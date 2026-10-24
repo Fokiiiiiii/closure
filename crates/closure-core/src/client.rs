@@ -671,8 +671,16 @@ mod tests {
     async fn a_client_answers_only_interactions_of_its_own_guild() {
         let api = Arc::new(MockApi::default());
         let interactions = Arc::new(InteractionGuilds::default());
-        assert!(interactions.register(&InteractionToken::new("token-1"), Id::new(1)));
-        assert!(interactions.register(&InteractionToken::new("token-2"), Id::new(2)));
+        assert!(
+            interactions
+                .register(&InteractionToken::new("token-1"), Id::new(1))
+                .is_recorded()
+        );
+        assert!(
+            interactions
+                .register(&InteractionToken::new("token-2"), Id::new(2))
+                .is_recorded()
+        );
         let client = client(&api, &[Capability::RespondToInteractions])
             .with_interactions(Arc::clone(&interactions))
             .scoped_to(Id::new(1));
@@ -700,9 +708,16 @@ mod tests {
     async fn a_bound_client_cannot_be_given_a_record_of_its_own_making() {
         let api = Arc::new(MockApi::default());
         let real = Arc::new(InteractionGuilds::default());
-        assert!(real.register(&InteractionToken::new("token-of-guild-2"), Id::new(2)));
+        assert!(
+            real.register(&InteractionToken::new("token-of-guild-2"), Id::new(2))
+                .is_recorded()
+        );
         let forged = Arc::new(InteractionGuilds::default());
-        assert!(forged.register(&InteractionToken::new("token-of-guild-2"), Id::new(1)));
+        assert!(
+            forged
+                .register(&InteractionToken::new("token-of-guild-2"), Id::new(1))
+                .is_recorded()
+        );
 
         let with_record = client(&api, &[Capability::RespondToInteractions])
             .with_interactions(Arc::clone(&real))
@@ -732,7 +747,11 @@ mod tests {
         // keeps guild 1's client and uses it with a token it received in guild 2.
         let api = Arc::new(MockApi::default());
         let interactions = Arc::new(InteractionGuilds::default());
-        assert!(interactions.register(&InteractionToken::new("token-of-guild-2"), Id::new(2)));
+        assert!(
+            interactions
+                .register(&InteractionToken::new("token-of-guild-2"), Id::new(2))
+                .is_recorded()
+        );
         let allowed_in_1 = client(&api, &[Capability::RespondToInteractions])
             .with_interactions(Arc::clone(&interactions))
             .scoped_to(Id::new(1));

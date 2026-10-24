@@ -39,7 +39,7 @@ impl Default for InteractionLimits {
 
 /// What happened to a token handed to [`InteractionGuilds::register`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Recorded {
+pub enum Recorded {
     New,
     /// The token was recorded before and still is; the first record is kept.
     Known,
@@ -50,7 +50,9 @@ enum Recorded {
 }
 
 impl Recorded {
-    fn is_recorded(self) -> bool {
+    /// Whether the token is recorded now (whether it was new or already known).
+    #[must_use]
+    pub fn is_recorded(self) -> bool {
         matches!(self, Self::New | Self::Known)
     }
 }
@@ -104,11 +106,11 @@ impl Records {
         if self.guilds.len() >= limits.total {
             return Recorded::TableFull;
         }
-        let in_guild = self.per_guild.entry(guild).or_insert(0);
-        if *in_guild >= limits.per_guild {
+        // Looked up without creating an entry: a refused guild must leave nothing behind.
+        if self.per_guild.get(&guild).copied().unwrap_or(0) >= limits.per_guild {
             return Recorded::GuildFull;
         }
-        *in_guild += 1;
+        *self.per_guild.entry(guild).or_insert(0) += 1;
         let token: Arc<str> = Arc::from(token);
         let expires = now + LIFETIME;
         self.guilds.insert(Arc::clone(&token), (guild, expires));
@@ -163,10 +165,10 @@ impl InteractionGuilds {
     /// every interaction it receives, before any module sees it. A token that is already
     /// recorded keeps its first record.
     ///
-    /// Returns whether the token is recorded. When it is not (a limit is reached), no module can
+    /// Says whether the token is recorded. When it is not (a limit is reached), no module can
     /// answer the interaction, so the host should not hand it to one.
     #[must_use]
-    pub fn register(&self, token: &InteractionToken, guild: GuildId) -> bool {
+    pub fn register(&self, token: &InteractionToken, guild: GuildId) -> Recorded {
         let recorded = {
             let mut records = self.lock();
             // The time is read under the lock, so records are made in the order of their times.
@@ -183,7 +185,7 @@ impl InteractionGuilds {
             }
             Recorded::New | Recorded::Known => {}
         }
-        recorded.is_recorded()
+        recorded
     }
 
     /// The guild `token` was issued for, if it is known and has not expired.
@@ -237,8 +239,8 @@ mod tests {
             InteractionToken::new("token-a"),
             InteractionToken::new("token-b"),
         );
-        assert!(guilds.register(&a, Id::new(1)));
-        assert!(guilds.register(&b, Id::new(2)));
+        assert!(guilds.register(&a, Id::new(1)).is_recorded());
+        assert!(guilds.register(&b, Id::new(2)).is_recorded());
 
         assert_eq!(guilds.guild_of(&a), Some(Id::new(1)));
         assert_eq!(guilds.guild_of(&b), Some(Id::new(2)));
@@ -258,7 +260,11 @@ mod tests {
     #[test]
     fn debug_output_never_contains_a_token() {
         let guilds = InteractionGuilds::default();
-        assert!(guilds.register(&InteractionToken::new("secret-token"), Id::new(1)));
+        assert!(
+            guilds
+                .register(&InteractionToken::new("secret-token"), Id::new(1))
+                .is_recorded()
+        );
         assert!(!format!("{guilds:?}").contains("secret-token"));
     }
 
@@ -445,10 +451,17 @@ mod tests {
             std::thread::spawn(move || guilds.register(&InteractionToken::new("a"), Id::new(1)))
         };
         entered_rx.recv().unwrap();
+        // The second caller says it is about to register, so the wait below starts only once it
+        // really is on its way to the clock.
+        let (started_tx, started_rx) = mpsc::channel();
         let second = {
             let guilds = Arc::clone(&guilds);
-            std::thread::spawn(move || guilds.register(&InteractionToken::new("b"), Id::new(1)))
+            std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                guilds.register(&InteractionToken::new("b"), Id::new(1))
+            })
         };
+        started_rx.recv().unwrap();
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -457,8 +470,8 @@ mod tests {
         );
 
         release_tx.send(()).unwrap();
-        assert!(first.join().unwrap());
-        assert!(second.join().unwrap());
+        assert!(first.join().unwrap().is_recorded());
+        assert!(second.join().unwrap().is_recorded());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -471,7 +484,7 @@ mod tests {
                 std::thread::spawn(move || {
                     for n in 0..2000 {
                         let token = InteractionToken::new(format!("{thread}-{n}"));
-                        assert!(guilds.register(&token, Id::new(1)));
+                        assert!(guilds.register(&token, Id::new(1)).is_recorded());
                     }
                 })
             })
@@ -490,5 +503,42 @@ mod tests {
                 .all(|(earlier, later)| earlier.0 <= later.0),
             "the queue must be sorted by expiry for the expired front to be enough"
         );
+    }
+
+    #[test]
+    fn a_guild_with_no_room_leaves_nothing_behind() {
+        // A limit of zero refuses everything; it must not cost memory per guild it refuses.
+        let guilds = InteractionGuilds::with_limits(InteractionLimits {
+            total: 100,
+            per_guild: 0,
+        });
+        let now = Instant::now();
+        for guild in 1..=50 {
+            assert_eq!(
+                guilds.register_at(&format!("t{guild}"), guild, now),
+                Recorded::GuildFull
+            );
+        }
+        assert!(guilds.lock().per_guild.is_empty());
+        assert!(guilds.lock().guilds.is_empty());
+    }
+
+    #[test]
+    fn the_caller_is_told_which_limit_was_reached() {
+        let guilds = InteractionGuilds::with_limits(InteractionLimits {
+            total: 3,
+            per_guild: 2,
+        });
+        let register = |token: &str, guild: u64| {
+            guilds.register(&InteractionToken::new(token), Id::new(guild))
+        };
+
+        assert_eq!(register("a", 1), Recorded::New);
+        assert_eq!(register("a", 1), Recorded::Known);
+        assert_eq!(register("b", 1), Recorded::New);
+        assert_eq!(register("c", 1), Recorded::GuildFull);
+        assert_eq!(register("d", 2), Recorded::New);
+        assert_eq!(register("e", 3), Recorded::TableFull);
+        assert!(!Recorded::GuildFull.is_recorded() && !Recorded::TableFull.is_recorded());
     }
 }

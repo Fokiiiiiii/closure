@@ -115,7 +115,11 @@ impl Probe {
                 let plain = held.respond(invocation, reply()).await;
                 // In this record the token belongs to the guild the held client is bound to.
                 let own_record = Arc::new(InteractionGuilds::default());
-                assert!(own_record.register(&invocation.token, Id::new(GUILD)));
+                assert!(
+                    own_record
+                        .register(&invocation.token, Id::new(GUILD))
+                        .is_recorded()
+                );
                 let forged = held
                     .clone()
                     .with_interactions(own_record)
@@ -1226,4 +1230,18 @@ async fn a_command_whose_interaction_cannot_be_recorded_is_not_handed_to_a_modul
         "first, first again and the other guild; not second"
     );
     assert_eq!(h.dispatcher.pending(), 0);
+    // What is kept per guild must be back at zero too: it decides when lanes are released.
+    for guild in [1, 2] {
+        let lanes = h.dispatcher.shared.guilds.get(&Id::new(guild)).unwrap();
+        assert_eq!(
+            lanes.state.pending.load(Ordering::Acquire),
+            0,
+            "guild {guild}"
+        );
+        assert_eq!(
+            lanes.state.queued_commands.load(Ordering::Acquire),
+            0,
+            "guild {guild}"
+        );
+    }
 }

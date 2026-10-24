@@ -19,7 +19,7 @@ use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
 use closure_core::event::{CommandInvocation, Event, GuildId};
-use closure_core::interaction::{InteractionGuilds, InteractionLimits};
+use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
@@ -303,15 +303,21 @@ impl Dispatcher {
 
         // Once the event is accepted and before any module can see it: the record decides whose
         // interaction a module may answer. Events dropped above never use up a record.
-        if let Event::Command(invocation) = &event
-            && !self.shared.interactions.register(&invocation.token, guild)
-        {
-            // No module could answer it, so none is given it. Undo what was reserved above.
-            budget.fetch_sub(1, Ordering::AcqRel);
-            lanes.state.pending.fetch_sub(1, Ordering::AcqRel);
-            metrics::counter!("closure_events_dropped_total", "reason" => "interaction_records_full")
-                .increment(1);
-            return;
+        if let Event::Command(invocation) = &event {
+            let recorded = self.shared.interactions.register(&invocation.token, guild);
+            if !recorded.is_recorded() {
+                // No module could answer it, so none is given it. Undo what was reserved above.
+                budget.fetch_sub(1, Ordering::AcqRel);
+                lanes.state.pending.fetch_sub(1, Ordering::AcqRel);
+                let reason = match recorded {
+                    Recorded::GuildFull => "interaction_records_guild_full",
+                    Recorded::TableFull | Recorded::New | Recorded::Known => {
+                        "interaction_records_table_full"
+                    }
+                };
+                metrics::counter!("closure_events_dropped_total", "reason" => reason).increment(1);
+                return;
+            }
         }
 
         let sender = lanes.sender_for(&event).clone();

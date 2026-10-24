@@ -81,7 +81,8 @@ client that is already bound to a guild, so a module cannot swap in a record of 
 expire with the token. The table is bounded in total and per guild, so one flooded guild
 cannot use up the room of the others; when a limit is reached new tokens are refused, never old
 ones dropped, and a command that cannot be recorded is not handed to a module (nobody could
-answer it) and counted as dropped. A token that is recorded again keeps its first record.
+answer it) and counted as dropped, with a different reason for the limit of a guild and for the
+total limit. A token that is recorded again keeps its first record.
 
 ## Configuration
 
