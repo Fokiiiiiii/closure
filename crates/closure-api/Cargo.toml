@@ -1,0 +1,33 @@
+[package]
+name = "closure-api"
+description = "HTTP API (health, metrics and guild configuration) for closure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum.workspace = true
+closure-config.workspace = true
+closure-core.workspace = true
+closure-db.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+twilight-model.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+sqlx.workspace = true
+
+[lints]
+workspace = true

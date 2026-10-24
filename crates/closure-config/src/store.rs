@@ -6,6 +6,7 @@ use closure_core::locale::Locale;
 use closure_core::module::ModuleId;
 use closure_core::settings::{ModuleSettings, RuntimeLimits, SettingsProvider};
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 
 use crate::compile::ConfigCompiler;
 use crate::error::ConfigError;
@@ -19,8 +20,14 @@ use crate::yaml::parse_overrides;
 /// never leave a guild half-configured.
 pub struct SettingsStore {
     compiler: ConfigCompiler,
-    guilds: DashMap<GuildId, Arc<GuildSettings>>,
+    guilds: DashMap<GuildId, Versioned>,
     preferred_locales: DashMap<GuildId, Locale>,
+}
+
+/// Settings together with the database revision they were read at.
+struct Versioned {
+    revision: i64,
+    settings: Arc<GuildSettings>,
 }
 
 impl std::fmt::Debug for SettingsStore {
@@ -46,15 +53,45 @@ impl SettingsStore {
         &self.compiler
     }
 
-    /// Validates `overrides` and, only if they are valid, makes them the guild's settings.
+    /// Validates `overrides` and, only if they are valid, makes them the guild's settings,
+    /// regardless of any revision. For deployments without a database and for tests; code that
+    /// reads from the database uses [`install`](Self::install).
     pub fn set_guild(
         &self,
         guild: GuildId,
         overrides: &GuildOverrides,
     ) -> Result<Arc<GuildSettings>, ConfigError> {
         let settings = Arc::new(self.compiler.compile(overrides)?);
-        self.guilds.insert(guild, Arc::clone(&settings));
+        self.guilds.insert(
+            guild,
+            Versioned {
+                revision: 0,
+                settings: Arc::clone(&settings),
+            },
+        );
         Ok(settings)
+    }
+
+    /// Installs settings read at `revision`, unless newer ones are already in place. Concurrent
+    /// writers and the change listener may all call this; the highest revision always wins, so
+    /// they can race without a stale read overwriting a fresh one. Returns whether it installed.
+    #[must_use]
+    pub fn install(&self, guild: GuildId, revision: i64, settings: GuildSettings) -> bool {
+        let versioned = Versioned {
+            revision,
+            settings: Arc::new(settings),
+        };
+        match self.guilds.entry(guild) {
+            Entry::Occupied(mut entry) if revision >= entry.get().revision => {
+                entry.insert(versioned);
+                true
+            }
+            Entry::Occupied(_) => false,
+            Entry::Vacant(entry) => {
+                entry.insert(versioned);
+                true
+            }
+        }
     }
 
     /// Parses and applies a YAML document.
@@ -89,7 +126,7 @@ impl SettingsStore {
     pub fn settings(&self, guild: GuildId) -> Arc<GuildSettings> {
         self.guilds.get(&guild).map_or_else(
             || Arc::clone(self.compiler.defaults()),
-            |entry| Arc::clone(&entry),
+            |entry| Arc::clone(&entry.settings),
         )
     }
 
@@ -202,6 +239,30 @@ mod tests {
 
         store.set_preferred_locale(guild, None);
         assert_eq!(store.locale(guild), Locale::En);
+    }
+
+    #[test]
+    fn the_highest_revision_wins_however_installs_are_ordered() {
+        let store = store();
+        let guild = Id::new(1);
+        let compile = |yaml: &str| {
+            store
+                .compiler()
+                .compile(&crate::parse_overrides(yaml).unwrap())
+                .unwrap()
+        };
+        assert!(store.install(guild, 2, compile("language: ja")));
+        assert!(
+            !store.install(guild, 1, compile("language: en")),
+            "stale install is refused"
+        );
+        assert_eq!(store.locale(guild), Locale::Ja);
+        assert!(
+            store.install(guild, 2, compile("language: en")),
+            "same revision may refresh"
+        );
+        assert!(store.install(guild, 3, compile("language: ja")));
+        assert_eq!(store.locale(guild), Locale::Ja);
     }
 
     #[test]
