@@ -60,6 +60,8 @@ impl ConfigCompiler {
                 })?;
             validators.insert(manifest.id.clone(), validator);
         }
+        // The schemas must also make a publishable document together (no two of one name).
+        crate::schema::document_schema(&registry)?;
         // The module defaults must satisfy their own schemas, otherwise no guild could ever
         // run on defaults.
         let defaults = Arc::new(compile_with(

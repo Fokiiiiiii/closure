@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use closure_core::capability::Capability;
 use closure_core::locale::Locale;
@@ -25,34 +26,42 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
     languages.extend(Locale::ALL.iter().map(|locale| json!(locale.tag())));
 
     let mut module_properties = Map::new();
+    // Every module's schema becomes a schema resource of the document, named by its `$id`; two
+    // resources of one name would be told apart by nothing.
+    let mut resource_ids: BTreeMap<String, String> = BTreeMap::new();
     for module in registry.iter() {
         let manifest = module.manifest();
-        check_supported(&manifest.config_schema).map_err(|message| {
-            ConfigError::BadModuleSchema {
-                module: manifest.id.to_string(),
-                message,
-            }
-        })?;
-        let config_schema =
-            published_config_schema(&manifest.id.to_string(), &manifest.config_schema);
+        let module_id = manifest.id.to_string();
+        let refuse = |message: String| ConfigError::BadModuleSchema {
+            module: module_id.clone(),
+            message,
+        };
+        check_supported(&manifest.config_schema).map_err(refuse)?;
+        let (config_schema, resource_id) =
+            published_config_schema(&module_id, &manifest.config_schema);
+        if let Some(other) = resource_ids.insert(resource_id.clone(), module_id.clone()) {
+            return Err(refuse(format!(
+                "`$id` {resource_id} is also the `$id` of module `{other}`"
+            )));
+        }
         let capabilities: Vec<&str> = manifest
             .capabilities
             .iter()
             .map(Capability::as_str)
             .collect();
         module_properties.insert(
-            manifest.id.to_string(),
+            module_id.clone(),
             json!({
                 "type": "object",
                 "description": manifest.description,
                 "additionalProperties": false,
                 "properties": {
-                    "enabled": { "type": "boolean", "default": manifest.default_enabled },
-                    "capabilities": {
+                    "enabled": or_null(json!({ "type": "boolean", "default": manifest.default_enabled })),
+                    "capabilities": or_null(json!({
                         "type": "array",
                         "uniqueItems": true,
                         "items": { "enum": capabilities }
-                    },
+                    })),
                     "config": config_schema
                 }
             }),
@@ -62,40 +71,56 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
     if let Some(Value::Object(properties)) = schema.pointer_mut("/properties") {
         properties.insert(
             "language".into(),
-            json!({
+            or_null(json!({
                 "description": "Language of the bot's messages; `auto` follows the server's community locale.",
                 "type": "string",
                 "enum": languages,
                 "default": "auto"
-            }),
+            })),
         );
         properties.insert(
             "modules".into(),
-            json!({
+            or_null(json!({
                 "description": "Per-module settings, keyed by module id.",
                 "type": "object",
                 "additionalProperties": false,
                 "properties": module_properties
-            }),
+            })),
         );
     }
     Ok(schema)
 }
 
-/// A module's config schema as it is published inside the document.
-fn published_config_schema(module: &str, schema: &Value) -> Value {
+/// `null` for an optional field means the same as leaving it out.
+fn or_null(schema: Value) -> Value {
+    let mut wrapper = Map::new();
+    wrapper.insert(
+        "anyOf".into(),
+        Value::Array(vec![schema, json!({ "type": "null" })]),
+    );
+    Value::Object(wrapper)
+}
+
+/// A module's config schema as it is published inside the document, and the name (`$id`) of the
+/// schema resource it is.
+fn published_config_schema(module: &str, schema: &Value) -> (Value, String) {
     let mut config = schema.clone();
+    let mut resource_id = format!("urn:closure:module:{module}");
     if let Value::Object(map) = &mut config {
         map.remove("$schema");
         // A reference scope of its own: `#/$defs/..` in a module's schema means that schema's own
         // definitions, not those of the document it is embedded in or of another module. A
         // schema that names itself keeps its name.
-        map.entry("$id")
-            .or_insert_with(|| json!(format!("urn:closure:module:{module}")));
+        match map.get("$id") {
+            Some(Value::String(own)) => resource_id.clone_from(own),
+            _ => {
+                map.insert("$id".into(), json!(resource_id));
+            }
+        }
     }
     relax(&mut config);
     // `config: null` stands for "the defaults" as well.
-    json!({ "anyOf": [config, { "type": "null" }] })
+    (or_null(config), resource_id)
 }
 
 const DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -112,8 +137,22 @@ const SCHEMA_MAPS: [&str; 5] = [
     "dependentSchemas",
 ];
 
-/// Keywords whose values are data, not schemas.
-const DATA: [&str; 4] = ["const", "enum", "default", "examples"];
+/// Keywords whose value is one schema.
+const SCHEMAS: [&str; 10] = [
+    "items",
+    "additionalProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "contains",
+    "propertyNames",
+    "not",
+    "if",
+    "then",
+    "else",
+];
+
+/// Keywords whose value is a list of schemas.
+const SCHEMA_LISTS: [&str; 4] = ["allOf", "anyOf", "oneOf", "prefixItems"];
 
 /// Keywords for references that cannot be followed by name, so the schema cannot be translated.
 const UNSUPPORTED: [&str; 5] = [
@@ -124,19 +163,23 @@ const UNSUPPORTED: [&str; 5] = [
     "$recursiveRef",
 ];
 
-/// Keywords that judge which keys an object has, or the object as a whole. A sparse override
-/// lacks keys the defaults fill in, and weakening what sits under `not` makes it stricter, so
-/// these are dropped where values are merged.
-const DROPPED: [&str; 5] = [
+/// Keywords that judge which keys an object has, how many, or what they are called, or the object
+/// as a whole. A sparse override lacks keys the defaults fill in and has `null` keys the merge
+/// drops, and weakening what sits under `not` makes it stricter, so these are dropped where
+/// values are merged.
+const DROPPED: [&str; 8] = [
     "required",
     "dependentRequired",
     "dependentSchemas",
     "minProperties",
+    "maxProperties",
+    "propertyNames",
+    "unevaluatedProperties",
     "not",
 ];
 
-/// How deep [`relax`] follows nesting and references. What is deeper stays as written, which is
-/// strict, so a schema this deep may reject a sparse document that the compiler accepts.
+/// How deep [`relax`] follows nesting and references. What is deeper allows anything, which keeps
+/// the contract (it can only let more through).
 const MAX_DEPTH: usize = 128;
 
 /// Whether a module's config schema is one [`relax`] can translate faithfully. Checked when the
@@ -151,55 +194,67 @@ pub(crate) fn check_supported(schema: &Value) -> Result<(), String> {
             "only JSON Schema draft 2020-12 is supported, not {declared}"
         ));
     }
-    scan(schema)
+    scan(schema, true)
 }
 
-fn scan(value: &Value) -> Result<(), String> {
-    match value {
-        Value::Object(map) => {
-            for (keyword, inner) in map {
-                if UNSUPPORTED.contains(&keyword.as_str()) {
-                    return Err(format!("`{keyword}` is not supported"));
-                }
-                if keyword == "$ref"
-                    && let Value::String(target) = inner
-                    && target != "#"
-                    && local_definition(target).is_none()
-                {
-                    return Err(format!(
-                        "`$ref` to `{target}` is not supported; use `#`, `#/$defs/<name>` or `#/definitions/<name>`"
-                    ));
-                }
-                if DATA.contains(&keyword.as_str()) {
-                    continue;
-                }
-                if SCHEMA_MAPS.contains(&keyword.as_str()) {
-                    if let Value::Object(named) = inner {
-                        named.values().try_for_each(scan)?;
-                    }
-                } else {
-                    scan(inner)?;
+/// Looks at the places where a schema can have keywords. What a keyword holds that is not a schema
+/// (`const`, `enum`, `default`, annotations, keywords nobody here knows) is data and left alone.
+fn scan(schema: &Value, top: bool) -> Result<(), String> {
+    let Value::Object(map) = schema else {
+        return Ok(());
+    };
+    for (keyword, inner) in map {
+        let keyword = keyword.as_str();
+        if UNSUPPORTED.contains(&keyword) {
+            return Err(format!("`{keyword}` is not supported"));
+        }
+        if matches!(keyword, "$id" | "$schema") && !top {
+            return Err(format!(
+                "`{keyword}` is only supported at the top of a module's schema"
+            ));
+        }
+        if keyword == "$ref"
+            && let Value::String(target) = inner
+            && target != "#"
+            && local_definition(target).is_none()
+        {
+            return Err(format!(
+                "`$ref` to `{target}` is not supported; use `#`, `#/$defs/<name>` or `#/definitions/<name>`"
+            ));
+        }
+        if SCHEMA_MAPS.contains(&keyword) {
+            if let Value::Object(named) = inner {
+                for schema in named.values() {
+                    scan(schema, false)?;
                 }
             }
-            Ok(())
+        } else if SCHEMAS.contains(&keyword) {
+            scan(inner, false)?;
+        } else if SCHEMA_LISTS.contains(&keyword)
+            && let Value::Array(schemas) = inner
+        {
+            for schema in schemas {
+                scan(schema, false)?;
+            }
         }
-        Value::Array(items) => items.iter().try_for_each(scan),
-        _ => Ok(()),
     }
+    Ok(())
 }
 
 /// Turns the schema of a configuration into the schema of an override of it.
 ///
 /// Values are merged key by key into the defaults, `null` meaning "the default", and arrays are
 /// replaced whole. So, wherever values are merged: a property may be `null`, keywords that look
-/// at which keys exist are dropped, `oneOf` and `if`/`then`/`else` are weakened to what any of
-/// their branches allows, and an unknown key may only be `null` (the merge drops it). A property
-/// may be a type defined elsewhere in the schema (`$ref` to `$defs`); a reference reached the way
-/// a property is gets a copy of the definition made the same way, and the original stays as it
-/// is for the places that need it strict, such as the items of a list.
+/// at which keys exist, how many or what they are called are dropped, so are an object `const`
+/// or `enum` (a sparse override is never equal to one), `oneOf` and `if`/`then`/`else` are
+/// weakened to what any of their branches allows, and an unknown key may only be `null` (the
+/// merge drops it). A property may be a type defined elsewhere in the schema (`$ref` to `$defs`);
+/// a reference reached the way a property is gets a copy of the definition made the same way,
+/// and the original stays as it is for the places that need it strict, such as the items of a
+/// list.
 fn relax(schema: &mut Value) {
     let mut copies = Copies::new(schema);
-    copies.visit(schema, 0, true);
+    copies.visit(schema, 0);
     copies.add_to(schema);
 }
 
@@ -232,14 +287,24 @@ impl Copies {
         }
     }
 
-    fn visit(&mut self, schema: &mut Value, depth: usize, is_root: bool) {
-        let Value::Object(map) = schema else { return };
-        // Another schema resource: its references mean its own definitions.
-        if depth > MAX_DEPTH || (!is_root && map.contains_key("$id")) {
+    fn visit(&mut self, schema: &mut Value, depth: usize) {
+        if depth > MAX_DEPTH {
+            if schema.is_object() {
+                *schema = Value::Bool(true);
+            }
             return;
         }
+        let Value::Object(map) = schema else { return };
         for keyword in DROPPED {
             map.remove(keyword);
+        }
+        // A sparse object is never equal to a whole one.
+        if matches!(map.get("const"), Some(Value::Object(_))) {
+            map.remove("const");
+        }
+        if matches!(map.get("enum"), Some(Value::Array(options)) if options.iter().any(Value::is_object))
+        {
+            map.remove("enum");
         }
         fold_conditionals(map);
         self.redirect_reference(map, depth);
@@ -259,7 +324,7 @@ impl Copies {
         for keyword in ["allOf", "anyOf"] {
             if let Some(Value::Array(branches)) = map.get_mut(keyword) {
                 for branch in branches {
-                    self.visit(branch, depth + 1, false);
+                    self.visit(branch, depth + 1);
                 }
             }
         }
@@ -267,9 +332,9 @@ impl Copies {
 
     /// Lets `null` stand in for the value of a property.
     fn nullable(&mut self, sub: &mut Value, depth: usize) {
-        self.visit(sub, depth + 1, false);
+        self.visit(sub, depth + 1);
         let inner = sub.take();
-        *sub = json!({ "anyOf": [inner, { "type": "null" }] });
+        *sub = or_null(inner);
     }
 
     /// Points a `$ref` to a definition of this schema at the copy of it, making the copy first if
@@ -297,11 +362,14 @@ impl Copies {
             // A placeholder first: a type that refers to itself finds the copy being made.
             self.made.insert((place, candidate.clone()), Value::Null);
             let mut copy = original;
-            self.visit(&mut copy, depth + 1, false);
+            self.visit(&mut copy, depth + 1);
             self.made.insert((place, candidate.clone()), copy);
             candidate
         };
-        map.insert("$ref".into(), json!(format!("#/{place}/{copy_name}")));
+        map.insert(
+            "$ref".into(),
+            json!(definition_reference(place, &copy_name)),
+        );
     }
 
     fn add_to(self, root: &mut Value) {
@@ -333,13 +401,56 @@ fn fold_conditionals(map: &mut Map<String, Value>) {
     }
 }
 
-/// `(where, name)` of a `$ref` like `#/$defs/Name` that points into the schema itself. Names that
-/// need escaping in a JSON pointer are not handled.
+/// `(where, name)` of a `$ref` like `#/$defs/Name` that points into the schema itself. The
+/// reference is a URI fragment holding a JSON pointer, so it is read as one: percent escapes
+/// first, then the pointer's segments, then `~1` and `~0` in each. It must be exactly one name
+/// below `$defs` or `definitions`.
 fn local_definition(reference: &str) -> Option<(&'static str, String)> {
-    DEFINITIONS.into_iter().find_map(|place| {
-        let name = reference.strip_prefix(&format!("#/{place}/"))?;
-        (!name.contains(['/', '~', '%'])).then(|| (place, name.to_owned()))
-    })
+    let pointer = percent_decode(reference.strip_prefix('#')?)?;
+    let mut segments = pointer.strip_prefix('/')?.split('/');
+    let first = segments.next()?;
+    let place = DEFINITIONS.into_iter().find(|place| *place == first)?;
+    let name = segments.next()?;
+    if name.is_empty() || segments.next().is_some() {
+        return None;
+    }
+    Some((place, name.replace("~1", "/").replace("~0", "~")))
+}
+
+/// The `$ref` that points to the definition `name` kept in `place`; the inverse of
+/// [`local_definition`].
+fn definition_reference(place: &str, name: &str) -> String {
+    let segment = name.replace('~', "~0").replace('/', "~1");
+    format!("#/{place}/{}", percent_encode(&segment))
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            decoded.push(u8::from_str_radix(text.get(at + 1..at + 3)?, 16).ok()?);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            // Writing to a `String` cannot fail.
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -424,15 +535,15 @@ mod tests {
     fn schema_lists_languages_and_embeds_module_schemas() {
         let schema = document_schema(&registry()).unwrap();
         assert_eq!(
-            schema["properties"]["language"]["enum"],
+            schema["properties"]["language"]["anyOf"][0]["enum"],
             json!(["auto", "en", "ja"])
         );
-        let warn = &schema["properties"]["modules"]["properties"]["warn"];
+        let warn = &schema["properties"]["modules"]["anyOf"][0]["properties"]["warn"];
         let config = &warn["properties"]["config"]["anyOf"][0];
         assert_eq!(config["properties"]["limit"]["anyOf"][0]["type"], "integer");
         assert!(config.get("$schema").is_none());
         assert_eq!(
-            warn["properties"]["capabilities"]["items"]["enum"],
+            warn["properties"]["capabilities"]["anyOf"][0]["items"]["enum"],
             json!(["send_messages"])
         );
     }
@@ -525,8 +636,8 @@ mod tests {
             ],
         );
         let schema = document_schema(&registry).unwrap();
-        let config = &schema["properties"]["modules"]["properties"]["warn"]["properties"]["config"]
-            ["anyOf"][0];
+        let config = &schema["properties"]["modules"]["anyOf"][0]["properties"]["warn"]["properties"]
+            ["config"]["anyOf"][0];
         for keyword in DROPPED {
             assert!(config.get(keyword).is_none(), "{keyword} is still there");
         }
@@ -738,28 +849,145 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_schema_resource_keeps_its_own_definitions() {
+    fn a_field_the_parser_lets_be_null_may_be_null_in_the_published_document() {
+        let registry = registry();
+        let validator = validator_of(&registry);
+        let schema = document_schema(&registry).unwrap();
+        // Every field of the document: if `field: null` parses, the schema has to take it.
+        for field in schema["properties"].as_object().unwrap().keys() {
+            if crate::yaml::parse_overrides(&format!("{field}: null\n")).is_ok() {
+                assert!(
+                    validator.is_valid(&json!({ field: null })),
+                    "`{field}: null` parses but the schema rejects it"
+                );
+            }
+        }
+        // And the fields of a module.
+        for field in ["enabled", "capabilities", "config"] {
+            let yaml = format!("modules:\n  warn:\n    {field}: null\n");
+            assert!(crate::yaml::parse_overrides(&yaml).is_ok(), "{field}");
+            assert!(
+                validator.is_valid(&json!({ "modules": { "warn": { field: null } } })),
+                "`{field}: null` of a module parses but the schema rejects it"
+            );
+        }
+        // The document itself knows nothing of a field it does not have.
+        assert!(!validator.is_valid(&json!({ "nonsense": null })));
+    }
+
+    #[test]
+    fn keywords_that_count_or_name_keys_do_not_see_keys_the_merge_drops() {
+        // `ghost: null` is dropped by the merge, so the merged object is as it was by default.
+        for (schema, default) in [
+            (json!({ "type": "object", "maxProperties": 0 }), json!({})),
+            (
+                json!({ "type": "object", "propertyNames": { "pattern": "^allowed$" } }),
+                json!({}),
+            ),
+            (
+                json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "integer" } },
+                    "unevaluatedProperties": false
+                }),
+                json!({ "a": 1 }),
+            ),
+        ] {
+            let registry = Arc::new(registry_with_defaults(schema, default));
+            assert_never_rejects_what_the_compiler_accepts(&registry, &[json!({ "ghost": null })]);
+        }
+    }
+
+    #[test]
+    fn an_object_const_or_enum_does_not_hold_a_sparse_override_to_the_whole_object() {
         let registry = Arc::new(registry_with_defaults(
             json!({
                 "type": "object",
-                "$defs": { "X": { "type": "integer" } },
                 "properties": {
-                    "child": {
-                        "$id": "urn:example:child",
-                        "type": "object",
-                        "$defs": { "X": { "type": "string" } },
-                        "properties": { "v": { "$ref": "#/$defs/X" } }
-                    }
+                    "pair": { "const": { "a": 1, "b": 2 } },
+                    "choice": { "enum": [{ "a": 1, "b": 2 }, { "a": 3, "b": 4 }] },
+                    "mode": { "enum": ["x", "y"] }
                 }
             }),
-            json!({ "child": { "v": "ok" } }),
+            json!({ "pair": { "a": 1, "b": 2 }, "choice": { "a": 1, "b": 2 }, "mode": "x" }),
         ));
         assert_never_rejects_what_the_compiler_accepts(
             &registry,
-            &[json!({}), json!({ "child": { "v": "new" } })],
+            &[
+                json!({ "pair": { "a": 1 } }),
+                json!({ "choice": { "a": 1 } }),
+                json!({ "choice": { "a": 3, "b": 4 } }),
+                json!({ "mode": "y" }),
+            ],
         );
+        // A scalar enum is as strict as it was.
+        assert!(!validator_of(&registry).is_valid(&document(&json!({ "mode": "z" }))));
+    }
+
+    #[test]
+    fn definitions_with_names_that_need_escaping_are_followed() {
+        let inner = json!({ "type": "object", "properties": { "n": { "type": "integer" } } });
+        let registry = registry_with(json!({
+            "type": "object",
+            "properties": {
+                "slash": { "$ref": "#/$defs/A~1B" },
+                "wide": { "$ref": "#/$defs/%C3%BC%20x" },
+                "tilde": { "$ref": "#/$defs/a~0b" },
+                "percent": { "$ref": "#/$defs/100%25" }
+            },
+            "$defs": { "A/B": inner, "ü x": inner, "a~b": inner, "100%": inner }
+        }));
         let validator = validator_of(&registry);
-        assert!(!validator.is_valid(&document(&json!({ "child": { "v": 1 } }))));
+        for field in ["slash", "wide", "tilde", "percent"] {
+            // `null` for `n` can only be accepted through the copy, so it was followed.
+            assert!(
+                validator.is_valid(&document(&json!({ field: { "n": null } }))),
+                "{field}"
+            );
+            assert!(
+                !validator.is_valid(&document(&json!({ field: { "n": "x" } }))),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_modules_may_not_name_their_schemas_alike() {
+        let module = |id: &str| {
+            let mut manifest = ModuleManifest::new(ModuleId::new(id).unwrap(), id, "0.1.0");
+            manifest.config_schema = json!({ "$id": "urn:example:shared", "type": "object" });
+            let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
+            module
+        };
+        let registry = ModuleRegistry::new(vec![module("first"), module("second")]).unwrap();
+
+        let Err(error) = document_schema(&registry) else {
+            panic!("the document must not be built");
+        };
+        assert!(error.to_string().contains("urn:example:shared"), "{error}");
+        let Err(error) = ConfigCompiler::new(Arc::new(registry)) else {
+            panic!("the bot must not start");
+        };
+        assert!(error.to_string().contains("urn:example:shared"), "{error}");
+    }
+
+    #[test]
+    fn a_nested_schema_resource_is_refused() {
+        // Another `$id` or `$schema` inside the schema would be a schema resource of its own, with
+        // definitions of its own, and a dialect of its own: nothing here translates that.
+        for schema in [
+            json!({ "properties": { "child": { "$id": "urn:example:child", "type": "object" } } }),
+            json!({ "$defs": { "Child": { "$id": "urn:example:child" } } }),
+            json!({ "properties": { "child": { "$schema": "https://json-schema.org/draft/2020-12/schema" } } }),
+        ] {
+            let error = check_supported(&schema).expect_err(&schema.to_string());
+            assert!(error.contains("only supported at the top"), "{error}");
+        }
+        // At the top they are fine, and so are properties that are *called* that.
+        check_supported(
+            &json!({ "$id": "urn:example:config", "properties": { "$id": { "type": "string" } } }),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -771,8 +999,8 @@ mod tests {
             "$defs": { "X": { "type": "integer" } }
         }));
         let schema = document_schema(&registry).unwrap();
-        let config = &schema["properties"]["modules"]["properties"]["warn"]["properties"]["config"]
-            ["anyOf"][0];
+        let config = &schema["properties"]["modules"]["anyOf"][0]["properties"]["warn"]["properties"]
+            ["config"]["anyOf"][0];
         assert_eq!(config["$id"], "urn:example:config");
         let validator = validator_of(&registry);
         assert!(validator.is_valid(&document(&json!({ "x": null }))));
@@ -780,23 +1008,39 @@ mod tests {
     }
 
     #[test]
-    fn a_very_long_chain_of_definitions_is_followed_only_so_far() {
+    fn what_lies_beyond_the_depth_limit_allows_anything() {
+        // A chain of definitions longer than the limit, each requiring its `child`, ending in a
+        // type that requires `v`. The override goes all the way down and leaves `v` out.
+        let length = MAX_DEPTH + 40;
         let mut definitions = Map::new();
-        let length = 400;
-        for n in 0..length {
+        let (mut default, mut over) = (json!({ "v": 1 }), json!({}));
+        for n in (0..length).rev() {
+            let (required, properties) = if n + 1 == length {
+                (json!(["v"]), json!({ "v": { "type": "integer" } }))
+            } else {
+                (
+                    json!(["child"]),
+                    json!({ "child": { "$ref": format!("#/$defs/D{}", n + 1) } }),
+                )
+            };
             definitions.insert(
                 format!("D{n}"),
-                json!({ "type": "object", "properties": { "child": { "$ref": format!("#/$defs/D{}", n + 1) } } }),
+                json!({ "type": "object", "required": required, "properties": properties }),
             );
+            if n + 1 != length {
+                default = json!({ "child": default });
+                over = json!({ "child": over });
+            }
         }
-        definitions.insert(format!("D{length}"), json!({ "type": "object" }));
-        let registry = registry_with(json!({
-            "type": "object",
-            "properties": { "root": { "$ref": "#/$defs/D0" } },
-            "$defs": definitions
-        }));
-        let validator = validator_of(&registry);
-        assert!(validator.is_valid(&document(&json!({ "root": { "child": null } }))));
+        let registry = Arc::new(registry_with_defaults(
+            json!({
+                "type": "object",
+                "properties": { "root": { "$ref": "#/$defs/D0" } },
+                "$defs": definitions
+            }),
+            json!({ "root": default }),
+        ));
+        assert_never_rejects_what_the_compiler_accepts(&registry, &[json!({ "root": over })]);
     }
 
     #[test]
@@ -812,7 +1056,10 @@ mod tests {
                 json!({ "$ref": "urn:example:config#/$defs/X" }),
                 "urn:example:config#/$defs/X",
             ),
-            (json!({ "$ref": "#/$defs/a~1b" }), "a~1b"),
+            // `%2F` is a `/` once the fragment is read, so this goes deeper than one name.
+            (json!({ "$ref": "#/$defs/a%2Fb" }), "a%2Fb"),
+            (json!({ "$ref": "#/$defs/%ZZ" }), "%ZZ"),
+            (json!({ "$ref": "#/$defs/" }), "#/$defs/"),
             (
                 json!({ "$ref": "#/$defs/A/properties/x" }),
                 "A/properties/x",
@@ -837,6 +1084,12 @@ mod tests {
             json!({ "properties": { "a": { "$ref": "#/definitions/A" } }, "definitions": { "A": {} } }),
             // Data that happens to look like keywords is data.
             json!({ "default": { "$anchor": "x", "$ref": "elsewhere" }, "enum": [{ "$dynamicRef": "y" }] }),
+            // Names the way schemars writes them when they hold `/`, `~`, spaces or non-ASCII.
+            json!({ "properties": { "a": { "$ref": "#/$defs/A~1B" }, "b": { "$ref": "#/$defs/%C3%BC%20x" } } }),
+            // What nobody here knows is an annotation, whatever it holds.
+            json!({ "x-ui": { "$ref": "https://example.invalid/help", "$anchor": "a" } }),
+            // A schema that names itself.
+            json!({ "$id": "urn:example:config", "$schema": "https://json-schema.org/draft/2020-12/schema" }),
             // A property is not a keyword, whatever it is called.
             json!({ "properties": { "$anchor": { "type": "string" }, "$ref": { "type": "string" } } }),
         ] {

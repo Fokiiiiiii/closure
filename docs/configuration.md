@@ -69,17 +69,21 @@ the result of merging the override into the defaults and the schema only sees th
 example an object that lacks a property no default fills in).
 
 To keep that contract, wherever values are merged key by key: `null` is accepted for any
-property (it means "the default") and for the whole `config`; `required`, `minProperties`,
-`dependentRequired`, `dependentSchemas` and `not` are dropped; `oneOf` and `if`/`then`/`else`
-are weakened to "any of the branches"; and an unknown key may only be `null`. The items of a list
-are replaced as a whole and stay strict.
+property (it means "the default"), for the whole `config`, and for every optional field of the
+document; `required`, `minProperties`, `maxProperties`, `propertyNames`, `unevaluatedProperties`,
+`dependentRequired`, `dependentSchemas` and `not` are dropped, and so is a `const` or `enum` that
+holds an object (a sparse override is never equal to one); `oneOf` and `if`/`then`/`else` are
+weakened to "any of the branches"; and an unknown key may only be `null`. The items of a list are
+replaced as a whole and stay strict.
 
-A module's schema may use `$defs`/`definitions` and `$ref` (as `schemars` writes them, also `#` for
-the root); each module's schema is its own reference scope, so two modules may define a type of the
-same name, and a schema that names itself with `$id` keeps its name. The bot refuses to start with
-a module schema it cannot translate: `$anchor`, `$dynamicRef` and the like, a `$ref` that is not
-`#`, `#/$defs/<name>` or `#/definitions/<name>`, or a `$schema` other than draft 2020-12. Nesting
-and reference chains deeper than 128 levels are left as written (strict).
+A module's schema may use `$defs`/`definitions` and `$ref` (as `schemars` writes them, with the
+escapes of a URI fragment and a JSON pointer, and also `#` for the root); each module's schema is
+its own reference scope, so two modules may define a type of the same name. A schema that names
+itself with `$id` keeps its name, and no two modules may use the same one. The bot refuses to
+start with a module schema it cannot translate: `$anchor`, `$dynamicRef` and the like, a `$ref`
+that is not `#` or one name below `$defs`/`definitions`, a `$id` or `$schema` anywhere but at the
+top, or a `$schema` other than draft 2020-12. What the bot does not know as a keyword is treated
+as an annotation. Nesting and reference chains deeper than 128 levels allow anything.
 Use it for editor completion or to generate forms.
 
 `POST /v1/guilds/{id}/config/validate` checks a document without storing it and returns what it
