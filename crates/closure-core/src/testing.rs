@@ -7,10 +7,10 @@ use async_trait::async_trait;
 
 use crate::action::{Action, Outcome};
 use crate::client::DiscordApi;
-use crate::error::DiscordError;
-use crate::event::GuildId;
+use crate::error::{DiscordError, ModuleError};
+use crate::event::{Event, GuildId};
 use crate::locale::Locale;
-use crate::module::ModuleId;
+use crate::module::{EventContext, Module, ModuleId, ModuleManifest};
 use crate::settings::{ModuleSettings, SettingsProvider};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -18,6 +18,21 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A module that does nothing; handy for exercising registries and configuration.
+#[derive(Debug, Clone)]
+pub struct StubModule(pub ModuleManifest);
+
+#[async_trait]
+impl Module for StubModule {
+    fn manifest(&self) -> &ModuleManifest {
+        &self.0
+    }
+
+    async fn on_event(&self, _: &EventContext, _: &Event) -> Result<(), ModuleError> {
+        Ok(())
+    }
 }
 
 /// A [`DiscordApi`] that records every action and answers with a scripted result.

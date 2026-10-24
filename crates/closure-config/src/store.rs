@@ -1,0 +1,206 @@
+use std::sync::Arc;
+
+use closure_core::event::GuildId;
+use closure_core::locale::Locale;
+use closure_core::module::ModuleId;
+use closure_core::settings::{ModuleSettings, SettingsProvider};
+use dashmap::DashMap;
+
+use crate::compile::ConfigCompiler;
+use crate::error::ConfigError;
+use crate::model::{GuildOverrides, GuildSettings};
+use crate::yaml::parse_overrides;
+
+/// In-memory, concurrently readable settings of every guild.
+///
+/// Reads never block on I/O or on a writer for another guild. A configuration that fails
+/// validation is rejected as a whole and the previous settings stay in force, so a bad edit can
+/// never leave a guild half-configured.
+pub struct SettingsStore {
+    compiler: ConfigCompiler,
+    guilds: DashMap<GuildId, Arc<GuildSettings>>,
+    preferred_locales: DashMap<GuildId, Locale>,
+}
+
+impl std::fmt::Debug for SettingsStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsStore")
+            .field("guilds", &self.guilds.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SettingsStore {
+    #[must_use]
+    pub fn new(compiler: ConfigCompiler) -> Self {
+        Self {
+            compiler,
+            guilds: DashMap::new(),
+            preferred_locales: DashMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn compiler(&self) -> &ConfigCompiler {
+        &self.compiler
+    }
+
+    /// Validates `overrides` and, only if they are valid, makes them the guild's settings.
+    pub fn set_guild(
+        &self,
+        guild: GuildId,
+        overrides: &GuildOverrides,
+    ) -> Result<Arc<GuildSettings>, ConfigError> {
+        let settings = Arc::new(self.compiler.compile(overrides)?);
+        self.guilds.insert(guild, Arc::clone(&settings));
+        Ok(settings)
+    }
+
+    /// Parses and applies a YAML document.
+    pub fn set_guild_yaml(
+        &self,
+        guild: GuildId,
+        yaml: &str,
+    ) -> Result<Arc<GuildSettings>, ConfigError> {
+        self.set_guild(guild, &parse_overrides(yaml)?)
+    }
+
+    /// Forgets a guild's configuration, e.g. after the bot was removed from it.
+    pub fn remove_guild(&self, guild: GuildId) {
+        self.guilds.remove(&guild);
+        self.preferred_locales.remove(&guild);
+    }
+
+    /// Records the community locale Discord reports for the guild (used by `language: auto`).
+    pub fn set_preferred_locale(&self, guild: GuildId, locale: Option<Locale>) {
+        match locale {
+            Some(locale) => {
+                self.preferred_locales.insert(guild, locale);
+            }
+            None => {
+                self.preferred_locales.remove(&guild);
+            }
+        }
+    }
+
+    /// The guild's settings, or the defaults when it has configured nothing.
+    #[must_use]
+    pub fn settings(&self, guild: GuildId) -> Arc<GuildSettings> {
+        self.guilds.get(&guild).map_or_else(
+            || Arc::clone(self.compiler.defaults()),
+            |entry| Arc::clone(&entry),
+        )
+    }
+
+    #[must_use]
+    pub fn configured_guilds(&self) -> usize {
+        self.guilds.len()
+    }
+}
+
+impl SettingsProvider for SettingsStore {
+    fn locale(&self, guild: GuildId) -> Locale {
+        self.settings(guild)
+            .language_override()
+            .or_else(|| self.preferred_locales.get(&guild).map(|entry| *entry))
+            .unwrap_or(Locale::DEFAULT)
+    }
+
+    fn module(&self, guild: GuildId, module: &ModuleId) -> Option<ModuleSettings> {
+        self.settings(guild).module(module).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use closure_core::module::{Module, ModuleManifest};
+    use closure_core::registry::ModuleRegistry;
+    use closure_core::testing::StubModule;
+    use serde_json::json;
+    use twilight_model::id::Id;
+
+    use super::*;
+
+    fn store() -> SettingsStore {
+        let mut manifest = ModuleManifest::new(ModuleId::new("warn").unwrap(), "warn", "0.1.0");
+        manifest.config_schema = json!({
+            "type": "object",
+            "properties": { "limit": { "type": "integer", "maximum": 10 } }
+        });
+        manifest.default_config = json!({ "limit": 3 });
+        let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
+        let registry = Arc::new(ModuleRegistry::new(vec![module]).unwrap());
+        SettingsStore::new(ConfigCompiler::new(registry).unwrap())
+    }
+
+    fn warn() -> ModuleId {
+        ModuleId::new("warn").unwrap()
+    }
+
+    #[test]
+    fn unconfigured_guilds_use_defaults() {
+        let store = store();
+        let settings = store.module(Id::new(1), &warn()).unwrap();
+        assert!(!settings.enabled);
+        assert_eq!(settings.config["limit"], 3);
+        assert_eq!(store.configured_guilds(), 0);
+    }
+
+    #[test]
+    fn yaml_edits_take_effect_for_that_guild_only() {
+        let store = store();
+        store
+            .set_guild_yaml(
+                Id::new(1),
+                "modules:\n  warn:\n    enabled: true\n    config: { limit: 7 }\n",
+            )
+            .unwrap();
+        let configured = store.module(Id::new(1), &warn()).unwrap();
+        assert!(configured.enabled);
+        assert_eq!(configured.config["limit"], 7);
+        assert!(!store.module(Id::new(2), &warn()).unwrap().enabled);
+    }
+
+    #[test]
+    fn an_invalid_edit_leaves_the_previous_settings_in_force() {
+        let store = store();
+        store
+            .set_guild_yaml(Id::new(1), "modules:\n  warn:\n    enabled: true\n")
+            .unwrap();
+        let rejected =
+            store.set_guild_yaml(Id::new(1), "modules:\n  warn:\n    config: { limit: 99 }\n");
+        assert!(rejected.is_err());
+        let rejected_syntax = store.set_guild_yaml(Id::new(1), "preset: [");
+        assert!(rejected_syntax.is_err());
+        assert!(store.module(Id::new(1), &warn()).unwrap().enabled);
+    }
+
+    #[test]
+    fn language_prefers_the_override_then_discord_then_english() {
+        let store = store();
+        let guild = Id::new(1);
+        assert_eq!(store.locale(guild), Locale::En);
+
+        store.set_preferred_locale(guild, Some(Locale::Ja));
+        assert_eq!(store.locale(guild), Locale::Ja);
+
+        store.set_guild_yaml(guild, "language: en").unwrap();
+        assert_eq!(store.locale(guild), Locale::En);
+
+        store.set_guild_yaml(guild, "language: auto").unwrap();
+        assert_eq!(store.locale(guild), Locale::Ja);
+
+        store.set_preferred_locale(guild, None);
+        assert_eq!(store.locale(guild), Locale::En);
+    }
+
+    #[test]
+    fn removing_a_guild_restores_defaults() {
+        let store = store();
+        let guild = Id::new(1);
+        store.set_guild_yaml(guild, "language: ja").unwrap();
+        store.remove_guild(guild);
+        assert_eq!(store.locale(guild), Locale::En);
+        assert_eq!(store.configured_guilds(), 0);
+    }
+}
