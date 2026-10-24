@@ -8,7 +8,11 @@
 //!   gracefully.
 
 mod api;
+mod breaker;
+mod dispatcher;
 mod error;
 pub mod hierarchy;
 
 pub use api::{RetryPolicy, TwilightApi};
+pub use breaker::BreakerConfig;
+pub use dispatcher::{DispatchError, Dispatcher, DispatcherConfig};

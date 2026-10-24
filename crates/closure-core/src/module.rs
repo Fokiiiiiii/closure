@@ -34,6 +34,12 @@ impl ModuleId {
         }
     }
 
+    /// The identity of actions the host performs itself, e.g. telling a user a command failed.
+    #[must_use]
+    pub fn system() -> Self {
+        Self("system".to_owned())
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
