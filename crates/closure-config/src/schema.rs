@@ -21,6 +21,15 @@ use crate::model::GuildOverrides;
 pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> {
     let mut schema = serde_json::to_value(schemars::schema_for!(GuildOverrides))
         .map_err(|error| ConfigError::Serialize(error.to_string()))?;
+    // The numbers of the document; what is an id (a string or a number) is not one of them.
+    for numbers in ["/properties/version", "/$defs/LimitsOverride"] {
+        if let Some(numbers) = schema.pointer_mut(numbers) {
+            also_as_text(numbers);
+        }
+    }
+    if let Some(preset) = schema.pointer_mut("/$defs/Preset") {
+        also_as_unit_variant_map(preset);
+    }
 
     let mut languages = vec![json!("auto")];
     languages.extend(Locale::ALL.iter().map(|locale| json!(locale.tag())));
@@ -48,11 +57,15 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
                 "description": manifest.description,
                 "additionalProperties": false,
                 "properties": {
-                    "enabled": or_null(json!({ "type": "boolean", "default": manifest.default_enabled })),
+                    // The parser also reads `"yes"` and the like as a boolean.
+                    "enabled": or_null(json!({
+                        "type": ["boolean", "string"],
+                        "default": manifest.default_enabled
+                    })),
                     // Repeats are taken as one capability, so they are no mistake.
                     "capabilities": or_null(json!({
                         "type": "array",
-                        "items": { "enum": capabilities }
+                        "items": unit_variant_forms(&json!({ "enum": capabilities }))
                     })),
                     "config": config_schema
                 }
@@ -88,6 +101,60 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
         root.insert("type".into(), json!(["object", "null"]));
     }
     Ok(schema)
+}
+
+/// Where the document wants a number or a boolean, the parser also takes the text of one (`"1"`,
+/// `"0x10"`, `"yes"`), quoted or not, so the published schema does too.
+fn also_as_text(schema: &mut Value) {
+    let Value::Object(map) = schema else { return };
+    match map.get_mut("type") {
+        Some(Value::String(kind)) if matches!(kind.as_str(), "integer" | "boolean") => {
+            let kind = kind.clone();
+            map.insert("type".into(), json!([kind, "string"]));
+        }
+        Some(Value::Array(kinds))
+            if kinds
+                .iter()
+                .any(|kind| matches!(kind.as_str(), Some("integer" | "boolean")))
+                && !kinds.iter().any(|kind| kind == "string") =>
+        {
+            kinds.push(json!("string"));
+        }
+        _ => {}
+    }
+    for inner in subschemas_mut(map) {
+        also_as_text(inner);
+    }
+}
+
+/// A string `enum` of names also takes each name as the only key of a map holding `null`, which
+/// is how the parser reads a variant without a value.
+fn unit_variant_forms(names: &Value) -> Value {
+    let keys: Map<String, Value> = names
+        .get("enum")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|name| (name.to_owned(), json!({ "type": "null" })))
+        .collect();
+    json!({
+        "anyOf": [
+            names,
+            { "type": "object", "properties": keys, "additionalProperties": false }
+        ]
+    })
+}
+
+/// [`unit_variant_forms`] for a schema that is the `enum` itself, keeping what is said about it.
+fn also_as_unit_variant_map(schema: &mut Value) {
+    let Value::Object(map) = schema else { return };
+    let description = map.remove("description");
+    let mut forms = unit_variant_forms(&schema.take());
+    if let (Some(description), Value::Object(outer)) = (description, &mut forms) {
+        outer.insert("description".into(), description);
+    }
+    *schema = forms;
 }
 
 /// The spellings of a language the parser takes besides the canonical ones: `auto` in any
@@ -649,7 +716,7 @@ mod tests {
         assert_eq!(config["properties"]["limit"]["anyOf"][0]["type"], "integer");
         assert!(config.get("$schema").is_none());
         assert_eq!(
-            warn["properties"]["capabilities"]["anyOf"][0]["items"]["enum"],
+            warn["properties"]["capabilities"]["anyOf"][0]["items"]["anyOf"][0]["enum"],
             json!(["send_messages"])
         );
     }
@@ -1267,6 +1334,15 @@ mod tests {
             json!({ "moderator_roles": [1, 2] }),
             json!({ "moderator_roles": ["1", 2] }),
             json!({ "modules": { "warn": { "capabilities": ["send_messages", "send_messages"] } } }),
+            // The parser reads the text of a number or a boolean wherever one is wanted, quoted
+            // or not, and a unit variant as a map holding it.
+            json!({ "version": "1" }),
+            json!({ "limits": { "concurrency": "2" } }),
+            json!({ "limits": { "handler_timeout_secs": "0x10", "queue_capacity": "2_56" } }),
+            json!({ "modules": { "warn": { "enabled": "yes" } } }),
+            json!({ "modules": { "warn": { "enabled": " false " } } }),
+            json!({ "preset": { "small": null } }),
+            json!({ "modules": { "warn": { "capabilities": [{ "send_messages": null }] } } }),
         ] {
             let overrides = parse_overrides(&document.to_string()).unwrap_or_else(|error| {
                 panic!("test setup: the parser refuses {document}: {error}")
@@ -1411,42 +1487,111 @@ mod tests {
         // Two modules naming their schemas alike, or one naming itself like the other's assigned
         // name, in any spelling of the same URI, would be told apart by nothing. The `$id` has no
         // use for a schema that may only refer to itself, so the bot assigns it.
-        let module = |id: &str, own: &str| {
+        // Each module's `X` is of a type of its own, so a reference that went to another module's
+        // would be seen.
+        let module = |id: &str, own: &str, kind: &str| {
             let mut manifest = ModuleManifest::new(ModuleId::new(id).unwrap(), id, "0.1.0");
             manifest.config_schema = json!({
                 "$id": own,
                 "type": "object",
                 "properties": { "x": { "$ref": "#/$defs/X" } },
-                "$defs": { "X": { "type": "integer" } }
+                "$defs": { "X": { "type": kind } }
             });
             let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
             module
         };
         let registry = ModuleRegistry::new(vec![
-            module("first", "urn:example:shared"),
-            module("second", "URN:example:shared"),
-            module("third", "urn:closure:module:first"),
-            module("fourth", "#"),
-            module("fifth", ""),
+            module("first", "urn:example:shared", "integer"),
+            module("second", "URN:example:shared", "string"),
+            module("third", "urn:closure:module:first", "boolean"),
+            module("fourth", "#", "integer"),
+            module("fifth", "", "string"),
         ])
         .unwrap();
         let schema = document_schema(&registry).unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
         let modules = &schema["properties"]["modules"]["anyOf"][0]["properties"];
-        for id in ["first", "second", "third", "fourth", "fifth"] {
+        for (id, right, wrong) in [
+            ("first", json!(5), json!("t")),
+            ("second", json!("t"), json!(5)),
+            ("third", json!(true), json!(5)),
+            ("fourth", json!(5), json!("t")),
+            ("fifth", json!("t"), json!(5)),
+        ] {
             assert_eq!(
                 modules[id]["properties"]["config"]["anyOf"][0]["$id"],
                 format!("urn:closure:module:{id}")
             );
-            assert!(validator.is_valid(&json!({ "modules": { id: { "config": { "x": null } } } })));
-            assert!(!validator.is_valid(&json!({ "modules": { id: { "config": { "x": "t" } } } })));
+            for (x, valid) in [(Value::Null, true), (right, true), (wrong, false)] {
+                let document = json!({ "modules": { id: { "config": { "x": x } } } });
+                assert_eq!(validator.is_valid(&document), valid, "{document}");
+            }
         }
     }
 
     #[test]
     fn a_schema_that_is_not_an_object_gets_no_id() {
         let registry = registry_with(json!(true));
+        let schema = document_schema(&registry).unwrap();
+        let config = &schema["properties"]["modules"]["anyOf"][0]["properties"]["warn"]["properties"]
+            ["config"]["anyOf"][0];
+        assert_eq!(config, &json!(true));
         let validator = validator_of(&registry);
         assert!(validator.is_valid(&document(&json!({ "anything": [1] }))));
+    }
+
+    #[test]
+    fn a_reference_to_the_root_from_where_values_are_merged_is_the_relaxed_one() {
+        // `child` meets the root as a merged value does, so what the defaults fill in may be
+        // left out, down to the `null` that stands for "the default": the strict copy of the
+        // root, which requires `n`, would refuse both.
+        let registry = Arc::new(registry_with_defaults(
+            json!({
+                "type": "object",
+                "required": ["n"],
+                "properties": { "n": { "type": "integer" }, "child": { "$ref": "#" } }
+            }),
+            json!({ "n": 1, "child": { "n": 1 } }),
+        ));
+        assert_never_rejects_what_the_compiler_accepts(
+            &registry,
+            &[json!({ "child": {} }), json!({ "child": { "n": null } })],
+        );
+    }
+
+    #[test]
+    fn beyond_the_depth_limit_even_a_wrong_type_is_let_through() {
+        // The compiler refuses the text at the bottom, which the schema cannot see through that
+        // many levels of definitions; letting it through is the allowed direction, and it is
+        // what tells the limit from the ordinary relaxing, which keeps the type.
+        let length = MAX_DEPTH + 40;
+        let mut definitions = Map::new();
+        let (mut default, mut over) = (json!({ "v": 1 }), json!({ "v": "text" }));
+        for n in (0..length).rev() {
+            let properties = if n + 1 == length {
+                json!({ "v": { "type": "integer" } })
+            } else {
+                json!({ "child": { "$ref": format!("#/$defs/D{}", n + 1) } })
+            };
+            definitions.insert(
+                format!("D{n}"),
+                json!({ "type": "object", "properties": properties }),
+            );
+            if n + 1 != length {
+                default = json!({ "child": default });
+                over = json!({ "child": over });
+            }
+        }
+        let registry = Arc::new(registry_with_defaults(
+            json!({
+                "type": "object",
+                "properties": { "root": { "$ref": "#/$defs/D0" } },
+                "$defs": definitions
+            }),
+            json!({ "root": default }),
+        ));
+        let config = json!({ "root": over });
+        assert!(!compiler_accepts(&registry, &config));
+        assert!(validator_of(&registry).is_valid(&document(&config)));
     }
 }

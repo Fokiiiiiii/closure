@@ -77,8 +77,9 @@ document (which may itself be `null`, as may a module's entry); `required`, `min
 `if`/`then`/`else` are weakened to "any of the branches"; and an unknown key may only be `null`.
 The items of a list are replaced as a whole and stay strict, and so does a `$ref: "#"` reached
 from one. The document also takes what the parser takes in other spellings: a language in any
-capitalisation or with a region (`ja-JP`), a Discord id as a number or as digits in a string, and
-a capability listed twice.
+capitalisation or with a region (`ja-JP`), a Discord id as a number or as digits in a string, a
+capability listed twice, the text of a number or a boolean where one is wanted (`"2"`, `"yes"`),
+and a preset or capability written as a map holding `null` (`{ small: null }`).
 
 A module's schema may use `$defs`/`definitions` and `$ref` (as `schemars` writes them, with the
 escapes of a URI fragment and a JSON pointer, and also `#` for the root); each module's schema is
