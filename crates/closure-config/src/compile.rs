@@ -41,6 +41,15 @@ impl std::fmt::Debug for ConfigCompiler {
 
 impl ConfigCompiler {
     pub fn new(registry: Arc<ModuleRegistry>) -> Result<Self, ConfigError> {
+        Self::with_publisher(registry, crate::schema::document_schema)
+    }
+
+    /// [`Self::new`] with the way the published document is made given, so that a document no
+    /// validator can be built from can be put to the test.
+    fn with_publisher(
+        registry: Arc<ModuleRegistry>,
+        publish: impl FnOnce(&ModuleRegistry) -> Result<serde_json::Value, ConfigError>,
+    ) -> Result<Self, ConfigError> {
         let mut validators = HashMap::new();
         for module in registry.iter() {
             let manifest = module.manifest();
@@ -62,7 +71,7 @@ impl ConfigCompiler {
         }
         // The schemas must also make a document together that can be published, and one that a
         // validator can be built from.
-        let published = crate::schema::document_schema(&registry)?;
+        let published = publish(&registry)?;
         jsonschema::validator_for(&published).map_err(|error| {
             ConfigError::Serialize(format!("the published schema does not build: {error}"))
         })?;
@@ -345,6 +354,23 @@ mod tests {
     fn module(id: &str, build: impl FnOnce(ModuleManifest) -> ModuleManifest) -> Arc<dyn Module> {
         let manifest = ModuleManifest::new(ModuleId::new(id).unwrap(), id, "0.1.0");
         Arc::new(StubModule(build(manifest)))
+    }
+
+    #[test]
+    fn a_published_document_no_validator_can_be_built_from_stops_startup() {
+        let registry = Arc::new(ModuleRegistry::new(vec![module("warn", |m| m)]).unwrap());
+        let Err(error) =
+            ConfigCompiler::with_publisher(Arc::clone(&registry), |_| Ok(json!({ "type": 5 })))
+        else {
+            panic!("the bot must not start");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("the published schema does not build"),
+            "{error}"
+        );
+        ConfigCompiler::with_publisher(registry, |_| Ok(json!({ "type": "object" }))).unwrap();
     }
 
     fn warn_module() -> Arc<dyn Module> {
