@@ -26,9 +26,6 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
     languages.extend(Locale::ALL.iter().map(|locale| json!(locale.tag())));
 
     let mut module_properties = Map::new();
-    // Every module's schema becomes a schema resource of the document, named by its `$id`; two
-    // resources of one name would be told apart by nothing.
-    let mut resource_ids: BTreeMap<String, String> = BTreeMap::new();
     for module in registry.iter() {
         let manifest = module.manifest();
         let module_id = manifest.id.to_string();
@@ -37,13 +34,7 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
             message,
         };
         check_supported(&manifest.config_schema).map_err(refuse)?;
-        let (config_schema, resource_id) =
-            published_config_schema(&module_id, &manifest.config_schema);
-        if let Some(other) = resource_ids.insert(resource_id.clone(), module_id.clone()) {
-            return Err(refuse(format!(
-                "`$id` {resource_id} is also the `$id` of module `{other}`"
-            )));
-        }
+        let config_schema = published_config_schema(&module_id, &manifest.config_schema);
         let capabilities: Vec<&str> = manifest
             .capabilities
             .iter()
@@ -51,15 +42,16 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
             .collect();
         module_properties.insert(
             module_id.clone(),
+            // A module's entry may be `null` as well: it stands for no override at all.
             json!({
-                "type": "object",
+                "type": ["object", "null"],
                 "description": manifest.description,
                 "additionalProperties": false,
                 "properties": {
                     "enabled": or_null(json!({ "type": "boolean", "default": manifest.default_enabled })),
+                    // Repeats are taken as one capability, so they are no mistake.
                     "capabilities": or_null(json!({
                         "type": "array",
-                        "uniqueItems": true,
                         "items": { "enum": capabilities }
                     })),
                     "config": config_schema
@@ -71,12 +63,15 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
     if let Some(Value::Object(properties)) = schema.pointer_mut("/properties") {
         properties.insert(
             "language".into(),
-            or_null(json!({
+            json!({
                 "description": "Language of the bot's messages; `auto` follows the server's community locale.",
-                "type": "string",
-                "enum": languages,
-                "default": "auto"
-            })),
+                "anyOf": [
+                    { "type": "string", "enum": languages, "default": "auto" },
+                    // What the parser also takes: any capitalisation, and a regional form.
+                    { "type": "string", "pattern": language_alias_pattern() },
+                    { "type": "null" }
+                ]
+            }),
         );
         properties.insert(
             "modules".into(),
@@ -88,7 +83,37 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
             })),
         );
     }
+    // The whole document may be `null` too: an empty one.
+    if let Value::Object(root) = &mut schema {
+        root.insert("type".into(), json!(["object", "null"]));
+    }
     Ok(schema)
+}
+
+/// The spellings of a language the parser takes besides the canonical ones: `auto` in any
+/// capitalisation, and a locale tag in any capitalisation, alone or followed by `-` or `_` and
+/// anything (`ja-JP`, `en_US`).
+fn language_alias_pattern() -> String {
+    let insensitive = |text: &str| -> String {
+        text.chars()
+            .map(|c| {
+                if c.is_ascii_alphabetic() {
+                    format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase())
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect()
+    };
+    let tags: Vec<String> = Locale::ALL
+        .iter()
+        .map(|locale| insensitive(locale.tag()))
+        .collect();
+    format!(
+        "^({}|({})([-_][\\s\\S]*)?)$",
+        insensitive("auto"),
+        tags.join("|")
+    )
 }
 
 /// `null` for an optional field means the same as leaving it out.
@@ -101,26 +126,21 @@ fn or_null(schema: Value) -> Value {
     Value::Object(wrapper)
 }
 
-/// A module's config schema as it is published inside the document, and the name (`$id`) of the
-/// schema resource it is.
-fn published_config_schema(module: &str, schema: &Value) -> (Value, String) {
+/// A module's config schema as it is published inside the document.
+fn published_config_schema(module: &str, schema: &Value) -> Value {
     let mut config = schema.clone();
-    let mut resource_id = format!("urn:closure:module:{module}");
     if let Value::Object(map) = &mut config {
         map.remove("$schema");
         // A reference scope of its own: `#/$defs/..` in a module's schema means that schema's own
-        // definitions, not those of the document it is embedded in or of another module. A
-        // schema that names itself keeps its name.
-        match map.get("$id") {
-            Some(Value::String(own)) => resource_id.clone_from(own),
-            _ => {
-                map.insert("$id".into(), json!(resource_id));
-            }
-        }
+        // definitions, not those of the document it is embedded in or of another module. Its name
+        // is the bot's to give, not the module's: a schema that refers only to itself has no use
+        // for one, and two modules (or one module and the document) with names that mean the
+        // same URI would be told apart by nothing.
+        map.insert("$id".into(), json!(format!("urn:closure:module:{module}")));
     }
     relax(&mut config);
     // `config: null` stands for "the defaults" as well.
-    (or_null(config), resource_id)
+    or_null(config)
 }
 
 const DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -129,21 +149,23 @@ const DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const DEFINITIONS: [&str; 2] = ["$defs", "definitions"];
 
 /// Keywords whose values are schemas, by name.
-const SCHEMA_MAPS: [&str; 5] = [
+const SCHEMA_MAPS: [&str; 6] = [
     "properties",
     "patternProperties",
     "$defs",
     "definitions",
     "dependentSchemas",
+    "dependencies",
 ];
 
 /// Keywords whose value is one schema.
-const SCHEMAS: [&str; 10] = [
+const SCHEMAS: [&str; 11] = [
     "items",
     "additionalProperties",
     "unevaluatedProperties",
     "unevaluatedItems",
     "contains",
+    "contentSchema",
     "propertyNames",
     "not",
     "if",
@@ -164,22 +186,28 @@ const UNSUPPORTED: [&str; 5] = [
 ];
 
 /// Keywords that judge which keys an object has, how many, or what they are called, or the object
-/// as a whole. A sparse override lacks keys the defaults fill in and has `null` keys the merge
-/// drops, and weakening what sits under `not` makes it stricter, so these are dropped where
-/// values are merged.
-const DROPPED: [&str; 8] = [
+/// as a whole (`dependencies` is the older spelling of `dependentRequired` and
+/// `dependentSchemas`). A sparse override lacks keys the defaults fill in and has `null` keys the
+/// merge drops, and weakening what sits under `not` makes it stricter, so these are dropped where
+/// values are merged. So are the `unevaluated*` keywords: they judge what no other keyword looked
+/// at, and the relaxing takes away or changes what looked at it (`if`, a branch cut off at the
+/// depth limit).
+const DROPPED: [&str; 10] = [
     "required",
     "dependentRequired",
     "dependentSchemas",
+    "dependencies",
     "minProperties",
     "maxProperties",
     "propertyNames",
     "unevaluatedProperties",
+    "unevaluatedItems",
     "not",
 ];
 
 /// How deep [`relax`] follows nesting and references. What is deeper allows anything, which keeps
-/// the contract (it can only let more through).
+/// the contract (it can only let more through, since the keywords that would be turned around by
+/// it are dropped).
 const MAX_DEPTH: usize = 128;
 
 /// Whether a module's config schema is one [`relax`] can translate faithfully. Checked when the
@@ -251,7 +279,8 @@ fn scan(schema: &Value, top: bool) -> Result<(), String> {
 /// merge drops it). A property may be a type defined elsewhere in the schema (`$ref` to `$defs`);
 /// a reference reached the way a property is gets a copy of the definition made the same way,
 /// and the original stays as it is for the places that need it strict, such as the items of a
-/// list.
+/// list. The same goes for `$ref: "#"`, the schema itself: reached the way a property is, it is
+/// the relaxed whole; reached anywhere else, it is a strict copy of the whole.
 fn relax(schema: &mut Value) {
     let mut copies = Copies::new(schema);
     copies.visit(schema, 0);
@@ -267,10 +296,38 @@ struct Copies {
     names: BTreeMap<(&'static str, String), String>,
     /// The copies, by `(where they are kept, name of the copy)`.
     made: BTreeMap<(&'static str, String), Value>,
+    /// What `$ref: "#"` is turned into while the schema is relaxed: a reference to the strict
+    /// copy of the whole schema, which stays where the places that need it strict are, and goes
+    /// back to `#` where the relaxed schema is wanted.
+    root_reference: String,
 }
 
 impl Copies {
-    fn new(root: &Value) -> Self {
+    fn new(root: &mut Value) -> Self {
+        let mut taken = BTreeSet::new();
+        for place in DEFINITIONS {
+            if let Some(Value::Object(definitions)) = root.get(place) {
+                taken.extend(definitions.keys().map(|name| (place, name.clone())));
+            }
+        }
+        let mut root_name = String::from("Root__strict");
+        while taken.contains(&("$defs", root_name.clone())) {
+            root_name.push('_');
+        }
+        let root_reference = definition_reference("$defs", &root_name);
+        let mut made = BTreeMap::new();
+        if point_root_references_at(root, &root_reference)
+            && let Value::Object(whole) = root
+        {
+            let mut strict = whole.clone();
+            // What is left is the schema without its definitions and its identity; the definitions
+            // are found where they are, in the root.
+            for keyword in ["$defs", "definitions", "$id", "$schema"] {
+                strict.remove(keyword);
+            }
+            taken.insert(("$defs", root_name.clone()));
+            made.insert(("$defs", root_name), Value::Object(strict));
+        }
         let mut originals = BTreeMap::new();
         for place in DEFINITIONS {
             if let Some(Value::Object(definitions)) = root.get(place) {
@@ -280,10 +337,11 @@ impl Copies {
             }
         }
         Self {
-            taken: originals.keys().cloned().collect(),
+            taken,
             originals,
             names: BTreeMap::new(),
-            made: BTreeMap::new(),
+            made,
+            root_reference,
         }
     }
 
@@ -343,6 +401,10 @@ impl Copies {
         let Some(Value::String(target)) = map.get("$ref") else {
             return;
         };
+        if *target == self.root_reference {
+            map.insert("$ref".into(), json!("#"));
+            return;
+        }
         let Some((place, name)) = local_definition(target) else {
             return;
         };
@@ -373,24 +435,63 @@ impl Copies {
     }
 
     fn add_to(self, root: &mut Value) {
+        let Value::Object(root) = root else { return };
         for ((place, name), copy) in self.made {
-            if let Some(Value::Object(definitions)) = root.get_mut(place) {
+            if let Value::Object(definitions) = root.entry(place).or_insert_with(|| json!({})) {
                 definitions.insert(name, copy);
             }
         }
     }
 }
 
+/// The schemas that sit directly in the keywords of `map`.
+fn subschemas_mut(map: &mut Map<String, Value>) -> Vec<&mut Value> {
+    let mut found = Vec::new();
+    for (keyword, inner) in map.iter_mut() {
+        let keyword = keyword.as_str();
+        if SCHEMA_MAPS.contains(&keyword) {
+            if let Value::Object(named) = inner {
+                found.extend(named.values_mut());
+            }
+        } else if SCHEMAS.contains(&keyword) {
+            found.push(inner);
+        } else if SCHEMA_LISTS.contains(&keyword)
+            && let Value::Array(schemas) = inner
+        {
+            found.extend(schemas.iter_mut());
+        }
+    }
+    found
+}
+
+/// Points every `$ref: "#"` in the schema at `target`; whether there was one.
+fn point_root_references_at(schema: &mut Value, target: &str) -> bool {
+    let Value::Object(map) = schema else {
+        return false;
+    };
+    let mut found = false;
+    if map.get("$ref").and_then(Value::as_str) == Some("#") {
+        map.insert("$ref".into(), json!(target));
+        found = true;
+    }
+    for inner in subschemas_mut(map) {
+        found |= point_root_references_at(inner, target);
+    }
+    found
+}
+
 /// Weakens `oneOf` and `if`/`then`/`else` to "any of the branches", as `allOf` entries, because a
 /// sparse override cannot say which branch applies once the defaults are filled in. `if` and a
-/// `then` or `else` without its partner say nothing the override can be held to, and are dropped.
+/// `then` or `else` without its partner say nothing the override can be held to, and are dropped;
+/// without an `if`, `then` and `else` are not looked at at all.
 fn fold_conditionals(map: &mut Map<String, Value>) {
     let mut alternatives = Vec::new();
     if let Some(Value::Array(branches)) = map.remove("oneOf") {
         alternatives.push(json!({ "anyOf": branches }));
     }
-    map.remove("if");
-    if let (Some(then), Some(otherwise)) = (map.remove("then"), map.remove("else")) {
+    let conditional = map.remove("if").is_some();
+    let (then, otherwise) = (map.remove("then"), map.remove("else"));
+    if let (true, Some(then), Some(otherwise)) = (conditional, then, otherwise) {
         alternatives.push(json!({ "anyOf": [then, otherwise] }));
     }
     if alternatives.is_empty() {
@@ -430,7 +531,12 @@ fn percent_decode(text: &str) -> Option<String> {
     let mut at = 0;
     while at < bytes.len() {
         if bytes[at] == b'%' {
-            decoded.push(u8::from_str_radix(text.get(at + 1..at + 3)?, 16).ok()?);
+            // `from_str_radix` alone would take a sign for a digit.
+            let digits = text.get(at + 1..at + 3)?;
+            if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return None;
+            }
+            decoded.push(u8::from_str_radix(digits, 16).ok()?);
             at += 3;
         } else {
             decoded.push(bytes[at]);
@@ -464,7 +570,7 @@ mod tests {
     use super::*;
     use crate::compile::ConfigCompiler;
     use crate::model::{GuildOverrides, ModuleOverride, Preset};
-    use crate::yaml::overrides_to_yaml;
+    use crate::yaml::{overrides_to_yaml, parse_overrides};
 
     fn registry() -> ModuleRegistry {
         registry_with(json!({
@@ -952,26 +1058,6 @@ mod tests {
     }
 
     #[test]
-    fn two_modules_may_not_name_their_schemas_alike() {
-        let module = |id: &str| {
-            let mut manifest = ModuleManifest::new(ModuleId::new(id).unwrap(), id, "0.1.0");
-            manifest.config_schema = json!({ "$id": "urn:example:shared", "type": "object" });
-            let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
-            module
-        };
-        let registry = ModuleRegistry::new(vec![module("first"), module("second")]).unwrap();
-
-        let Err(error) = document_schema(&registry) else {
-            panic!("the document must not be built");
-        };
-        assert!(error.to_string().contains("urn:example:shared"), "{error}");
-        let Err(error) = ConfigCompiler::new(Arc::new(registry)) else {
-            panic!("the bot must not start");
-        };
-        assert!(error.to_string().contains("urn:example:shared"), "{error}");
-    }
-
-    #[test]
     fn a_nested_schema_resource_is_refused() {
         // Another `$id` or `$schema` inside the schema would be a schema resource of its own, with
         // definitions of its own, and a dialect of its own: nothing here translates that.
@@ -988,23 +1074,6 @@ mod tests {
             &json!({ "$id": "urn:example:config", "properties": { "$id": { "type": "string" } } }),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn a_schema_that_names_itself_keeps_its_name() {
-        let registry = registry_with(json!({
-            "$id": "urn:example:config",
-            "type": "object",
-            "properties": { "x": { "$ref": "#/$defs/X" } },
-            "$defs": { "X": { "type": "integer" } }
-        }));
-        let schema = document_schema(&registry).unwrap();
-        let config = &schema["properties"]["modules"]["anyOf"][0]["properties"]["warn"]["properties"]
-            ["config"]["anyOf"][0];
-        assert_eq!(config["$id"], "urn:example:config");
-        let validator = validator_of(&registry);
-        assert!(validator.is_valid(&document(&json!({ "x": null }))));
-        assert!(!validator.is_valid(&document(&json!({ "x": "text" }))));
     }
 
     #[test]
@@ -1178,5 +1247,206 @@ mod tests {
         assert!(!validator.is_valid(&json!({ "language": "klingon" })));
         assert!(!validator.is_valid(&json!({ "modules": { "nope": {} } })));
         assert!(validator.is_valid(&json!({ "language": "ja" })));
+    }
+
+    /// Every document the parser takes and the compiler accepts, in the odd forms it takes them,
+    /// must satisfy the published schema as well.
+    #[test]
+    fn documents_the_parser_accepts_satisfy_the_published_schema() {
+        let registry = Arc::new(registry());
+        let validator = validator_of(&registry);
+        for document in [
+            Value::Null,
+            json!({ "modules": { "warn": null } }),
+            json!({ "language": "AUTO" }),
+            json!({ "language": "ja-JP" }),
+            json!({ "language": "en_US" }),
+            json!({ "language": "EN" }),
+            json!({ "log_channel": 123_456_789_012_345_678_u64 }),
+            json!({ "log_channel": "123456789012345678" }),
+            json!({ "moderator_roles": [1, 2] }),
+            json!({ "moderator_roles": ["1", 2] }),
+            json!({ "modules": { "warn": { "capabilities": ["send_messages", "send_messages"] } } }),
+        ] {
+            let overrides = parse_overrides(&document.to_string()).unwrap_or_else(|error| {
+                panic!("test setup: the parser refuses {document}: {error}")
+            });
+            ConfigCompiler::new(Arc::clone(&registry))
+                .unwrap()
+                .compile(&overrides)
+                .unwrap_or_else(|error| {
+                    panic!("test setup: the compiler refuses {document}: {error}")
+                });
+            assert!(
+                validator.is_valid(&document),
+                "the published schema rejects what the parser and compiler accept: {document}"
+            );
+        }
+        for wrong in [
+            json!({ "language": "klingon" }),
+            json!({ "language": "english" }),
+            json!({ "language": "enx" }),
+            json!({ "log_channel": -1 }),
+            json!({ "log_channel": "abc" }),
+            json!({ "moderator_roles": ["abc"] }),
+        ] {
+            assert!(!validator.is_valid(&wrong), "{wrong}");
+        }
+    }
+
+    #[test]
+    fn what_a_dropped_keyword_evaluated_does_not_make_unevaluated_items_stricter() {
+        // `if` passes for a first string, which then counts as evaluated; once `if` is folded away
+        // nothing evaluates it, and `unevaluatedItems` would turn on the very item it allowed.
+        let registry = Arc::new(registry_with(json!({
+            "type": "object",
+            "properties": { "list": {
+                "type": "array",
+                "if": { "prefixItems": [{ "type": "string" }] },
+                "then": true,
+                "else": true,
+                "unevaluatedItems": false
+            } }
+        })));
+        assert_never_rejects_what_the_compiler_accepts(
+            &registry,
+            &[json!({ "list": ["x"] }), json!({ "list": [] })],
+        );
+    }
+
+    #[test]
+    fn then_and_else_without_if_say_nothing() {
+        let registry = Arc::new(registry_with(json!({
+            "type": "object",
+            "properties": { "n": { "type": "integer" } },
+            "then": false,
+            "else": false
+        })));
+        assert_never_rejects_what_the_compiler_accepts(&registry, &[json!({}), json!({ "n": 1 })]);
+    }
+
+    #[test]
+    fn a_reference_to_the_root_from_a_place_that_stays_strict_stays_strict() {
+        // The items of a list are replaced whole, so they meet the root as the module wrote it:
+        // `{}` lacks the required `n`. Pointing these at the relaxed root, which lets `{}` through,
+        // would turn `not` and `maxContains` around and make `oneOf` match twice.
+        let registry = Arc::new(registry_with_defaults(
+            json!({
+                "type": "object",
+                "required": ["n"],
+                "properties": {
+                    "n": { "type": "integer" },
+                    "negated": { "type": "array", "items": { "not": { "$ref": "#" } } },
+                    "single": {
+                        "type": "array",
+                        "items": { "oneOf": [{ "$ref": "#" }, { "type": "object" }] }
+                    },
+                    "counted": {
+                        "type": "array",
+                        "contains": { "$ref": "#" },
+                        "minContains": 0,
+                        "maxContains": 0
+                    }
+                }
+            }),
+            json!({ "n": 1 }),
+        ));
+        assert_never_rejects_what_the_compiler_accepts(
+            &registry,
+            &[
+                json!({ "negated": [{}] }),
+                json!({ "single": [{}] }),
+                json!({ "counted": [{}] }),
+                json!({ "n": null }),
+            ],
+        );
+        // Inside an item the root is still the whole, strict one.
+        let validator = validator_of(&registry);
+        assert!(!validator.is_valid(&document(&json!({ "negated": [{ "n": 1 }] }))));
+    }
+
+    #[test]
+    fn the_legacy_dependencies_keyword_is_dropped_like_its_successors() {
+        let registry = Arc::new(registry_with_defaults(
+            json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" }, "b": { "type": "integer" } },
+                "dependencies": { "a": ["b"], "b": { "required": ["a"] } }
+            }),
+            json!({ "a": 1, "b": 2 }),
+        ));
+        assert_never_rejects_what_the_compiler_accepts(
+            &registry,
+            &[json!({ "a": 3 }), json!({ "b": 4 })],
+        );
+        let schema = document_schema(&registry).unwrap();
+        let config = &schema["properties"]["modules"]["anyOf"][0]["properties"]["warn"]["properties"]
+            ["config"]["anyOf"][0];
+        assert!(config.get("dependencies").is_none());
+    }
+
+    #[test]
+    fn a_reference_inside_content_schema_is_looked_at_too() {
+        let error = check_supported(&json!({
+            "type": "string",
+            "contentMediaType": "application/json",
+            "contentSchema": { "$ref": "urn:example:other" }
+        }))
+        .expect_err("a reference nobody can follow");
+        assert!(error.contains("urn:example:other"), "{error}");
+    }
+
+    #[test]
+    fn a_percent_escape_needs_two_hex_digits() {
+        // `from_str_radix` alone would read `+1` as 1.
+        assert_eq!(percent_decode("%2B1").as_deref(), Some("+1"));
+        assert!(percent_decode("%+1").is_none());
+        assert!(percent_decode("%-1").is_none());
+        assert!(percent_decode("%1").is_none());
+        assert!(local_definition("#/$defs/%+1").is_none());
+    }
+
+    #[test]
+    fn a_modules_own_id_is_replaced_by_one_the_bot_gives_it() {
+        // Two modules naming their schemas alike, or one naming itself like the other's assigned
+        // name, in any spelling of the same URI, would be told apart by nothing. The `$id` has no
+        // use for a schema that may only refer to itself, so the bot assigns it.
+        let module = |id: &str, own: &str| {
+            let mut manifest = ModuleManifest::new(ModuleId::new(id).unwrap(), id, "0.1.0");
+            manifest.config_schema = json!({
+                "$id": own,
+                "type": "object",
+                "properties": { "x": { "$ref": "#/$defs/X" } },
+                "$defs": { "X": { "type": "integer" } }
+            });
+            let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
+            module
+        };
+        let registry = ModuleRegistry::new(vec![
+            module("first", "urn:example:shared"),
+            module("second", "URN:example:shared"),
+            module("third", "urn:closure:module:first"),
+            module("fourth", "#"),
+            module("fifth", ""),
+        ])
+        .unwrap();
+        let schema = document_schema(&registry).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let modules = &schema["properties"]["modules"]["anyOf"][0]["properties"];
+        for id in ["first", "second", "third", "fourth", "fifth"] {
+            assert_eq!(
+                modules[id]["properties"]["config"]["anyOf"][0]["$id"],
+                format!("urn:closure:module:{id}")
+            );
+            assert!(validator.is_valid(&json!({ "modules": { id: { "config": { "x": null } } } })));
+            assert!(!validator.is_valid(&json!({ "modules": { id: { "config": { "x": "t" } } } })));
+        }
+    }
+
+    #[test]
+    fn a_schema_that_is_not_an_object_gets_no_id() {
+        let registry = registry_with(json!(true));
+        let validator = validator_of(&registry);
+        assert!(validator.is_valid(&document(&json!({ "anything": [1] }))));
     }
 }

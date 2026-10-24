@@ -60,8 +60,12 @@ impl ConfigCompiler {
                 })?;
             validators.insert(manifest.id.clone(), validator);
         }
-        // The schemas must also make a publishable document together (no two of one name).
-        crate::schema::document_schema(&registry)?;
+        // The schemas must also make a document together that can be published, and one that a
+        // validator can be built from.
+        let published = crate::schema::document_schema(&registry)?;
+        jsonschema::validator_for(&published).map_err(|error| {
+            ConfigError::Serialize(format!("the published schema does not build: {error}"))
+        })?;
         // The module defaults must satisfy their own schemas, otherwise no guild could ever
         // run on defaults.
         let defaults = Arc::new(compile_with(

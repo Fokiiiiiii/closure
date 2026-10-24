@@ -14,6 +14,26 @@ use crate::error::Issue;
 /// The configuration schema version this build reads and writes.
 pub const CURRENT_VERSION: u32 = 1;
 
+/// A Discord id as the parser takes it: the digits in a string (how it is written), or a number.
+fn snowflake() -> serde_json::Value {
+    serde_json::json!({
+        "anyOf": [
+            { "type": "string", "pattern": "^\\+?[0-9]+$" },
+            { "type": "integer", "minimum": 1 }
+        ]
+    })
+}
+
+fn optional_snowflake_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "anyOf": [snowflake(), { "type": "null" }] })
+}
+
+fn optional_snowflakes_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [{ "type": "array", "items": snowflake() }, { "type": "null" }]
+    })
+}
+
 /// A starting point sized for the server. It only chooses defaults; every value can still be
 /// overridden individually.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -166,11 +186,11 @@ pub struct GuildOverrides {
     pub language: Option<Language>,
     /// Channel where the bot posts moderation logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<String>")]
+    #[schemars(schema_with = "optional_snowflake_schema")]
     pub log_channel: Option<ChannelId>,
     /// Roles whose members may use moderation commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<Vec<String>>")]
+    #[schemars(schema_with = "optional_snowflakes_schema")]
     pub moderator_roles: Option<Vec<RoleId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<LimitsOverride>,
