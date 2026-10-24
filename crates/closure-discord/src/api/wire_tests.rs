@@ -539,3 +539,107 @@ async fn a_channel_the_cache_knows_is_not_looked_up_again() {
     assert_eq!(api.channel_guild(Id::new(100)).await, Ok(Some(Id::new(10))));
     assert!(discord.requests().is_empty(), "answered from the cache");
 }
+
+mod scoped_client {
+    use closure_core::capability::Capability;
+    use closure_core::client::ApiClient;
+    use closure_core::module::ModuleId;
+
+    use super::*;
+
+    const CHANNEL: &str = r#"{"id":"100","type":0,"guild_id":"10"}"#;
+
+    fn delete_channel() -> Action {
+        Action::DeleteChannel {
+            channel_id: Id::new(100),
+            reason: reason("cleanup"),
+        }
+    }
+
+    fn client_of(discord: &FakeDiscord, guild: u64) -> ApiClient {
+        ApiClient::new(
+            Arc::new(discord.api()),
+            Capability::ALL.into_iter().collect(),
+            ModuleId::new("test").unwrap(),
+        )
+        .scoped_to(Id::new(guild))
+    }
+
+    /// The methods of the requests Discord received.
+    fn methods(discord: &FakeDiscord) -> Vec<String> {
+        discord.requests().into_iter().map(|r| r.method).collect()
+    }
+
+    #[tokio::test]
+    async fn a_channel_of_the_guild_is_acted_on_after_one_lookup() {
+        let discord = FakeDiscord::start(vec![(200, CHANNEL)]).await;
+        let client = client_of(&discord, 10);
+
+        client.execute(delete_channel()).await.unwrap();
+        client.execute(delete_channel()).await.unwrap();
+
+        assert_eq!(
+            methods(&discord),
+            ["GET", "DELETE", "DELETE"],
+            "the guild of a channel is asked for once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_channel_of_another_guild_is_never_acted_on() {
+        let discord = FakeDiscord::start(vec![(200, CHANNEL)]).await;
+
+        let result = client_of(&discord, 99).execute(delete_channel()).await;
+
+        assert!(
+            matches!(result, Err(DiscordError::Forbidden(_))),
+            "{result:?}"
+        );
+        assert_eq!(methods(&discord), ["GET"]);
+    }
+
+    #[tokio::test]
+    async fn when_the_lookup_fails_the_action_is_not_sent() {
+        let cases: [(&str, Vec<(u16, &'static str)>); 5] = [
+            ("forbidden", vec![(403, FORBIDDEN)]),
+            (
+                "transient then forbidden",
+                vec![(500, ""), (403, FORBIDDEN)],
+            ),
+            (
+                // Twilight resends a rate limited request itself and would never stop if the
+                // answer stayed 429, so the limit lifts here and the lookup is then refused.
+                "rate limited, then forbidden",
+                vec![
+                    (
+                        429,
+                        r#"{"message":"slow down","retry_after":0.001,"global":false}"#,
+                    ),
+                    (403, FORBIDDEN),
+                ],
+            ),
+            ("unreadable answer", vec![(200, "not json")]),
+            (
+                "a guild channel without a guild",
+                vec![(200, r#"{"id":"100","type":0}"#)],
+            ),
+        ];
+        for (name, responses) in cases {
+            let discord = FakeDiscord::start(responses).await;
+
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                client_of(&discord, 10).execute(delete_channel()),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: hung"));
+
+            assert!(result.is_err(), "{name}: {result:?}");
+            assert!(
+                methods(&discord).iter().all(|m| m == "GET"),
+                "{name}: {:?}",
+                methods(&discord)
+            );
+        }
+    }
+}

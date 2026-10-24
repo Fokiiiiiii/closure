@@ -19,6 +19,7 @@ use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
 use closure_core::event::{CommandInvocation, Event, GuildId};
+use closure_core::interaction::InteractionGuilds;
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
@@ -173,6 +174,8 @@ struct Shared {
     translator: Arc<dyn Translator>,
     config: DispatcherConfig,
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
+    /// The guild of every live interaction, so a module cannot answer another guild's.
+    interactions: Arc<InteractionGuilds>,
     pending_total: AtomicUsize,
     closing: AtomicBool,
     cancel: CancellationToken,
@@ -255,6 +258,7 @@ impl Dispatcher {
             translator,
             config,
             guilds: DashMap::new(),
+            interactions: Arc::new(InteractionGuilds::default()),
             pending_total: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
             cancel: CancellationToken::new(),
@@ -276,6 +280,10 @@ impl Dispatcher {
         metrics::counter!("closure_events_total", "kind" => kind).increment(1);
 
         let guild = event.guild_id();
+        // Before any module can see the token: it decides whose interaction it may answer.
+        if let Event::Command(invocation) = &event {
+            self.shared.interactions.register(&invocation.token, guild);
+        }
         let limits = self.shared.settings.limits(guild);
         let Some(lanes) = self.lanes_for(guild, limits.concurrency) else {
             metrics::counter!("closure_events_dropped_total", "reason" => "shutdown").increment(1);
@@ -595,6 +603,7 @@ fn context_for(
         settings.granted.clone(),
         id.clone(),
     )
+    .with_interactions(Arc::clone(&shared.interactions))
     .scoped_to(guild);
     EventContext::new(
         id.clone(),

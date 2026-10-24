@@ -386,11 +386,8 @@ async fn in_guild_a_client_bound_to_another_guild_cannot_touch_this_guilds_chann
     };
 
     let outcome = async {
-        assert_eq!(
-            live.api.channel_guild(channel.id).await?,
-            Some(live.guild),
-            "Discord says which guild the channel is in"
-        );
+        // Nothing is asserted in here: a failed assert would skip the clean-up below.
+        let found = live.api.channel_guild(channel.id).await?;
 
         let api: Arc<dyn DiscordApi> =
             Arc::new(TwilightApi::new(Arc::clone(&live.http), live.application));
@@ -404,15 +401,11 @@ async fn in_guild_a_client_bound_to_another_guild_cannot_touch_this_guilds_chann
         let elsewhere =
             ApiClient::new(Arc::clone(&api), granted(), module.clone()).scoped_to(Id::new(1));
         let refused = elsewhere.send_message(channel.id, "must not be sent").await;
-        assert!(
-            matches!(refused, Err(DiscordError::Forbidden(_))),
-            "{refused:?}"
-        );
 
         let here = ApiClient::new(api, granted(), module).scoped_to(live.guild);
         here.send_message(channel.id, "sent by a client bound to this guild")
             .await?;
-        Ok::<(), DiscordError>(())
+        Ok::<_, DiscordError>((found, refused))
     }
     .await;
 
@@ -423,5 +416,15 @@ async fn in_guild_a_client_bound_to_another_guild_cannot_touch_this_guilds_chann
         })
         .await
         .unwrap();
-    outcome.unwrap();
+
+    let (found, refused) = outcome.unwrap();
+    assert_eq!(
+        found,
+        Some(live.guild),
+        "Discord says which guild the channel is in"
+    );
+    assert!(
+        matches!(refused, Err(DiscordError::Forbidden(_))),
+        "{refused:?}"
+    );
 }

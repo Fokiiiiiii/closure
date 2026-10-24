@@ -10,9 +10,10 @@ mod roles;
 #[cfg(test)]
 mod wire_tests;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::IntoFuture;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -65,7 +66,13 @@ pub struct TwilightApi {
     cache: Option<Arc<dyn CacheView>>,
     retry: RetryPolicy,
     clock: Clock,
+    /// Guilds of channels learned from Discord. A channel never changes guild, so an entry
+    /// cannot go stale; the map is emptied when it reaches [`KNOWN_CHANNELS`].
+    known_channels: Mutex<HashMap<ChannelId, GuildId>>,
 }
+
+/// How many channel-to-guild answers from Discord are remembered.
+const KNOWN_CHANNELS: usize = 10_000;
 
 impl fmt::Debug for TwilightApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -85,6 +92,7 @@ impl TwilightApi {
             cache: None,
             retry: RetryPolicy::default(),
             clock: Arc::new(system_clock),
+            known_channels: Mutex::new(HashMap::new()),
         }
     }
 
@@ -199,24 +207,53 @@ impl DiscordApi for TwilightApi {
         result
     }
 
-    /// Answered from the cache when it knows the channel; otherwise Discord is asked, with the
-    /// same retries as any other read. A channel does not move between guilds, so a cached
-    /// answer cannot go stale.
+    /// Answered from the cache, then from earlier answers of Discord; otherwise Discord is asked
+    /// (a `GetChannel`, counted and timed like any other action). A channel does not move
+    /// between guilds, so a remembered answer cannot go stale. Concurrent first lookups of the
+    /// same channel are not merged.
     async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
+        let lookup = |source: &'static str| {
+            metrics::counter!("closure_channel_guild_lookups_total", "source" => source)
+                .increment(1);
+        };
         if let Some(guild) = self
             .cache
             .as_ref()
             .and_then(|cache| cache.channel_guild(channel))
         {
+            lookup("cache");
             return Ok(Some(guild));
         }
+        if let Some(guild) = self
+            .known_channels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&channel)
+            .copied()
+        {
+            lookup("memory");
+            return Ok(Some(guild));
+        }
+        lookup("discord");
         match self
-            .execute_checked(&Action::GetChannel {
+            .execute(Action::GetChannel {
                 channel_id: channel,
             })
             .await?
         {
-            Outcome::Channel(found) => Ok(found.guild_id),
+            Outcome::Channel(found) => {
+                if let Some(guild) = found.guild_id {
+                    let mut known = self
+                        .known_channels
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if known.len() >= KNOWN_CHANNELS {
+                        known.clear();
+                    }
+                    known.insert(channel, guild);
+                }
+                Ok(found.guild_id)
+            }
             _ => Err(DiscordError::Fatal(
                 "unexpected outcome for `get_channel`".into(),
             )),

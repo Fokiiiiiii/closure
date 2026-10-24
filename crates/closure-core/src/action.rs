@@ -565,7 +565,8 @@ impl Action {
 
     /// The guild the action names, if it names one. Actions that identify only a channel, a
     /// message or an interaction return `None`: their guild cannot be known without a lookup
-    /// (for channels and messages, see [`channel_id`](Self::channel_id)).
+    /// (for channels and messages, see [`channels`](Self::channels); for interaction
+    /// responses, [`interaction_token`](Self::interaction_token)).
     #[must_use]
     pub fn guild_id(&self) -> Option<GuildId> {
         match self {
@@ -604,11 +605,14 @@ impl Action {
         }
     }
 
-    /// The channel the action targets, for the actions that identify their target by a channel
-    /// (or by a message in one) rather than by a guild. Which guild that channel belongs to has
-    /// to be looked up; see [`DiscordApi::channel_guild`](crate::client::DiscordApi::channel_guild).
+    /// Every channel the action targets or refers to: the channel of a message action, the
+    /// channel being edited, the parent category of a new channel, the alert channel and the
+    /// exempt channels of an auto-moderation rule. Which guild each belongs to has to be looked
+    /// up; see [`DiscordApi::channel_guild`](crate::client::DiscordApi::channel_guild).
+    ///
+    /// The match has no wildcard arm, so a new action cannot be added without deciding this.
     #[must_use]
-    pub fn channel_id(&self) -> Option<ChannelId> {
+    pub fn channels(&self) -> Vec<ChannelId> {
         match self {
             Self::SendMessage { channel_id, .. }
             | Self::EditMessage { channel_id, .. }
@@ -619,8 +623,19 @@ impl Action {
             | Self::EditChannel { channel_id, .. }
             | Self::DeleteChannel { channel_id, .. }
             | Self::SetPermissionOverwrite { channel_id, .. }
-            | Self::DeletePermissionOverwrite { channel_id, .. } => Some(*channel_id),
-            // These name a guild, or are bound to the interaction they answer.
+            | Self::DeletePermissionOverwrite { channel_id, .. } => vec![*channel_id],
+            Self::CreateChannel { spec, .. } => spec.parent_id.into_iter().collect(),
+            Self::CreateAutoModRule { spec, .. } => spec
+                .actions
+                .iter()
+                .filter_map(|action| match action {
+                    AutoModAction::SendAlert { channel_id } => Some(*channel_id),
+                    AutoModAction::BlockMessage { .. } | AutoModAction::Timeout { .. } => None,
+                })
+                .chain(spec.exempt_channels.iter().copied())
+                .collect(),
+            // These name a guild and nothing else that is a channel, or are bound to an
+            // interaction (see `interaction_token`).
             Self::GetGuild { .. }
             | Self::GetMember { .. }
             | Self::Kick { .. }
@@ -631,7 +646,49 @@ impl Action {
             | Self::AddRole { .. }
             | Self::RemoveRole { .. }
             | Self::ListBans { .. }
+            | Self::ListRoles { .. }
+            | Self::CreateRole { .. }
+            | Self::EditRole { .. }
+            | Self::DeleteRole { .. }
+            | Self::ListAutoModRules { .. }
+            | Self::DeleteAutoModRule { .. }
+            | Self::GetAuditLog { .. }
+            | Self::Respond { .. }
+            | Self::Followup { .. }
+            | Self::EditResponse { .. } => Vec::new(),
+        }
+    }
+
+    /// The interaction token of the actions that answer an interaction. Which guild a token
+    /// belongs to is known only to the host, which registered it when the interaction arrived;
+    /// see [`InteractionGuilds`](crate::interaction::InteractionGuilds).
+    #[must_use]
+    pub fn interaction_token(&self) -> Option<&InteractionToken> {
+        match self {
+            Self::Respond { token, .. }
+            | Self::Followup { token, .. }
+            | Self::EditResponse { token, .. } => Some(token),
+            Self::SendMessage { .. }
+            | Self::EditMessage { .. }
+            | Self::DeleteMessage { .. }
+            | Self::BulkDeleteMessages { .. }
+            | Self::AddReaction { .. }
+            | Self::GetGuild { .. }
+            | Self::GetMember { .. }
+            | Self::Kick { .. }
+            | Self::Ban { .. }
+            | Self::Unban { .. }
+            | Self::Timeout { .. }
+            | Self::SetNickname { .. }
+            | Self::AddRole { .. }
+            | Self::RemoveRole { .. }
+            | Self::ListBans { .. }
+            | Self::GetChannel { .. }
             | Self::CreateChannel { .. }
+            | Self::EditChannel { .. }
+            | Self::DeleteChannel { .. }
+            | Self::SetPermissionOverwrite { .. }
+            | Self::DeletePermissionOverwrite { .. }
             | Self::ListRoles { .. }
             | Self::CreateRole { .. }
             | Self::EditRole { .. }
@@ -639,10 +696,7 @@ impl Action {
             | Self::ListAutoModRules { .. }
             | Self::CreateAutoModRule { .. }
             | Self::DeleteAutoModRule { .. }
-            | Self::GetAuditLog { .. }
-            | Self::Respond { .. }
-            | Self::Followup { .. }
-            | Self::EditResponse { .. } => None,
+            | Self::GetAuditLog { .. } => None,
         }
     }
 

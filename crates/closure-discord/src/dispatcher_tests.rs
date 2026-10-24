@@ -40,6 +40,8 @@ enum Behavior {
     /// Sleeps `id % 3` milliseconds, so naive parallelism would reorder events.
     Staggered,
     TryBan,
+    /// Answers the command it received, then tries a token it was never given.
+    RespondThenForge,
     /// Logs the guild policy the module was given.
     ReadPolicy,
 }
@@ -176,6 +178,33 @@ impl Module for Probe {
                     "policy:{:?}:{}",
                     policy.log_channel.map(Id::get),
                     policy.is_moderator(&[Id::new(5)])
+                ));
+                Ok(())
+            }
+            Behavior::RespondThenForge => {
+                let Event::Command(invocation) = event else {
+                    return Ok(());
+                };
+                let reply = || InteractionReply {
+                    content: Some("pong".into()),
+                    embeds: vec![],
+                    ephemeral: true,
+                };
+                let own = ctx.api.respond(invocation, reply()).await;
+                let forged = ctx
+                    .api
+                    .followup(
+                        &CommandInvocation {
+                            token: InteractionToken::new("a-token-of-another-guild"),
+                            ..invocation.clone()
+                        },
+                        reply(),
+                    )
+                    .await;
+                self.log.lock().unwrap().push(format!(
+                    "own:{} forged:{}",
+                    own.is_ok(),
+                    matches!(forged, Err(DiscordError::Forbidden(_)))
                 ));
                 Ok(())
             }
@@ -1043,4 +1072,28 @@ async fn a_send_that_already_took_its_capacity_is_still_collected_after_close() 
     }
 
     assert_eq!(collected, [7]);
+}
+
+#[tokio::test]
+async fn a_module_can_answer_the_interaction_it_was_given_but_not_one_it_was_not() {
+    let mut module = Probe::with_command("tools", "ping");
+    Arc::get_mut(&mut module).unwrap().manifest.capabilities =
+        [Capability::RespondToInteractions].into_iter().collect();
+    module.set(Behavior::RespondThenForge);
+    let h = harness(
+        &[(&module, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(command("ping", None));
+    h.dispatcher.flush().await;
+
+    assert_eq!(module.log(), ["load", "command", "own:true forged:true"]);
+    assert_eq!(
+        h.api.actions().len(),
+        1,
+        "only the module's own answer was sent"
+    );
 }

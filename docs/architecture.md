@@ -66,12 +66,17 @@ A module never receives an HTTP client, a token or a database handle. Its `ApiCl
 the guild of the event: an action that targets another guild is refused, whatever capabilities
 the module holds. An action that names a guild is compared directly. One that identifies only a
 channel or a message (send, edit, delete, react, channel edits and permission overwrites) is
-checked by looking up the channel's guild: from the cache when it knows the channel, otherwise
-from Discord. A channel in another guild, in no guild (a direct message), or whose guild cannot
-be determined is refused, so a failing lookup never lets an action through. Only the actions that
-answer an interaction (`Respond`, `Followup`, `EditResponse`) are not checked this way: they carry
-the token of the interaction the module was handed, and a module is only handed tokens of events
-of its own guild.
+checked by looking up the channel's guild: from the cache when it knows the channel, then from
+earlier answers of Discord, otherwise from Discord itself. The channels an action merely refers
+to (the parent category of a new channel, the alert and exempt channels of an auto-moderation
+rule) are checked the same way. A channel in another guild, in no guild (a direct message), or
+whose guild cannot be determined is refused, so a failing lookup never lets an action through.
+
+Answers to an interaction (`Respond`, `Followup`, `EditResponse`) are checked against a record the
+host keeps: when a command arrives, before any module sees it, its token is recorded together
+with the guild it came from. A module is one object shared by all guilds and could keep a client
+from one guild and use it with a token it received in another; the client therefore answers only
+tokens recorded for its own guild, and refuses unknown ones. Records expire with the token.
 
 ## Configuration
 

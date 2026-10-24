@@ -11,6 +11,7 @@ pub mod capability;
 pub mod client;
 pub mod error;
 pub mod event;
+pub mod interaction;
 pub mod locale;
 pub mod module;
 pub mod registry;
