@@ -19,7 +19,7 @@ use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
 use closure_core::event::{CommandInvocation, Event, GuildId};
-use closure_core::interaction::InteractionGuilds;
+use closure_core::interaction::{InteractionGuilds, InteractionLimits};
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
@@ -53,6 +53,8 @@ pub struct DispatcherConfig {
     pub idle_after: Duration,
     /// How often idle guilds are looked for.
     pub reap_every: Duration,
+    /// How many interactions may be waiting for an answer; see [`InteractionLimits`].
+    pub interaction_limits: InteractionLimits,
 }
 
 impl Default for DispatcherConfig {
@@ -61,6 +63,7 @@ impl Default for DispatcherConfig {
             breaker: BreakerConfig::default(),
             idle_after: Duration::from_secs(60),
             reap_every: Duration::from_secs(30),
+            interaction_limits: InteractionLimits::default(),
         }
     }
 }
@@ -258,7 +261,7 @@ impl Dispatcher {
             translator,
             config,
             guilds: DashMap::new(),
-            interactions: Arc::new(InteractionGuilds::default()),
+            interactions: Arc::new(InteractionGuilds::with_limits(config.interaction_limits)),
             pending_total: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
             cancel: CancellationToken::new(),
@@ -300,8 +303,15 @@ impl Dispatcher {
 
         // Once the event is accepted and before any module can see it: the record decides whose
         // interaction a module may answer. Events dropped above never use up a record.
-        if let Event::Command(invocation) = &event {
-            self.shared.interactions.register(&invocation.token, guild);
+        if let Event::Command(invocation) = &event
+            && !self.shared.interactions.register(&invocation.token, guild)
+        {
+            // No module could answer it, so none is given it. Undo what was reserved above.
+            budget.fetch_sub(1, Ordering::AcqRel);
+            lanes.state.pending.fetch_sub(1, Ordering::AcqRel);
+            metrics::counter!("closure_events_dropped_total", "reason" => "interaction_records_full")
+                .increment(1);
+            return;
         }
 
         let sender = lanes.sender_for(&event).clone();

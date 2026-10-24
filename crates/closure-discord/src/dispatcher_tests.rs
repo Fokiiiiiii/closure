@@ -115,7 +115,7 @@ impl Probe {
                 let plain = held.respond(invocation, reply()).await;
                 // In this record the token belongs to the guild the held client is bound to.
                 let own_record = Arc::new(InteractionGuilds::default());
-                own_record.register(&invocation.token, Id::new(GUILD));
+                assert!(own_record.register(&invocation.token, Id::new(GUILD)));
                 let forged = held
                     .clone()
                     .with_interactions(own_record)
@@ -1184,4 +1184,46 @@ async fn a_client_kept_from_one_guild_cannot_answer_an_interaction_of_another() 
         ["load", "msg:1", "command", "plain:true forged:true"]
     );
     assert_eq!(h.api.actions(), [], "nothing was sent to Discord");
+}
+
+/// A command of `guild` that carries its own interaction token.
+fn command_with(guild: u64, token: &str) -> Event {
+    let Event::Command(mut invocation) = command("ping", None) else {
+        unreachable!()
+    };
+    invocation.guild_id = Id::new(guild);
+    invocation.token = InteractionToken::new(token);
+    Event::Command(invocation)
+}
+
+#[tokio::test]
+async fn a_command_whose_interaction_cannot_be_recorded_is_not_handed_to_a_module() {
+    let module = Probe::with_command("tools", "ping");
+    let config = DispatcherConfig {
+        interaction_limits: InteractionLimits {
+            total: 100,
+            per_guild: 1,
+        },
+        ..DispatcherConfig::default()
+    };
+    // A queue budget of one command: a reservation that is not given back shows up as a drop.
+    let h = harness(&[(&module, true)], limits(1, 4), config).await;
+
+    h.dispatcher.dispatch(command_with(1, "first"));
+    h.dispatcher.flush().await;
+    h.dispatcher.dispatch(command_with(1, "second")); // over the limit of guild 1
+    h.dispatcher.flush().await;
+    // The very same interaction again is accepted (it is recorded), but only if the refused
+    // command above gave its place in the queue back.
+    h.dispatcher.dispatch(command_with(1, "first"));
+    h.dispatcher.flush().await;
+    h.dispatcher.dispatch(command_with(2, "other-guild"));
+    h.dispatcher.flush().await;
+
+    let handled = module.log().iter().filter(|l| *l == "command").count();
+    assert_eq!(
+        handled, 3,
+        "first, first again and the other guild; not second"
+    );
+    assert_eq!(h.dispatcher.pending(), 0);
 }
