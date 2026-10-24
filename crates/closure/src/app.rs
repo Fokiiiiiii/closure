@@ -13,7 +13,8 @@ use closure_db::{Db, DbOptions};
 use closure_discord::hierarchy::InMemoryCacheView;
 use closure_discord::{
     CommandScope, Dispatcher, DispatcherConfig, GatewayConfig, GatewayHandle, GatewayHealth,
-    TwilightApi, build_commands, gateway_intents, new_cache, register_commands, start_gateway,
+    TwilightApi, build_commands, gateway_intents, joined_guilds, new_cache, register_commands,
+    start_gateway,
 };
 use closure_i18n::TranslatorBuilder;
 use closure_mod_diagnostics::DiagnosticsModule;
@@ -26,7 +27,7 @@ use twilight_model::id::Id;
 use twilight_model::id::marker::ApplicationMarker;
 
 use crate::args::Args;
-use crate::hooks::AppHooks;
+use crate::hooks::{AppHooks, reconcile_guilds};
 use crate::sync;
 
 const GATEWAY_STOP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -211,6 +212,14 @@ async fn serve(
         .clone();
 
     publish_commands(args, &http, application_id, core).await?;
+
+    match joined_guilds(&http).await {
+        Ok(guilds) => match reconcile_guilds(db, &guilds).await {
+            Ok(left) => tracing::info!(guilds = guilds.len(), left, "reconciled the guild list"),
+            Err(error) => tracing::warn!(%error, "could not reconcile the guild list"),
+        },
+        Err(error) => tracing::warn!(%error, "could not read the guild list from Discord"),
+    }
 
     let hooks = Arc::new(AppHooks::new(db.clone(), Arc::clone(&core.store)));
     let gateway = started.gateway.insert(

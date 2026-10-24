@@ -2,6 +2,7 @@
 
 mod automod;
 mod channels;
+mod guilds;
 mod interactions;
 mod members;
 mod messages;
@@ -23,6 +24,8 @@ use serde::de::DeserializeOwned;
 use twilight_http::Client;
 use twilight_http::response::Response;
 use twilight_http::response::marker::ListBody;
+
+pub use guilds::joined_guilds;
 
 use crate::error::map_http_error;
 use crate::hierarchy::{CacheView, Preflight, preflight};

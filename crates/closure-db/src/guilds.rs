@@ -29,6 +29,22 @@ impl Db {
         Ok(active)
     }
 
+    /// Marks every active guild not in `present` as left, for guilds the bot was removed from
+    /// while it was not running. Returns how many were marked.
+    pub async fn mark_missing_guilds_left(&self, present: &[GuildId]) -> Result<u64, DbError> {
+        let present = present
+            .iter()
+            .map(|guild| to_db(*guild))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = sqlx::query(
+            "UPDATE guilds SET left_at = now() WHERE left_at IS NULL AND id <> ALL($1)",
+        )
+        .bind(present)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Records that the bot left `guild`. Its data is kept in case it returns.
     pub async fn mark_guild_left(&self, guild: GuildId) -> Result<(), DbError> {
         sqlx::query("UPDATE guilds SET left_at = now() WHERE id = $1 AND left_at IS NULL")
@@ -81,6 +97,26 @@ mod tests {
 
         db.mark_guild_left(guild).await.unwrap();
         assert!(!db.is_guild_active(guild).await.unwrap(), "left");
+    }
+
+    #[sqlx::test]
+    async fn guilds_missing_from_discord_s_list_are_marked_left(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        for id in [1, 2, 3] {
+            db.register_guild(Id::new(id)).await.unwrap();
+        }
+        db.mark_guild_left(Id::new(3)).await.unwrap();
+
+        let marked = db
+            .mark_missing_guilds_left(&[Id::new(1), Id::new(9)])
+            .await
+            .unwrap();
+
+        assert_eq!(marked, 1, "only guild 2 was active and absent");
+        assert!(db.is_guild_active(Id::new(1)).await.unwrap());
+        assert!(!db.is_guild_active(Id::new(2)).await.unwrap());
+        assert_eq!(db.mark_missing_guilds_left(&[]).await.unwrap(), 1);
+        assert!(!db.is_guild_active(Id::new(1)).await.unwrap());
     }
 
     #[sqlx::test]

@@ -431,3 +431,36 @@ async fn the_server_owner_is_rejected_without_sending_anything() {
     );
     assert_eq!(discord.requests().len(), 0);
 }
+
+#[tokio::test]
+async fn the_guild_list_is_read_page_by_page_until_a_short_page() {
+    let page = |range: std::ops::Range<u64>| -> &'static str {
+        let items: Vec<String> = range
+            .map(|id| {
+                format!(
+                    r#"{{"id":"{id}","name":"g","icon":null,"owner":false,"permissions":"0","features":[]}}"#
+                )
+            })
+            .collect();
+        Box::leak(format!("[{}]", items.join(",")).into_boxed_str())
+    };
+    let discord = FakeDiscord::start(vec![(200, page(1..201)), (200, page(201..204))]).await;
+
+    let http = discord.api().http().clone();
+    let guilds = super::joined_guilds(&http).await.unwrap();
+
+    assert_eq!(guilds.len(), 203);
+    assert_eq!(guilds.last().unwrap().get(), 203);
+    let requests = discord.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0].path.contains("limit=200"),
+        "{}",
+        requests[0].path
+    );
+    assert!(
+        requests[1].path.contains("after=200"),
+        "{}",
+        requests[1].path
+    );
+}

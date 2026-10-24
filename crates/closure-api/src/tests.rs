@@ -526,7 +526,7 @@ async fn metrics_and_the_schema_are_served_to_the_admin(pool: PgPool) {
         .json();
     assert_eq!(
         schema["properties"]["modules"]["properties"]["warn"]["properties"]["config"]["properties"]
-            ["limit"]["maximum"],
+            ["limit"]["anyOf"][0]["maximum"],
         10
     );
 }

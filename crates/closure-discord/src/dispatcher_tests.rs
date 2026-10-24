@@ -88,6 +88,10 @@ impl Probe {
         self.log.lock().unwrap().clone()
     }
 
+    fn running(&self) -> usize {
+        self.running.load(Ordering::SeqCst)
+    }
+
     fn max_running(&self) -> usize {
         self.max_running.load(Ordering::SeqCst)
     }
@@ -112,12 +116,20 @@ impl Module for Probe {
     }
 
     async fn on_event(&self, ctx: &EventContext, event: &Event) -> Result<(), ModuleError> {
+        /// Counts a handler as running until it finishes *or is dropped* (aborted).
+        struct Running<'a>(&'a AtomicUsize);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
         let running = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+        let _running = Running(&self.running);
         self.max_running.fetch_max(running, Ordering::SeqCst);
         self.log.lock().unwrap().push(label(event));
 
         let behavior = self.behavior.lock().unwrap().clone();
-        let result = match behavior {
+        match behavior {
             Behavior::Ok => Ok(()),
             Behavior::Fail => Err(ModuleError::other("boom")),
             Behavior::Forbidden => Err(DiscordError::Forbidden("nope".into()).into()),
@@ -159,9 +171,7 @@ impl Module for Probe {
                 });
                 Ok(())
             }
-        };
-        self.running.fetch_sub(1, Ordering::SeqCst);
-        result
+        }
     }
 
     async fn on_unload(&self) {
@@ -871,6 +881,36 @@ async fn shutdown_finishes_queued_events_and_unloads_modules_in_reverse_order() 
             "events after shutdown are refused"
         );
     }
+}
+
+#[tokio::test]
+async fn after_the_grace_period_nothing_keeps_running_while_modules_are_unloaded() {
+    let slow = messages_only("slow");
+    slow.set(Behavior::Hang);
+    let mut long = limits(64, 1);
+    long.handler_timeout = Duration::from_secs(3600);
+    let h = harness(&[(&slow, true)], long, DispatcherConfig::default()).await;
+
+    // The first event hangs; the second waits behind it in the same lane.
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.dispatch(message(3, 2));
+    while slow.running() == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let drained = h.dispatcher.shutdown(Duration::from_millis(100)).await;
+
+    assert!(!drained, "the hung call could not drain");
+    assert_eq!(
+        slow.running(),
+        0,
+        "the running call must be gone before on_unload"
+    );
+    assert_eq!(
+        slow.log(),
+        ["load", "msg:1", "unload"],
+        "the queued event never started"
+    );
 }
 
 #[tokio::test]

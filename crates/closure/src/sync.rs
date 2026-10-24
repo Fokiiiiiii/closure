@@ -85,27 +85,52 @@ async fn follow(
         };
         if let Err(error) = outcome {
             tracing::warn!(%error, "configuration sync failed; reconnecting");
-            match reconnect(&db, &shutdown).await {
+            match resync(&db, &store, &shutdown).await {
                 Some(fresh) => listener = fresh,
                 None => return,
-            }
-            // Edits made while disconnected produced no notification.
-            if let Err(error) = load_all(&db, &store).await {
-                tracing::warn!(%error, "could not reload configurations after reconnecting");
             }
         }
     }
 }
 
-async fn reconnect(db: &Db, shutdown: &CancellationToken) -> Option<closure_db::ConfigListener> {
+/// Resubscribes and reloads everything, retrying until both succeed: edits made while
+/// disconnected produced no notification, so a reload that failed once must not be dropped or
+/// the store would stay stale until the next unrelated edit. Subscribing comes first so no edit
+/// can fall between the two.
+async fn resync(
+    db: &Db,
+    store: &SettingsStore,
+    shutdown: &CancellationToken,
+) -> Option<closure_db::ConfigListener> {
+    retry_until_ok(RECONNECT_DELAY, shutdown, || async {
+        let listener = db.listen_config().await?;
+        load_all(db, store).await?;
+        Ok::<_, DbError>(listener)
+    })
+    .await
+}
+
+/// Runs `attempt` every `delay` until it succeeds. `None` means shutdown came first.
+async fn retry_until_ok<T, E, F, Fut>(
+    delay: Duration,
+    shutdown: &CancellationToken,
+    mut attempt: F,
+) -> Option<T>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return None,
-            () = tokio::time::sleep(RECONNECT_DELAY) => {}
+            () = tokio::time::sleep(delay) => {}
         }
-        match db.listen_config().await {
-            Ok(listener) => return Some(listener),
-            Err(error) => tracing::warn!(%error, "could not resubscribe to configuration changes"),
+        match attempt().await {
+            Ok(value) => return Some(value),
+            Err(error) => {
+                tracing::warn!(%error, "could not resynchronise configurations; retrying");
+            }
         }
     }
 }
@@ -139,6 +164,30 @@ mod tests {
 
     fn language_of(store: &SettingsStore, guild: u64) -> closure_core::locale::Locale {
         store.locale(Id::new(guild))
+    }
+
+    #[tokio::test]
+    async fn a_failing_resync_is_retried_until_it_succeeds() {
+        let mut calls = 0;
+        let value = retry_until_ok(Duration::from_millis(5), &CancellationToken::new(), || {
+            calls += 1;
+            let ok = calls == 3;
+            async move { if ok { Ok(7) } else { Err("down") } }
+        })
+        .await;
+        assert_eq!(value, Some(7));
+        assert_eq!(calls, 3);
+    }
+
+    #[tokio::test]
+    async fn retrying_stops_on_shutdown() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let value = retry_until_ok(Duration::from_millis(5), &shutdown, || async {
+            Err::<(), _>("down")
+        })
+        .await;
+        assert_eq!(value, None);
     }
 
     #[sqlx::test(migrations = "../closure-db/migrations")]

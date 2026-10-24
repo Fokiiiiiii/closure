@@ -1,18 +1,20 @@
 //! Running the gateway shards.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use closure_core::event::{Event as ModuleEvent, GuildId};
 use closure_core::locale::Locale;
 use closure_core::registry::ModuleRegistry;
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use twilight_cache_inmemory::{InMemoryCache, ResourceType};
+use twilight_gateway::error::ReceiveMessageErrorType;
 use twilight_gateway::{
     CloseFrame, Config, Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _,
     create_recommended,
@@ -160,12 +162,12 @@ impl GatewayHandle {
 struct ShardContext {
     cache: Arc<InMemoryCache>,
     dispatcher: Dispatcher,
-    hooks: mpsc::Sender<HookJob>,
+    hooks: Arc<HookQueue>,
     health: Arc<GatewayHealth>,
     shutdown: CancellationToken,
 }
 
-/// Work for the hook task. Kept as plain data so it can be queued.
+/// A guild arrival or departure waiting for its hook to run.
 #[derive(Debug)]
 enum HookJob {
     Available {
@@ -178,24 +180,84 @@ enum HookJob {
     },
 }
 
-/// Enough room for the burst of guild arrivals when a large bot starts, with a wide margin.
-const HOOK_QUEUE: usize = 8192;
-
-async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, mut jobs: mpsc::Receiver<HookJob>) {
-    while let Some(job) = jobs.recv().await {
-        let hook = async {
-            match &job {
-                HookJob::Available {
-                    guild,
-                    name,
-                    preferred_locale,
-                } => hooks.guild_available(*guild, name, *preferred_locale).await,
-                HookJob::Removed { guild } => hooks.guild_removed(*guild).await,
-            }
-        };
-        if tokio::time::timeout(HOOK_TIMEOUT, hook).await.is_err() {
-            tracing::warn!(?job, "guild hook timed out");
+impl HookJob {
+    fn guild(&self) -> GuildId {
+        match self {
+            Self::Available { guild, .. } | Self::Removed { guild } => *guild,
         }
+    }
+}
+
+/// The newest pending hook of each guild.
+///
+/// Hooks bring persistent state in line with the guilds the bot is in, so only the latest word
+/// about a guild matters: a departure replaces a queued arrival and the other way round. That
+/// keeps the queue bounded by the number of guilds, and pushing never waits, so a slow database
+/// can never stop a shard from being read (which would get the connection cut).
+#[derive(Default)]
+struct HookQueue {
+    pending: Mutex<HashMap<GuildId, HookJob>>,
+    wake: Notify,
+}
+
+impl HookQueue {
+    fn push(&self, job: HookJob) {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(job.guild(), job);
+        self.wake.notify_one();
+    }
+
+    fn take(&self) -> Vec<HookJob> {
+        std::mem::take(&mut *self.pending.lock().unwrap_or_else(PoisonError::into_inner))
+            .into_values()
+            .collect()
+    }
+}
+
+/// Runs queued hooks one at a time. After `shutdown` it finishes what is queued and ends.
+async fn run_hook_worker(
+    hooks: Arc<dyn GuildHooks>,
+    queue: Arc<HookQueue>,
+    shutdown: CancellationToken,
+) {
+    loop {
+        let jobs = queue.take();
+        if jobs.is_empty() {
+            if shutdown.is_cancelled() {
+                return;
+            }
+            tokio::select! {
+                () = queue.wake.notified() => {}
+                () = shutdown.cancelled() => {}
+            }
+            continue;
+        }
+        for job in jobs {
+            let hook = async {
+                match &job {
+                    HookJob::Available {
+                        guild,
+                        name,
+                        preferred_locale,
+                    } => hooks.guild_available(*guild, name, *preferred_locale).await,
+                    HookJob::Removed { guild } => hooks.guild_removed(*guild).await,
+                }
+            };
+            if tokio::time::timeout(HOOK_TIMEOUT, hook).await.is_err() {
+                tracing::warn!(?job, "guild hook timed out");
+            }
+        }
+    }
+}
+
+/// A label for an error that is safe to log.
+fn error_class(kind: &ReceiveMessageErrorType) -> &'static str {
+    match kind {
+        ReceiveMessageErrorType::Deserializing { .. } => "deserializing",
+        ReceiveMessageErrorType::Reconnect => "reconnect",
+        _ => "other",
     }
 }
 
@@ -227,17 +289,16 @@ pub async fn start_gateway(
     tracing::info!(shards = shards.len(), "starting gateway");
 
     let health = Arc::new(GatewayHealth::new(shards.len()));
-    let (hook_sender, hook_jobs) = mpsc::channel(HOOK_QUEUE);
+    let hook_queue = Arc::new(HookQueue::default());
     let context = Arc::new(ShardContext {
         cache,
         dispatcher,
-        hooks: hook_sender,
+        hooks: Arc::clone(&hook_queue),
         health: Arc::clone(&health),
         shutdown,
     });
     let tracker = TaskTracker::new();
-    // Ends when the last shard task drops its sender, after draining what is queued.
-    tracker.spawn(run_hook_worker(hooks, hook_jobs));
+    tracker.spawn(run_hook_worker(hooks, hook_queue, context.shutdown.clone()));
     for shard in shards {
         tracker.spawn(run_shard(shard, Arc::clone(&context)));
     }
@@ -266,12 +327,18 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
                 let finished = closing && matches!(event, Event::GatewayClose(_));
                 // `Shard` is not `Sync`, so only plain values cross the await points below.
                 let latency = shard.latency().recent().first().copied();
-                handle_event(&context, id, latency, event).await;
+                handle_event(&context, id, latency, &event);
                 if finished {
                     break;
                 }
             }
-            Err(error) => tracing::warn!(shard = %id, %error, "error receiving gateway event"),
+            // Never print the error itself: for a payload that fails to parse it contains the
+            // whole event, including interaction tokens and member data.
+            Err(error) => tracing::warn!(
+                shard = %id,
+                class = error_class(error.kind()),
+                "error receiving gateway event"
+            ),
         }
     }
     context.health.set(id, false);
@@ -285,14 +352,9 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
     }
 }
 
-async fn handle_event(
-    context: &ShardContext,
-    id: ShardId,
-    latency: Option<Duration>,
-    event: Event,
-) {
-    context.cache.update(&event);
-    if let Some(ready) = readiness_change(&event) {
+fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, event: &Event) {
+    context.cache.update(event);
+    if let Some(ready) = readiness_change(event) {
         context.health.set(id, ready);
     }
     if matches!(event, Event::GatewayHeartbeatAck)
@@ -302,7 +364,7 @@ async fn handle_event(
             .set(latency.as_secs_f64());
     }
 
-    let Some(converted) = convert::event(&event) else {
+    let Some(converted) = convert::event(event) else {
         return;
     };
     let hook = match &converted {
@@ -319,10 +381,8 @@ async fn handle_event(
         _ => None,
     };
     context.dispatcher.dispatch(converted);
-    if let Some(job) = hook
-        && context.hooks.send(job).await.is_err()
-    {
-        tracing::warn!("the guild hook task has stopped");
+    if let Some(job) = hook {
+        context.hooks.push(job);
     }
 }
 
@@ -368,6 +428,16 @@ mod tests {
     }
 
     #[test]
+    fn error_labels_never_contain_the_event() {
+        let kind = ReceiveMessageErrorType::Deserializing {
+            event: r#"{"token":"secret-interaction-token"}"#.into(),
+        };
+        let label = error_class(&kind);
+        assert_eq!(label, "deserializing");
+        assert!(!label.contains("secret"));
+    }
+
+    #[test]
     fn a_resumed_session_counts_as_ready_again() {
         assert_eq!(readiness_change(&Event::Resumed), Some(true));
         assert_eq!(readiness_change(&Event::GatewayClose(None)), Some(false));
@@ -375,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_hook_task_runs_jobs_in_order_and_stops_when_senders_are_gone() {
+    async fn the_newest_hook_of_a_guild_wins_and_pushing_never_waits() {
         use std::sync::Mutex;
 
         #[derive(Default)]
@@ -396,25 +466,31 @@ mod tests {
         }
 
         let recorder = Arc::new(Recorder::default());
-        let (sender, jobs) = mpsc::channel(8);
-        let worker = tokio::spawn(run_hook_worker(
-            Arc::clone(&recorder) as Arc<dyn GuildHooks>,
-            jobs,
-        ));
+        let queue = Arc::new(HookQueue::default());
+        let shutdown = CancellationToken::new();
         let guild: GuildId = twilight_model::id::Id::new(7);
-        sender
-            .send(HookJob::Available {
-                guild,
-                name: "a".into(),
-                preferred_locale: None,
-            })
-            .await
-            .unwrap();
-        sender.send(HookJob::Removed { guild }).await.unwrap();
-        drop(sender);
-        worker.await.unwrap();
 
-        assert_eq!(*recorder.0.lock().unwrap(), ["available:7:a", "removed:7"]);
+        // Far more pushes than any bounded channel would hold, with no worker running yet:
+        // every push returns at once and the queue keeps one entry per guild.
+        for round in 0..100_000 {
+            queue.push(HookJob::Available {
+                guild,
+                name: round.to_string(),
+                preferred_locale: None,
+            });
+        }
+        queue.push(HookJob::Removed { guild });
+        assert_eq!(queue.pending.lock().unwrap().len(), 1);
+
+        shutdown.cancel();
+        run_hook_worker(
+            Arc::clone(&recorder) as Arc<dyn GuildHooks>,
+            Arc::clone(&queue),
+            shutdown,
+        )
+        .await;
+
+        assert_eq!(*recorder.0.lock().unwrap(), ["removed:7"]);
     }
 
     #[test]

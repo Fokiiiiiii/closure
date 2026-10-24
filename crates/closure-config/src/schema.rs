@@ -23,6 +23,7 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
         if let Value::Object(map) = &mut config_schema {
             map.remove("$schema");
         }
+        allow_null_properties(&mut config_schema);
         let capabilities: Vec<&str> = manifest
             .capabilities
             .iter()
@@ -70,6 +71,24 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
     Ok(schema)
 }
 
+/// In a module's configuration `null` means "use the default", so the published schema must
+/// accept it wherever a property may be set. (Array items are replaced whole, so `null` has no
+/// special meaning there and they stay strict.)
+fn allow_null_properties(schema: &mut Value) {
+    let Value::Object(map) = schema else { return };
+    let mut nullable = |sub: &mut Value| {
+        allow_null_properties(sub);
+        let inner = sub.take();
+        *sub = json!({ "anyOf": [inner, { "type": "null" }] });
+    };
+    if let Some(Value::Object(properties)) = map.get_mut("properties") {
+        properties.values_mut().for_each(&mut nullable);
+    }
+    if let Some(additional @ Value::Object(_)) = map.get_mut("additionalProperties") {
+        nullable(additional);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -103,7 +122,7 @@ mod tests {
         );
         let warn = &schema["properties"]["modules"]["properties"]["warn"];
         assert_eq!(
-            warn["properties"]["config"]["properties"]["limit"]["type"],
+            warn["properties"]["config"]["properties"]["limit"]["anyOf"][0]["type"],
             "integer"
         );
         assert!(warn["properties"]["config"].get("$schema").is_none());
@@ -138,6 +157,16 @@ mod tests {
             .map(|e| e.to_string())
             .collect();
         assert!(errors.is_empty(), "{errors:?}\n{yaml}");
+    }
+
+    #[test]
+    fn null_is_accepted_wherever_it_means_use_the_default() {
+        let schema = document_schema(&registry()).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let config = |value: Value| json!({ "modules": { "warn": { "config": value } } });
+        assert!(validator.is_valid(&config(json!({ "limit": null }))));
+        assert!(validator.is_valid(&config(json!({ "limit": 3 }))));
+        assert!(!validator.is_valid(&config(json!({ "limit": "three" }))));
     }
 
     #[test]

@@ -22,6 +22,16 @@ impl AppHooks {
     }
 }
 
+/// Brings the recorded guilds in line with the list Discord reports at start-up: the gateway
+/// only announces changes while connected, so guilds joined or left during downtime would
+/// otherwise stay wrong. Run before the gateway starts so it cannot race with the hooks.
+pub async fn reconcile_guilds(db: &Db, present: &[GuildId]) -> Result<u64, closure_db::DbError> {
+    for guild in present {
+        db.register_guild(*guild).await?;
+    }
+    db.mark_missing_guilds_left(present).await
+}
+
 #[async_trait]
 impl GuildHooks for AppHooks {
     async fn guild_available(&self, guild: GuildId, name: &str, preferred_locale: Option<Locale>) {
@@ -114,6 +124,25 @@ mod tests {
             Locale::Ja,
             "the configuration came back"
         );
+    }
+
+    #[sqlx::test(migrations = "../closure-db/migrations")]
+    async fn start_up_reconciliation_adds_joined_and_drops_removed_guilds(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.register_guild(Id::new(1)).await.unwrap();
+        db.register_guild(Id::new(2)).await.unwrap();
+        db.mark_guild_left(Id::new(2)).await.unwrap();
+        db.register_guild(Id::new(3)).await.unwrap();
+
+        // While down: guild 1 stayed, guild 2 was rejoined, guild 3 was removed, guild 4 is new.
+        let marked = reconcile_guilds(&db, &[Id::new(1), Id::new(2), Id::new(4)])
+            .await
+            .unwrap();
+
+        assert_eq!(marked, 1);
+        for (guild, active) in [(1, true), (2, true), (3, false), (4, true)] {
+            assert_eq!(db.is_guild_active(Id::new(guild)).await.unwrap(), active);
+        }
     }
 
     #[sqlx::test(migrations = "../closure-db/migrations")]

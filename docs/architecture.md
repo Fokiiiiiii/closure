@@ -34,9 +34,13 @@ gateway shard ─► cache.update ─► convert ─► guild hooks ─► Dispa
    `Event` model. Direct messages and guild outages are dropped here; every later stage can rely on
    an event belonging to a guild.
 2. Guild hooks (recording the guild, its Discord language, restoring its configuration on
-   rejoin) run in order on a background task right after the event is dispatched. A slow database
-   therefore never stops the shard from being read, which would get the connection cut; the cost
-   is that a module may see a guild arrive a moment before the hook has finished.
+   rejoin) run on a background task right after the event is dispatched. Pending hooks are kept
+   per guild and only the newest one counts (a departure replaces a queued arrival), so the queue
+   is bounded by the number of guilds and pushing never waits. A slow database therefore never
+   stops the shard from being read, which would get the connection cut; the cost is that a
+   module may see a guild arrive a moment before the hook has finished. Because the gateway only
+   reports changes while connected, start-up first reads the bot's guild list from Discord and
+   records guilds joined or left during downtime.
 3. The `Dispatcher` picks the guild's *lane* from the channel, user or role the event concerns.
    Events in one lane run in order; lanes run in parallel. Slash commands use lanes of their own.
    The guild has one budget of events waiting or running (commands have another): when it is used
@@ -67,7 +71,8 @@ history. At start-up every document is compiled — merged over the preset and m
 checked against each module's JSON Schema, capabilities capped at what the module declares — and
 installed into the `SettingsStore`. Edits through the API are validated *before* they are stored.
 Other processes learn of an edit through PostgreSQL `LISTEN/NOTIFY`; because notifications are not
-durable, everything is reloaded whenever the connection may have dropped some. The store only
+durable, everything is reloaded whenever the connection may have dropped some; after a failure
+the resubscribe-and-reload step is retried until it succeeds. The store only
 accepts an installation whose revision is at least as new as the one it holds, so concurrent
 writers cannot let a stale read win. A stored document that no longer validates is skipped with a
 warning and the guild keeps its previous settings.

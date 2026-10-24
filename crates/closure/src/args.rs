@@ -69,13 +69,25 @@ impl fmt::Debug for Args {
     }
 }
 
+/// The log filter to use, given `RUST_LOG`.
+///
+/// Twilight's request spans carry the full request URL, which contains interaction tokens, and any
+/// event logged inside such a span prints it. `twilight_http` is therefore kept at `warn` even
+/// when `RUST_LOG` asks for more, unless it names `twilight_http` itself, which opts in knowingly.
+fn log_filter(rust_log: Option<&str>) -> String {
+    const QUIET: &str = "twilight_http=warn";
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if value.contains("twilight_http") => value.to_owned(),
+        Some(value) => format!("{value},{QUIET}"),
+        None => format!("info,{QUIET}"),
+    }
+}
+
 impl Args {
     /// Installs the global logger. `RUST_LOG` overrides the default level (`info`).
     pub fn init_logging(&self) {
-        // Twilight's request spans carry the full URL, which contains interaction tokens; keeping
-        // that crate quiet by default keeps them out of the logs.
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info,twilight_http=warn"));
+        let filter = EnvFilter::try_new(log_filter(std::env::var("RUST_LOG").ok().as_deref()))
+            .unwrap_or_else(|_| EnvFilter::new(log_filter(None)));
         let builder = tracing_subscriber::fmt().with_env_filter(filter);
         match self.log_format {
             LogFormat::Pretty => builder.init(),
@@ -153,6 +165,23 @@ mod tests {
                 .unwrap();
             assert!(argument.is_required_set(), "{name} must be required");
         }
+    }
+
+    #[test]
+    fn twilight_http_stays_quiet_even_when_the_environment_asks_for_debug() {
+        assert_eq!(log_filter(None), "info,twilight_http=warn");
+        assert_eq!(log_filter(Some("")), "info,twilight_http=warn");
+        assert_eq!(log_filter(Some("debug")), "debug,twilight_http=warn");
+        assert_eq!(
+            log_filter(Some("closure=debug,sqlx=warn")),
+            "closure=debug,sqlx=warn,twilight_http=warn"
+        );
+        // Naming the crate is a deliberate opt-in.
+        assert_eq!(
+            log_filter(Some("twilight_http=debug")),
+            "twilight_http=debug"
+        );
+        assert!(EnvFilter::try_new(log_filter(Some("debug"))).is_ok());
     }
 
     #[test]

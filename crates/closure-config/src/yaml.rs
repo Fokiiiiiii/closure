@@ -13,6 +13,11 @@ fn options() -> Options {
     budget.max_events = 100_000;
     budget.max_aliases = 20;
     budget.max_anchors = 20;
+    // The parser's defaults allow 64 MiB of expansion, far beyond any real document (the text
+    // itself is capped at 64 KiB), and the expanded value is built before it can be checked.
+    budget.max_recorded_anchor_bytes = 256 * 1024;
+    budget.max_total_scalar_bytes = 256 * 1024;
+    budget.max_nodes = 20_000;
     let mut options = Options::default();
     options.budget = Some(budget);
     options
@@ -183,6 +188,37 @@ modules:
                 Err(ConfigError::Syntax { .. })
             ),
             "a 9^12 expansion must be refused"
+        );
+    }
+
+    #[test]
+    fn a_small_document_cannot_expand_into_tens_of_megabytes() {
+        // Each level repeats the previous one three times, so with a 60 000 character string at
+        // the bottom the expansion is 60 000 * 3^6 = 43 MB, from 7 anchors, 18 aliases and
+        // about 60 KiB of text.
+        let document = |size: usize| {
+            let mut lines = vec![format!("l0: &l0 \"{}\"", "x".repeat(size))];
+            for level in 1..=6 {
+                let previous = format!("*l{}", level - 1);
+                lines.push(format!(
+                    "l{level}: &l{level} [{previous}, {previous}, {previous}]"
+                ));
+            }
+            let body: String = lines
+                .iter()
+                .map(|line| ["      ", line, "\n"].concat())
+                .collect();
+            format!("modules:\n  warn:\n    config:\n{body}")
+        };
+
+        // Control: the same shape with a small string is a valid document.
+        assert!(parse_overrides(&document(10)).is_ok());
+
+        let bomb = document(60_000);
+        assert!(bomb.len() < MAX_YAML_BYTES);
+        assert!(
+            matches!(parse_overrides(&bomb), Err(ConfigError::Syntax { .. })),
+            "the expansion must be refused while parsing, not after it was built"
         );
     }
 

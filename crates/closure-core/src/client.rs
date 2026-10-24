@@ -66,7 +66,9 @@ impl ApiClient {
     /// must not rely on this alone for those.
     #[must_use]
     pub fn scoped_to(mut self, guild: GuildId) -> Self {
-        self.guild = Some(guild);
+        // Only the first binding counts: a module holds a (cloneable) scoped client and must not
+        // be able to rebind its own copy to another guild.
+        self.guild.get_or_insert(guild);
         self
     }
 
@@ -364,6 +366,25 @@ mod tests {
 
         client.kick(Id::new(1), Id::new(9), reason()).await.unwrap();
         assert_eq!(api.actions().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_module_cannot_rebind_its_scoped_client_to_another_guild() {
+        let api = Arc::new(MockApi::default());
+        let given = client(&api, &[Capability::BanMembers]).scoped_to(Id::new(1));
+
+        let rebound = given.clone().scoped_to(Id::new(2));
+        let result = rebound.ban(Id::new(2), Id::new(9), 0, reason()).await;
+        assert!(
+            matches!(result, Err(DiscordError::Forbidden(_))),
+            "{result:?}"
+        );
+        assert_eq!(api.actions(), []);
+
+        rebound
+            .ban(Id::new(1), Id::new(9), 0, reason())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

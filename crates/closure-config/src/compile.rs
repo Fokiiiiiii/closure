@@ -222,7 +222,11 @@ fn compile_module(
         &manifest.default_config,
         module_override.and_then(|m| m.config.as_ref()),
     );
-    if contains_nul(&config) {
+    // The raw override too: a null-valued key is dropped by the merge, yet is still stored.
+    let raw_has_nul = module_override
+        .and_then(|m| m.config.as_ref())
+        .is_some_and(contains_nul);
+    if raw_has_nul || contains_nul(&config) {
         // PostgreSQL cannot store U+0000 in JSON text; refuse it here as a clear 422.
         issues.push(Issue::new(
             format!("modules.{id}.config"),
@@ -544,6 +548,19 @@ mod tests {
             .compile(&warn_override(json!({ "nested": { "a\u{0}": 1 } })))
             .unwrap_err();
         assert!(in_a_key.issues().iter().any(|i| i.message.contains("NUL")));
+    }
+
+    #[test]
+    fn nul_in_a_key_that_the_merge_drops_is_still_refused() {
+        // `null` means "use the default", so the key vanishes from the merged value, but the
+        // document PostgreSQL would be asked to store still contains it.
+        let error = compiler()
+            .compile(&warn_override(json!({ "bad\u{0}key": null })))
+            .unwrap_err();
+        assert!(
+            error.issues().iter().any(|i| i.message.contains("NUL")),
+            "{error:?}"
+        );
     }
 
     #[test]

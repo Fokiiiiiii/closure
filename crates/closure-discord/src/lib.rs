@@ -16,7 +16,7 @@ mod error;
 mod gateway;
 pub mod hierarchy;
 
-pub use api::{RetryPolicy, TwilightApi};
+pub use api::{RetryPolicy, TwilightApi, joined_guilds};
 pub use breaker::BreakerConfig;
 pub use commands::{CommandBuildError, CommandScope, build_commands, register_commands};
 pub use dispatcher::{DispatchError, Dispatcher, DispatcherConfig};

@@ -34,6 +34,9 @@ use tokio_util::task::TaskTracker;
 
 use crate::breaker::{Breaker, BreakerConfig};
 
+/// How long `shutdown` waits for lanes to stop once they were told to abort.
+const HARD_STOP_WAIT: Duration = Duration::from_secs(2);
+
 /// How long the dispatcher waits for a reply to a user before giving up on it.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -168,6 +171,9 @@ struct Shared {
     pending_total: AtomicUsize,
     closing: AtomicBool,
     cancel: CancellationToken,
+    /// Cancelled when the grace period of `shutdown` ran out: lanes stop taking work and running
+    /// module calls are aborted, so nothing is still running when the modules are unloaded.
+    abort: CancellationToken,
     tracker: TaskTracker,
 }
 
@@ -247,6 +253,7 @@ impl Dispatcher {
             pending_total: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
             cancel: CancellationToken::new(),
+            abort: CancellationToken::new(),
             tracker: TaskTracker::new(),
         });
         shared.tracker.spawn(reaper(Arc::clone(&shared)));
@@ -310,6 +317,8 @@ impl Dispatcher {
             return Some(Arc::clone(&existing));
         }
 
+        // `pending` is raised inside each arm, while the map entry is still locked: a concurrent
+        // caller that wants to replace the lanes then sees them as busy, and the reaper does too.
         let lanes = match self.shared.guilds.entry(guild) {
             Entry::Occupied(mut entry) => {
                 let replace = entry.get().event_lanes != concurrency
@@ -319,18 +328,20 @@ impl Dispatcher {
                 if replace && !self.shared.closing.load(Ordering::Acquire) {
                     entry.insert(self.spawn_lanes(guild, concurrency));
                 }
-                Arc::clone(entry.get())
+                let lanes = Arc::clone(entry.get());
+                lanes.state.pending.fetch_add(1, Ordering::AcqRel);
+                lanes
             }
             Entry::Vacant(entry) => {
                 if self.shared.closing.load(Ordering::Acquire) {
                     return None;
                 }
                 let lanes = self.spawn_lanes(guild, concurrency);
+                lanes.state.pending.fetch_add(1, Ordering::AcqRel);
                 entry.insert(Arc::clone(&lanes));
                 lanes
             }
         };
-        lanes.state.pending.fetch_add(1, Ordering::AcqRel);
         Some(lanes)
     }
 
@@ -389,8 +400,19 @@ impl Dispatcher {
             tracing::warn!(
                 ?grace,
                 pending = self.pending(),
-                "dispatcher did not drain in time"
+                "dispatcher did not drain in time; stopping what is still running"
             );
+            // Without this the lanes would keep handling events, and a running module call
+            // would carry on, after the modules below have been unloaded.
+            self.shared.abort.cancel();
+            if tokio::time::timeout(HARD_STOP_WAIT, self.shared.tracker.wait())
+                .await
+                .is_err()
+            {
+                tracing::error!(
+                    "lanes did not stop after being told to; a module is blocking a thread"
+                );
+            }
         }
 
         let modules: Vec<&Arc<dyn Module>> = self.shared.registry.iter().collect();
@@ -422,7 +444,13 @@ async fn lane_worker(
     state: Arc<GuildState>,
     mut receiver: mpsc::Receiver<Job>,
 ) {
-    while let Some(job) = receiver.recv().await {
+    loop {
+        let job = tokio::select! {
+            biased;
+            () = shared.abort.cancelled() => break,
+            job = receiver.recv() => job,
+        };
+        let Some(job) = job else { break };
         metrics::histogram!("closure_event_queue_seconds")
             .record(job.enqueued.elapsed().as_secs_f64());
         let handled = AssertUnwindSafe(handle_event(&shared, guild, &state, &job.event))
@@ -480,7 +508,7 @@ async fn call_module(
         return Verdict::Skipped;
     };
     let config = shared.config.breaker;
-    if !state.with_breaker(&id, |breaker| breaker.allow(Instant::now(), &config)) {
+    if !state.with_breaker(&id, |breaker| breaker.allow(Instant::now())) {
         metrics::counter!("closure_handler_total", "module" => id.to_string(), "result" => "skipped")
             .increment(1);
         return Verdict::Skipped;
@@ -494,7 +522,15 @@ async fn call_module(
         let event = Arc::clone(event);
         async move { module.on_event(&ctx, &event).await }
     });
-    let verdict = match tokio::time::timeout(handler_timeout, &mut task).await {
+    let waited = tokio::select! {
+        result = tokio::time::timeout(handler_timeout, &mut task) => Some(result),
+        () = shared.abort.cancelled() => None,
+    };
+    let Some(waited) = waited else {
+        task.abort();
+        return Verdict::Skipped;
+    };
+    let verdict = match waited {
         Ok(Ok(Ok(()))) => Verdict::Done,
         Ok(Ok(Err(error))) => Verdict::Failed(error),
         Ok(Err(join_error)) => {

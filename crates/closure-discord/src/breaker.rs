@@ -29,17 +29,22 @@ impl Default for BreakerConfig {
 pub(crate) struct Breaker {
     consecutive_failures: u32,
     open_until: Option<Instant>,
+    /// A recovery attempt was let through and has not reported yet.
+    trial_in_flight: bool,
 }
 
 impl Breaker {
     /// Whether a call may go ahead now. After the cooldown, the first caller is admitted as the
     /// trial and the breaker closes the door again until that trial reports back.
-    pub(crate) fn allow(&mut self, now: Instant, config: &BreakerConfig) -> bool {
+    pub(crate) fn allow(&mut self, now: Instant) -> bool {
         match self.open_until {
             None => true,
             Some(until) if now < until => false,
+            // The cooldown is over. One call at a time may test whether the module recovered,
+            // however long it takes: others stay out until it reports.
+            Some(_) if self.trial_in_flight => false,
             Some(_) => {
-                self.open_until = Some(now + config.cooldown);
+                self.trial_in_flight = true;
                 true
             }
         }
@@ -48,9 +53,11 @@ impl Breaker {
     pub(crate) fn record_success(&mut self) {
         self.consecutive_failures = 0;
         self.open_until = None;
+        self.trial_in_flight = false;
     }
 
     pub(crate) fn record_failure(&mut self, now: Instant, config: &BreakerConfig) {
+        self.trial_in_flight = false;
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         if self.consecutive_failures >= config.threshold {
             self.open_until = Some(now + config.cooldown);
@@ -76,15 +83,12 @@ mod tests {
         let now = Instant::now();
         let mut breaker = Breaker::default();
         for _ in 0..2 {
-            assert!(breaker.allow(now, &CONFIG));
+            assert!(breaker.allow(now));
             breaker.record_failure(now, &CONFIG);
         }
-        assert!(
-            breaker.allow(now, &CONFIG),
-            "still closed after two failures"
-        );
+        assert!(breaker.allow(now), "still closed after two failures");
         breaker.record_failure(now, &CONFIG);
-        assert!(!breaker.allow(now, &CONFIG));
+        assert!(!breaker.allow(now));
         assert!(breaker.is_open(now));
     }
 
@@ -97,7 +101,7 @@ mod tests {
         breaker.record_success();
         breaker.record_failure(now, &CONFIG);
         breaker.record_failure(now, &CONFIG);
-        assert!(breaker.allow(now, &CONFIG));
+        assert!(breaker.allow(now));
     }
 
     #[test]
@@ -108,10 +112,27 @@ mod tests {
             breaker.record_failure(start, &CONFIG);
         }
         let later = start + CONFIG.cooldown;
-        assert!(breaker.allow(later, &CONFIG), "the trial");
+        assert!(breaker.allow(later), "the trial");
+        assert!(!breaker.allow(later), "others wait for the trial's verdict");
+    }
+
+    #[test]
+    fn a_slow_trial_keeps_everyone_else_out_until_it_reports() {
+        let start = Instant::now();
+        let mut breaker = Breaker::default();
+        for _ in 0..3 {
+            breaker.record_failure(start, &CONFIG);
+        }
+        let first = start + CONFIG.cooldown;
+        assert!(breaker.allow(first), "the trial");
+        // The trial runs for several cooldowns; nobody else may be admitted meanwhile.
+        for waited in 1..=5 {
+            assert!(!breaker.allow(first + CONFIG.cooldown * waited), "{waited}");
+        }
+        breaker.record_success();
         assert!(
-            !breaker.allow(later, &CONFIG),
-            "others wait for the trial's verdict"
+            breaker.allow(first),
+            "closed again after the trial succeeded"
         );
     }
 
@@ -124,18 +145,18 @@ mod tests {
         for _ in 0..3 {
             recovering.record_failure(start, &CONFIG);
         }
-        assert!(recovering.allow(later, &CONFIG));
+        assert!(recovering.allow(later));
         recovering.record_success();
-        assert!(recovering.allow(later, &CONFIG));
+        assert!(recovering.allow(later));
         assert!(!recovering.is_open(later));
 
         let mut relapsing = Breaker::default();
         for _ in 0..3 {
             relapsing.record_failure(start, &CONFIG);
         }
-        assert!(relapsing.allow(later, &CONFIG));
+        assert!(relapsing.allow(later));
         relapsing.record_failure(later, &CONFIG);
-        assert!(!relapsing.allow(later + CONFIG.cooldown / 2, &CONFIG));
-        assert!(relapsing.allow(later + CONFIG.cooldown, &CONFIG));
+        assert!(!relapsing.allow(later + CONFIG.cooldown / 2));
+        assert!(relapsing.allow(later + CONFIG.cooldown));
     }
 }
