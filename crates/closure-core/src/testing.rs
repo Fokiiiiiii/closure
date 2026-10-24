@@ -11,7 +11,7 @@ use crate::error::{DiscordError, ModuleError};
 use crate::event::{Event, GuildId};
 use crate::locale::Locale;
 use crate::module::{EventContext, Module, ModuleId, ModuleManifest};
-use crate::settings::{ModuleSettings, SettingsProvider};
+use crate::settings::{ModuleSettings, RuntimeLimits, SettingsProvider};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A poisoned lock only means another test thread panicked; the data is still usable.
@@ -70,6 +70,7 @@ impl DiscordApi for MockApi {
 #[derive(Debug, Clone)]
 pub struct StaticSettings {
     pub locale: Locale,
+    pub limits: RuntimeLimits,
     pub modules: Arc<HashMap<ModuleId, ModuleSettings>>,
 }
 
@@ -78,6 +79,7 @@ impl StaticSettings {
     pub fn new(modules: impl IntoIterator<Item = (ModuleId, ModuleSettings)>) -> Self {
         Self {
             locale: Locale::DEFAULT,
+            limits: RuntimeLimits::default(),
             modules: Arc::new(modules.into_iter().collect()),
         }
     }
@@ -86,6 +88,10 @@ impl StaticSettings {
 impl SettingsProvider for StaticSettings {
     fn locale(&self, _guild: GuildId) -> Locale {
         self.locale
+    }
+
+    fn limits(&self, _guild: GuildId) -> RuntimeLimits {
+        self.limits
     }
 
     fn module(&self, _guild: GuildId, module: &ModuleId) -> Option<ModuleSettings> {

@@ -8,3 +8,5 @@ error-rate-limited = Discord のレート制限中です。しばらくしてか
 error-transient = Discord 側で一時的な問題が発生しています。しばらくしてからもう一度お試しください。
 error-fatal = Discord との通信中に問題が発生しました。
 error-internal = 内部でエラーが発生しました。内容は記録されています。
+error-module-disabled = この機能はこのサーバーでは無効になっています。
+error-command-failed = コマンドの実行中に問題が発生しました。しばらくしてからもう一度お試しください。

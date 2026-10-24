@@ -1,9 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use closure_core::event::GuildId;
 use closure_core::locale::Locale;
 use closure_core::module::ModuleId;
-use closure_core::settings::{ModuleSettings, SettingsProvider};
+use closure_core::settings::{ModuleSettings, RuntimeLimits, SettingsProvider};
 use dashmap::DashMap;
 
 use crate::compile::ConfigCompiler;
@@ -106,6 +107,15 @@ impl SettingsProvider for SettingsStore {
             .unwrap_or(Locale::DEFAULT)
     }
 
+    fn limits(&self, guild: GuildId) -> RuntimeLimits {
+        let limits = self.settings(guild).effective.limits;
+        RuntimeLimits {
+            handler_timeout: Duration::from_secs(limits.handler_timeout_secs),
+            queue_capacity: limits.queue_capacity,
+            concurrency: limits.concurrency,
+        }
+    }
+
     fn module(&self, guild: GuildId, module: &ModuleId) -> Option<ModuleSettings> {
         self.settings(guild).module(module).cloned()
     }
@@ -192,6 +202,26 @@ mod tests {
 
         store.set_preferred_locale(guild, None);
         assert_eq!(store.locale(guild), Locale::En);
+    }
+
+    #[test]
+    fn runtime_limits_follow_the_preset_and_overrides() {
+        let store = store();
+        let guild = Id::new(1);
+        let medium = store.limits(guild);
+        assert_eq!(medium.concurrency, 8);
+        assert_eq!(medium.handler_timeout, Duration::from_secs(10));
+
+        store
+            .set_guild_yaml(
+                guild,
+                "preset: large\nlimits:\n  handler_timeout_secs: 20\n",
+            )
+            .unwrap();
+        let large = store.limits(guild);
+        assert_eq!(large.concurrency, 32);
+        assert_eq!(large.queue_capacity, 1024);
+        assert_eq!(large.handler_timeout, Duration::from_secs(20));
     }
 
     #[test]

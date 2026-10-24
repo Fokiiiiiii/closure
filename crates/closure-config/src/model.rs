@@ -88,9 +88,10 @@ impl From<Language> for String {
 pub struct Limits {
     /// How long one module may spend on one event before it is abandoned.
     pub handler_timeout_secs: u64,
-    /// Events a guild may have waiting; beyond this the oldest work is shed and counted.
+    /// Events a guild may have waiting; beyond this new events are dropped and counted.
     pub queue_capacity: usize,
-    /// Events of one guild handled at the same time.
+    /// Independent lanes of the guild: events keep their order within a lane, lanes run in
+    /// parallel. An event's lane is chosen from the user or channel it concerns.
     pub concurrency: usize,
 }
 
