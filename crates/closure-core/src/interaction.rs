@@ -453,9 +453,10 @@ mod tests {
 
     #[test]
     fn the_time_of_a_record_is_read_while_the_lock_is_held() {
-        // The type system already forces this (`now` needs the guard of the lock); this checks
-        // the behaviour, and can only ever fail in the right direction: if the second caller
-        // were slow to start, the test would pass without having proved anything.
+        // The structure already forces this (the time is read inside `Locked`, which holds the
+        // guard); this checks the behaviour, and can only ever fail in the right direction: if
+        // the second caller were slow to start, the test would pass without having proved
+        // anything.
         //
         // The first caller is stopped inside the clock. If the clock is read under the lock,
         // the second caller cannot get to its own clock until the first has finished; if it were
