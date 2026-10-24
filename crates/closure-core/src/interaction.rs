@@ -117,6 +117,13 @@ impl Records {
         self.by_expiry.push_back((expires, token));
         Recorded::New
     }
+
+    fn lookup(&self, token: &str, now: Instant) -> Option<GuildId> {
+        self.guilds
+            .get(token)
+            .filter(|(_, expires)| *expires > now)
+            .map(|(guild, _)| *guild)
+    }
 }
 
 type Clock = Box<dyn Fn() -> Instant + Send + Sync>;
@@ -169,11 +176,8 @@ impl InteractionGuilds {
     /// answer the interaction, so the host should not hand it to one.
     #[must_use]
     pub fn register(&self, token: &InteractionToken, guild: GuildId) -> Recorded {
-        let recorded = {
-            let mut records = self.lock();
-            let now = self.now(&records);
-            records.record(self.limits, token.expose(), guild, now)
-        };
+        // The guard lives for this statement only; the logging below is outside the lock.
+        let recorded = self.locked().record(token.expose(), guild);
         // Outside the lock: logging may block.
         match recorded {
             Recorded::GuildFull => {
@@ -190,28 +194,41 @@ impl InteractionGuilds {
     /// The guild `token` was issued for, if it is known and has not expired.
     #[must_use]
     pub fn guild_of(&self, token: &InteractionToken) -> Option<GuildId> {
-        let records = self.lock();
-        let now = self.now(&records);
-        Self::lookup(&records, token, now)
+        self.locked().lookup(token.expose())
     }
 
-    fn lookup(records: &Records, token: &InteractionToken, now: Instant) -> Option<GuildId> {
-        records
-            .guilds
-            .get(token.expose())
-            .filter(|(_, expires)| *expires > now)
-            .map(|(guild, _)| *guild)
-    }
-
-    /// The current time. It takes the guard of the lock, so it cannot be read without holding the
-    /// lock: records are made in the order of their times only if the time is read inside it.
-    /// This is the only place the clock is read.
-    fn now(&self, _held: &MutexGuard<'_, Records>) -> Instant {
-        (self.clock)()
+    /// The table, locked. This is the only way the clock is read: the time never leaves
+    /// [`Locked`], so it is always read, and used, while one and the same guard is held.
+    fn locked(&self) -> Locked<'_> {
+        Locked {
+            records: self.lock(),
+            table: self,
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Records> {
         self.records.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The records with their lock held. Reading the time and using it happen inside the methods
+/// of this type, on the guard it holds, so a time cannot be read under one lock and used under
+/// another, or after the lock was let go and taken again, and a guard of some other table cannot
+/// be mixed in. The raw `Instant` is never handed out.
+struct Locked<'a> {
+    records: MutexGuard<'a, Records>,
+    table: &'a InteractionGuilds,
+}
+
+impl Locked<'_> {
+    fn record(&mut self, token: &str, guild: GuildId) -> Recorded {
+        // Read while the lock is held: records are made in the order of their times.
+        let now = (self.table.clock)();
+        self.records.record(self.table.limits, token, guild, now)
+    }
+
+    fn lookup(&self, token: &str) -> Option<GuildId> {
+        self.records.lookup(token, (self.table.clock)())
     }
 }
 
@@ -236,7 +253,7 @@ mod tests {
         }
 
         fn at(&self, token: &str, now: Instant) -> Option<GuildId> {
-            Self::lookup(&self.lock(), &InteractionToken::new(token), now)
+            self.lock().lookup(token, now)
         }
     }
 
