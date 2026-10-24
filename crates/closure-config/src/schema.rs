@@ -75,8 +75,13 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
 /// accept it wherever a property may be set. (Array items are replaced whole, so `null` has no
 /// special meaning there and they stay strict.)
 ///
-/// Properties can sit in the schema itself or in any keyword that describes the same object:
-/// `allOf`, `anyOf`, `oneOf`, `if`/`then`/`else`, and `patternProperties`.
+/// Properties can sit in the schema itself or in a keyword that only *adds* constraints to the
+/// same object: `allOf`, `anyOf`, `then`, `else` and `patternProperties`.
+///
+/// Keywords that *decide* something are left as written, because relaxing them changes the
+/// decision: `if` picks `then` or `else`, and `oneOf` demands exactly one matching branch. The
+/// compiler judges the document after `null` has been replaced by the default, which the schema
+/// cannot express there, so a `null` under such a keyword is judged on its own.
 fn allow_null_properties(schema: &mut Value) {
     let Value::Object(map) = schema else { return };
     let mut nullable = |sub: &mut Value| {
@@ -92,12 +97,12 @@ fn allow_null_properties(schema: &mut Value) {
     if let Some(additional @ Value::Object(_)) = map.get_mut("additionalProperties") {
         nullable(additional);
     }
-    for keyword in ["allOf", "anyOf", "oneOf"] {
+    for keyword in ["allOf", "anyOf"] {
         if let Some(Value::Array(branches)) = map.get_mut(keyword) {
             branches.iter_mut().for_each(allow_null_properties);
         }
     }
-    for keyword in ["if", "then", "else"] {
+    for keyword in ["then", "else"] {
         if let Some(branch) = map.get_mut(keyword) {
             allow_null_properties(branch);
         }
@@ -194,15 +199,15 @@ mod tests {
             "type": "object",
             "allOf": [{ "properties": { "limit": { "type": "integer", "minimum": 1 } } }],
             "anyOf": [{ "properties": { "a": { "type": "integer" } } }],
-            "if": { "properties": { "mode": { "const": "x" } } },
             "then": { "properties": { "b": { "type": "integer" } } },
+            "else": { "properties": { "c": { "type": "integer" } } },
             "patternProperties": { "^x_": { "type": "string" } }
         })))
         .unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
         let config = |value: Value| json!({ "modules": { "warn": { "config": value } } });
 
-        for key in ["limit", "a", "mode", "b", "x_name"] {
+        for key in ["limit", "a", "b", "c", "x_name"] {
             assert!(
                 validator.is_valid(&config(json!({ key: null }))),
                 "{key} should accept null"
@@ -212,6 +217,45 @@ mod tests {
         assert!(!validator.is_valid(&config(json!({ "limit": 0 }))));
         assert!(!validator.is_valid(&config(json!({ "limit": "three" }))));
         assert!(!validator.is_valid(&config(json!({ "x_name": 5 }))));
+    }
+
+    #[test]
+    fn an_if_condition_keeps_choosing_the_same_branch_as_before() {
+        // With defaults {mode: "y", limit: 25}, `mode: null` means "y", so `else` applies.
+        let schema = document_schema(&registry_with(json!({
+            "type": "object",
+            "properties": { "mode": { "enum": ["x", "y"] }, "limit": { "type": "integer" } },
+            "if": { "properties": { "mode": { "const": "x" } } },
+            "then": { "properties": { "limit": { "maximum": 10 } } },
+            "else": { "properties": { "limit": { "minimum": 20 } } }
+        })))
+        .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let config = |value: Value| json!({ "modules": { "warn": { "config": value } } });
+
+        assert!(validator.is_valid(&config(json!({ "mode": null, "limit": 25 }))));
+        assert!(!validator.is_valid(&config(json!({ "mode": null, "limit": 5 }))));
+        assert!(validator.is_valid(&config(json!({ "mode": "x", "limit": 5 }))));
+        assert!(!validator.is_valid(&config(json!({ "mode": "x", "limit": 25 }))));
+    }
+
+    #[test]
+    fn one_of_keeps_requiring_exactly_one_matching_branch() {
+        let schema = document_schema(&registry_with(json!({
+            "type": "object",
+            "oneOf": [
+                { "properties": { "value": { "type": "integer" } }, "required": ["value"] },
+                { "properties": { "value": { "type": "null" } }, "required": ["value"] }
+            ]
+        })))
+        .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let config = |value: Value| json!({ "modules": { "warn": { "config": value } } });
+
+        // Had both branches been made nullable, `null` would match both and be refused.
+        assert!(validator.is_valid(&config(json!({ "value": null }))));
+        assert!(validator.is_valid(&config(json!({ "value": 3 }))));
+        assert!(!validator.is_valid(&config(json!({ "value": "three" }))));
     }
 
     #[test]

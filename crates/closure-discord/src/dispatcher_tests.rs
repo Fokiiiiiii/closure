@@ -1020,3 +1020,26 @@ fn a_message_and_its_deletion_share_an_ordering_key() {
     };
     assert_eq!(ordering_key(&created), ordering_key(&deleted));
 }
+
+#[tokio::test]
+async fn a_send_that_already_took_its_capacity_is_still_collected_after_close() {
+    let (sender, mut receiver) = mpsc::channel::<u32>(4);
+    // Capacity taken, message not pushed yet: what `try_send` is in the middle of doing.
+    let permit = sender.try_reserve().unwrap();
+    let drained = tokio::spawn(async move {
+        let mut collected = Vec::new();
+        drain_closed(&mut receiver, |message| collected.push(message)).await;
+        collected
+    });
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !drained.is_finished(),
+        "must wait for the sender in progress"
+    );
+
+    permit.send(7);
+
+    assert_eq!(drained.await.unwrap(), [7]);
+}

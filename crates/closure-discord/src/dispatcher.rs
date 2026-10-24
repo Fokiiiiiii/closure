@@ -470,9 +470,18 @@ async fn lane_worker(
     }
     // Jobs still queued when the lane was told to stop would be dropped with the receiver and
     // never counted off, which would leave `pending` (and so `flush`) stuck for good.
+    drain_closed(&mut receiver, |job| settle(&shared, &state, &job)).await;
+}
+
+/// Closes `receiver` and hands every message that was or will be sent to `each`.
+///
+/// `try_recv` is not enough: a sender that already took its capacity but has not pushed the
+/// message yet looks like an empty queue, and its message would be dropped unseen with the
+/// receiver. `recv` returns `None` only once all such senders are done.
+async fn drain_closed<T>(receiver: &mut mpsc::Receiver<T>, mut each: impl FnMut(T)) {
     receiver.close();
-    while let Ok(job) = receiver.try_recv() {
-        settle(&shared, &state, &job);
+    while let Some(message) = receiver.recv().await {
+        each(message);
     }
 }
 
