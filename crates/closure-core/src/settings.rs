@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::capability::CapabilitySet;
-use crate::event::GuildId;
+use crate::event::{ChannelId, GuildId, RoleId};
 use crate::locale::Locale;
 use crate::module::ModuleId;
 
@@ -13,6 +13,23 @@ pub struct ModuleSettings {
     pub config: Arc<serde_json::Value>,
     /// Capabilities the guild allows the module to use. Never exceeds what the module declared.
     pub granted: CapabilitySet,
+}
+
+/// Guild-wide settings every module may rely on, independent of its own configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GuildPolicy {
+    /// Where moderation logs go, if the guild chose a channel.
+    pub log_channel: Option<ChannelId>,
+    /// Roles whose members may use moderation features.
+    pub moderator_roles: Vec<RoleId>,
+}
+
+impl GuildPolicy {
+    /// Whether a member holding `roles` counts as a moderator of the guild.
+    #[must_use]
+    pub fn is_moderator(&self, roles: &[RoleId]) -> bool {
+        roles.iter().any(|role| self.moderator_roles.contains(role))
+    }
 }
 
 /// Resource limits the event dispatcher applies to one guild.
@@ -48,7 +65,28 @@ pub trait SettingsProvider: Send + Sync {
 
     fn limits(&self, guild: GuildId) -> RuntimeLimits;
 
+    fn policy(&self, guild: GuildId) -> Arc<GuildPolicy>;
+
     /// `None` when the guild has no entry for the module (treated as the module's defaults by
     /// the caller, never as an error).
     fn module(&self, guild: GuildId, module: &ModuleId) -> Option<ModuleSettings>;
+}
+
+#[cfg(test)]
+mod tests {
+    use twilight_model::id::Id;
+
+    use super::*;
+
+    #[test]
+    fn moderators_are_members_holding_any_moderator_role() {
+        let policy = GuildPolicy {
+            log_channel: None,
+            moderator_roles: vec![Id::new(5), Id::new(6)],
+        };
+        assert!(policy.is_moderator(&[Id::new(1), Id::new(6)]));
+        assert!(!policy.is_moderator(&[Id::new(1), Id::new(2)]));
+        assert!(!policy.is_moderator(&[]));
+        assert!(!GuildPolicy::default().is_moderator(&[Id::new(5)]));
+    }
 }

@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use closure_core::capability::CapabilitySet;
 use closure_core::event::{ChannelId, RoleId};
 use closure_core::locale::Locale;
 use closure_core::module::ModuleId;
-use closure_core::settings::ModuleSettings;
+use closure_core::settings::{GuildPolicy, ModuleSettings};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -203,6 +204,7 @@ pub struct EffectiveConfig {
 pub struct GuildSettings {
     pub effective: EffectiveConfig,
     pub(crate) modules: HashMap<ModuleId, ModuleSettings>,
+    pub(crate) policy: Arc<GuildPolicy>,
 }
 
 impl GuildSettings {

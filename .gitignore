@@ -29,3 +29,8 @@ rustc-ice-*.txt
 !.env.example
 .serena/
 .codebase-memory/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store

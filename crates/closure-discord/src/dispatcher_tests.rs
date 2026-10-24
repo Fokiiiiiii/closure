@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use closure_core::action::{Action, InteractionResponse};
-use closure_core::capability::Capability;
+use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::client::DiscordApi;
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{
@@ -12,6 +12,7 @@ use closure_core::event::{
 };
 use closure_core::locale::Locale;
 use closure_core::module::{CommandSpec, EventContext, Module, ModuleId, ModuleManifest};
+use closure_core::settings::GuildPolicy;
 use closure_core::testing::{MockApi, StaticSettings};
 use closure_i18n::TranslatorBuilder;
 use serde_json::json;
@@ -37,6 +38,8 @@ enum Behavior {
     /// Sleeps `id % 3` milliseconds, so naive parallelism would reorder events.
     Staggered,
     TryBan,
+    /// Logs the guild policy the module was given.
+    ReadPolicy,
 }
 
 struct Probe {
@@ -136,6 +139,15 @@ impl Module for Probe {
                     return Ok(());
                 };
                 tokio::time::sleep(Duration::from_millis(message.id.get() % 3)).await;
+                Ok(())
+            }
+            Behavior::ReadPolicy => {
+                let policy = ctx.policy();
+                self.log.lock().unwrap().push(format!(
+                    "policy:{:?}:{}",
+                    policy.log_channel.map(Id::get),
+                    policy.is_moderator(&[Id::new(5)])
+                ));
                 Ok(())
             }
             Behavior::TryBan => {
@@ -452,6 +464,40 @@ async fn errors_from_discord_do_not_count_against_a_module() {
         h.dispatcher.flush().await;
     }
     assert_eq!(moderator.log().len(), 1 + 10);
+}
+
+#[tokio::test]
+async fn modules_are_given_the_guilds_policy() {
+    let probe = messages_only("policy");
+    probe.set(Behavior::ReadPolicy);
+    let registry =
+        Arc::new(ModuleRegistry::new(vec![Arc::clone(&probe) as Arc<dyn Module>]).unwrap());
+    let mut settings = StaticSettings::new([(
+        probe.manifest.id.clone(),
+        ModuleSettings {
+            enabled: true,
+            config: Arc::new(json!({})),
+            granted: CapabilitySet::new(),
+        },
+    )]);
+    settings.policy = Arc::new(GuildPolicy {
+        log_channel: Some(Id::new(9)),
+        moderator_roles: vec![Id::new(5)],
+    });
+    let dispatcher = Dispatcher::start(
+        registry,
+        Arc::new(settings),
+        Arc::new(MockApi::default()),
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+        DispatcherConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    dispatcher.dispatch(message(3, 1));
+    dispatcher.flush().await;
+
+    assert_eq!(probe.log(), ["load", "msg:1", "policy:Some(9):true"]);
 }
 
 #[tokio::test]

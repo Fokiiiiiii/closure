@@ -12,6 +12,7 @@ use crate::client::ApiClient;
 use crate::error::{CoreError, ModuleError};
 use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId};
 use crate::locale::{Args, Catalog, Locale, Translator};
+use crate::settings::GuildPolicy;
 
 /// Stable identifier of a module, used in configuration keys, metrics and translation
 /// namespaces. Restricted to `[a-z0-9_-]`, starting with a letter, at most 32 characters.
@@ -296,6 +297,7 @@ pub struct EventContext {
     pub api: ApiClient,
     /// The guild's language.
     pub locale: Locale,
+    policy: Arc<GuildPolicy>,
     config: Arc<serde_json::Value>,
     translator: Arc<dyn Translator>,
 }
@@ -317,6 +319,7 @@ impl EventContext {
         guild_id: GuildId,
         api: ApiClient,
         locale: Locale,
+        policy: Arc<GuildPolicy>,
         config: Arc<serde_json::Value>,
         translator: Arc<dyn Translator>,
     ) -> Self {
@@ -325,9 +328,16 @@ impl EventContext {
             guild_id,
             api,
             locale,
+            policy,
             config,
             translator,
         }
+    }
+
+    /// The guild-wide settings: log channel and moderator roles.
+    #[must_use]
+    pub fn policy(&self) -> &GuildPolicy {
+        &self.policy
     }
 
     /// The effective configuration of this module in this guild.

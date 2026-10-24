@@ -1,0 +1,98 @@
+# Configuration
+
+Every server is configured by one document. There are two ways to edit it:
+
+- **Simple:** pick a `preset` and flip a few switches (typically from a dashboard form).
+- **Advanced:** write the whole thing as YAML.
+
+Both edit the same *sparse* document: only what differs from the defaults is stored. Fields you do
+not write keep following the defaults, so when a default improves, every server that did not
+override it gets the improvement.
+
+## The document
+
+```yaml
+version: 1                 # schema version; omit for the current one
+preset: large              # small | medium | large   (default: medium)
+language: ja               # auto | en | ja           (default: auto)
+log_channel: 123456789012345678
+moderator_roles: [111111111111111111, 222222222222222222]
+
+limits:                    # override single values of the preset
+  handler_timeout_secs: 20
+
+modules:
+  diagnostics:
+    enabled: true
+    capabilities: [respond_to_interactions]   # can only narrow what the module declares
+    config:
+      ephemeral: false     # the module's own section
+```
+
+| Field | Meaning |
+| --- | --- |
+| `version` | Schema version. A document written by a newer closure is refused rather than misread. |
+| `preset` | Sizes the limits below for a small, medium or large server. |
+| `language` | The language of the bot's messages. `auto` follows the community language the server chose in Discord. |
+| `log_channel` | Where modules post moderation logs. |
+| `moderator_roles` | Roles whose members may use moderation features (at most 100). |
+| `limits` | Per-server resource limits; see below. |
+| `modules.<id>` | `enabled`, an optional `capabilities` list, and `config` — validated against the module's own JSON Schema. |
+
+Unknown keys are errors, so a typo is reported instead of silently ignored. In a module's `config`,
+`null` means "use the default".
+
+### Presets and limits
+
+| | `small` | `medium` | `large` |
+| --- | --- | --- | --- |
+| `handler_timeout_secs` — how long a module may spend on one event | 10 | 10 | 15 |
+| `queue_capacity` — events waiting before new ones are dropped | 64 | 256 | 1024 |
+| `concurrency` — independent lanes handled in parallel | 4 | 8 | 32 |
+
+Allowed ranges: timeout 1–60, queue 8–10 000, concurrency 1–256.
+
+## Checking a document
+
+`GET /v1/schema` returns the JSON Schema of the whole document, including every module's section.
+Use it for editor completion or to generate forms.
+
+`POST /v1/guilds/{id}/config/validate` checks a document without storing it and returns what it
+resolves to. `GET /v1/guilds/{id}/config/effective` shows the complete configuration of a server
+with every default filled in.
+
+Problems are reported all at once, with a path and a stable code:
+
+```json
+{ "error": { "code": "invalid_config", "message": "the configuration has problems",
+  "issues": [ { "path": "modules.warn.config.limit", "code": "invalid_module_config",
+                "message": "99 is greater than the maximum of 10" } ] } }
+```
+
+Syntax errors carry the 1-based `line` and `column`.
+
+## Using the HTTP API
+
+All of these need `Authorization: Bearer $API_ADMIN_TOKEN`.
+
+```bash
+# read (YAML if you ask for it, JSON otherwise); the ETag is the revision
+curl -i -H "Authorization: Bearer $API_ADMIN_TOKEN" \
+     -H "Accept: application/yaml" \
+     http://127.0.0.1:8080/v1/guilds/$GUILD/config
+
+# write: If-Match says which revision you edited ("0" when none exists yet)
+curl -i -X PUT -H "Authorization: Bearer $API_ADMIN_TOKEN" \
+     -H 'If-Match: "0"' --data-binary @config.yaml \
+     http://127.0.0.1:8080/v1/guilds/$GUILD/config
+```
+
+- A write without `If-Match` is refused (`428`).
+- If someone else saved in between, the write is refused (`412`) and the response's `ETag` is the
+  current revision; reload and merge.
+- Invalid documents are refused (`422`) and nothing is stored.
+- A successful write takes effect immediately and is recorded in the history
+  (`GET /v1/guilds/{id}/config/history`) and the audit trail.
+
+Both YAML and JSON are accepted as the request body (JSON is YAML). Bodies are limited to 64 KiB,
+and YAML aliases are capped, so a hostile document cannot exhaust memory.

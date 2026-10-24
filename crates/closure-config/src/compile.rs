@@ -4,7 +4,7 @@ use std::sync::Arc;
 use closure_core::capability::CapabilitySet;
 use closure_core::module::{ModuleId, ModuleManifest, ModuleRuntime};
 use closure_core::registry::ModuleRegistry;
-use closure_core::settings::ModuleSettings;
+use closure_core::settings::{GuildPolicy, ModuleSettings};
 use jsonschema::Validator;
 use serde_json::Value;
 
@@ -136,6 +136,10 @@ fn compile_with(
         return Err(ConfigError::Invalid(issues));
     }
 
+    let policy = Arc::new(GuildPolicy {
+        log_channel: overrides.log_channel,
+        moderator_roles: moderator_roles.clone(),
+    });
     Ok(GuildSettings {
         effective: EffectiveConfig {
             version: CURRENT_VERSION,
@@ -147,6 +151,7 @@ fn compile_with(
             modules: effective_modules,
         },
         modules: module_settings,
+        policy,
     })
 }
 

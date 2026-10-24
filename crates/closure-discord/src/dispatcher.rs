@@ -474,6 +474,7 @@ fn context_for(
         guild,
         api,
         shared.settings.locale(guild),
+        shared.settings.policy(guild),
         Arc::clone(&settings.config),
         Arc::clone(&shared.translator),
     )

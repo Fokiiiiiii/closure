@@ -131,6 +131,7 @@ mod tests {
     use closure_core::client::{ApiClient, DiscordApi};
     use closure_core::event::{CommandInvocation, InteractionToken, UserInfo};
     use closure_core::registry::ModuleRegistry;
+    use closure_core::settings::GuildPolicy;
     use closure_core::testing::MockApi;
     use closure_i18n::TranslatorBuilder;
     use twilight_model::guild::Permissions;
@@ -177,6 +178,7 @@ mod tests {
                 module.manifest().id.clone(),
             ),
             guild_language,
+            Arc::new(GuildPolicy::default()),
             Arc::new(config),
             Arc::new(translators.build()),
         );
@@ -270,6 +272,7 @@ mod tests {
                 module.manifest().id.clone(),
             ),
             Locale::En,
+            Arc::new(GuildPolicy::default()),
             Arc::new(json!({ "ephemeral": "yes" })),
             Arc::new(closure_core::locale::KeyTranslator),
         );

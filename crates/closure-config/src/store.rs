@@ -4,7 +4,7 @@ use std::time::Duration;
 use closure_core::event::GuildId;
 use closure_core::locale::Locale;
 use closure_core::module::ModuleId;
-use closure_core::settings::{ModuleSettings, RuntimeLimits, SettingsProvider};
+use closure_core::settings::{GuildPolicy, ModuleSettings, RuntimeLimits, SettingsProvider};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 
@@ -159,6 +159,10 @@ impl SettingsProvider for SettingsStore {
         }
     }
 
+    fn policy(&self, guild: GuildId) -> Arc<GuildPolicy> {
+        Arc::clone(&self.settings(guild).policy)
+    }
+
     fn module(&self, guild: GuildId, module: &ModuleId) -> Option<ModuleSettings> {
         self.settings(guild).module(module).cloned()
     }
@@ -245,6 +249,25 @@ mod tests {
 
         store.set_preferred_locale(guild, None);
         assert_eq!(store.locale(guild), Locale::En);
+    }
+
+    #[test]
+    fn the_guild_policy_follows_the_document() {
+        let store = store();
+        let guild = Id::new(1);
+        assert_eq!(*store.policy(guild), GuildPolicy::default());
+
+        store
+            .set_guild_yaml(guild, "log_channel: 99\nmoderator_roles: [5, 6]\n")
+            .unwrap();
+        let policy = store.policy(guild);
+        assert_eq!(policy.log_channel, Some(Id::new(99)));
+        assert!(policy.is_moderator(&[Id::new(6)]));
+        assert_eq!(
+            *store.policy(Id::new(2)),
+            GuildPolicy::default(),
+            "other guilds are unaffected"
+        );
     }
 
     #[test]
