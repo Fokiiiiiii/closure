@@ -464,3 +464,78 @@ async fn the_guild_list_is_read_page_by_page_until_a_short_page() {
         requests[1].path
     );
 }
+
+#[tokio::test]
+async fn the_guild_of_a_channel_is_read_from_discord_when_the_cache_does_not_know_it() {
+    let discord = FakeDiscord::start(vec![
+        (200, r#"{"id":"100","type":0,"guild_id":"10"}"#),
+        (200, r#"{"id":"300","type":1}"#),
+        (404, r#"{"code":10003,"message":"Unknown Channel"}"#),
+    ])
+    .await;
+    let api = discord.api();
+
+    assert_eq!(
+        api.channel_guild(Id::new(100)).await,
+        Ok(Some(Id::new(10))),
+        "a guild channel"
+    );
+    assert_eq!(
+        api.channel_guild(Id::new(300)).await,
+        Ok(None),
+        "a direct message channel is in no guild"
+    );
+    assert_eq!(
+        api.channel_guild(Id::new(404)).await,
+        Err(DiscordError::NotFound),
+        "an unknown channel is an error, not an answer"
+    );
+
+    let paths: Vec<String> = discord.requests().into_iter().map(|r| r.path).collect();
+    assert_eq!(
+        paths,
+        [
+            "/api/v10/channels/100",
+            "/api/v10/channels/300",
+            "/api/v10/channels/404"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_channel_the_cache_knows_is_not_looked_up_again() {
+    struct KnowsChannel;
+    impl CacheView for KnowsChannel {
+        fn bot_user(&self) -> Option<closure_core::event::UserId> {
+            None
+        }
+        fn guild_owner(
+            &self,
+            _: closure_core::event::GuildId,
+        ) -> Option<closure_core::event::UserId> {
+            None
+        }
+        fn member_roles(
+            &self,
+            _: closure_core::event::GuildId,
+            _: closure_core::event::UserId,
+        ) -> Option<Vec<closure_core::event::RoleId>> {
+            None
+        }
+        fn role_position(&self, _: closure_core::event::RoleId) -> Option<i64> {
+            None
+        }
+        fn channel_guild(
+            &self,
+            channel: closure_core::event::ChannelId,
+        ) -> Option<closure_core::event::GuildId> {
+            (channel.get() == 100).then(|| Id::new(10))
+        }
+    }
+
+    let discord = FakeDiscord::start(vec![(500, "")]).await;
+    let api = discord.api().with_cache(Arc::new(KnowsChannel));
+
+    assert_eq!(api.channel_guild(Id::new(100)).await, Ok(Some(Id::new(10))));
+    assert!(discord.requests().is_empty(), "answered from the cache");
+}

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use closure_core::action::Action;
 use closure_core::error::DiscordError;
-use closure_core::event::{GuildId, RoleId, UserId};
+use closure_core::event::{ChannelId, GuildId, RoleId, UserId};
 use twilight_cache_inmemory::{CacheableRole, InMemoryCache};
 
 /// What the hierarchy check needs to know. Implemented over Twilight's cache, and by fakes in
@@ -25,6 +25,11 @@ pub trait CacheView: Send + Sync {
     /// Roles of a member, not including the implicit `@everyone` role.
     fn member_roles(&self, guild: GuildId, user: UserId) -> Option<Vec<RoleId>>;
     fn role_position(&self, role: RoleId) -> Option<i64>;
+    /// The guild a channel (or thread) belongs to, if the cache knows the channel. `None` means
+    /// "unknown", not "outside any guild", so callers fall back to asking Discord.
+    fn channel_guild(&self, _channel: ChannelId) -> Option<GuildId> {
+        None
+    }
 }
 
 /// [`CacheView`] over Twilight's in-memory cache.
@@ -48,6 +53,10 @@ impl CacheView for InMemoryCacheView {
 
     fn role_position(&self, role: RoleId) -> Option<i64> {
         self.0.role(role).map(|role| role.position())
+    }
+
+    fn channel_guild(&self, channel: ChannelId) -> Option<GuildId> {
+        self.0.channel(channel).and_then(|channel| channel.guild_id)
     }
 }
 

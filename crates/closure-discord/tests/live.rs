@@ -354,3 +354,74 @@ async fn in_guild_commands_can_be_registered_and_cleared() {
     .unwrap();
     assert_eq!(published, commands.len());
 }
+
+#[tokio::test]
+#[ignore = "talks to the real Discord API"]
+async fn in_guild_a_client_bound_to_another_guild_cannot_touch_this_guilds_channels() {
+    use closure_core::capability::Capability;
+    use closure_core::client::ApiClient;
+    use closure_core::module::ModuleId;
+
+    let live = live();
+    let note = reason("closure live test");
+    let Outcome::Channel(channel) = live
+        .api
+        .execute(Action::CreateChannel {
+            guild_id: live.guild,
+            spec: NewChannel {
+                name: "closure-scope-test".into(),
+                kind: ChannelKind::Text,
+                parent_id: None,
+                topic: None,
+                nsfw: false,
+                slowmode_seconds: 0,
+                overwrites: vec![],
+            },
+            reason: note.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected a channel");
+    };
+
+    let outcome = async {
+        assert_eq!(
+            live.api.channel_guild(channel.id).await?,
+            Some(live.guild),
+            "Discord says which guild the channel is in"
+        );
+
+        let api: Arc<dyn DiscordApi> =
+            Arc::new(TwilightApi::new(Arc::clone(&live.http), live.application));
+        let granted = || {
+            [Capability::SendMessages, Capability::ManageChannels]
+                .into_iter()
+                .collect()
+        };
+        let module = ModuleId::new("scope-test").unwrap();
+
+        let elsewhere =
+            ApiClient::new(Arc::clone(&api), granted(), module.clone()).scoped_to(Id::new(1));
+        let refused = elsewhere.send_message(channel.id, "must not be sent").await;
+        assert!(
+            matches!(refused, Err(DiscordError::Forbidden(_))),
+            "{refused:?}"
+        );
+
+        let here = ApiClient::new(api, granted(), module).scoped_to(live.guild);
+        here.send_message(channel.id, "sent by a client bound to this guild")
+            .await?;
+        Ok::<(), DiscordError>(())
+    }
+    .await;
+
+    live.api
+        .execute(Action::DeleteChannel {
+            channel_id: channel.id,
+            reason: note,
+        })
+        .await
+        .unwrap();
+    outcome.unwrap();
+}

@@ -63,10 +63,15 @@ gateway shard ─► cache.update ─► convert ─► guild hooks ─► Dispa
    records metrics.
 
 A module never receives an HTTP client, a token or a database handle. Its `ApiClient` is bound to
-the guild of the event: an action that names another guild is refused, whatever capabilities the
-module holds. Actions that identify only a channel or a message name no guild and cannot be checked
-that way; that is acceptable for trusted native modules, but must be closed (by resolving the
-channel's guild) before untrusted scripted modules are allowed to run.
+the guild of the event: an action that targets another guild is refused, whatever capabilities
+the module holds. An action that names a guild is compared directly. One that identifies only a
+channel or a message (send, edit, delete, react, channel edits and permission overwrites) is
+checked by looking up the channel's guild: from the cache when it knows the channel, otherwise
+from Discord. A channel in another guild, in no guild (a direct message), or whose guild cannot
+be determined is refused, so a failing lookup never lets an action through. Only the actions that
+answer an interaction (`Respond`, `Followup`, `EditResponse`) are not checked this way: they carry
+the token of the interaction the module was handed, and a module is only handed tokens of events
+of its own guild.
 
 ## Configuration
 

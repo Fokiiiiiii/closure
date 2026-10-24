@@ -66,8 +66,9 @@ Things to know:
 - **Be quick, and never block a thread.** Each call has a timeout (the guild's
   `handler_timeout_secs`), but it can only stop a module at an `await`; code that blocks or spawns
   blocking work keeps running after the timeout.
-- **You act within one guild.** Your client is bound to the guild of the event, and an action that
-  names another guild is refused.
+- **You act within one guild.** Your client is bound to the guild of the event. An action that
+  targets another guild, or a channel or message outside it, is refused. Acting on a channel costs
+  a lookup of its guild if the cache does not know it.
 - **Order**: events about one channel, user or role arrive in order; unrelated events may be handled
   at the same time, so share state through `Arc` and locks, not assumptions.
 - Check `ctx.policy().is_moderator(&roles)` (and the invoker's Discord permissions) before

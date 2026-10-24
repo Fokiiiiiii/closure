@@ -564,7 +564,8 @@ impl Action {
     }
 
     /// The guild the action names, if it names one. Actions that identify only a channel, a
-    /// message or an interaction return `None`: their guild cannot be known without a lookup.
+    /// message or an interaction return `None`: their guild cannot be known without a lookup
+    /// (for channels and messages, see [`channel_id`](Self::channel_id)).
     #[must_use]
     pub fn guild_id(&self) -> Option<GuildId> {
         match self {
@@ -597,6 +598,48 @@ impl Action {
             | Self::DeleteChannel { .. }
             | Self::SetPermissionOverwrite { .. }
             | Self::DeletePermissionOverwrite { .. }
+            | Self::Respond { .. }
+            | Self::Followup { .. }
+            | Self::EditResponse { .. } => None,
+        }
+    }
+
+    /// The channel the action targets, for the actions that identify their target by a channel
+    /// (or by a message in one) rather than by a guild. Which guild that channel belongs to has
+    /// to be looked up; see [`DiscordApi::channel_guild`](crate::client::DiscordApi::channel_guild).
+    #[must_use]
+    pub fn channel_id(&self) -> Option<ChannelId> {
+        match self {
+            Self::SendMessage { channel_id, .. }
+            | Self::EditMessage { channel_id, .. }
+            | Self::DeleteMessage { channel_id, .. }
+            | Self::BulkDeleteMessages { channel_id, .. }
+            | Self::AddReaction { channel_id, .. }
+            | Self::GetChannel { channel_id }
+            | Self::EditChannel { channel_id, .. }
+            | Self::DeleteChannel { channel_id, .. }
+            | Self::SetPermissionOverwrite { channel_id, .. }
+            | Self::DeletePermissionOverwrite { channel_id, .. } => Some(*channel_id),
+            // These name a guild, or are bound to the interaction they answer.
+            Self::GetGuild { .. }
+            | Self::GetMember { .. }
+            | Self::Kick { .. }
+            | Self::Ban { .. }
+            | Self::Unban { .. }
+            | Self::Timeout { .. }
+            | Self::SetNickname { .. }
+            | Self::AddRole { .. }
+            | Self::RemoveRole { .. }
+            | Self::ListBans { .. }
+            | Self::CreateChannel { .. }
+            | Self::ListRoles { .. }
+            | Self::CreateRole { .. }
+            | Self::EditRole { .. }
+            | Self::DeleteRole { .. }
+            | Self::ListAutoModRules { .. }
+            | Self::CreateAutoModRule { .. }
+            | Self::DeleteAutoModRule { .. }
+            | Self::GetAuditLog { .. }
             | Self::Respond { .. }
             | Self::Followup { .. }
             | Self::EditResponse { .. } => None,

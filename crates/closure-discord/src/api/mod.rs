@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use closure_core::action::{Action, Outcome};
 use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
-use closure_core::event::ApplicationId;
+use closure_core::event::{ApplicationId, ChannelId, GuildId};
 use serde::de::DeserializeOwned;
 use twilight_http::Client;
 use twilight_http::response::Response;
@@ -197,6 +197,30 @@ impl DiscordApi for TwilightApi {
         metrics::histogram!("closure_discord_action_seconds", "action" => name)
             .record(started.elapsed().as_secs_f64());
         result
+    }
+
+    /// Answered from the cache when it knows the channel; otherwise Discord is asked, with the
+    /// same retries as any other read. A channel does not move between guilds, so a cached
+    /// answer cannot go stale.
+    async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
+        if let Some(guild) = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.channel_guild(channel))
+        {
+            return Ok(Some(guild));
+        }
+        match self
+            .execute_checked(&Action::GetChannel {
+                channel_id: channel,
+            })
+            .await?
+        {
+            Outcome::Channel(found) => Ok(found.guild_id),
+            _ => Err(DiscordError::Fatal(
+                "unexpected outcome for `get_channel`".into(),
+            )),
+        }
     }
 }
 
