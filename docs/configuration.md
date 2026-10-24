@@ -62,6 +62,12 @@ second window. A new `handler_timeout_secs` and `queue_capacity` apply to the ne
 ## Checking a document
 
 `GET /v1/schema` returns the JSON Schema of the whole document, including every module's section.
+A document holds only what differs from the defaults, so the published schema is the one of an
+override: `required` is dropped where values are merged key by key, and `null` is accepted for
+any property that can be set (it means "the default"). The items of a list are replaced as a
+whole and stay strict. A module's schema may use `$defs` and `$ref` (as `schemars` writes them);
+each module's schema is its own reference scope, so two modules may define a type of the same
+name. Under `if` and `oneOf`, `null` cannot be expressed this way and is judged on its own.
 Use it for editor completion or to generate forms.
 
 `POST /v1/guilds/{id}/config/validate` checks a document without storing it and returns what it
