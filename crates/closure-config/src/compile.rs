@@ -44,6 +44,13 @@ impl ConfigCompiler {
         let mut validators = HashMap::new();
         for module in registry.iter() {
             let manifest = module.manifest();
+            // A schema that cannot be published faithfully is refused now, not published wrongly.
+            crate::schema::check_supported(&manifest.config_schema).map_err(|message| {
+                ConfigError::BadModuleSchema {
+                    module: manifest.id.to_string(),
+                    message,
+                }
+            })?;
             let validator =
                 jsonschema::validator_for(&manifest.config_schema).map_err(|error| {
                     ConfigError::BadModuleSchema {

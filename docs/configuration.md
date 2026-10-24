@@ -63,11 +63,23 @@ second window. A new `handler_timeout_secs` and `queue_capacity` apply to the ne
 
 `GET /v1/schema` returns the JSON Schema of the whole document, including every module's section.
 A document holds only what differs from the defaults, so the published schema is the one of an
-override: `required` is dropped where values are merged key by key, and `null` is accepted for
-any property that can be set (it means "the default"). The items of a list are replaced as a
-whole and stay strict. A module's schema may use `$defs` and `$ref` (as `schemars` writes them);
-each module's schema is its own reference scope, so two modules may define a type of the same
-name. Under `if` and `oneOf`, `null` cannot be expressed this way and is judged on its own.
+**override**, made from each module's own schema. Its contract: it never rejects an override
+that the bot accepts. It may let one through that the bot then refuses, because the bot judges
+the result of merging the override into the defaults and the schema only sees the override (for
+example an object that lacks a property no default fills in).
+
+To keep that contract, wherever values are merged key by key: `null` is accepted for any
+property (it means "the default") and for the whole `config`; `required`, `minProperties`,
+`dependentRequired`, `dependentSchemas` and `not` are dropped; `oneOf` and `if`/`then`/`else`
+are weakened to "any of the branches"; and an unknown key may only be `null`. The items of a list
+are replaced as a whole and stay strict.
+
+A module's schema may use `$defs`/`definitions` and `$ref` (as `schemars` writes them, also `#` for
+the root); each module's schema is its own reference scope, so two modules may define a type of the
+same name, and a schema that names itself with `$id` keeps its name. The bot refuses to start with
+a module schema it cannot translate: `$anchor`, `$dynamicRef` and the like, a `$ref` that is not
+`#`, `#/$defs/<name>` or `#/definitions/<name>`, or a `$schema` other than draft 2020-12. Nesting
+and reference chains deeper than 128 levels are left as written (strict).
 Use it for editor completion or to generate forms.
 
 `POST /v1/guilds/{id}/config/validate` checks a document without storing it and returns what it
