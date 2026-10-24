@@ -5,11 +5,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use closure_core::action::{Action, InteractionResponse};
 use closure_core::capability::{Capability, CapabilitySet};
-use closure_core::client::DiscordApi;
+use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{
     ChannelId, CommandInvocation, Event, EventKind, InteractionToken, MessageInfo, UserInfo,
 };
+use closure_core::interaction::InteractionGuilds;
 use closure_core::locale::Locale;
 use closure_core::module::{CommandSpec, EventContext, Module, ModuleId, ModuleManifest};
 use closure_core::settings::{GuildPolicy, RuntimeLimits, SettingsProvider};
@@ -42,6 +43,8 @@ enum Behavior {
     TryBan,
     /// Answers the command it received, then tries a token it was never given.
     RespondThenForge,
+    /// Keeps the client of a message event, then replays it on a command of another guild.
+    HoldThenReplay,
     /// Logs the guild policy the module was given.
     ReadPolicy,
 }
@@ -52,8 +55,11 @@ struct Probe {
     behavior: Mutex<Behavior>,
     running: AtomicUsize,
     max_running: AtomicUsize,
+
     /// How many handlers were still running when `on_unload` started.
     running_at_unload: AtomicUsize,
+    /// A client a module kept from an earlier event.
+    held: Mutex<Option<ApiClient>>,
 }
 
 impl Probe {
@@ -68,6 +74,7 @@ impl Probe {
             running: AtomicUsize::new(0),
             max_running: AtomicUsize::new(0),
             running_at_unload: AtomicUsize::new(usize::MAX),
+            held: Mutex::new(None),
         })
     }
 
@@ -89,6 +96,39 @@ impl Probe {
 
     fn set(&self, behavior: Behavior) {
         *self.behavior.lock().unwrap() = behavior;
+    }
+
+    /// Keeps the client of a message event, then replays it on a command of another guild,
+    /// also with a record of interactions of the module's own making.
+    async fn hold_then_replay(&self, ctx: &EventContext, event: &Event) {
+        match event {
+            Event::MessageCreated(_) => {
+                *self.held.lock().unwrap() = Some(ctx.api.clone());
+            }
+            Event::Command(invocation) => {
+                let held = self.held.lock().unwrap().clone().expect("a held client");
+                let reply = || InteractionReply {
+                    content: Some("pong".into()),
+                    embeds: vec![],
+                    ephemeral: true,
+                };
+                let plain = held.respond(invocation, reply()).await;
+                // In this record the token belongs to the guild the held client is bound to.
+                let own_record = Arc::new(InteractionGuilds::default());
+                own_record.register(&invocation.token, Id::new(GUILD));
+                let forged = held
+                    .clone()
+                    .with_interactions(own_record)
+                    .respond(invocation, reply())
+                    .await;
+                self.log.lock().unwrap().push(format!(
+                    "plain:{} forged:{}",
+                    matches!(plain, Err(DiscordError::Forbidden(_))),
+                    matches!(forged, Err(DiscordError::Forbidden(_)))
+                ));
+            }
+            _ => {}
+        }
     }
 
     fn log(&self) -> Vec<String> {
@@ -179,6 +219,10 @@ impl Module for Probe {
                     policy.log_channel.map(Id::get),
                     policy.is_moderator(&[Id::new(5)])
                 ));
+                Ok(())
+            }
+            Behavior::HoldThenReplay => {
+                self.hold_then_replay(ctx, event).await;
                 Ok(())
             }
             Behavior::RespondThenForge => {
@@ -1096,4 +1140,48 @@ async fn a_module_can_answer_the_interaction_it_was_given_but_not_one_it_was_not
         1,
         "only the module's own answer was sent"
     );
+}
+
+#[tokio::test]
+async fn a_client_kept_from_one_guild_cannot_answer_an_interaction_of_another() {
+    // One module, shared by both guilds, keeps the client it got for a message in guild 1 and
+    // uses it, also with a record of its own making, on a command that arrives in guild 2.
+    let mut module = Probe::new(
+        "tools",
+        &[EventKind::MessageCreated],
+        &[Capability::RespondToInteractions],
+    );
+    Arc::get_mut(&mut module)
+        .unwrap()
+        .manifest
+        .commands
+        .push(CommandSpec {
+            name: "ping".into(),
+            description: "d".into(),
+            options: vec![],
+            subcommands: vec![],
+            default_member_permissions: None,
+        });
+    module.set(Behavior::HoldThenReplay);
+    let h = harness(
+        &[(&module, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.flush().await;
+    let Event::Command(mut invocation) = command("ping", None) else {
+        unreachable!()
+    };
+    invocation.guild_id = Id::new(2);
+    h.dispatcher.dispatch(Event::Command(invocation));
+    h.dispatcher.flush().await;
+
+    assert_eq!(
+        module.log(),
+        ["load", "msg:1", "command", "plain:true forged:true"]
+    );
+    assert_eq!(h.api.actions(), [], "nothing was sent to Discord");
 }

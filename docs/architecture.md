@@ -76,7 +76,9 @@ Answers to an interaction (`Respond`, `Followup`, `EditResponse`) are checked ag
 host keeps: when a command arrives, before any module sees it, its token is recorded together
 with the guild it came from. A module is one object shared by all guilds and could keep a client
 from one guild and use it with a token it received in another; the client therefore answers only
-tokens recorded for its own guild, and refuses unknown ones. Records expire with the token.
+tokens recorded for its own guild, and refuses unknown ones. The record cannot be replaced on a
+client that is already bound to a guild, so a module cannot swap in a record of its own. Records
+expire with the token; when the table is full new tokens are refused, never old ones dropped.
 
 ## Configuration
 

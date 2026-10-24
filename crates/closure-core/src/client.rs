@@ -70,9 +70,17 @@ impl ApiClient {
 
     /// Tells the client which guild each interaction token belongs to. A client that is bound
     /// to a guild and has no such record refuses every interaction response.
+    ///
+    /// Only the host's setup does this, before the client is bound to a guild: once it is bound,
+    /// or already has a record, the call changes nothing. A module holds a bound client and
+    /// could otherwise swap in a record of its own, in which any token belongs to any guild.
     #[must_use]
     pub fn with_interactions(mut self, interactions: Arc<InteractionGuilds>) -> Self {
-        self.interactions = Some(interactions);
+        if self.guild.is_some() || self.interactions.is_some() {
+            tracing::warn!(module = %self.module, "the interaction record of a bound client cannot be replaced");
+        } else {
+            self.interactions = Some(interactions);
+        }
         self
     }
 
@@ -686,6 +694,36 @@ mod tests {
             3,
             "only the own guild's three went through"
         );
+    }
+
+    #[tokio::test]
+    async fn a_bound_client_cannot_be_given_a_record_of_its_own_making() {
+        let api = Arc::new(MockApi::default());
+        let real = Arc::new(InteractionGuilds::default());
+        real.register(&InteractionToken::new("token-of-guild-2"), Id::new(2));
+        let forged = Arc::new(InteractionGuilds::default());
+        forged.register(&InteractionToken::new("token-of-guild-2"), Id::new(1));
+
+        let with_record = client(&api, &[Capability::RespondToInteractions])
+            .with_interactions(Arc::clone(&real))
+            .scoped_to(Id::new(1));
+        let without_record =
+            client(&api, &[Capability::RespondToInteractions]).scoped_to(Id::new(1));
+
+        for client in [with_record, without_record] {
+            // What a module holding the client could try.
+            let client = client.with_interactions(Arc::clone(&forged));
+            for make in [respond, followup, edit_response] {
+                let action = make("token-of-guild-2");
+                let name = action.name();
+                let result = client.execute(action).await;
+                assert!(
+                    matches!(result, Err(DiscordError::Forbidden(_))),
+                    "{name}: {result:?}"
+                );
+            }
+        }
+        assert_eq!(api.actions(), []);
     }
 
     #[tokio::test]

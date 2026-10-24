@@ -280,10 +280,6 @@ impl Dispatcher {
         metrics::counter!("closure_events_total", "kind" => kind).increment(1);
 
         let guild = event.guild_id();
-        // Before any module can see the token: it decides whose interaction it may answer.
-        if let Event::Command(invocation) = &event {
-            self.shared.interactions.register(&invocation.token, guild);
-        }
         let limits = self.shared.settings.limits(guild);
         let Some(lanes) = self.lanes_for(guild, limits.concurrency) else {
             metrics::counter!("closure_events_dropped_total", "reason" => "shutdown").increment(1);
@@ -300,6 +296,12 @@ impl Dispatcher {
                 .increment(1);
             tracing::warn!(%guild, kind, "event dropped: the guild's queue is full");
             return;
+        }
+
+        // Once the event is accepted and before any module can see it: the record decides whose
+        // interaction a module may answer. Events dropped above never use up a record.
+        if let Event::Command(invocation) = &event {
+            self.shared.interactions.register(&invocation.token, guild);
         }
 
         let sender = lanes.sender_for(&event).clone();
