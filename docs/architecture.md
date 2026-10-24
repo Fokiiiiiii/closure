@@ -40,14 +40,18 @@ gateway shard ─► cache.update ─► convert ─► guild hooks ─► Dispa
    stops the shard from being read, which would get the connection cut; the cost is that a
    module may see a guild arrive a moment before the hook has finished. Because the gateway only
    reports changes while connected, start-up first reads the bot's guild list from Discord and
-   records guilds joined or left during downtime.
+   records guilds joined or left during downtime. The hook task ends once the last shard has
+   finished, after running what is still queued.
 3. The `Dispatcher` picks the guild's *lane* from the channel, user or role the event concerns.
    Events in one lane run in order; lanes run in parallel. Slash commands use lanes of their own.
    The guild has one budget of events waiting or running (commands have another): when it is used
    up the event is dropped and counted, never buffered without limit.
 4. Each module call runs in its own task with a timeout. A panic or a hang costs that call only.
    After repeated failures a module is paused for that guild and then given one trial call (circuit
-   breaker). Errors that mean "Discord refused" do not count against the module.
+   breaker). Errors that mean "Discord refused" do not count against the module, and the result
+   of a call admitted before the breaker opened is ignored, so it cannot decide the trial.
+   On shutdown, module calls that overrun the grace period are aborted and awaited before any
+   module is unloaded.
 5. The module asks for Discord side effects through `ApiClient`. It rejects an action the module
    has no capability for, validates it (lengths, ranges, required audit-log reason), and only then
    hands it to `TwilightApi`.

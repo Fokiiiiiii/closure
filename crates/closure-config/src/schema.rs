@@ -74,6 +74,9 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
 /// In a module's configuration `null` means "use the default", so the published schema must
 /// accept it wherever a property may be set. (Array items are replaced whole, so `null` has no
 /// special meaning there and they stay strict.)
+///
+/// Properties can sit in the schema itself or in any keyword that describes the same object:
+/// `allOf`, `anyOf`, `oneOf`, `if`/`then`/`else`, and `patternProperties`.
 fn allow_null_properties(schema: &mut Value) {
     let Value::Object(map) = schema else { return };
     let mut nullable = |sub: &mut Value| {
@@ -81,11 +84,23 @@ fn allow_null_properties(schema: &mut Value) {
         let inner = sub.take();
         *sub = json!({ "anyOf": [inner, { "type": "null" }] });
     };
-    if let Some(Value::Object(properties)) = map.get_mut("properties") {
-        properties.values_mut().for_each(&mut nullable);
+    for keyword in ["properties", "patternProperties"] {
+        if let Some(Value::Object(properties)) = map.get_mut(keyword) {
+            properties.values_mut().for_each(&mut nullable);
+        }
     }
     if let Some(additional @ Value::Object(_)) = map.get_mut("additionalProperties") {
         nullable(additional);
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(Value::Array(branches)) = map.get_mut(keyword) {
+            branches.iter_mut().for_each(allow_null_properties);
+        }
+    }
+    for keyword in ["if", "then", "else"] {
+        if let Some(branch) = map.get_mut(keyword) {
+            allow_null_properties(branch);
+        }
     }
 }
 
@@ -102,12 +117,16 @@ mod tests {
     use crate::yaml::overrides_to_yaml;
 
     fn registry() -> ModuleRegistry {
-        let mut manifest = ModuleManifest::new(ModuleId::new("warn").unwrap(), "Warn", "0.1.0");
-        manifest.config_schema = json!({
+        registry_with(json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
             "properties": { "limit": { "type": "integer" } }
-        });
+        }))
+    }
+
+    fn registry_with(config_schema: Value) -> ModuleRegistry {
+        let mut manifest = ModuleManifest::new(ModuleId::new("warn").unwrap(), "Warn", "0.1.0");
+        manifest.config_schema = config_schema;
         manifest.capabilities = [Capability::SendMessages].into_iter().collect();
         let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
         ModuleRegistry::new(vec![module]).unwrap()
@@ -167,6 +186,32 @@ mod tests {
         assert!(validator.is_valid(&config(json!({ "limit": null }))));
         assert!(validator.is_valid(&config(json!({ "limit": 3 }))));
         assert!(!validator.is_valid(&config(json!({ "limit": "three" }))));
+    }
+
+    #[test]
+    fn null_is_accepted_for_properties_declared_inside_combinator_keywords() {
+        let schema = document_schema(&registry_with(json!({
+            "type": "object",
+            "allOf": [{ "properties": { "limit": { "type": "integer", "minimum": 1 } } }],
+            "anyOf": [{ "properties": { "a": { "type": "integer" } } }],
+            "if": { "properties": { "mode": { "const": "x" } } },
+            "then": { "properties": { "b": { "type": "integer" } } },
+            "patternProperties": { "^x_": { "type": "string" } }
+        })))
+        .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let config = |value: Value| json!({ "modules": { "warn": { "config": value } } });
+
+        for key in ["limit", "a", "mode", "b", "x_name"] {
+            assert!(
+                validator.is_valid(&config(json!({ key: null }))),
+                "{key} should accept null"
+            );
+        }
+        assert!(validator.is_valid(&config(json!({ "limit": 3 }))));
+        assert!(!validator.is_valid(&config(json!({ "limit": 0 }))));
+        assert!(!validator.is_valid(&config(json!({ "limit": "three" }))));
+        assert!(!validator.is_valid(&config(json!({ "x_name": 5 }))));
     }
 
     #[test]

@@ -167,6 +167,14 @@ struct ShardContext {
     shutdown: CancellationToken,
 }
 
+impl Drop for ShardContext {
+    /// Every shard task holds the context, so it is dropped when the last of them has finished,
+    /// whether that is because of a shutdown or because Discord closed them for good.
+    fn drop(&mut self) {
+        self.hooks.close();
+    }
+}
+
 /// A guild arrival or departure waiting for its hook to run.
 #[derive(Debug)]
 enum HookJob {
@@ -196,42 +204,54 @@ impl HookJob {
 /// can never stop a shard from being read (which would get the connection cut).
 #[derive(Default)]
 struct HookQueue {
-    pending: Mutex<HashMap<GuildId, HookJob>>,
+    state: Mutex<HookQueueState>,
     wake: Notify,
+}
+
+#[derive(Default)]
+struct HookQueueState {
+    pending: HashMap<GuildId, HookJob>,
+    /// Set once no shard can push any more.
+    closed: bool,
 }
 
 impl HookQueue {
     fn push(&self, job: HookJob) {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(job.guild(), job);
+        self.state().pending.insert(job.guild(), job);
         self.wake.notify_one();
     }
 
-    fn take(&self) -> Vec<HookJob> {
-        std::mem::take(&mut *self.pending.lock().unwrap_or_else(PoisonError::into_inner))
-            .into_values()
-            .collect()
+    /// Declares that nothing will be pushed any more, so the worker may end once it is idle.
+    fn close(&self) {
+        self.state().closed = true;
+        self.wake.notify_one();
+    }
+
+    /// Everything pending, and whether the queue is closed. Both are read under one lock, so a
+    /// closed queue that reports no jobs really is finished.
+    fn take(&self) -> (Vec<HookJob>, bool) {
+        let mut state = self.state();
+        (
+            std::mem::take(&mut state.pending).into_values().collect(),
+            state.closed,
+        )
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, HookQueueState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// Runs queued hooks one at a time. After `shutdown` it finishes what is queued and ends.
-async fn run_hook_worker(
-    hooks: Arc<dyn GuildHooks>,
-    queue: Arc<HookQueue>,
-    shutdown: CancellationToken,
-) {
+/// Runs queued hooks one at a time. Ends once the queue is closed and empty, so the hooks of
+/// events handled while the shards were shutting down are not lost.
+async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
     loop {
-        let jobs = queue.take();
+        let (jobs, closed) = queue.take();
         if jobs.is_empty() {
-            if shutdown.is_cancelled() {
+            if closed {
                 return;
             }
-            tokio::select! {
-                () = queue.wake.notified() => {}
-                () = shutdown.cancelled() => {}
-            }
+            queue.wake.notified().await;
             continue;
         }
         for job in jobs {
@@ -298,7 +318,7 @@ pub async fn start_gateway(
         shutdown,
     });
     let tracker = TaskTracker::new();
-    tracker.spawn(run_hook_worker(hooks, hook_queue, context.shutdown.clone()));
+    tracker.spawn(run_hook_worker(hooks, hook_queue));
     for shard in shards {
         tracker.spawn(run_shard(shard, Arc::clone(&context)));
     }
@@ -444,53 +464,121 @@ mod tests {
         assert_eq!(readiness_change(&Event::GatewayHeartbeatAck), None);
     }
 
-    #[tokio::test]
-    async fn the_newest_hook_of_a_guild_wins_and_pushing_never_waits() {
-        use std::sync::Mutex;
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<String>>);
 
-        #[derive(Default)]
-        struct Recorder(Mutex<Vec<String>>);
-
-        #[async_trait]
-        impl GuildHooks for Recorder {
-            async fn guild_available(&self, guild: GuildId, name: &str, _: Option<Locale>) {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push(format!("available:{guild}:{name}"));
-            }
-
-            async fn guild_removed(&self, guild: GuildId) {
-                self.0.lock().unwrap().push(format!("removed:{guild}"));
-            }
+    #[async_trait]
+    impl GuildHooks for Recorder {
+        async fn guild_available(&self, guild: GuildId, name: &str, _: Option<Locale>) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("available:{guild}:{name}"));
         }
 
+        async fn guild_removed(&self, guild: GuildId) {
+            self.0.lock().unwrap().push(format!("removed:{guild}"));
+        }
+    }
+
+    fn available(guild: u64, name: &str) -> HookJob {
+        HookJob::Available {
+            guild: twilight_model::id::Id::new(guild),
+            name: name.into(),
+            preferred_locale: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_newest_hook_of_a_guild_wins_and_pushing_never_waits() {
         let recorder = Arc::new(Recorder::default());
         let queue = Arc::new(HookQueue::default());
-        let shutdown = CancellationToken::new();
         let guild: GuildId = twilight_model::id::Id::new(7);
 
         // Far more pushes than any bounded channel would hold, with no worker running yet:
         // every push returns at once and the queue keeps one entry per guild.
         for round in 0..100_000 {
-            queue.push(HookJob::Available {
-                guild,
-                name: round.to_string(),
-                preferred_locale: None,
-            });
+            queue.push(available(7, &round.to_string()));
         }
         queue.push(HookJob::Removed { guild });
-        assert_eq!(queue.pending.lock().unwrap().len(), 1);
+        assert_eq!(queue.state().pending.len(), 1);
 
-        shutdown.cancel();
+        queue.close();
         run_hook_worker(
             Arc::clone(&recorder) as Arc<dyn GuildHooks>,
             Arc::clone(&queue),
-            shutdown,
         )
         .await;
 
         assert_eq!(*recorder.0.lock().unwrap(), ["removed:7"]);
+    }
+
+    #[tokio::test]
+    async fn the_worker_ends_when_the_queue_is_closed_without_any_shutdown_request() {
+        let recorder = Arc::new(Recorder::default());
+        let queue = Arc::new(HookQueue::default());
+        let worker = tokio::spawn(run_hook_worker(
+            Arc::clone(&recorder) as Arc<dyn GuildHooks>,
+            Arc::clone(&queue),
+        ));
+        tokio::task::yield_now().await;
+        assert!(!worker.is_finished(), "an open queue keeps the worker");
+
+        queue.close();
+
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("a closed, empty queue must end the worker")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hooks_pushed_right_before_the_queue_closes_are_still_run() {
+        let recorder = Arc::new(Recorder::default());
+        let queue = Arc::new(HookQueue::default());
+        let worker = tokio::spawn(run_hook_worker(
+            Arc::clone(&recorder) as Arc<dyn GuildHooks>,
+            Arc::clone(&queue),
+        ));
+        tokio::task::yield_now().await;
+
+        queue.push(available(1, "a"));
+        queue.push(available(2, "b"));
+        queue.close();
+        worker.await.unwrap();
+
+        let mut seen = recorder.0.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(seen, ["available:1:a", "available:2:b"]);
+    }
+
+    #[tokio::test]
+    async fn the_queue_closes_when_the_last_shard_context_is_dropped() {
+        use closure_core::testing::{MockApi, StaticSettings};
+
+        let dispatcher = Dispatcher::start(
+            Arc::new(ModuleRegistry::new(vec![]).unwrap()),
+            Arc::new(StaticSettings::new([])),
+            Arc::new(MockApi::default()),
+            Arc::new(closure_i18n::TranslatorBuilder::new().unwrap().build()),
+            crate::DispatcherConfig::default(),
+        )
+        .await
+        .unwrap();
+        let queue = Arc::new(HookQueue::default());
+        let context = Arc::new(ShardContext {
+            cache: new_cache(),
+            dispatcher,
+            hooks: Arc::clone(&queue),
+            health: Arc::new(GatewayHealth::new(2)),
+            shutdown: CancellationToken::new(),
+        });
+        let second = Arc::clone(&context);
+
+        drop(context);
+        assert!(!queue.take().1, "one shard is still running");
+        drop(second);
+        assert!(queue.take().1, "the last shard is gone");
     }
 
     #[test]

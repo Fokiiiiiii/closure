@@ -3,7 +3,12 @@ use std::net::SocketAddr;
 use std::num::NonZeroU64;
 
 use clap::{Parser, ValueEnum};
-use tracing_subscriber::EnvFilter;
+use tracing::Subscriber;
+use tracing_subscriber::filter::{FilterExt, LevelFilter, Targets};
+use tracing_subscriber::layer::{Filter, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum LogFormat {
@@ -69,29 +74,43 @@ impl fmt::Debug for Args {
     }
 }
 
-/// The log filter to use, given `RUST_LOG`.
+/// The filter for log output: `RUST_LOG` (default `info`), and on top of it a hard cap that keeps
+/// `twilight_http` and its modules at `warn`.
 ///
 /// Twilight's request spans carry the full request URL, which contains interaction tokens, and any
-/// event logged inside such a span prints it. `twilight_http` is therefore kept at `warn` even
-/// when `RUST_LOG` asks for more, unless it names `twilight_http` itself, which opts in knowingly.
-fn log_filter(rust_log: Option<&str>) -> String {
-    const QUIET: &str = "twilight_http=warn";
-    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) if value.contains("twilight_http") => value.to_owned(),
-        Some(value) => format!("{value},{QUIET}"),
-        None => format!("info,{QUIET}"),
-    }
+/// event logged inside such a span prints it. The cap is a separate filter rather than a
+/// directive added to `RUST_LOG`, so no `RUST_LOG` value can lift it, however specific or broad.
+fn log_filter<S>(rust_log: Option<&str>) -> impl Filter<S> + use<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let requested = rust_log
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| EnvFilter::try_new(value).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    let cap = Targets::new()
+        .with_default(LevelFilter::TRACE)
+        .with_target("twilight_http", LevelFilter::WARN);
+    requested.and(cap)
 }
 
 impl Args {
     /// Installs the global logger. `RUST_LOG` overrides the default level (`info`).
     pub fn init_logging(&self) {
-        let filter = EnvFilter::try_new(log_filter(std::env::var("RUST_LOG").ok().as_deref()))
-            .unwrap_or_else(|_| EnvFilter::new(log_filter(None)));
-        let builder = tracing_subscriber::fmt().with_env_filter(filter);
+        let rust_log = std::env::var("RUST_LOG").ok();
+        let registry = tracing_subscriber::registry();
         match self.log_format {
-            LogFormat::Pretty => builder.init(),
-            LogFormat::Json => builder.json().init(),
+            LogFormat::Pretty => registry
+                .with(tracing_subscriber::fmt::layer().with_filter(log_filter(rust_log.as_deref())))
+                .init(),
+            LogFormat::Json => registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_filter(log_filter(rust_log.as_deref())),
+                )
+                .init(),
         }
     }
 }
@@ -167,21 +186,70 @@ mod tests {
         }
     }
 
+    /// Runs a request-like span (target `twilight_http`, URL with a token) containing an event of
+    /// the application, and returns what the logger wrote.
+    fn log_with(rust_log: &str) -> String {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .with_filter(log_filter(Some(rust_log))),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                target: "twilight_http::request",
+                "request",
+                url = "/interactions/1/SECRET-TOKEN/callback"
+            );
+            let _entered = span.enter();
+            tracing::debug!(target: "twilight_http::client", "sending SECRET-TOKEN");
+            tracing::info!(target: "closure::app", "handled");
+        });
+        let bytes = buffer.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
     #[test]
-    fn twilight_http_stays_quiet_even_when_the_environment_asks_for_debug() {
-        assert_eq!(log_filter(None), "info,twilight_http=warn");
-        assert_eq!(log_filter(Some("")), "info,twilight_http=warn");
-        assert_eq!(log_filter(Some("debug")), "debug,twilight_http=warn");
-        assert_eq!(
-            log_filter(Some("closure=debug,sqlx=warn")),
-            "closure=debug,sqlx=warn,twilight_http=warn"
-        );
-        // Naming the crate is a deliberate opt-in.
-        assert_eq!(
-            log_filter(Some("twilight_http=debug")),
-            "twilight_http=debug"
-        );
-        assert!(EnvFilter::try_new(log_filter(Some("debug"))).is_ok());
+    fn no_rust_log_value_can_bring_twilight_http_logs_back() {
+        for rust_log in [
+            "trace",
+            "twilight_http=trace",
+            "twilight_http::request=trace",
+            "twilight_http::client=trace,debug",
+            "trace,not_twilight_http=warn",
+            "[request]=trace",
+        ] {
+            let output = log_with(rust_log);
+            assert!(
+                !output.contains("SECRET-TOKEN"),
+                "RUST_LOG={rust_log} leaked: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_targets_still_follow_rust_log() {
+        assert!(log_with("closure=info").contains("handled"));
+        assert!(!log_with("closure=warn").contains("handled"));
+        // An unusable value falls back to `info` instead of silencing everything.
+        assert!(log_with("not a [valid filter").contains("handled"));
     }
 
     #[test]

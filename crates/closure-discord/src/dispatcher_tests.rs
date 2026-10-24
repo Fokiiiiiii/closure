@@ -31,6 +31,8 @@ enum Behavior {
     Forbidden,
     Panic,
     Hang,
+    /// Hangs, and needs a moment of real (blocking) work to be torn down once aborted.
+    SlowToStop,
     /// Blocks until a permit is available.
     Gate(Arc<Semaphore>),
     /// Waits for another handler to arrive: only completes if two run at the same time.
@@ -48,6 +50,8 @@ struct Probe {
     behavior: Mutex<Behavior>,
     running: AtomicUsize,
     max_running: AtomicUsize,
+    /// How many handlers were still running when `on_unload` started.
+    running_at_unload: AtomicUsize,
 }
 
 impl Probe {
@@ -61,6 +65,7 @@ impl Probe {
             behavior: Mutex::new(Behavior::Ok),
             running: AtomicUsize::new(0),
             max_running: AtomicUsize::new(0),
+            running_at_unload: AtomicUsize::new(usize::MAX),
         })
     }
 
@@ -138,6 +143,18 @@ impl Module for Probe {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 Ok(())
             }
+            Behavior::SlowToStop => {
+                /// Dropped (on abort) before the `Running` guard above.
+                struct SlowDrop;
+                impl Drop for SlowDrop {
+                    fn drop(&mut self) {
+                        std::thread::sleep(Duration::from_millis(150));
+                    }
+                }
+                let _slow = SlowDrop;
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                Ok(())
+            }
             Behavior::Gate(gate) => {
                 let _permit = gate.acquire().await.unwrap();
                 Ok(())
@@ -175,6 +192,8 @@ impl Module for Probe {
     }
 
     async fn on_unload(&self) {
+        self.running_at_unload
+            .store(self.running(), Ordering::SeqCst);
         self.log.lock().unwrap().push("unload".into());
     }
 }
@@ -910,6 +929,37 @@ async fn after_the_grace_period_nothing_keeps_running_while_modules_are_unloaded
         slow.log(),
         ["load", "msg:1", "unload"],
         "the queued event never started"
+    );
+    assert_eq!(
+        h.dispatcher.pending(),
+        0,
+        "the discarded event is counted off"
+    );
+    tokio::time::timeout(Duration::from_secs(1), h.dispatcher.flush())
+        .await
+        .expect("flush must not wait for events that were thrown away");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_unload_starts_only_after_an_aborted_handler_is_completely_gone() {
+    let slow = messages_only("slow");
+    slow.set(Behavior::SlowToStop);
+    let mut long = limits(64, 1);
+    long.handler_timeout = Duration::from_secs(3600);
+    let h = harness(&[(&slow, true)], long, DispatcherConfig::default()).await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    while slow.running() == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let drained = h.dispatcher.shutdown(Duration::from_millis(50)).await;
+
+    assert!(!drained);
+    assert_eq!(
+        slow.running_at_unload.load(Ordering::SeqCst),
+        0,
+        "the handler's destructors were still running when on_unload started"
     );
 }
 

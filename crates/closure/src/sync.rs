@@ -74,21 +74,38 @@ async fn follow(
     shutdown: CancellationToken,
 ) {
     loop {
+        // The listener is moved in and gone when this returns, which hands its connection back
+        // to the pool before `resync` needs connections of its own.
+        if !apply_notifications(&db, &store, listener, &shutdown).await {
+            return;
+        }
+        match resync(&db, &store, &shutdown).await {
+            Some(fresh) => listener = fresh,
+            None => return,
+        }
+    }
+}
+
+/// Applies change notifications until one cannot be handled (`true`) or shutdown (`false`).
+async fn apply_notifications(
+    db: &Db,
+    store: &SettingsStore,
+    mut listener: closure_db::ConfigListener,
+    shutdown: &CancellationToken,
+) -> bool {
+    loop {
         let event = tokio::select! {
-            () = shutdown.cancelled() => return,
+            () = shutdown.cancelled() => return false,
             event = listener.next() => event,
         };
         let outcome = match event {
-            Ok(ConfigEvent::Changed { guild, .. }) => reload_one(&db, &store, guild).await,
-            Ok(ConfigEvent::Resync) => load_all(&db, &store).await.map(drop),
+            Ok(ConfigEvent::Changed { guild, .. }) => reload_one(db, store, guild).await,
+            Ok(ConfigEvent::Resync) => load_all(db, store).await.map(drop),
             Err(error) => Err(error),
         };
         if let Err(error) = outcome {
             tracing::warn!(%error, "configuration sync failed; reconnecting");
-            match resync(&db, &store, &shutdown).await {
-                Some(fresh) => listener = fresh,
-                None => return,
-            }
+            return true;
         }
     }
 }
@@ -110,7 +127,8 @@ async fn resync(
     .await
 }
 
-/// Runs `attempt` every `delay` until it succeeds. `None` means shutdown came first.
+/// Runs `attempt` every `delay` until it succeeds. `None` means shutdown came first, which also
+/// abandons an attempt in progress.
 async fn retry_until_ok<T, E, F, Fut>(
     delay: Duration,
     shutdown: &CancellationToken,
@@ -126,7 +144,12 @@ where
             () = shutdown.cancelled() => return None,
             () = tokio::time::sleep(delay) => {}
         }
-        match attempt().await {
+        // An attempt can hang too (a database that stops answering), and must not hold up shutdown.
+        let result = tokio::select! {
+            () = shutdown.cancelled() => return None,
+            result = attempt() => result,
+        };
+        match result {
             Ok(value) => return Some(value),
             Err(error) => {
                 tracing::warn!(%error, "could not resynchronise configurations; retrying");
@@ -188,6 +211,85 @@ mod tests {
         })
         .await;
         assert_eq!(value, None);
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_hangs_does_not_hold_up_shutdown() {
+        let shutdown = CancellationToken::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let (shutdown, started) = (shutdown.clone(), Arc::clone(&started));
+            async move {
+                retry_until_ok(Duration::from_millis(5), &shutdown, || {
+                    started.notify_one();
+                    std::future::pending::<Result<(), &str>>()
+                })
+                .await
+            }
+        });
+
+        started.notified().await;
+        shutdown.cancel();
+
+        let value = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("shutdown must abandon the running attempt")
+            .unwrap();
+        assert_eq!(value, None);
+    }
+
+    #[sqlx::test(migrations = "../closure-db/migrations")]
+    async fn resync_recovers_on_a_pool_of_only_two_connections(
+        options: sqlx::postgres::PgPoolOptions,
+        connect: sqlx::postgres::PgConnectOptions,
+    ) {
+        // One connection for the listener, one for queries: the smallest working pool.
+        let app = Db::from_pool(
+            options
+                .clone()
+                .max_connections(2)
+                .acquire_timeout(Duration::from_millis(500))
+                .connect_with(connect.clone())
+                .await
+                .unwrap(),
+        );
+        let admin = sqlx::PgPool::connect_with(connect).await.unwrap();
+        let writer = Db::from_pool(admin.clone());
+        let store = store();
+        save(&writer, 1, "language: ja").await;
+
+        let shutdown = CancellationToken::new();
+        let task = start(app, Arc::clone(&store), shutdown.clone())
+            .await
+            .unwrap();
+
+        // A notification whose reload fails (the stored document is unreadable) sends the task
+        // into a resync while its old listener is still alive.
+        sqlx::query("UPDATE guild_config SET doc = '{\"preset\": 5}' WHERE guild_id = 1")
+            .execute(&admin)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_notify($1, '1:99')")
+            .bind(closure_db::CONFIG_CHANNEL)
+            .execute(&admin)
+            .await
+            .unwrap();
+
+        // Once the task has recovered it listens again and sees later edits.
+        save(&writer, 9, "language: ja").await;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !store.is_configured(Id::new(9)) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the sync task never recovered");
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the sync task should stop on shutdown")
+            .unwrap();
     }
 
     #[sqlx::test(migrations = "../closure-db/migrations")]

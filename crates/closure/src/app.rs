@@ -253,6 +253,19 @@ async fn serve(
     })
 }
 
+/// Waits for a background task that was told to stop. One that does not stop in time is aborted:
+/// dropping its handle would leave it running, holding database connections that `db.close()`
+/// then waits for.
+async fn stop_task(mut task: JoinHandle<()>, name: &str) {
+    if tokio::time::timeout(TASK_STOP_TIMEOUT, &mut task)
+        .await
+        .is_err()
+    {
+        tracing::warn!(task = name, "did not stop in time; aborting it");
+        task.abort();
+    }
+}
+
 pub async fn run(args: Args) -> Result<()> {
     let metrics = PrometheusBuilder::new()
         .install_recorder()
@@ -299,9 +312,9 @@ pub async fn run(args: Args) -> Result<()> {
         dispatcher.shutdown(DISPATCHER_DRAIN_TIMEOUT).await;
     }
     if let Some(task) = started.api_task {
-        let _ = tokio::time::timeout(TASK_STOP_TIMEOUT, task).await;
+        stop_task(task, "HTTP API").await;
     }
-    let _ = tokio::time::timeout(TASK_STOP_TIMEOUT, sync_task).await;
+    stop_task(sync_task, "configuration sync").await;
     db.close().await;
     tracing::info!("stopped");
 

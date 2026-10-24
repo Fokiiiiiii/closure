@@ -28,14 +28,19 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::breaker::{Breaker, BreakerConfig};
+use crate::breaker::{Breaker, BreakerConfig, Ticket};
 
 /// How long `shutdown` waits for lanes to stop once they were told to abort.
 const HARD_STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// How long an aborted module task gets to actually stop. Shorter than [`HARD_STOP_WAIT`], so a
+/// module that blocks its thread is reported by the lane before `shutdown` gives up on it.
+const TASK_STOP_WAIT: Duration = Duration::from_secs(1);
 
 /// How long the dispatcher waits for a reply to a user before giving up on it.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -461,8 +466,28 @@ async fn lane_worker(
             // and the lane must survive it.
             tracing::error!(%guild, kind = job.event.kind().as_str(), "dispatcher panicked while handling an event");
         }
-        state.finish(job.command);
-        shared.pending_total.fetch_sub(1, Ordering::AcqRel);
+        settle(&shared, &state, &job);
+    }
+    // Jobs still queued when the lane was told to stop would be dropped with the receiver and
+    // never counted off, which would leave `pending` (and so `flush`) stuck for good.
+    receiver.close();
+    while let Ok(job) = receiver.try_recv() {
+        settle(&shared, &state, &job);
+    }
+}
+
+/// Counts an accepted job off once it was handled or discarded.
+fn settle(shared: &Shared, state: &GuildState, job: &Job) {
+    state.finish(job.command);
+    shared.pending_total.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// Aborts a module task and waits until it is really gone: `abort` only requests cancellation,
+/// and the modules must not be unloaded while a handler (or its destructors) still runs.
+async fn stop_task<T>(task: &mut JoinHandle<T>, module: &ModuleId) {
+    task.abort();
+    if tokio::time::timeout(TASK_STOP_WAIT, task).await.is_err() {
+        tracing::error!(%module, "a module task did not stop after being aborted; it is blocking a thread");
     }
 }
 
@@ -508,11 +533,11 @@ async fn call_module(
         return Verdict::Skipped;
     };
     let config = shared.config.breaker;
-    if !state.with_breaker(&id, |breaker| breaker.allow(Instant::now())) {
+    let Some(ticket) = state.with_breaker(&id, |breaker| breaker.allow(Instant::now())) else {
         metrics::counter!("closure_handler_total", "module" => id.to_string(), "result" => "skipped")
             .increment(1);
         return Verdict::Skipped;
-    }
+    };
 
     let ctx = context_for(shared, guild, &id, &settings);
     // Read per call, so a changed timeout applies to the very next event.
@@ -527,7 +552,7 @@ async fn call_module(
         () = shared.abort.cancelled() => None,
     };
     let Some(waited) = waited else {
-        task.abort();
+        stop_task(&mut task, &id).await;
         return Verdict::Skipped;
     };
     let verdict = match waited {
@@ -538,13 +563,13 @@ async fn call_module(
             Verdict::Panicked
         }
         Err(_elapsed) => {
-            task.abort();
+            stop_task(&mut task, &id).await;
             tracing::error!(module = %id, %guild, kind = event.kind().as_str(), timeout = ?handler_timeout, "module timed out");
             Verdict::TimedOut
         }
     };
 
-    record_verdict(state, &id, guild, event, &verdict, &config);
+    record_verdict(state, &id, guild, event, ticket, &verdict, &config);
     metrics::histogram!("closure_handler_seconds", "module" => id.to_string())
         .record(started.elapsed().as_secs_f64());
     verdict
@@ -580,6 +605,7 @@ fn record_verdict(
     id: &ModuleId,
     guild: GuildId,
     event: &Event,
+    ticket: Ticket,
     verdict: &Verdict,
     config: &BreakerConfig,
 ) {
@@ -601,12 +627,12 @@ fn record_verdict(
     state.with_breaker(id, |breaker| {
         if blame_module {
             let was_open = breaker.is_open(now);
-            breaker.record_failure(now, config);
+            breaker.record_failure(ticket, now, config);
             if !was_open && breaker.is_open(now) {
                 tracing::error!(module = %id, %guild, "module is failing repeatedly; pausing it for this guild");
             }
         } else {
-            breaker.record_success();
+            breaker.record_success(ticket);
         }
     });
 }
