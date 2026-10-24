@@ -136,6 +136,12 @@ pub struct Catalog {
 /// a message instead of breaking a moderation action.
 pub trait Translator: Send + Sync {
     fn translate(&self, locale: Locale, namespace: &str, key: &str, args: &Args) -> String;
+
+    /// The translation of `key` in exactly `locale`, without any fallback. Used to tell a
+    /// missing translation from a present one, e.g. when publishing localised command names.
+    fn exact(&self, _locale: Locale, _namespace: &str, _key: &str, _args: &Args) -> Option<String> {
+        None
+    }
 }
 
 /// A translator that returns keys unchanged. Useful in tests and as a safe default.

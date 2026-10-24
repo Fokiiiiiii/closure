@@ -9,10 +9,18 @@
 
 mod api;
 mod breaker;
+mod commands;
+mod convert;
 mod dispatcher;
 mod error;
+mod gateway;
 pub mod hierarchy;
 
 pub use api::{RetryPolicy, TwilightApi};
 pub use breaker::BreakerConfig;
+pub use commands::{CommandBuildError, CommandScope, build_commands, register_commands};
 pub use dispatcher::{DispatchError, Dispatcher, DispatcherConfig};
+pub use gateway::{
+    GatewayConfig, GatewayError, GatewayHandle, GatewayHealth, GuildHooks, NoHooks,
+    gateway_intents, new_cache, start_gateway,
+};

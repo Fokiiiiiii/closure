@@ -334,6 +334,29 @@ mod tests {
     }
 
     #[test]
+    fn required_options_must_come_first() {
+        let option = |name: &str, required| OptionSpec {
+            name: name.into(),
+            description: "d".into(),
+            kind: OptionKind::String,
+            required,
+        };
+        let command = |options| CommandSpec {
+            name: "warn".into(),
+            description: "d".into(),
+            options,
+            subcommands: vec![],
+            default_member_permissions: None,
+        };
+        let registry = |options| {
+            let manifest = ModuleManifest::new(id("a"), "a", "0.1.0").command(command(options));
+            ModuleRegistry::new(vec![Arc::new(Stub(manifest))])
+        };
+        assert!(registry(vec![option("a", true), option("b", false)]).is_ok());
+        assert!(registry(vec![option("a", false), option("b", true)]).is_err());
+    }
+
+    #[test]
     fn subscribers_intents_and_command_owner_follow_manifests() {
         let mut manifest = ModuleManifest::new(id("a"), "a", "0.1.0")
             .intents(Intents::GUILD_MESSAGES)

@@ -175,6 +175,11 @@ impl FluentTranslator {
 }
 
 impl Translator for FluentTranslator {
+    fn exact(&self, locale: Locale, namespace: &str, key: &str, args: &Args) -> Option<String> {
+        self.lookup(locale, namespace, key, args)
+            .filter(|text| !text.is_empty())
+    }
+
     fn translate(&self, locale: Locale, namespace: &str, key: &str, args: &Args) -> String {
         let candidates = [
             (locale, namespace),
@@ -311,6 +316,17 @@ mod tests {
             t.translate(Locale::En, "some-module", "no-such-key", &Args::new()),
             "no-such-key"
         );
+    }
+
+    #[test]
+    fn exact_lookups_never_fall_back() {
+        let t = translator(&[("m", Locale::En, "only-en = English only")]);
+        assert_eq!(
+            t.exact(Locale::En, "m", "only-en", &Args::new()).as_deref(),
+            Some("English only")
+        );
+        assert_eq!(t.exact(Locale::Ja, "m", "only-en", &Args::new()), None);
+        assert_eq!(t.exact(Locale::En, "other", "only-en", &Args::new()), None);
     }
 
     #[test]

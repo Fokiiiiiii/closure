@@ -105,6 +105,12 @@ pub struct SubcommandSpec {
     pub options: Vec<OptionSpec>,
 }
 
+/// Discord rejects a command whose optional options precede a required one.
+fn required_first(options: &[OptionSpec]) -> bool {
+    let first_optional = options.iter().position(|option| !option.required);
+    first_optional.is_none_or(|index| options[index..].iter().all(|option| !option.required))
+}
+
 /// A slash command, as data.
 ///
 /// Localised names and descriptions are not stored here: for command `ping` the catalog holds
@@ -153,12 +159,18 @@ impl CommandSpec {
         if !self.options.iter().all(option_ok) {
             return Err(invalid("an option has an invalid name or description"));
         }
+        if !required_first(&self.options) {
+            return Err(invalid("required options must come before optional ones"));
+        }
         for sub in &self.subcommands {
             if !name_ok(&sub.name) || !text_ok(&sub.description) || sub.options.len() > 25 {
                 return Err(invalid("a subcommand is invalid"));
             }
             if !sub.options.iter().all(option_ok) {
                 return Err(invalid("a subcommand option is invalid"));
+            }
+            if !required_first(&sub.options) {
+                return Err(invalid("required options must come before optional ones"));
             }
         }
         Ok(())
