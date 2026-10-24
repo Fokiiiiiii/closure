@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::event::{GuildId, InteractionToken};
@@ -20,30 +20,55 @@ const LIFETIME: Duration = Duration::from_secs(16 * 60);
 /// recorded, so their responses are refused instead of the memory growing.
 const CAPACITY: usize = 100_000;
 
+/// What happened to a token handed to [`InteractionGuilds::register`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recorded {
+    New,
+    /// The token was recorded before and still is; the first record is kept.
+    Known,
+    /// The table is full.
+    Refused,
+}
+
 #[derive(Default)]
 struct Records {
+    /// Every token is in here and in `by_expiry` exactly once.
     guilds: HashMap<Arc<str>, (GuildId, Instant)>,
-    /// Tokens in the order they were recorded. Every record lives equally long, so this is also
-    /// the order in which they expire, and only the expired front ever has to be looked at.
+    /// Tokens in the order they were recorded. Records are made while holding the lock and
+    /// every record lives equally long, so this is also the order in which they expire, and only
+    /// the expired front ever has to be looked at.
     by_expiry: VecDeque<(Instant, Arc<str>)>,
+    /// How many entries of `by_expiry` were looked at while forgetting expired records.
+    examined: usize,
 }
 
 impl Records {
     fn forget_expired(&mut self, now: Instant) {
         while let Some((expires, token)) = self.by_expiry.front() {
+            self.examined += 1;
             if *expires > now {
                 break;
             }
-            // A token recorded twice keeps its later expiry.
-            if self
-                .guilds
-                .get(token)
-                .is_some_and(|(_, latest)| latest == expires)
-            {
-                self.guilds.remove(token);
-            }
+            self.guilds.remove(token);
             self.by_expiry.pop_front();
         }
+    }
+
+    fn record(&mut self, token: &str, guild: GuildId, now: Instant) -> Recorded {
+        self.forget_expired(now);
+        // A token never changes guild: re-recording it neither moves it nor extends it, and
+        // cannot make either structure grow.
+        if self.guilds.contains_key(token) {
+            return Recorded::Known;
+        }
+        if self.guilds.len() >= CAPACITY {
+            return Recorded::Refused;
+        }
+        let token: Arc<str> = Arc::from(token);
+        let expires = now + LIFETIME;
+        self.guilds.insert(Arc::clone(&token), (guild, expires));
+        self.by_expiry.push_back((expires, token));
+        Recorded::New
     }
 }
 
@@ -64,28 +89,24 @@ impl fmt::Debug for InteractionGuilds {
 
 impl InteractionGuilds {
     /// Records that `token` was issued for an interaction in `guild`. Called by the host for
-    /// every interaction it receives, before any module sees it.
+    /// every interaction it receives, before any module sees it. A token that is already
+    /// recorded keeps its first record.
     pub fn register(&self, token: &InteractionToken, guild: GuildId) {
-        self.register_at(token, guild, Instant::now());
+        // The time is read under the lock, so records are made in the order of their times.
+        let recorded = {
+            let mut records = self.lock();
+            records.record(token.expose(), guild, Instant::now())
+        };
+        if recorded == Recorded::Refused {
+            // Outside the lock: logging may block.
+            tracing::warn!("too many live interactions; not recording this one");
+        }
     }
 
     /// The guild `token` was issued for, if it is known and has not expired.
     #[must_use]
     pub fn guild_of(&self, token: &InteractionToken) -> Option<GuildId> {
         self.guild_of_at(token, Instant::now())
-    }
-
-    fn register_at(&self, token: &InteractionToken, guild: GuildId, now: Instant) {
-        let mut records = self.lock();
-        records.forget_expired(now);
-        if records.guilds.len() >= CAPACITY {
-            tracing::error!("too many live interactions; not recording this one");
-            return;
-        }
-        let token: Arc<str> = Arc::from(token.expose());
-        let expires = now + LIFETIME;
-        records.guilds.insert(Arc::clone(&token), (guild, expires));
-        records.by_expiry.push_back((expires, token));
     }
 
     fn guild_of_at(&self, token: &InteractionToken, now: Instant) -> Option<GuildId> {
@@ -96,7 +117,7 @@ impl InteractionGuilds {
             .map(|(guild, _)| *guild)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Records> {
+    fn lock(&self) -> MutexGuard<'_, Records> {
         self.records.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -106,6 +127,17 @@ mod tests {
     use twilight_model::id::Id;
 
     use super::*;
+
+    impl InteractionGuilds {
+        /// Records at a chosen time, for the tests that need to move it.
+        fn register_at(&self, token: &str, guild: u64, now: Instant) -> Recorded {
+            self.lock().record(token, Id::new(guild), now)
+        }
+
+        fn at(&self, token: &str, now: Instant) -> Option<GuildId> {
+            self.guild_of_at(&InteractionToken::new(token), now)
+        }
+    }
 
     #[test]
     fn a_token_belongs_to_the_guild_it_was_registered_for() {
@@ -125,15 +157,11 @@ mod tests {
     #[test]
     fn a_token_is_forgotten_once_discord_no_longer_honours_it() {
         let guilds = InteractionGuilds::default();
-        let token = InteractionToken::new("token");
         let start = Instant::now();
-        guilds.register_at(&token, Id::new(1), start);
+        guilds.register_at("token", 1, start);
 
-        assert_eq!(
-            guilds.guild_of_at(&token, start + LIFETIME / 2),
-            Some(Id::new(1))
-        );
-        assert_eq!(guilds.guild_of_at(&token, start + LIFETIME), None);
+        assert_eq!(guilds.at("token", start + LIFETIME / 2), Some(Id::new(1)));
+        assert_eq!(guilds.at("token", start + LIFETIME), None);
     }
 
     #[test]
@@ -147,7 +175,7 @@ mod tests {
     fn full(at: Instant) -> InteractionGuilds {
         let guilds = InteractionGuilds::default();
         for n in 0..CAPACITY {
-            guilds.register_at(&InteractionToken::new(format!("t{n}")), Id::new(1), at);
+            assert_eq!(guilds.register_at(&format!("t{n}"), 1, at), Recorded::New);
         }
         guilds
     }
@@ -158,18 +186,15 @@ mod tests {
         let guilds = full(start);
         let late = start + Duration::from_secs(60);
 
-        guilds.register_at(&InteractionToken::new("one-too-many"), Id::new(2), late);
+        assert_eq!(
+            guilds.register_at("one-too-many", 2, late),
+            Recorded::Refused
+        );
 
+        assert_eq!(guilds.at("one-too-many", late), None);
+        assert_eq!(guilds.at("t0", late), Some(Id::new(1)));
         assert_eq!(
-            guilds.guild_of_at(&InteractionToken::new("one-too-many"), late),
-            None
-        );
-        assert_eq!(
-            guilds.guild_of_at(&InteractionToken::new("t0"), late),
-            Some(Id::new(1))
-        );
-        assert_eq!(
-            guilds.guild_of_at(&InteractionToken::new(format!("t{}", CAPACITY - 1)), late),
+            guilds.at(&format!("t{}", CAPACITY - 1), late),
             Some(Id::new(1))
         );
     }
@@ -180,50 +205,80 @@ mod tests {
         let guilds = full(start);
         let expired = start + LIFETIME;
 
-        guilds.register_at(&InteractionToken::new("fresh"), Id::new(2), expired);
+        assert_eq!(guilds.register_at("fresh", 2, expired), Recorded::New);
 
-        assert_eq!(
-            guilds.guild_of_at(&InteractionToken::new("fresh"), expired),
-            Some(Id::new(2))
-        );
-        assert_eq!(
-            guilds.guild_of_at(&InteractionToken::new("t0"), expired),
-            None
-        );
+        assert_eq!(guilds.at("fresh", expired), Some(Id::new(2)));
+        assert_eq!(guilds.at("t0", expired), None);
         assert_eq!(guilds.lock().guilds.len(), 1, "the expired ones are gone");
+        assert_eq!(guilds.lock().by_expiry.len(), 1);
     }
 
     #[test]
-    fn a_full_table_is_not_scanned_again_for_every_refused_token() {
+    fn refusing_tokens_of_a_full_table_looks_at_one_entry_each() {
         let start = Instant::now();
         let guilds = full(start);
+        let examined_before = guilds.lock().examined;
 
-        // Nothing has expired, so a refused registration must only look at the front.
-        let before = guilds.lock().by_expiry.len();
+        // Nothing has expired, so every refusal stops at the first entry of the queue.
         for n in 0..1000 {
-            guilds.register_at(
-                &InteractionToken::new(format!("extra{n}")),
-                Id::new(2),
-                start + Duration::from_secs(1),
+            let at = start + Duration::from_secs(1);
+            assert_eq!(
+                guilds.register_at(&format!("extra{n}"), 2, at),
+                Recorded::Refused
             );
         }
-        assert_eq!(guilds.lock().by_expiry.len(), before);
+
+        assert_eq!(guilds.lock().examined - examined_before, 1000);
+        assert_eq!(guilds.lock().by_expiry.len(), CAPACITY);
         assert_eq!(guilds.lock().guilds.len(), CAPACITY);
     }
 
     #[test]
-    fn a_token_recorded_twice_lives_until_its_later_expiry() {
+    fn recording_a_token_again_changes_nothing_and_grows_nothing() {
         let guilds = InteractionGuilds::default();
-        let token = InteractionToken::new("token");
         let start = Instant::now();
+        assert_eq!(guilds.register_at("token", 1, start), Recorded::New);
+
+        // More than the capacity, later, and for another guild.
         let later = start + Duration::from_secs(60);
-        guilds.register_at(&token, Id::new(1), start);
-        guilds.register_at(&token, Id::new(1), later);
+        for _ in 0..=CAPACITY {
+            assert_eq!(guilds.register_at("token", 2, later), Recorded::Known);
+        }
 
-        // The first record has expired, the second has not.
-        let between = start + LIFETIME + Duration::from_secs(1);
-        guilds.register_at(&InteractionToken::new("other"), Id::new(2), between);
+        assert_eq!(guilds.at("token", later), Some(Id::new(1)), "first record");
+        assert_eq!(guilds.lock().guilds.len(), 1);
+        assert_eq!(guilds.lock().by_expiry.len(), 1);
+        // And it does not live longer than its first record says.
+        assert_eq!(guilds.at("token", start + LIFETIME), None);
+    }
 
-        assert_eq!(guilds.guild_of_at(&token, between), Some(Id::new(1)));
+    #[test]
+    fn records_made_from_many_threads_stay_in_expiry_order() {
+        let guilds = Arc::new(InteractionGuilds::default());
+        let threads: Vec<_> = (0..8)
+            .map(|thread| {
+                let guilds = Arc::clone(&guilds);
+                std::thread::spawn(move || {
+                    for n in 0..2000 {
+                        guilds
+                            .register(&InteractionToken::new(format!("{thread}-{n}")), Id::new(1));
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let records = guilds.lock();
+        assert_eq!(records.by_expiry.len(), 16_000);
+        assert!(
+            records
+                .by_expiry
+                .iter()
+                .zip(records.by_expiry.iter().skip(1))
+                .all(|(earlier, later)| earlier.0 <= later.0),
+            "the queue must be sorted by expiry for the expired front to be enough"
+        );
     }
 }
