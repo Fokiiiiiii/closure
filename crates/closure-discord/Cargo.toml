@@ -1,0 +1,37 @@
+[package]
+name = "closure-discord"
+description = "Twilight-backed Discord gateway, REST client and event dispatcher for closure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+closure-core.workspace = true
+closure-i18n.workspace = true
+dashmap.workspace = true
+futures-util.workspace = true
+metrics.workspace = true
+# Not used in code: enabling its `ring` feature once makes rustls pick the crypto provider
+# for every TLS user in the process (Twilight, sqlx) without a manual install step.
+rustls.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+twilight-cache-inmemory.workspace = true
+twilight-gateway.workspace = true
+twilight-http.workspace = true
+twilight-model.workspace = true
+twilight-util.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
+
+[lints]
+workspace = true
