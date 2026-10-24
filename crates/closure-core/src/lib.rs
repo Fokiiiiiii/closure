@@ -17,5 +17,6 @@ pub mod module;
 pub mod registry;
 pub mod settings;
 pub mod testing;
+pub mod throttle;
 
 pub use twilight_model::gateway::Intents;

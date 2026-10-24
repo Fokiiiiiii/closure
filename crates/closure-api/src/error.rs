@@ -8,6 +8,10 @@ use serde::Serialize;
 #[derive(Debug)]
 pub(crate) enum ApiError {
     Unauthorized,
+    /// Too many failed logins from this address; it has to wait.
+    TooManyAttempts {
+        retry_after_secs: u64,
+    },
     BadRequest(String),
     NotFound(String),
     /// A write that must say which revision it edits (`If-Match`) did not.
@@ -86,6 +90,19 @@ impl IntoResponse for ApiError {
                 response
                     .headers_mut()
                     .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+                response
+            }
+            Self::TooManyAttempts { retry_after_secs } => {
+                let mut response = respond(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    body(
+                        "too_many_attempts",
+                        "too many failed attempts to authenticate; wait before trying again",
+                    ),
+                );
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from(retry_after_secs));
                 response
             }
             Self::BadRequest(message) => {

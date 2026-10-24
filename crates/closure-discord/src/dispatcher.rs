@@ -24,6 +24,7 @@ use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
 use closure_core::settings::{ModuleSettings, SettingsProvider};
+use closure_core::throttle::LogGate;
 use closure_i18n::{CORE_NAMESPACE, user_message};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -45,6 +46,10 @@ const TASK_STOP_WAIT: Duration = Duration::from_secs(1);
 
 /// How long the dispatcher waits for a reply to a user before giving up on it.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How far apart the messages about a full queue are; a raid fills it for as long as it lasts,
+/// and each dropped event would otherwise be a line.
+const QUEUE_FULL_LOG_EVERY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy)]
 pub struct DispatcherConfig {
@@ -102,6 +107,7 @@ struct GuildState {
     queued_commands: AtomicUsize,
     last_activity: Mutex<Instant>,
     breakers: Mutex<HashMap<ModuleId, Breaker>>,
+    queue_full_log: LogGate,
 }
 
 impl GuildState {
@@ -112,6 +118,7 @@ impl GuildState {
             queued_commands: AtomicUsize::new(0),
             last_activity: Mutex::new(Instant::now()),
             breakers: Mutex::new(HashMap::new()),
+            queue_full_log: LogGate::new(QUEUE_FULL_LOG_EVERY),
         }
     }
 
@@ -179,6 +186,9 @@ struct Shared {
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
     /// The guild of every live interaction, so a module cannot answer another guild's.
     interactions: Arc<InteractionGuilds>,
+    /// Per module, how many of its calls overran the timeout and are still running, because
+    /// they block a thread and cannot be aborted. A module with any is not given new calls.
+    wedged: DashMap<ModuleId, Arc<AtomicUsize>>,
     pending_total: AtomicUsize,
     closing: AtomicBool,
     cancel: CancellationToken,
@@ -262,6 +272,7 @@ impl Dispatcher {
             config,
             guilds: DashMap::new(),
             interactions: Arc::new(InteractionGuilds::with_limits(config.interaction_limits)),
+            wedged: DashMap::new(),
             pending_total: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
             cancel: CancellationToken::new(),
@@ -297,7 +308,9 @@ impl Dispatcher {
             lanes.state.pending.fetch_sub(1, Ordering::AcqRel);
             metrics::counter!("closure_events_dropped_total", "reason" => "queue_full")
                 .increment(1);
-            tracing::warn!(%guild, kind, "event dropped: the guild's queue is full");
+            if let Some(held_back) = lanes.state.queue_full_log.pass() {
+                tracing::warn!(%guild, kind, held_back, "events are dropped: the guild's queue is full");
+            }
             return;
         }
 
@@ -395,6 +408,13 @@ impl Dispatcher {
             senders,
             state,
         })
+    }
+
+    /// Whether `module` has calls that overran their timeout and cannot be stopped because they
+    /// block a thread. Such a module is not given new calls until they have returned.
+    #[must_use]
+    pub fn is_wedged(&self, module: &ModuleId) -> bool {
+        self.shared.is_wedged(module)
     }
 
     /// Events accepted but not finished yet.
@@ -517,13 +537,48 @@ fn settle(shared: &Shared, state: &GuildState, job: &Job) {
     shared.pending_total.fetch_sub(1, Ordering::AcqRel);
 }
 
+impl Shared {
+    fn is_wedged(&self, module: &ModuleId) -> bool {
+        self.wedged
+            .get(module)
+            .is_some_and(|count| count.load(Ordering::Acquire) > 0)
+    }
+
+    /// Takes note of an aborted call that did not stop: it blocks a thread and keeps running
+    /// until it returns on its own. The module gets no new calls meanwhile, or each of them
+    /// would take another worker thread until the runtime has none left for anyone.
+    fn wedge(&self, module: &ModuleId, task: JoinHandle<Result<(), ModuleError>>) {
+        let count = Arc::clone(&*self.wedged.entry(module.clone()).or_default());
+        let now = count.fetch_add(1, Ordering::AcqRel) + 1;
+        metrics::gauge!("closure_module_wedged_calls", "module" => module.to_string())
+            .set(f64::from(u32::try_from(now).unwrap_or(u32::MAX)));
+        if now == 1 {
+            tracing::error!(%module, "a module blocks a thread; it gets no new calls until its running ones return");
+        }
+        let module = module.clone();
+        tokio::spawn(async move {
+            // Ends when the blocked call finally returns and the abort takes effect.
+            let _ = task.await;
+            let left = count.fetch_sub(1, Ordering::AcqRel) - 1;
+            metrics::gauge!("closure_module_wedged_calls", "module" => module.to_string())
+                .set(f64::from(u32::try_from(left).unwrap_or(u32::MAX)));
+            if left == 0 {
+                tracing::warn!(%module, "a module that blocked a thread has returned; it gets calls again");
+            }
+        });
+    }
+}
+
 /// Aborts a module task and waits until it is really gone: `abort` only requests cancellation,
 /// and the modules must not be unloaded while a handler (or its destructors) still runs.
-async fn stop_task<T>(task: &mut JoinHandle<T>, module: &ModuleId) {
+/// Whether it stopped; one that did not blocks a thread.
+async fn stop_task<T>(task: &mut JoinHandle<T>, module: &ModuleId) -> bool {
     task.abort();
-    if tokio::time::timeout(TASK_STOP_WAIT, task).await.is_err() {
+    let stopped = tokio::time::timeout(TASK_STOP_WAIT, task).await.is_ok();
+    if !stopped {
         tracing::error!(%module, "a module task did not stop after being aborted; it is blocking a thread");
     }
+    stopped
 }
 
 async fn handle_event(
@@ -567,6 +622,11 @@ async fn call_module(
     let Some(settings) = shared.settings.module(guild, &id).filter(|s| s.enabled) else {
         return Verdict::Skipped;
     };
+    if shared.is_wedged(&id) {
+        metrics::counter!("closure_handler_total", "module" => id.to_string(), "result" => "wedged")
+            .increment(1);
+        return Verdict::Skipped;
+    }
     let config = shared.config.breaker;
     let Some(ticket) = state.with_breaker(&id, |breaker| breaker.allow(Instant::now())) else {
         metrics::counter!("closure_handler_total", "module" => id.to_string(), "result" => "skipped")
@@ -587,7 +647,9 @@ async fn call_module(
         () = shared.abort.cancelled() => None,
     };
     let Some(waited) = waited else {
-        stop_task(&mut task, &id).await;
+        if !stop_task(&mut task, &id).await {
+            shared.wedge(&id, task);
+        }
         return Verdict::Skipped;
     };
     let verdict = match waited {
@@ -598,7 +660,9 @@ async fn call_module(
             Verdict::Panicked
         }
         Err(_elapsed) => {
-            stop_task(&mut task, &id).await;
+            if !stop_task(&mut task, &id).await {
+                shared.wedge(&id, task);
+            }
             tracing::error!(module = %id, %guild, kind = event.kind().as_str(), timeout = ?handler_timeout, "module timed out");
             Verdict::TimedOut
         }

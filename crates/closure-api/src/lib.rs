@@ -13,6 +13,9 @@ mod auth;
 mod config;
 mod error;
 mod ops;
+mod server;
+
+pub use server::{ServerLimits, serve};
 
 use std::fmt;
 use std::sync::Arc;
@@ -62,6 +65,7 @@ pub(crate) struct Inner {
     pub(crate) readiness: Arc<dyn Readiness>,
     pub(crate) render_metrics: Box<dyn Fn() -> String + Send + Sync>,
     pub(crate) token_digest: [u8; 32],
+    pub(crate) failures: auth::FailureLimiter,
 }
 
 /// Everything the handlers need; cheap to clone.
@@ -95,6 +99,7 @@ impl ApiState {
                 readiness,
                 render_metrics: Box::new(render_metrics),
                 token_digest: auth::digest(token),
+                failures: auth::FailureLimiter::default(),
             }),
         })
     }

@@ -205,6 +205,58 @@ async fn wrong_or_malformed_credentials_are_refused(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
+async fn an_address_that_keeps_failing_to_log_in_is_turned_away_even_with_the_right_token(
+    pool: PgPool,
+) {
+    use std::net::SocketAddr;
+
+    use axum::extract::ConnectInfo;
+
+    let app = app(pool).await;
+    let from = |address: &str, token: &str| {
+        let address: SocketAddr = address.parse().unwrap();
+        let router = app.router.clone();
+        let request = Request::builder()
+            .uri("/metrics")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .extension(ConnectInfo(address))
+            .body(Body::empty())
+            .unwrap();
+        async move { router.oneshot(request).await.unwrap() }
+    };
+
+    for _ in 0..10 {
+        let response = from("198.51.100.7:4000", "a-wrong-token-that-is-long-enough").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    // Used up: the right token does not help until the window has passed.
+    let blocked = from("198.51.100.7:4001", TOKEN).await;
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+    let wait: u64 = blocked.headers()[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&wait), "{wait}");
+    // Another address is not affected, and the probes need no token at all.
+    assert_eq!(
+        from("198.51.100.8:4000", TOKEN).await.status(),
+        StatusCode::OK
+    );
+    let probe = Request::builder()
+        .uri("/healthz")
+        .extension(ConnectInfo(
+            "198.51.100.7:4002".parse::<SocketAddr>().unwrap(),
+        ))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.router.clone().oneshot(probe).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
 async fn weak_admin_tokens_are_refused_at_setup(pool: PgPool) {
     let registry = Arc::new(ModuleRegistry::new(vec![]).unwrap());
     let store = Arc::new(SettingsStore::new(ConfigCompiler::new(registry).unwrap()));

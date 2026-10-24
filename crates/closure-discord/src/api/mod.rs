@@ -22,6 +22,7 @@ use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
 use closure_core::event::{ApplicationId, ChannelId, GuildId};
 use serde::de::DeserializeOwned;
+use tokio::sync::OnceCell;
 use twilight_http::Client;
 use twilight_http::response::Response;
 use twilight_http::response::marker::ListBody;
@@ -69,6 +70,9 @@ pub struct TwilightApi {
     /// Guilds of channels learned from Discord. A channel never changes guild, so an entry
     /// cannot go stale; the map is emptied when it reaches [`KNOWN_CHANNELS`].
     known_channels: Mutex<HashMap<ChannelId, GuildId>>,
+    /// Lookups of a channel's guild that are under way, so concurrent first lookups of one
+    /// channel make one request.
+    lookups: Mutex<HashMap<ChannelId, LookupCell>>,
 }
 
 /// How many channel-to-guild answers from Discord are remembered.
@@ -93,6 +97,7 @@ impl TwilightApi {
             retry: RetryPolicy::default(),
             clock: Arc::new(system_clock),
             known_channels: Mutex::new(HashMap::new()),
+            lookups: Mutex::new(HashMap::new()),
         }
     }
 
@@ -210,7 +215,7 @@ impl DiscordApi for TwilightApi {
     /// Answered from the cache, then from earlier answers of Discord; otherwise Discord is asked
     /// (a `GetChannel`, counted and timed like any other action). A channel does not move
     /// between guilds, so a remembered answer cannot go stale. Concurrent first lookups of the
-    /// same channel are not merged.
+    /// same channel make one request and share its answer.
     async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
         let lookup = |source: &'static str| {
             metrics::counter!("closure_channel_guild_lookups_total", "source" => source)
@@ -234,7 +239,73 @@ impl DiscordApi for TwilightApi {
             lookup("memory");
             return Ok(Some(guild));
         }
-        lookup("discord");
+        // Whoever comes first asks; the others who want the same channel meanwhile wait for that
+        // answer, a failure included, instead of asking again.
+        let flight = Flight::join(&self.lookups, channel);
+        let mut asked = false;
+        let answer = flight
+            .cell
+            .get_or_init(|| {
+                asked = true;
+                lookup("discord");
+                self.ask_discord(channel)
+            })
+            .await
+            .clone();
+        if !asked {
+            lookup("shared");
+        }
+        answer
+    }
+}
+
+/// A lookup of the guild of a channel that is under way, shared by everyone who wants it.
+type LookupCell = Arc<OnceCell<Result<Option<GuildId>, DiscordError>>>;
+
+/// One caller's share in a lookup. The last one to leave takes the lookup off the list, also when
+/// the callers are given up on (their future dropped) before the answer came.
+struct Flight<'a> {
+    lookups: &'a Mutex<HashMap<ChannelId, LookupCell>>,
+    channel: ChannelId,
+    cell: LookupCell,
+}
+
+impl<'a> Flight<'a> {
+    fn join(lookups: &'a Mutex<HashMap<ChannelId, LookupCell>>, channel: ChannelId) -> Self {
+        let cell = Arc::clone(
+            lookups
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(channel)
+                .or_default(),
+        );
+        Self {
+            lookups,
+            channel,
+            cell,
+        }
+    }
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let mut lookups = self.lookups.lock().unwrap_or_else(PoisonError::into_inner);
+        // Joining happens under this lock too, so no new share appears while this is decided: the
+        // list's own reference and this one are all that is left when nobody else waits.
+        if Arc::strong_count(&self.cell) <= 2
+            && lookups
+                .get(&self.channel)
+                .is_some_and(|listed| Arc::ptr_eq(listed, &self.cell))
+        {
+            lookups.remove(&self.channel);
+        }
+    }
+}
+
+impl TwilightApi {
+    /// Asks Discord (a `GetChannel`, counted and timed like any other action) and remembers the
+    /// guild it names.
+    async fn ask_discord(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
         match self
             .execute(Action::GetChannel {
                 channel_id: channel,
@@ -258,6 +329,14 @@ impl DiscordApi for TwilightApi {
                 "unexpected outcome for `get_channel`".into(),
             )),
         }
+    }
+
+    #[cfg(test)]
+    fn lookups_in_flight(&self) -> usize {
+        self.lookups
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 

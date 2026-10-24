@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use closure_api::{ApiState, GatewayStatus, Readiness, router};
+use closure_api::{ApiState, GatewayStatus, Readiness, ServerLimits, router};
 use closure_config::{ConfigCompiler, SettingsStore};
 use closure_core::locale::Translator;
 use closure_core::module::Module;
@@ -82,12 +82,8 @@ fn serve_api(
     listener: tokio::net::TcpListener,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let served = axum::serve(listener, router(state))
-            .with_graceful_shutdown(shutdown.cancelled_owned())
-            .await;
-        if let Err(error) = served {
-            tracing::error!(%address, %error, "the HTTP API stopped");
-        }
+        closure_api::serve(listener, router(state), ServerLimits::default(), shutdown).await;
+        tracing::info!(%address, "the HTTP API stopped");
     })
 }
 

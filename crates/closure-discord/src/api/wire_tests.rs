@@ -502,6 +502,72 @@ async fn the_guild_of_a_channel_is_read_from_discord_when_the_cache_does_not_kno
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lookups_of_one_channel_at_the_same_time_make_one_request() {
+    let discord = FakeDiscord::start(vec![(200, r#"{"id":"100","type":0,"guild_id":"10"}"#)]).await;
+    let api = Arc::new(discord.api());
+
+    let lookups: Vec<_> = (0..50)
+        .map(|_| {
+            let api = Arc::clone(&api);
+            tokio::spawn(async move { api.channel_guild(Id::new(100)).await })
+        })
+        .collect();
+    for lookup in lookups {
+        assert_eq!(lookup.await.unwrap(), Ok(Some(Id::new(10))));
+    }
+
+    assert_eq!(discord.requests().len(), 1);
+    // Nothing is left behind once the lookups are over.
+    assert_eq!(api.lookups_in_flight(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_lookup_is_shared_by_those_waiting_and_not_remembered() {
+    let discord = FakeDiscord::start(vec![
+        (404, r#"{"code":10003,"message":"Unknown Channel"}"#),
+        (200, r#"{"id":"100","type":0,"guild_id":"10"}"#),
+    ])
+    .await;
+    let api = Arc::new(discord.api());
+
+    let lookups: Vec<_> = (0..20)
+        .map(|_| {
+            let api = Arc::clone(&api);
+            tokio::spawn(async move { api.channel_guild(Id::new(100)).await })
+        })
+        .collect();
+    let mut failed = 0;
+    for lookup in lookups {
+        if lookup.await.unwrap() == Err(DiscordError::NotFound) {
+            failed += 1;
+        }
+    }
+    assert!(failed >= 1);
+    assert_eq!(api.lookups_in_flight(), 0);
+
+    // The failure was not kept: asking again goes to Discord again.
+    let before = discord.requests().len();
+    assert_eq!(api.channel_guild(Id::new(100)).await, Ok(Some(Id::new(10))));
+    assert_eq!(discord.requests().len(), before + 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lookup_given_up_on_does_not_stop_the_others_or_leave_a_trace() {
+    let discord = FakeDiscord::start(vec![(200, r#"{"id":"100","type":0,"guild_id":"10"}"#)]).await;
+    let api = Arc::new(discord.api());
+
+    let abandoned = tokio::spawn({
+        let api = Arc::clone(&api);
+        async move { api.channel_guild(Id::new(100)).await }
+    });
+    abandoned.abort();
+    let _ = abandoned.await;
+
+    assert_eq!(api.channel_guild(Id::new(100)).await, Ok(Some(Id::new(10))));
+    assert_eq!(api.lookups_in_flight(), 0);
+}
+
 #[tokio::test]
 async fn a_channel_the_cache_knows_is_not_looked_up_again() {
     struct KnowsChannel;

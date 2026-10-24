@@ -34,6 +34,8 @@ enum Behavior {
     Hang,
     /// Hangs, and needs a moment of real (blocking) work to be torn down once aborted.
     SlowToStop,
+    /// Blocks its thread (no `await`) for this long: nothing can abort that.
+    BlockThread(Duration),
     /// Blocks until a permit is available.
     Gate(Arc<Semaphore>),
     /// Waits for another handler to arrive: only completes if two run at the same time.
@@ -201,6 +203,10 @@ impl Module for Probe {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 Ok(())
             }
+            Behavior::BlockThread(duration) => {
+                std::thread::sleep(duration);
+                Ok(())
+            }
             Behavior::Gate(gate) => {
                 let _permit = gate.acquire().await.unwrap();
                 Ok(())
@@ -299,6 +305,14 @@ fn message(channel: u64, id: u64) -> Event {
         mentions_everyone: false,
         attachment_count: 0,
     })
+}
+
+fn message_in(guild: u64, channel: u64, id: u64) -> Event {
+    let Event::MessageCreated(mut info) = message(channel, id) else {
+        unreachable!("`message` makes a message");
+    };
+    info.guild_id = Id::new(guild);
+    Event::MessageCreated(info)
 }
 
 fn command(name: &str, locale: Option<Locale>) -> Event {
@@ -1038,6 +1052,218 @@ async fn on_unload_starts_only_after_an_aborted_handler_is_completely_gone() {
         0,
         "the handler's destructors were still running when on_unload started"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_module_that_blocks_a_thread_gets_no_further_calls_until_it_is_back() {
+    let blocker = messages_only("blocker");
+    let healthy = messages_only("healthy");
+    // Blocks for longer than the time an aborted task is given to stop.
+    blocker.set(Behavior::BlockThread(
+        TASK_STOP_WAIT + Duration::from_millis(1200),
+    ));
+    let mut short = limits(64, 4);
+    short.handler_timeout = Duration::from_millis(50);
+    let h = harness(
+        &[(&blocker, true), (&healthy, true)],
+        short,
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    // The call overruns its timeout, cannot be stopped, and is given up on.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !h.dispatcher.is_wedged(&blocker.manifest.id) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the module is noticed to be blocking");
+    assert!(!h.dispatcher.is_wedged(&healthy.manifest.id));
+
+    // Other events go on, to the others, and the blocked module is not asked again.
+    h.dispatcher.dispatch(message(4, 2));
+    h.dispatcher.dispatch(message(5, 3));
+    h.dispatcher.flush().await;
+    // Two channels, so two lanes: in no particular order.
+    let mut seen = healthy.log();
+    seen.sort();
+    assert_eq!(seen, ["load", "msg:1", "msg:2", "msg:3"]);
+    assert_eq!(blocker.log(), ["load", "msg:1"]);
+
+    // Once the call has returned, the module is asked again.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while h.dispatcher.is_wedged(&blocker.manifest.id) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the module is let back in");
+    blocker.set(Behavior::Ok);
+    h.dispatcher.dispatch(message(6, 4));
+    h.dispatcher.flush().await;
+    assert_eq!(blocker.log(), ["load", "msg:1", "msg:4"]);
+}
+
+#[tokio::test]
+async fn a_full_queue_is_one_line_of_log_however_many_events_it_drops() {
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let held = messages_only("held");
+    let gate = Arc::new(Semaphore::new(0));
+    held.set(Behavior::Gate(Arc::clone(&gate)));
+    let h = harness(&[(&held, true)], limits(8, 1), DispatcherConfig::default()).await;
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer({
+            let captured = Arc::clone(&captured);
+            move || Capture(Arc::clone(&captured))
+        })
+        .finish();
+    // `dispatch` logs on the calling thread.
+    tracing::subscriber::with_default(subscriber, || {
+        for id in 1..=1000 {
+            h.dispatcher.dispatch(message(3, id));
+        }
+    });
+
+    let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let lines = log.matches("the guild's queue is full").count();
+    assert_eq!(lines, 1, "{log}");
+    gate.add_permits(10_000);
+    h.dispatcher.flush().await;
+}
+
+/// A module that only counts, for measuring the dispatcher itself.
+struct Counting {
+    manifest: ModuleManifest,
+    handled: AtomicUsize,
+    work: Duration,
+}
+
+#[async_trait]
+impl Module for Counting {
+    fn manifest(&self) -> &ModuleManifest {
+        &self.manifest
+    }
+
+    async fn on_event(&self, _: &EventContext, _: &Event) -> Result<(), ModuleError> {
+        if !self.work.is_zero() {
+            tokio::time::sleep(self.work).await;
+        }
+        self.handled.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+async fn counting_dispatcher(work: Duration, limits: RuntimeLimits) -> (Dispatcher, Arc<Counting>) {
+    let manifest = ModuleManifest::new(ModuleId::new("counting").unwrap(), "counting", "0.1.0")
+        .events([EventKind::MessageCreated]);
+    let module = Arc::new(Counting {
+        manifest,
+        handled: AtomicUsize::new(0),
+        work,
+    });
+    let registry =
+        Arc::new(ModuleRegistry::new(vec![Arc::clone(&module) as Arc<dyn Module>]).unwrap());
+    let mut settings = StaticSettings::new([(
+        module.manifest.id.clone(),
+        ModuleSettings {
+            enabled: true,
+            config: Arc::new(json!({})),
+            granted: CapabilitySet::default(),
+        },
+    )]);
+    settings.limits = limits;
+    let dispatcher = Dispatcher::start(
+        registry,
+        Arc::new(settings),
+        Arc::new(MockApi::default()),
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+        DispatcherConfig::default(),
+    )
+    .await
+    .unwrap();
+    (dispatcher, module)
+}
+
+/// How many of `count` per second, when it took `elapsed`.
+fn per_second(count: usize, elapsed: Duration) -> u128 {
+    u128::try_from(count).unwrap_or(0) * 1_000_000 / elapsed.as_micros().max(1)
+}
+
+/// Not a test of behaviour: prints what the dispatcher manages on this machine. Run with
+/// `cargo test --release -p closure-discord --lib measure -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "a measurement, not a test"]
+async fn measure_throughput_of_events_that_need_no_work() {
+    let (queue, module) = counting_dispatcher(Duration::ZERO, limits(10_000, 4)).await;
+    let (guilds, per_guild) = (64_u64, 5_000_u64);
+    let events = usize::try_from(guilds * per_guild).unwrap();
+
+    let started = Instant::now();
+    for id in 1..=per_guild {
+        for guild in 1..=guilds {
+            queue.dispatch(message_in(guild, 3, id));
+        }
+    }
+    let sent_in = started.elapsed();
+    queue.flush().await;
+    let all_in = started.elapsed();
+
+    let handled = module.handled.load(Ordering::Relaxed);
+    println!(
+        "{events} events over {guilds} guilds: accepted {handled}, dispatched in {sent_in:?} ({}/s), all handled in {all_in:?} ({}/s)",
+        per_second(events, sent_in),
+        per_second(handled, all_in),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "a measurement, not a test"]
+async fn measure_one_guild_flooding_a_module_that_takes_its_time() {
+    // What a raid does: one guild, far more events than its queue holds, a module that needs
+    // 2 ms for each.
+    for (name, capacity, lanes) in [
+        ("small", 200, 2),
+        ("medium", 1_000, 4),
+        ("large", 5_000, 16),
+    ] {
+        let (queue, module) =
+            counting_dispatcher(Duration::from_millis(2), limits(capacity, lanes)).await;
+        let events = 1_000_000_usize;
+
+        let started = Instant::now();
+        for id in 1..=events {
+            let id = u64::try_from(id).unwrap();
+            queue.dispatch(message_in(1, 3 + id % 64, id));
+        }
+        let sent_in = started.elapsed();
+        let waiting = queue.pending();
+        queue.flush().await;
+        let all_in = started.elapsed();
+
+        let handled = module.handled.load(Ordering::Relaxed);
+        println!(
+            "{name} (queue {capacity}, {lanes} lanes): {events} events dispatched in {sent_in:?} ({}/s); {waiting} were waiting, {handled} handled, {} dropped; drained after {all_in:?}",
+            per_second(events, sent_in),
+            events - handled,
+        );
+        assert!(waiting <= capacity, "the queue is bounded");
+    }
 }
 
 #[tokio::test]

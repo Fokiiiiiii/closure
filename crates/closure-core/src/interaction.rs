@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::event::{GuildId, InteractionToken};
+use crate::throttle::LogGate;
 
 /// How long Discord honours an interaction token (15 minutes), plus a little slack.
 const LIFETIME: Duration = Duration::from_secs(16 * 60);
@@ -128,11 +129,16 @@ impl Records {
 
 type Clock = Box<dyn Fn() -> Instant + Send + Sync>;
 
+/// How far apart the messages about a limit that keeps being reached are.
+const LOG_EVERY: Duration = Duration::from_secs(10);
+
 /// The guild of every interaction token that is still valid. Cheap to share behind an `Arc`.
 pub struct InteractionGuilds {
     limits: InteractionLimits,
     clock: Clock,
     records: Mutex<Records>,
+    guild_full_log: LogGate,
+    table_full_log: LogGate,
 }
 
 impl Default for InteractionGuilds {
@@ -165,6 +171,8 @@ impl InteractionGuilds {
             limits,
             clock: Box::new(clock),
             records: Mutex::new(Records::default()),
+            guild_full_log: LogGate::new(LOG_EVERY),
+            table_full_log: LogGate::new(LOG_EVERY),
         }
     }
 
@@ -178,13 +186,21 @@ impl InteractionGuilds {
     pub fn register(&self, token: &InteractionToken, guild: GuildId) -> Recorded {
         // The guard lives for this statement only; the logging below is outside the lock.
         let recorded = self.locked().record(token.expose(), guild);
-        // Outside the lock: logging may block.
+        // Outside the lock: logging may block. A flood reaches a limit again and again, so the
+        // message is let through now and then, with the number of those left out.
         match recorded {
             Recorded::GuildFull => {
-                tracing::warn!(%guild, "too many live interactions in this guild; not recording this one");
+                if let Some(held_back) = self.guild_full_log.pass() {
+                    tracing::warn!(%guild, held_back, "too many live interactions in this guild; not recording this one");
+                }
             }
             Recorded::TableFull => {
-                tracing::warn!("too many live interactions; not recording this one");
+                if let Some(held_back) = self.table_full_log.pass() {
+                    tracing::warn!(
+                        held_back,
+                        "too many live interactions; not recording this one"
+                    );
+                }
             }
             Recorded::New | Recorded::Known => {}
         }

@@ -51,7 +51,11 @@ gateway shard ─► cache.update ─► convert ─► guild hooks ─► Dispa
    breaker). Errors that mean "Discord refused" do not count against the module, and the result
    of a call admitted before the breaker opened is ignored, so it cannot decide the trial.
    On shutdown, module calls that overrun the grace period are aborted and awaited before any
-   module is unloaded.
+   module is unloaded. A call that overruns its timeout is aborted; if it does not stop within a
+   second it blocks a thread (aborting only works at an `await`). The module is then *wedged*:
+   it gets no new calls, in any guild, until the running ones have returned, so it cannot take
+   one worker thread after another. This is logged once, counted as
+   `closure_handler_total{result="wedged"}` and shown by `closure_module_wedged_calls`.
 5. The module asks for Discord side effects through `ApiClient`. It rejects an action the module
    has no capability for, validates it (lengths, ranges, required audit-log reason), and only then
    hands it to `TwilightApi`.
@@ -71,6 +75,8 @@ earlier answers of Discord, otherwise from Discord itself. The channels an actio
 to (the parent category of a new channel, the alert and exempt channels of an auto-moderation
 rule) are checked the same way. A channel in another guild, in no guild (a direct message), or
 whose guild cannot be determined is refused, so a failing lookup never lets an action through.
+Lookups of one channel that happen at the same time make one request and share its answer, a
+failure included; a failure is not remembered.
 
 Answers to an interaction (`Respond`, `Followup`, `EditResponse`) are checked against a record the
 host keeps: when a command arrives, before any module sees it, its token is recorded together
@@ -142,12 +148,36 @@ returned actions into `ApiClient::execute` calls. Nothing else in the system wou
 ## Known gaps
 
 - `task.abort()` stops a timed-out module only at an `await`; a module that blocks a thread or
-  spawns blocking work keeps running. Modules must not block.
-- The HTTP API has no connection cap or header-read timeout of its own, and `/readyz` queries the
-  database on every call. Put it behind a reverse proxy if it is reachable by anyone untrusted.
+  spawns blocking work keeps running. It is noticed and gets no new calls (see above), but the
+  calls already running keep their threads, so a module that blocks in many guilds at once can
+  still take every worker thread for as long as they block. Modules must not block.
+- The HTTP API caps connections (256 at once), cuts off a client that takes more than 10 seconds
+  to send its headers, and turns an address away for the rest of a minute after 10 failed logins.
+  It has no TLS and `/readyz` queries the database on every call. Behind a reverse proxy every
+  client has the proxy's address and they share one login allowance; put it behind a proxy that
+  limits clients if it is reachable by anyone untrusted.
 - Command events go only to the module that owns the command, not to other subscribers.
 - Subcommand *groups* (two levels of nesting) are not supported; one level is.
 - A stored document that fails to parse makes `GET /v1/guilds/{id}/config` return 500 for that
   guild, and a replacement needs the revision from the database.
-- The HTTP API has no rate limit on failed logins; keep it on loopback or behind a proxy.
 - One process per bot; shard ranges are not configurable.
+
+## Measured
+
+What the dispatcher does on one machine (Apple M2, 8 cores, release build, 4 worker threads, a
+module that only counts, so this is the cost of the dispatcher itself and not of any real module).
+Reproduce with
+`cargo test --release -p closure-discord --lib measure -- --ignored --nocapture --test-threads=1`.
+
+| | |
+| --- | --- |
+| Events that need no work, 64 guilds | about 3.6 million dispatched per second, 0.88 million handled per second |
+| A raid on one guild, a module that needs 2 ms per event, 1,000,000 events | dispatching costs about 8 to 10 million events per second whether they are accepted or dropped |
+| ... small preset (queue 200, 2 lanes) | at most 200 waiting; 258 handled, the rest dropped; drained in 0.4 s |
+| ... medium preset (queue 1,000, 4 lanes) | at most 1,000 waiting; 1,128 handled; drained in 1.0 s |
+| ... large preset (queue 5,000, 16 lanes) | at most 5,000 waiting; 5,608 handled; drained in 1.2 s |
+
+The queue stays at its limit however many events arrive, and the log gets one line per ten
+seconds about it, with the number of events left out. What the numbers do not say: how real
+modules behave (database or Discord calls), memory use, or how the gateway connection copes
+with the same load.
