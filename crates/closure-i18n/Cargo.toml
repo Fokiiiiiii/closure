@@ -1,0 +1,19 @@
+[package]
+name = "closure-i18n"
+description = "Fluent-based translations (English and Japanese) for closure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+closure-core.workspace = true
+fluent-bundle.workspace = true
+fluent-syntax.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+unic-langid.workspace = true
+
+[lints]
+workspace = true
