@@ -171,8 +171,7 @@ impl InteractionGuilds {
     pub fn register(&self, token: &InteractionToken, guild: GuildId) -> Recorded {
         let recorded = {
             let mut records = self.lock();
-            // The time is read under the lock, so records are made in the order of their times.
-            let now = (self.clock)();
+            let now = self.now(&records);
             records.record(self.limits, token.expose(), guild, now)
         };
         // Outside the lock: logging may block.
@@ -191,15 +190,24 @@ impl InteractionGuilds {
     /// The guild `token` was issued for, if it is known and has not expired.
     #[must_use]
     pub fn guild_of(&self, token: &InteractionToken) -> Option<GuildId> {
-        self.guild_of_at(token, (self.clock)())
+        let records = self.lock();
+        let now = self.now(&records);
+        Self::lookup(&records, token, now)
     }
 
-    fn guild_of_at(&self, token: &InteractionToken, now: Instant) -> Option<GuildId> {
-        self.lock()
+    fn lookup(records: &Records, token: &InteractionToken, now: Instant) -> Option<GuildId> {
+        records
             .guilds
             .get(token.expose())
             .filter(|(_, expires)| *expires > now)
             .map(|(guild, _)| *guild)
+    }
+
+    /// The current time. It takes the guard of the lock, so it cannot be read without holding the
+    /// lock: records are made in the order of their times only if the time is read inside it.
+    /// This is the only place the clock is read.
+    fn now(&self, _held: &MutexGuard<'_, Records>) -> Instant {
+        (self.clock)()
     }
 
     fn lock(&self) -> MutexGuard<'_, Records> {
@@ -228,7 +236,7 @@ mod tests {
         }
 
         fn at(&self, token: &str, now: Instant) -> Option<GuildId> {
-            self.guild_of_at(&InteractionToken::new(token), now)
+            Self::lookup(&self.lock(), &InteractionToken::new(token), now)
         }
     }
 
@@ -428,6 +436,10 @@ mod tests {
 
     #[test]
     fn the_time_of_a_record_is_read_while_the_lock_is_held() {
+        // The type system already forces this (`now` needs the guard of the lock); this checks
+        // the behaviour, and can only ever fail in the right direction: if the second caller
+        // were slow to start, the test would pass without having proved anything.
+        //
         // The first caller is stopped inside the clock. If the clock is read under the lock,
         // the second caller cannot get to its own clock until the first has finished; if it were
         // read before taking the lock, both would already be inside it.
