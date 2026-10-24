@@ -130,8 +130,13 @@ mod tests {
     }
 
     fn registry_with(config_schema: Value) -> ModuleRegistry {
+        registry_with_defaults(config_schema, json!({}))
+    }
+
+    fn registry_with_defaults(config_schema: Value, default_config: Value) -> ModuleRegistry {
         let mut manifest = ModuleManifest::new(ModuleId::new("warn").unwrap(), "Warn", "0.1.0");
         manifest.config_schema = config_schema;
+        manifest.default_config = default_config;
         manifest.capabilities = [Capability::SendMessages].into_iter().collect();
         let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
         ModuleRegistry::new(vec![module]).unwrap()
@@ -199,15 +204,13 @@ mod tests {
             "type": "object",
             "allOf": [{ "properties": { "limit": { "type": "integer", "minimum": 1 } } }],
             "anyOf": [{ "properties": { "a": { "type": "integer" } } }],
-            "then": { "properties": { "b": { "type": "integer" } } },
-            "else": { "properties": { "c": { "type": "integer" } } },
             "patternProperties": { "^x_": { "type": "string" } }
         })))
         .unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
         let config = |value: Value| json!({ "modules": { "warn": { "config": value } } });
 
-        for key in ["limit", "a", "b", "c", "x_name"] {
+        for key in ["limit", "a", "x_name"] {
             assert!(
                 validator.is_valid(&config(json!({ key: null }))),
                 "{key} should accept null"
@@ -220,23 +223,92 @@ mod tests {
     }
 
     #[test]
-    fn an_if_condition_keeps_choosing_the_same_branch_as_before() {
-        // With defaults {mode: "y", limit: 25}, `mode: null` means "y", so `else` applies.
+    fn null_is_accepted_for_properties_declared_inside_then_and_else() {
+        // `then`/`else` only count next to an `if`, so the branch that applies is made explicit.
         let schema = document_schema(&registry_with(json!({
             "type": "object",
-            "properties": { "mode": { "enum": ["x", "y"] }, "limit": { "type": "integer" } },
-            "if": { "properties": { "mode": { "const": "x" } } },
-            "then": { "properties": { "limit": { "maximum": 10 } } },
-            "else": { "properties": { "limit": { "minimum": 20 } } }
+            "if": { "properties": { "kind": { "const": "a" } }, "required": ["kind"] },
+            "then": { "properties": { "b": { "type": "integer" } } },
+            "else": { "properties": { "c": { "type": "integer" } } }
         })))
         .unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
         let config = |value: Value| json!({ "modules": { "warn": { "config": value } } });
 
-        assert!(validator.is_valid(&config(json!({ "mode": null, "limit": 25 }))));
-        assert!(!validator.is_valid(&config(json!({ "mode": null, "limit": 5 }))));
-        assert!(validator.is_valid(&config(json!({ "mode": "x", "limit": 5 }))));
-        assert!(!validator.is_valid(&config(json!({ "mode": "x", "limit": 25 }))));
+        assert!(validator.is_valid(&config(json!({ "kind": "a", "b": null }))));
+        assert!(validator.is_valid(&config(json!({ "kind": "a", "b": 1 }))));
+        assert!(!validator.is_valid(&config(json!({ "kind": "a", "b": "one" }))));
+        assert!(validator.is_valid(&config(json!({ "kind": "z", "c": null }))));
+        assert!(!validator.is_valid(&config(json!({ "kind": "z", "c": "one" }))));
+    }
+
+    /// A schema whose `if` depends on `mode`, where `then` and `else` bound `limit` differently.
+    fn conditional_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": { "mode": { "enum": ["x", "y"] }, "limit": { "type": "integer" } },
+            "if": { "properties": { "mode": { "const": "x" } } },
+            "then": { "properties": { "limit": { "maximum": 10 } } },
+            "else": { "properties": { "limit": { "minimum": 20 } } }
+        })
+    }
+
+    /// Whether the compiler accepts this module config for a guild, after `null` was replaced by
+    /// the module's default.
+    fn compiler_accepts(registry: &Arc<ModuleRegistry>, config: &Value) -> bool {
+        let mut overrides = crate::model::GuildOverrides::default();
+        overrides.modules.insert(
+            "warn".into(),
+            ModuleOverride {
+                config: Some(config.clone()),
+                ..ModuleOverride::default()
+            },
+        );
+        crate::compile::ConfigCompiler::new(Arc::clone(registry))
+            .unwrap()
+            .compile(&overrides)
+            .is_ok()
+    }
+
+    #[test]
+    fn an_if_condition_picks_the_same_branch_as_the_compiler_does() {
+        // Defaults are mode "y", limit 25, so `mode: null` means "y" and `else` applies.
+        let registry = Arc::new(registry_with_defaults(
+            conditional_schema(),
+            json!({ "mode": "y", "limit": 25 }),
+        ));
+        let schema = document_schema(&registry).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+
+        for (config, expected) in [
+            (json!({ "mode": null, "limit": 25 }), true),
+            (json!({ "mode": null, "limit": 5 }), false),
+            (json!({ "mode": "x", "limit": 5 }), true),
+            (json!({ "mode": "x", "limit": 25 }), false),
+        ] {
+            let published = json!({ "modules": { "warn": { "config": config } } });
+            assert_eq!(validator.is_valid(&published), expected, "schema: {config}");
+            assert_eq!(
+                compiler_accepts(&registry, &config),
+                expected,
+                "compiler: {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_limit_a_null_under_an_if_condition_is_judged_without_the_default() {
+        // Here the default has no `mode`, so `mode: null` leaves it unset and the compiler's `if`
+        // succeeds on the missing property (`then`: at most 10). The schema cannot know that and
+        // judges the null itself (`if` fails, `else`: at least 20). This is the documented limit.
+        let registry = Arc::new(registry_with(conditional_schema()));
+        let schema = document_schema(&registry).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let config = json!({ "mode": null, "limit": 25 });
+        let published = json!({ "modules": { "warn": { "config": config } } });
+
+        assert!(validator.is_valid(&published));
+        assert!(!compiler_accepts(&registry, &config));
     }
 
     #[test]

@@ -1026,20 +1026,21 @@ async fn a_send_that_already_took_its_capacity_is_still_collected_after_close() 
     let (sender, mut receiver) = mpsc::channel::<u32>(4);
     // Capacity taken, message not pushed yet: what `try_send` is in the middle of doing.
     let permit = sender.try_reserve().unwrap();
-    let drained = tokio::spawn(async move {
-        let mut collected = Vec::new();
-        drain_closed(&mut receiver, |message| collected.push(message)).await;
-        collected
-    });
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
+
+    let mut collected = Vec::new();
+    {
+        let drain = drain_closed(&mut receiver, |message| collected.push(message));
+        let mut drain = std::pin::pin!(drain);
+        // One poll runs `close()` and then waits for the sender in progress.
+        let first = std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx)));
+        assert!(
+            first.await.is_pending(),
+            "must wait for the sender in progress"
+        );
+
+        permit.send(7);
+        drain.await;
     }
-    assert!(
-        !drained.is_finished(),
-        "must wait for the sender in progress"
-    );
 
-    permit.send(7);
-
-    assert_eq!(drained.await.unwrap(), [7]);
+    assert_eq!(collected, [7]);
 }
