@@ -12,7 +12,7 @@ use closure_core::event::{
 };
 use closure_core::locale::Locale;
 use closure_core::module::{CommandSpec, EventContext, Module, ModuleId, ModuleManifest};
-use closure_core::settings::GuildPolicy;
+use closure_core::settings::{GuildPolicy, RuntimeLimits, SettingsProvider};
 use closure_core::testing::{MockApi, StaticSettings};
 use closure_i18n::TranslatorBuilder;
 use serde_json::json;
@@ -350,14 +350,13 @@ async fn different_channels_are_handled_in_parallel() {
 }
 
 #[tokio::test]
-async fn a_full_queue_drops_new_events_instead_of_growing() {
+async fn the_guild_wide_budget_drops_new_events_instead_of_growing() {
     let probe = messages_only("slow");
     let gate = Arc::new(Semaphore::new(0));
     probe.set(Behavior::Gate(Arc::clone(&gate)));
-    let config = DispatcherConfig::default();
-    let mut slow_limits = limits(2, 1);
+    let mut slow_limits = limits(3, 1);
     slow_limits.handler_timeout = Duration::from_secs(30);
-    let h = harness(&[(&probe, true)], slow_limits, config).await;
+    let h = harness(&[(&probe, true)], slow_limits, DispatcherConfig::default()).await;
 
     h.dispatcher.dispatch(message(3, 1));
     while probe.log().len() < 2 {
@@ -366,11 +365,202 @@ async fn a_full_queue_drops_new_events_instead_of_growing() {
     for id in 2..=6 {
         h.dispatcher.dispatch(message(3, id));
     }
-    assert_eq!(h.dispatcher.pending(), 3, "one running plus a queue of two");
+    assert_eq!(
+        h.dispatcher.pending(),
+        3,
+        "the budget counts running and waiting events"
+    );
 
     gate.add_permits(100);
     h.dispatcher.flush().await;
     assert_eq!(probe.log(), ["load", "msg:1", "msg:2", "msg:3"]);
+}
+
+#[tokio::test]
+async fn one_busy_channel_may_use_the_whole_budget_of_the_guild() {
+    let probe = messages_only("hot");
+    let gate = Arc::new(Semaphore::new(0));
+    probe.set(Behavior::Gate(Arc::clone(&gate)));
+    let mut wide = limits(8, 8);
+    wide.handler_timeout = Duration::from_secs(30);
+    let h = harness(&[(&probe, true)], wide, DispatcherConfig::default()).await;
+
+    // Every event concerns the same channel, so they all share one of the eight lanes.
+    for id in 1..=20 {
+        h.dispatcher.dispatch(message(3, id));
+    }
+    assert_eq!(
+        h.dispatcher.pending(),
+        8,
+        "a lane is not limited to its share of the budget"
+    );
+
+    gate.add_permits(100);
+    h.dispatcher.flush().await;
+    assert_eq!(probe.log().len(), 1 + 8);
+}
+
+#[tokio::test]
+async fn commands_are_not_stuck_behind_a_backlog_of_ordinary_events() {
+    let slow = messages_only("slow");
+    let gate = Arc::new(Semaphore::new(0));
+    slow.set(Behavior::Gate(Arc::clone(&gate)));
+    let tools = Probe::with_command("tools", "ping");
+    let mut wide = limits(64, 4);
+    wide.handler_timeout = Duration::from_secs(30);
+    let h = harness(
+        &[(&slow, true), (&tools, true)],
+        wide,
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    // Occupy every lane that ordinary events can use, with a queue behind each.
+    for channel in 1..=64 {
+        for id in 1..=3 {
+            h.dispatcher.dispatch(message(channel, channel * 10 + id));
+        }
+    }
+    h.dispatcher.dispatch(command("ping", None));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !tools.log().contains(&"command".to_owned()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the command waited behind the message backlog");
+    assert!(h.dispatcher.pending() > 1, "the backlog is still there");
+
+    gate.add_permits(10_000);
+    h.dispatcher.flush().await;
+}
+
+#[tokio::test]
+async fn a_flood_of_events_does_not_use_up_the_budget_of_commands() {
+    let slow = messages_only("slow");
+    let gate = Arc::new(Semaphore::new(0));
+    slow.set(Behavior::Gate(Arc::clone(&gate)));
+    let tools = Probe::with_command("tools", "ping");
+    let mut small = limits(4, 2);
+    small.handler_timeout = Duration::from_secs(30);
+    let h = harness(
+        &[(&slow, true), (&tools, true)],
+        small,
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    for id in 1..=50 {
+        h.dispatcher.dispatch(message(3, id));
+    }
+    h.dispatcher.dispatch(command("ping", None));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !tools.log().contains(&"command".to_owned()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the command was dropped with the flood");
+
+    gate.add_permits(1000);
+    h.dispatcher.flush().await;
+}
+
+/// Settings whose handler timeout can be changed while the dispatcher runs.
+struct Tunable {
+    inner: StaticSettings,
+    timeout: Mutex<Duration>,
+}
+
+impl SettingsProvider for Tunable {
+    fn locale(&self, guild: closure_core::event::GuildId) -> Locale {
+        self.inner.locale(guild)
+    }
+
+    fn limits(&self, guild: closure_core::event::GuildId) -> RuntimeLimits {
+        RuntimeLimits {
+            handler_timeout: *self.timeout.lock().unwrap(),
+            ..self.inner.limits(guild)
+        }
+    }
+
+    fn policy(&self, guild: closure_core::event::GuildId) -> Arc<GuildPolicy> {
+        self.inner.policy(guild)
+    }
+
+    fn module(
+        &self,
+        guild: closure_core::event::GuildId,
+        module: &ModuleId,
+    ) -> Option<ModuleSettings> {
+        self.inner.module(guild, module)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_changed_timeout_applies_to_the_next_event_without_waiting_for_idle() {
+    let hung = messages_only("hung");
+    hung.set(Behavior::Hang);
+    let registry =
+        Arc::new(ModuleRegistry::new(vec![Arc::clone(&hung) as Arc<dyn Module>]).unwrap());
+    let settings = Arc::new(Tunable {
+        inner: StaticSettings::new([(
+            hung.manifest.id.clone(),
+            ModuleSettings {
+                enabled: true,
+                config: Arc::new(json!({})),
+                granted: CapabilitySet::new(),
+            },
+        )]),
+        timeout: Mutex::new(Duration::from_secs(30)),
+    });
+    let dispatcher = Dispatcher::start(
+        registry,
+        Arc::clone(&settings) as Arc<dyn SettingsProvider>,
+        Arc::new(MockApi::default()),
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+        DispatcherConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let started = tokio::time::Instant::now();
+    dispatcher.dispatch(message(3, 1));
+    dispatcher.flush().await;
+    assert!(started.elapsed() >= Duration::from_secs(30));
+
+    *settings.timeout.lock().unwrap() = Duration::from_millis(100);
+    let started = tokio::time::Instant::now();
+    dispatcher.dispatch(message(3, 2));
+    dispatcher.flush().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the new timeout should apply to the lanes that already exist: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn nothing_is_dispatched_after_shutdown_and_no_lanes_are_left_behind() {
+    let probe = messages_only("late");
+    let h = harness(
+        &[(&probe, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+    h.dispatcher.dispatch(message(3, 1));
+    assert!(h.dispatcher.shutdown(Duration::from_secs(5)).await);
+
+    h.dispatcher.dispatch(message(4, 2));
+    h.dispatcher.dispatch(command("ping", None));
+    assert_eq!(
+        h.dispatcher.active_guilds(),
+        0,
+        "a late event must not create lanes"
+    );
+    assert_eq!(h.dispatcher.pending(), 0);
 }
 
 #[tokio::test]

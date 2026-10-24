@@ -22,13 +22,12 @@ use closure_core::event::{CommandInvocation, Event, GuildId};
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
-use closure_core::settings::{ModuleSettings, RuntimeLimits, SettingsProvider};
+use closure_core::settings::{ModuleSettings, SettingsProvider};
 use closure_i18n::{CORE_NAMESPACE, user_message};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -69,11 +68,26 @@ pub enum DispatchError {
 struct Job {
     event: Arc<Event>,
     enqueued: Instant,
+    /// Commands have their own lanes and their own share of the queue budget.
+    command: bool,
 }
+
+/// Lanes a long queue of ordinary events can never occupy, so that slash commands are answered
+/// within Discord's three second window even in the middle of a raid.
+fn command_lane_count(concurrency: usize) -> usize {
+    (concurrency / 4).max(1)
+}
+
+/// Room in each lane's channel. The real limit is the guild-wide budget checked on dispatch;
+/// this only has to be larger than any allowed `queue_capacity`. Channels allocate lazily.
+const LANE_CHANNEL_CAPACITY: usize = 10_000;
 
 /// State shared by the lanes of one guild.
 struct GuildState {
+    /// Events accepted and not finished (waiting or running), of either kind.
     pending: AtomicUsize,
+    queued_events: AtomicUsize,
+    queued_commands: AtomicUsize,
     last_activity: Mutex<Instant>,
     breakers: Mutex<HashMap<ModuleId, Breaker>>,
 }
@@ -82,9 +96,26 @@ impl GuildState {
     fn new() -> Self {
         Self {
             pending: AtomicUsize::new(0),
+            queued_events: AtomicUsize::new(0),
+            queued_commands: AtomicUsize::new(0),
             last_activity: Mutex::new(Instant::now()),
             breakers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The budget `command` events are counted against.
+    fn budget(&self, command: bool) -> &AtomicUsize {
+        if command {
+            &self.queued_commands
+        } else {
+            &self.queued_events
+        }
+    }
+
+    fn finish(&self, command: bool) {
+        self.budget(command).fetch_sub(1, Ordering::AcqRel);
+        self.touch();
+        self.pending.fetch_sub(1, Ordering::AcqRel);
     }
 
     fn touch(&self) {
@@ -109,9 +140,22 @@ impl GuildState {
 
 /// The send side of a guild's lanes. Dropping it lets the lane workers drain and exit.
 struct GuildLanes {
-    limits: RuntimeLimits,
+    /// Lanes for ordinary events; the senders after them are the command lanes.
+    event_lanes: usize,
     senders: Vec<mpsc::Sender<Job>>,
     state: Arc<GuildState>,
+}
+
+impl GuildLanes {
+    fn sender_for(&self, event: &Event) -> &mpsc::Sender<Job> {
+        let key = ordering_key(event);
+        let index = if matches!(event, Event::Command(_)) {
+            self.event_lanes + lane_index(key, self.senders.len() - self.event_lanes)
+        } else {
+            lane_index(key, self.event_lanes)
+        };
+        &self.senders[index]
+    }
 }
 
 struct Shared {
@@ -209,7 +253,8 @@ impl Dispatcher {
         Ok(Self { shared })
     }
 
-    /// Queues an event. Never blocks: when the guild's queue is full the event is dropped.
+    /// Queues an event. Never blocks: when the guild already has `queue_capacity` events
+    /// waiting or running, the event is dropped and counted.
     pub fn dispatch(&self, event: Event) {
         let kind = event.kind().as_str();
         if self.shared.closing.load(Ordering::Acquire) {
@@ -220,78 +265,91 @@ impl Dispatcher {
 
         let guild = event.guild_id();
         let limits = self.shared.settings.limits(guild);
-        let lanes = self.lanes_for(guild, limits);
-        let lane = lane_index(ordering_key(&event), lanes.senders.len());
+        let Some(lanes) = self.lanes_for(guild, limits.concurrency) else {
+            metrics::counter!("closure_events_dropped_total", "reason" => "shutdown").increment(1);
+            return;
+        };
+
+        // The budget is the guild's, not a lane's: one busy channel may use all of it.
+        let command = matches!(event, Event::Command(_));
+        let budget = lanes.state.budget(command);
+        if budget.fetch_add(1, Ordering::AcqRel) >= limits.queue_capacity {
+            budget.fetch_sub(1, Ordering::AcqRel);
+            lanes.state.pending.fetch_sub(1, Ordering::AcqRel);
+            metrics::counter!("closure_events_dropped_total", "reason" => "queue_full")
+                .increment(1);
+            tracing::warn!(%guild, kind, "event dropped: the guild's queue is full");
+            return;
+        }
+
+        let sender = lanes.sender_for(&event).clone();
         let job = Job {
             event: Arc::new(event),
             enqueued: Instant::now(),
+            command,
         };
-
         self.shared.pending_total.fetch_add(1, Ordering::AcqRel);
-        match lanes.senders[lane].try_send(job) {
-            Ok(()) => {}
-            Err(error) => {
-                lanes.state.pending.fetch_sub(1, Ordering::AcqRel);
-                self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
-                let reason = if matches!(error, TrySendError::Full(_)) {
-                    "queue_full"
-                } else {
-                    "closed"
-                };
-                metrics::counter!("closure_events_dropped_total", "reason" => reason).increment(1);
-                tracing::warn!(%guild, kind, reason, "event dropped");
-            }
+        if sender.try_send(job).is_err() {
+            lanes.state.finish(command);
+            self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
+            metrics::counter!("closure_events_dropped_total", "reason" => "closed").increment(1);
+            tracing::warn!(%guild, kind, "event dropped: the lane is closed");
         }
     }
 
-    /// The lanes of `guild`, created on first use and replaced when the limits changed while
-    /// nothing was pending. The guild's pending count is raised under the map lock so the
-    /// reaper cannot release lanes that are about to receive an event.
-    fn lanes_for(&self, guild: GuildId, limits: RuntimeLimits) -> Arc<GuildLanes> {
+    /// The lanes of `guild`, created on first use and rebuilt when the configured number of
+    /// lanes changed while nothing was pending. The guild's pending count is raised under the
+    /// map lock so the reaper cannot release lanes that are about to receive an event.
+    /// Returns `None` once shutdown has begun, so no lanes are created that nothing would drain.
+    fn lanes_for(&self, guild: GuildId, concurrency: usize) -> Option<Arc<GuildLanes>> {
+        let concurrency = concurrency.max(1);
         if let Some(existing) = self.shared.guilds.get(&guild)
-            && existing.limits == limits
+            && existing.event_lanes == concurrency
         {
             existing.state.pending.fetch_add(1, Ordering::AcqRel);
-            return Arc::clone(&existing);
+            return Some(Arc::clone(&existing));
         }
 
         let lanes = match self.shared.guilds.entry(guild) {
             Entry::Occupied(mut entry) => {
-                let replace = entry.get().limits != limits
+                let replace = entry.get().event_lanes != concurrency
                     && entry.get().state.pending.load(Ordering::Acquire) == 0;
-                if replace {
-                    entry.insert(self.spawn_lanes(guild, limits));
+                // `shutdown` sets `closing` before it clears the map, and this check runs under
+                // the same shard lock, so a lane can never be created behind its back.
+                if replace && !self.shared.closing.load(Ordering::Acquire) {
+                    entry.insert(self.spawn_lanes(guild, concurrency));
                 }
                 Arc::clone(entry.get())
             }
             Entry::Vacant(entry) => {
-                let lanes = self.spawn_lanes(guild, limits);
+                if self.shared.closing.load(Ordering::Acquire) {
+                    return None;
+                }
+                let lanes = self.spawn_lanes(guild, concurrency);
                 entry.insert(Arc::clone(&lanes));
                 lanes
             }
         };
         lanes.state.pending.fetch_add(1, Ordering::AcqRel);
-        lanes
+        Some(lanes)
     }
 
-    fn spawn_lanes(&self, guild: GuildId, limits: RuntimeLimits) -> Arc<GuildLanes> {
-        let lane_count = limits.concurrency.max(1);
-        let capacity = (limits.queue_capacity / lane_count).max(1);
+    fn spawn_lanes(&self, guild: GuildId, concurrency: usize) -> Arc<GuildLanes> {
+        let total = concurrency + command_lane_count(concurrency);
         let state = Arc::new(GuildState::new());
-        let mut senders = Vec::with_capacity(lane_count);
-        for _ in 0..lane_count {
-            let (sender, receiver) = mpsc::channel(capacity);
+        let mut senders = Vec::with_capacity(total);
+        for _ in 0..total {
+            let (sender, receiver) = mpsc::channel(LANE_CHANNEL_CAPACITY);
             senders.push(sender);
             self.shared.tracker.spawn(lane_worker(
                 Arc::clone(&self.shared),
                 guild,
                 Arc::clone(&state),
-                limits,
                 receiver,
             ));
         }
         Arc::new(GuildLanes {
-            limits,
+            event_lanes: concurrency,
             senders,
             state,
         })
@@ -362,13 +420,12 @@ async fn lane_worker(
     shared: Arc<Shared>,
     guild: GuildId,
     state: Arc<GuildState>,
-    limits: RuntimeLimits,
     mut receiver: mpsc::Receiver<Job>,
 ) {
     while let Some(job) = receiver.recv().await {
         metrics::histogram!("closure_event_queue_seconds")
             .record(job.enqueued.elapsed().as_secs_f64());
-        let handled = AssertUnwindSafe(handle_event(&shared, guild, &state, limits, &job.event))
+        let handled = AssertUnwindSafe(handle_event(&shared, guild, &state, &job.event))
             .catch_unwind()
             .await;
         if handled.is_err() {
@@ -376,8 +433,7 @@ async fn lane_worker(
             // and the lane must survive it.
             tracing::error!(%guild, kind = job.event.kind().as_str(), "dispatcher panicked while handling an event");
         }
-        state.touch();
-        state.pending.fetch_sub(1, Ordering::AcqRel);
+        state.finish(job.command);
         shared.pending_total.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -386,18 +442,17 @@ async fn handle_event(
     shared: &Arc<Shared>,
     guild: GuildId,
     state: &Arc<GuildState>,
-    limits: RuntimeLimits,
     event: &Arc<Event>,
 ) {
     if let Event::Command(invocation) = &**event {
-        handle_command(shared, guild, state, limits, event, invocation).await;
+        handle_command(shared, guild, state, event, invocation).await;
         return;
     }
     let kind = event.kind();
     let calls = shared
         .registry
         .subscribers(kind)
-        .map(|module| call_module(shared, guild, state, limits, Arc::clone(module), event));
+        .map(|module| call_module(shared, guild, state, Arc::clone(module), event));
     futures_util::future::join_all(calls).await;
 }
 
@@ -417,7 +472,6 @@ async fn call_module(
     shared: &Arc<Shared>,
     guild: GuildId,
     state: &Arc<GuildState>,
-    limits: RuntimeLimits,
     module: Arc<dyn Module>,
     event: &Arc<Event>,
 ) -> Verdict {
@@ -433,12 +487,14 @@ async fn call_module(
     }
 
     let ctx = context_for(shared, guild, &id, &settings);
+    // Read per call, so a changed timeout applies to the very next event.
+    let handler_timeout = shared.settings.limits(guild).handler_timeout;
     let started = Instant::now();
     let mut task = tokio::spawn({
         let event = Arc::clone(event);
         async move { module.on_event(&ctx, &event).await }
     });
-    let verdict = match tokio::time::timeout(limits.handler_timeout, &mut task).await {
+    let verdict = match tokio::time::timeout(handler_timeout, &mut task).await {
         Ok(Ok(Ok(()))) => Verdict::Done,
         Ok(Ok(Err(error))) => Verdict::Failed(error),
         Ok(Err(join_error)) => {
@@ -447,7 +503,7 @@ async fn call_module(
         }
         Err(_elapsed) => {
             task.abort();
-            tracing::error!(module = %id, %guild, kind = event.kind().as_str(), timeout = ?limits.handler_timeout, "module timed out");
+            tracing::error!(module = %id, %guild, kind = event.kind().as_str(), timeout = ?handler_timeout, "module timed out");
             Verdict::TimedOut
         }
     };
@@ -468,7 +524,8 @@ fn context_for(
         Arc::clone(&shared.api),
         settings.granted.clone(),
         id.clone(),
-    );
+    )
+    .scoped_to(guild);
     EventContext::new(
         id.clone(),
         guild,
@@ -522,7 +579,6 @@ async fn handle_command(
     shared: &Arc<Shared>,
     guild: GuildId,
     state: &Arc<GuildState>,
-    limits: RuntimeLimits,
     event: &Arc<Event>,
     invocation: &CommandInvocation,
 ) {
@@ -553,7 +609,7 @@ async fn handle_command(
         return;
     }
 
-    let verdict = call_module(shared, guild, state, limits, Arc::clone(module), event).await;
+    let verdict = call_module(shared, guild, state, Arc::clone(module), event).await;
     let message = match verdict {
         Verdict::Done => return,
         Verdict::Failed(ModuleError::Discord(error)) => {

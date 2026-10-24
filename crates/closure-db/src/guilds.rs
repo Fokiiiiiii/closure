@@ -18,6 +18,17 @@ impl Db {
         Ok(())
     }
 
+    /// Whether the bot is currently in `guild`, as far as the database knows.
+    pub async fn is_guild_active(&self, guild: GuildId) -> Result<bool, DbError> {
+        let active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM guilds WHERE id = $1 AND left_at IS NULL)",
+        )
+        .bind(to_db(guild)?)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(active)
+    }
+
     /// Records that the bot left `guild`. Its data is kept in case it returns.
     pub async fn mark_guild_left(&self, guild: GuildId) -> Result<(), DbError> {
         sqlx::query("UPDATE guilds SET left_at = now() WHERE id = $1 AND left_at IS NULL")
@@ -57,6 +68,19 @@ mod tests {
 
         db.register_guild(guild).await.unwrap();
         assert!(left_at_is_null(&pool, 42).await);
+    }
+
+    #[sqlx::test]
+    async fn only_guilds_the_bot_is_in_are_active(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        let guild = Id::new(42);
+        assert!(!db.is_guild_active(guild).await.unwrap(), "never seen");
+
+        db.register_guild(guild).await.unwrap();
+        assert!(db.is_guild_active(guild).await.unwrap());
+
+        db.mark_guild_left(guild).await.unwrap();
+        assert!(!db.is_guild_active(guild).await.unwrap(), "left");
     }
 
     #[sqlx::test]

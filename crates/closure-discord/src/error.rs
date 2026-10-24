@@ -18,7 +18,10 @@ pub(crate) fn classify(
 ) -> DiscordError {
     match status {
         400 => DiscordError::Invalid(message),
-        401 => DiscordError::Fatal("the bot token is invalid, expired or revoked".into()),
+        401 => DiscordError::Fatal(
+            "Discord rejected the credentials: the bot token or an interaction token is invalid, expired or revoked"
+                .into(),
+        ),
         403 => DiscordError::Forbidden(message),
         404 => DiscordError::NotFound,
         429 => DiscordError::RateLimited {

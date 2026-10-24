@@ -47,10 +47,17 @@ Unknown keys are errors, so a typo is reported instead of silently ignored. In a
 | | `small` | `medium` | `large` |
 | --- | --- | --- | --- |
 | `handler_timeout_secs` — how long a module may spend on one event | 10 | 10 | 15 |
-| `queue_capacity` — events waiting before new ones are dropped | 64 | 256 | 1024 |
+| `queue_capacity` — events the server may have waiting or running at once | 64 | 256 | 1024 |
 | `concurrency` — independent lanes handled in parallel | 4 | 8 | 32 |
 
 Allowed ranges: timeout 1–60, queue 8–10 000, concurrency 1–256.
+
+Beyond `queue_capacity` new events are dropped (and counted in the metrics) rather than queued
+without limit. The budget belongs to the whole server, so one busy channel may use all of it.
+Slash commands have a budget of the same size and extra lanes (a quarter of `concurrency`, at
+least one) of their own, so a flood of ordinary events cannot delay them past Discord's three
+second window. A new `handler_timeout_secs` and `queue_capacity` apply to the next event; a new
+`concurrency` takes effect once the server's queue has drained.
 
 ## Checking a document
 
@@ -73,7 +80,8 @@ Syntax errors carry the 1-based `line` and `column`.
 
 ## Using the HTTP API
 
-All of these need `Authorization: Bearer $API_ADMIN_TOKEN`.
+All of these need `Authorization: Bearer $API_ADMIN_TOKEN`. Make the token long and random, for
+example `openssl rand -hex 24`; only its length (at least 24 characters) is checked.
 
 ```bash
 # read (YAML if you ask for it, JSON otherwise); the ETag is the revision
@@ -91,8 +99,14 @@ curl -i -X PUT -H "Authorization: Bearer $API_ADMIN_TOKEN" \
 - If someone else saved in between, the write is refused (`412`) and the response's `ETag` is the
   current revision; reload and merge.
 - Invalid documents are refused (`422`) and nothing is stored.
-- A successful write takes effect immediately and is recorded in the history
+- Only servers the bot is currently in can be configured (`404` otherwise).
+- A successful write takes effect at once in the running bot (the lane count is the one exception
+  noted above) and is recorded in the history
   (`GET /v1/guilds/{id}/config/history`) and the audit trail.
 
+If you edit the database by hand and delete or recreate a server's configuration row, restart the
+bot: it ignores a revision lower than the one it already holds.
+
 Both YAML and JSON are accepted as the request body (JSON is YAML). Bodies are limited to 64 KiB,
-and YAML aliases are capped, so a hostile document cannot exhaust memory.
+YAML aliases are capped, and a parsed document may not exceed 128 KiB, so a hostile document
+cannot exhaust memory. Text containing the NUL character is refused with a `422`.

@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 
 use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
@@ -27,7 +28,7 @@ pub struct Args {
 
     /// The application (client) id of the bot.
     #[arg(long, env = "DISCORD_APPLICATION_ID")]
-    pub application_id: u64,
+    pub application_id: NonZeroU64,
 
     /// PostgreSQL connection URL, e.g. `postgres://user:password@host/closure`.
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
@@ -45,7 +46,7 @@ pub struct Args {
     /// Publish slash commands to this server only (they appear at once) instead of globally
     /// (which can take up to an hour). Use it while developing.
     #[arg(long, env = "COMMAND_GUILD")]
-    pub command_guild: Option<u64>,
+    pub command_guild: Option<NonZeroU64>,
 
     /// Do not publish slash commands at start-up.
     #[arg(long)]
@@ -71,7 +72,10 @@ impl fmt::Debug for Args {
 impl Args {
     /// Installs the global logger. `RUST_LOG` overrides the default level (`info`).
     pub fn init_logging(&self) {
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        // Twilight's request spans carry the full URL, which contains interaction tokens; keeping
+        // that crate quiet by default keeps them out of the logs.
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info,twilight_http=warn"));
         let builder = tracing_subscriber::fmt().with_env_filter(filter);
         match self.log_format {
             LogFormat::Pretty => builder.init(),
@@ -105,7 +109,7 @@ mod tests {
         let args = parse(&[]).unwrap();
         assert_eq!(args.api_bind, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(args.log_format, LogFormat::Pretty);
-        assert_eq!(args.application_id, 42);
+        assert_eq!(args.application_id.get(), 42);
         assert!(args.api_admin_token.is_none());
         assert!(!args.skip_command_registration);
     }
@@ -125,7 +129,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.api_bind.port(), 9000);
-        assert_eq!(args.command_guild, Some(7));
+        assert_eq!(args.command_guild.map(NonZeroU64::get), Some(7));
         assert!(args.skip_command_registration);
         assert_eq!(args.log_format, LogFormat::Json);
     }
@@ -134,6 +138,8 @@ mod tests {
     fn malformed_values_are_rejected() {
         assert!(parse(&["--api-bind", "not-an-address"]).is_err());
         assert!(parse(&["--command-guild", "abc"]).is_err());
+        // 0 is not a snowflake; accepting it would silently publish commands globally.
+        assert!(parse(&["--command-guild", "0"]).is_err());
         assert!(parse(&["--log-format", "xml"]).is_err());
     }
 

@@ -37,10 +37,13 @@ impl GuildPolicy {
 pub struct RuntimeLimits {
     /// How long a module may spend on one event before it is abandoned.
     pub handler_timeout: Duration,
-    /// Events the guild may have waiting; beyond this new events are dropped and counted.
+    /// Events the guild may have waiting or running at once; beyond this new events are
+    /// dropped and counted. Slash commands have a budget of their own, so a flood of ordinary
+    /// events cannot crowd them out.
     pub queue_capacity: usize,
-    /// Independent lanes of the guild. Events keep their order within one lane, and lanes run
-    /// in parallel; an event's lane is chosen from the user or channel it concerns.
+    /// Independent lanes for ordinary events. Events keep their order within one lane, and
+    /// lanes run in parallel; an event's lane is chosen from the channel, user or role it
+    /// concerns. A quarter as many extra lanes (at least one) serve slash commands.
     pub concurrency: usize,
 }
 

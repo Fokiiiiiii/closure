@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use closure_core::event::{Event as ModuleEvent, GuildId};
 use closure_core::locale::Locale;
 use closure_core::registry::ModuleRegistry;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use twilight_cache_inmemory::{InMemoryCache, ResourceType};
@@ -24,8 +25,11 @@ use crate::dispatcher::Dispatcher;
 /// How long a hook may take before the gateway moves on without it.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Called by the gateway before a guild event is dispatched, so persistent state (settings,
-/// the database) is up to date by the time a module sees the event.
+/// Called by the gateway for guild arrivals and departures.
+///
+/// Hooks run in order on a background task, right after the event is handed to the dispatcher,
+/// so a slow database never stalls reading from the gateway (which would make Discord cut the
+/// connection). The price is that a module can see the event a moment before the hook finished.
 #[async_trait]
 pub trait GuildHooks: Send + Sync {
     /// The bot can see the guild: on start-up for every guild, and when it is added to one.
@@ -156,9 +160,53 @@ impl GatewayHandle {
 struct ShardContext {
     cache: Arc<InMemoryCache>,
     dispatcher: Dispatcher,
-    hooks: Arc<dyn GuildHooks>,
+    hooks: mpsc::Sender<HookJob>,
     health: Arc<GatewayHealth>,
     shutdown: CancellationToken,
+}
+
+/// Work for the hook task. Kept as plain data so it can be queued.
+#[derive(Debug)]
+enum HookJob {
+    Available {
+        guild: GuildId,
+        name: String,
+        preferred_locale: Option<Locale>,
+    },
+    Removed {
+        guild: GuildId,
+    },
+}
+
+/// Enough room for the burst of guild arrivals when a large bot starts, with a wide margin.
+const HOOK_QUEUE: usize = 8192;
+
+async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, mut jobs: mpsc::Receiver<HookJob>) {
+    while let Some(job) = jobs.recv().await {
+        let hook = async {
+            match &job {
+                HookJob::Available {
+                    guild,
+                    name,
+                    preferred_locale,
+                } => hooks.guild_available(*guild, name, *preferred_locale).await,
+                HookJob::Removed { guild } => hooks.guild_removed(*guild).await,
+            }
+        };
+        if tokio::time::timeout(HOOK_TIMEOUT, hook).await.is_err() {
+            tracing::warn!(?job, "guild hook timed out");
+        }
+    }
+}
+
+/// Whether an event means the shard has (or no longer has) a working session.
+fn readiness_change(event: &Event) -> Option<bool> {
+    match event {
+        // `Resumed` is how a shard comes back after a reconnect that kept its session.
+        Event::Ready(_) | Event::Resumed => Some(true),
+        Event::GatewayClose(_) => Some(false),
+        _ => None,
+    }
 }
 
 /// Connects the recommended number of shards and feeds the cache and the dispatcher until
@@ -179,14 +227,17 @@ pub async fn start_gateway(
     tracing::info!(shards = shards.len(), "starting gateway");
 
     let health = Arc::new(GatewayHealth::new(shards.len()));
+    let (hook_sender, hook_jobs) = mpsc::channel(HOOK_QUEUE);
     let context = Arc::new(ShardContext {
         cache,
         dispatcher,
-        hooks,
+        hooks: hook_sender,
         health: Arc::clone(&health),
         shutdown,
     });
     let tracker = TaskTracker::new();
+    // Ends when the last shard task drops its sender, after draining what is queued.
+    tracker.spawn(run_hook_worker(hooks, hook_jobs));
     for shard in shards {
         tracker.spawn(run_shard(shard, Arc::clone(&context)));
     }
@@ -241,44 +292,37 @@ async fn handle_event(
     event: Event,
 ) {
     context.cache.update(&event);
-    match &event {
-        Event::Ready(_) => context.health.set(id, true),
-        Event::GatewayClose(_) => context.health.set(id, false),
-        Event::GatewayHeartbeatAck => {
-            if let Some(latency) = latency {
-                metrics::gauge!("closure_gateway_latency_seconds", "shard" => id.number().to_string())
-                    .set(latency.as_secs_f64());
-            }
-        }
-        _ => {}
+    if let Some(ready) = readiness_change(&event) {
+        context.health.set(id, ready);
+    }
+    if matches!(event, Event::GatewayHeartbeatAck)
+        && let Some(latency) = latency
+    {
+        metrics::gauge!("closure_gateway_latency_seconds", "shard" => id.number().to_string())
+            .set(latency.as_secs_f64());
     }
 
     let Some(converted) = convert::event(&event) else {
         return;
     };
-    run_hooks(context, &converted).await;
-    context.dispatcher.dispatch(converted);
-}
-
-async fn run_hooks(context: &ShardContext, event: &ModuleEvent) {
-    let hook = async {
-        match event {
-            ModuleEvent::GuildAvailable {
-                guild_id,
-                name,
-                preferred_locale,
-            } => {
-                context
-                    .hooks
-                    .guild_available(*guild_id, name, *preferred_locale)
-                    .await;
-            }
-            ModuleEvent::GuildRemoved { guild_id } => context.hooks.guild_removed(*guild_id).await,
-            _ => {}
-        }
+    let hook = match &converted {
+        ModuleEvent::GuildAvailable {
+            guild_id,
+            name,
+            preferred_locale,
+        } => Some(HookJob::Available {
+            guild: *guild_id,
+            name: name.clone(),
+            preferred_locale: *preferred_locale,
+        }),
+        ModuleEvent::GuildRemoved { guild_id } => Some(HookJob::Removed { guild: *guild_id }),
+        _ => None,
     };
-    if tokio::time::timeout(HOOK_TIMEOUT, hook).await.is_err() {
-        tracing::warn!(kind = event.kind().as_str(), "guild hook timed out");
+    context.dispatcher.dispatch(converted);
+    if let Some(job) = hook
+        && context.hooks.send(job).await.is_err()
+    {
+        tracing::warn!("the guild hook task has stopped");
     }
 }
 
@@ -321,6 +365,56 @@ mod tests {
             gateway_intents(&ModuleRegistry::new(vec![]).unwrap()),
             Intents::GUILDS
         );
+    }
+
+    #[test]
+    fn a_resumed_session_counts_as_ready_again() {
+        assert_eq!(readiness_change(&Event::Resumed), Some(true));
+        assert_eq!(readiness_change(&Event::GatewayClose(None)), Some(false));
+        assert_eq!(readiness_change(&Event::GatewayHeartbeatAck), None);
+    }
+
+    #[tokio::test]
+    async fn the_hook_task_runs_jobs_in_order_and_stops_when_senders_are_gone() {
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<String>>);
+
+        #[async_trait]
+        impl GuildHooks for Recorder {
+            async fn guild_available(&self, guild: GuildId, name: &str, _: Option<Locale>) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("available:{guild}:{name}"));
+            }
+
+            async fn guild_removed(&self, guild: GuildId) {
+                self.0.lock().unwrap().push(format!("removed:{guild}"));
+            }
+        }
+
+        let recorder = Arc::new(Recorder::default());
+        let (sender, jobs) = mpsc::channel(8);
+        let worker = tokio::spawn(run_hook_worker(
+            Arc::clone(&recorder) as Arc<dyn GuildHooks>,
+            jobs,
+        ));
+        let guild: GuildId = twilight_model::id::Id::new(7);
+        sender
+            .send(HookJob::Available {
+                guild,
+                name: "a".into(),
+                preferred_locale: None,
+            })
+            .await
+            .unwrap();
+        sender.send(HookJob::Removed { guild }).await.unwrap();
+        drop(sender);
+        worker.await.unwrap();
+
+        assert_eq!(*recorder.0.lock().unwrap(), ["available:7:a", "removed:7"]);
     }
 
     #[test]

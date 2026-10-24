@@ -64,8 +64,11 @@ fn app_with(pool: PgPool, gateway: GatewayStatus) -> App {
     }
 }
 
-fn app(pool: PgPool) -> App {
-    app_with(pool, GatewayStatus { ready: 1, total: 1 })
+/// An app whose test guild (the one most tests configure) has been joined by the bot.
+async fn app(pool: PgPool) -> App {
+    let app = app_with(pool, GatewayStatus { ready: 1, total: 1 });
+    app.db.register_guild(Id::new(GUILD)).await.unwrap();
+    app
 }
 
 struct Response {
@@ -148,7 +151,7 @@ const GUILD: u64 = 42;
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn probes_need_no_token_but_everything_else_does(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     for uri in ["/healthz", "/readyz"] {
         let response = send(&app.router, call(Method::GET, uri).token(None)).await;
         assert_eq!(response.status, StatusCode::OK, "{uri}");
@@ -163,7 +166,7 @@ async fn probes_need_no_token_but_everything_else_does(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn wrong_or_malformed_credentials_are_refused(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     let attempts: [(&str, Call); 4] = [
         (
             "wrong token",
@@ -217,7 +220,7 @@ async fn weak_admin_tokens_are_refused_at_setup(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn an_unconfigured_guild_reads_as_an_empty_document_at_revision_zero(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     let response = send(&app.router, call(Method::GET, "/v1/guilds/42/config")).await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.etag(), "\"0\"");
@@ -226,7 +229,7 @@ async fn an_unconfigured_guild_reads_as_an_empty_document_at_revision_zero(pool:
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn saving_creates_then_updates_and_takes_effect_immediately(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     let guild = Id::new(GUILD);
     let warn = ModuleId::new("warn").unwrap();
     assert!(!app.store.module(guild, &warn).unwrap().enabled);
@@ -267,8 +270,29 @@ async fn saving_creates_then_updates_and_takes_effect_immediately(pool: PgPool) 
 }
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
+async fn only_servers_the_bot_is_in_can_be_configured(pool: PgPool) {
+    let app = app_with(pool, GatewayStatus { ready: 1, total: 1 });
+    let response = send(&app.router, put(777, "\"0\"", "preset: small")).await;
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert_eq!(response.json()["error"]["code"], "not_found");
+    assert_eq!(app.db.load_config(Id::new(777)).await.unwrap(), None);
+
+    app.db.register_guild(Id::new(777)).await.unwrap();
+    let response = send(&app.router, put(777, "\"0\"", "preset: small")).await;
+    assert_eq!(response.status, StatusCode::OK);
+
+    app.db.mark_guild_left(Id::new(777)).await.unwrap();
+    let response = send(&app.router, put(777, "\"1\"", "preset: large")).await;
+    assert_eq!(
+        response.status,
+        StatusCode::NOT_FOUND,
+        "a guild the bot left is not configurable"
+    );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
 async fn writes_must_say_which_revision_they_edit(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     let response = send(
         &app.router,
         call(Method::PUT, "/v1/guilds/42/config").body("preset: small"),
@@ -280,7 +304,7 @@ async fn writes_must_say_which_revision_they_edit(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn a_stale_editor_gets_a_conflict_with_the_current_revision(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     send(&app.router, put(GUILD, "\"0\"", "preset: small")).await;
     send(&app.router, put(GUILD, "\"1\"", "preset: medium")).await;
 
@@ -294,7 +318,7 @@ async fn a_stale_editor_gets_a_conflict_with_the_current_revision(pool: PgPool) 
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn simultaneous_edits_from_one_revision_have_one_winner(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     send(&app.router, put(GUILD, "\"0\"", "preset: small")).await;
 
     let (a, b) = tokio::join!(
@@ -308,7 +332,7 @@ async fn simultaneous_edits_from_one_revision_have_one_winner(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn invalid_documents_are_rejected_before_anything_is_stored(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     let guild = Id::new(GUILD);
 
     let syntax = send(
@@ -346,7 +370,7 @@ async fn invalid_documents_are_rejected_before_anything_is_stored(pool: PgPool) 
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn json_bodies_are_accepted_and_yaml_can_be_requested(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     let saved = send(
         &app.router,
         put(GUILD, "\"0\"", r#"{"preset":"small","language":"ja"}"#),
@@ -369,7 +393,7 @@ async fn json_bodies_are_accepted_and_yaml_can_be_requested(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn validating_is_a_dry_run_that_shows_the_resolved_result(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     let checked = send(
         &app.router,
         call(Method::POST, "/v1/guilds/42/config/validate")
@@ -399,7 +423,7 @@ async fn validating_is_a_dry_run_that_shows_the_resolved_result(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn the_effective_view_fills_in_every_default(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     send(&app.router, put(GUILD, "\"0\"", "language: ja")).await;
     let effective = send(
         &app.router,
@@ -415,7 +439,7 @@ async fn the_effective_view_fills_in_every_default(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn history_lists_revisions_newest_first(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     send(&app.router, put(GUILD, "\"0\"", "preset: small")).await;
     send(&app.router, put(GUILD, "\"1\"", "preset: large")).await;
     let response = send(
@@ -436,7 +460,7 @@ async fn history_lists_revisions_newest_first(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn oversized_bodies_are_refused(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     let huge = format!("# {}\n", "x".repeat(200 * 1024));
     let response = send(&app.router, put(GUILD, "\"0\"", &huge)).await;
     assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
@@ -444,7 +468,7 @@ async fn oversized_bodies_are_refused(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn bad_guild_ids_are_rejected(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     for uri in [
         "/v1/guilds/0/config",
         "/v1/guilds/18446744073709551615/config",
@@ -487,7 +511,7 @@ async fn readiness_needs_both_the_database_and_every_shard(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn metrics_and_the_schema_are_served_to_the_admin(pool: PgPool) {
-    let app = app(pool);
+    let app = app(pool).await;
     let metrics = send(&app.router, call(Method::GET, "/metrics")).await;
     assert_eq!(metrics.text, "closure_up 1\n");
     assert!(
@@ -509,7 +533,7 @@ async fn metrics_and_the_schema_are_served_to_the_admin(pool: PgPool) {
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn internal_failures_do_not_leak_details(pool: PgPool) {
-    let app = app(pool.clone());
+    let app = app(pool.clone()).await;
     pool.close().await;
     let response = send(&app.router, call(Method::GET, "/v1/guilds/42/config")).await;
     assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);

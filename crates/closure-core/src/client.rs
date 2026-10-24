@@ -30,6 +30,7 @@ pub struct ApiClient {
     api: Arc<dyn DiscordApi>,
     granted: Arc<CapabilitySet>,
     module: ModuleId,
+    guild: Option<GuildId>,
 }
 
 impl fmt::Debug for ApiClient {
@@ -37,6 +38,7 @@ impl fmt::Debug for ApiClient {
         f.debug_struct("ApiClient")
             .field("module", &self.module)
             .field("granted", &self.granted)
+            .field("guild", &self.guild)
             .finish_non_exhaustive()
     }
 }
@@ -52,7 +54,20 @@ impl ApiClient {
             api,
             granted: Arc::new(granted),
             module,
+            guild: None,
         }
+    }
+
+    /// Restricts the client to one guild: an action that names a different guild is refused.
+    ///
+    /// Capabilities are granted per guild, so without this a module enabled with `ban_members`
+    /// in one guild could ban in any other. Actions that identify only a channel or a message
+    /// name no guild and cannot be checked here; hosts running untrusted (scripted) modules
+    /// must not rely on this alone for those.
+    #[must_use]
+    pub fn scoped_to(mut self, guild: GuildId) -> Self {
+        self.guild = Some(guild);
+        self
     }
 
     pub async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
@@ -61,6 +76,14 @@ impl ApiClient {
         if !self.granted.contains(capability) {
             tracing::warn!(module = %self.module, action = name, %capability, "capability denied");
             return Err(DiscordError::CapabilityDenied(capability));
+        }
+        if let (Some(scope), Some(target)) = (self.guild, action.guild_id())
+            && scope != target
+        {
+            tracing::warn!(module = %self.module, action = name, %scope, %target, "action targets another guild");
+            return Err(DiscordError::Forbidden(
+                "the action targets a guild other than the one being served".into(),
+            ));
         }
         action.validate()?;
 
@@ -325,6 +348,22 @@ mod tests {
             Err(DiscordError::CapabilityDenied(Capability::BanMembers))
         );
         assert_eq!(api.actions(), []);
+    }
+
+    #[tokio::test]
+    async fn a_scoped_client_refuses_other_guilds_even_with_the_capability() {
+        let api = Arc::new(MockApi::default());
+        let client = client(&api, &[Capability::KickMembers]).scoped_to(Id::new(1));
+
+        let elsewhere = client.kick(Id::new(2), Id::new(9), reason()).await;
+        assert!(
+            matches!(elsewhere, Err(DiscordError::Forbidden(_))),
+            "{elsewhere:?}"
+        );
+        assert_eq!(api.actions(), []);
+
+        client.kick(Id::new(1), Id::new(9), reason()).await.unwrap();
+        assert_eq!(api.actions().len(), 1);
     }
 
     #[tokio::test]

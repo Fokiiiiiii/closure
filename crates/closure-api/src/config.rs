@@ -114,6 +114,10 @@ pub(crate) async fn put_config(
     let overrides = parse_body(&body)?;
     // Validate before touching the database: an invalid document must never be stored.
     let settings = state.inner.settings.compiler().compile(&overrides)?;
+    // Only servers the bot is in can be configured; this keeps stray ids out of the database.
+    if !state.inner.db.is_guild_active(guild).await? {
+        return Err(ApiError::NotFound("the bot is not in that server".into()));
+    }
 
     let revision = state
         .inner

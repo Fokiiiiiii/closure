@@ -12,8 +12,8 @@ use closure_core::settings::SettingsProvider;
 use closure_db::{Db, DbOptions};
 use closure_discord::hierarchy::InMemoryCacheView;
 use closure_discord::{
-    CommandScope, Dispatcher, DispatcherConfig, GatewayConfig, GatewayHealth, TwilightApi,
-    build_commands, gateway_intents, new_cache, register_commands, start_gateway,
+    CommandScope, Dispatcher, DispatcherConfig, GatewayConfig, GatewayHandle, GatewayHealth,
+    TwilightApi, build_commands, gateway_intents, new_cache, register_commands, start_gateway,
 };
 use closure_i18n::TranslatorBuilder;
 use closure_mod_diagnostics::DiagnosticsModule;
@@ -124,10 +124,9 @@ async fn publish_commands(
         return Ok(());
     }
     let commands = build_commands(&core.registry, core.translator.as_ref())?;
-    let scope = args
-        .command_guild
-        .and_then(Id::new_checked)
-        .map_or(CommandScope::Global, CommandScope::Guild);
+    let scope = args.command_guild.map_or(CommandScope::Global, |guild| {
+        CommandScope::Guild(Id::new(guild.get()))
+    });
     let published = register_commands(http, application_id, scope, &commands)
         .await
         .context("could not publish slash commands")?;
@@ -170,6 +169,81 @@ async fn start_api(
     )))
 }
 
+/// What has been started and has to be stopped again, however the run ends.
+#[derive(Default)]
+struct Started {
+    dispatcher: Option<Dispatcher>,
+    gateway: Option<GatewayHandle>,
+    api_task: Option<JoinHandle<()>>,
+}
+
+/// Starts everything that talks to Discord and waits until the process is asked to stop.
+/// Returns whether the gateway stopped on its own. Whatever was started before an error is
+/// left in `started`, so the caller can still shut it down in order.
+async fn serve(
+    args: &Args,
+    core: &Core,
+    db: &Db,
+    metrics: PrometheusHandle,
+    shutdown: &CancellationToken,
+    started: &mut Started,
+) -> Result<bool> {
+    let application_id = Id::new(args.application_id.get());
+    let http = Arc::new(Client::new(args.discord_token.clone()));
+    let cache = new_cache();
+    let api = Arc::new(
+        TwilightApi::new(Arc::clone(&http), application_id)
+            .with_cache(Arc::new(InMemoryCacheView(Arc::clone(&cache)))),
+    );
+    let dispatcher = started
+        .dispatcher
+        .insert(
+            Dispatcher::start(
+                Arc::clone(&core.registry),
+                Arc::clone(&core.store) as Arc<dyn SettingsProvider>,
+                api,
+                Arc::clone(&core.translator),
+                DispatcherConfig::default(),
+            )
+            .await
+            .context("a module failed to load")?,
+        )
+        .clone();
+
+    publish_commands(args, &http, application_id, core).await?;
+
+    let hooks = Arc::new(AppHooks::new(db.clone(), Arc::clone(&core.store)));
+    let gateway = started.gateway.insert(
+        start_gateway(
+            &http,
+            GatewayConfig {
+                token: args.discord_token.clone(),
+                intents: gateway_intents(&core.registry),
+            },
+            cache,
+            dispatcher,
+            hooks,
+            shutdown.clone(),
+        )
+        .await
+        .context("could not start the gateway")?,
+    );
+    started.api_task = start_api(
+        args,
+        core,
+        db,
+        Arc::clone(gateway.health()),
+        metrics,
+        shutdown,
+    )
+    .await?;
+
+    Ok(tokio::select! {
+        () = termination() => false,
+        () = gateway.closed() => true,
+    })
+}
+
 pub async fn run(args: Args) -> Result<()> {
     let metrics = PrometheusBuilder::new()
         .install_recorder()
@@ -193,82 +267,42 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("could not load guild configurations")?;
 
-    let application_id =
-        Id::new_checked(args.application_id).context("the application id must not be 0")?;
-    let http = Arc::new(Client::new(args.discord_token.clone()));
-    let cache = new_cache();
-    let api = Arc::new(
-        TwilightApi::new(Arc::clone(&http), application_id)
-            .with_cache(Arc::new(InMemoryCacheView(Arc::clone(&cache)))),
-    );
-    let dispatcher = Dispatcher::start(
-        Arc::clone(&core.registry),
-        Arc::clone(&core.store) as Arc<dyn SettingsProvider>,
-        api,
-        Arc::clone(&core.translator),
-        DispatcherConfig::default(),
-    )
-    .await
-    .context("a module failed to load")?;
-
-    publish_commands(&args, &http, application_id, &core).await?;
-
-    let hooks = Arc::new(AppHooks::new(db.clone(), Arc::clone(&core.store)));
-    let gateway = start_gateway(
-        &http,
-        GatewayConfig {
-            token: args.discord_token.clone(),
-            intents: gateway_intents(&core.registry),
-        },
-        cache,
-        dispatcher.clone(),
-        hooks,
-        shutdown.clone(),
-    )
-    .await
-    .context("could not start the gateway")?;
-    let api_task = start_api(
-        &args,
-        &core,
-        &db,
-        Arc::clone(gateway.health()),
-        metrics,
-        &shutdown,
-    )
-    .await?;
-
-    let gateway_stopped = tokio::select! {
-        () = termination() => false,
-        () = gateway.closed() => true,
-    };
-    if gateway_stopped {
-        tracing::error!("the gateway stopped on its own");
-    } else {
-        tracing::info!("shutting down");
+    let mut started = Started::default();
+    let outcome = serve(&args, &core, &db, metrics, &shutdown, &mut started).await;
+    match &outcome {
+        Ok(false) => tracing::info!("shutting down"),
+        Ok(true) => tracing::error!("the gateway stopped on its own"),
+        Err(error) => {
+            tracing::error!(error = %format!("{error:#}"), "start-up failed; stopping what was started");
+        }
     }
 
     // Stop taking new work first, then let what is in flight finish.
     shutdown.cancel();
-    if tokio::time::timeout(GATEWAY_STOP_TIMEOUT, gateway.closed())
-        .await
-        .is_err()
+    if let Some(gateway) = &started.gateway
+        && tokio::time::timeout(GATEWAY_STOP_TIMEOUT, gateway.closed())
+            .await
+            .is_err()
     {
         tracing::warn!("the gateway did not stop in time");
     }
-    dispatcher.shutdown(DISPATCHER_DRAIN_TIMEOUT).await;
-    if let Some(task) = api_task {
+    if let Some(dispatcher) = &started.dispatcher {
+        dispatcher.shutdown(DISPATCHER_DRAIN_TIMEOUT).await;
+    }
+    if let Some(task) = started.api_task {
         let _ = tokio::time::timeout(TASK_STOP_TIMEOUT, task).await;
     }
     let _ = tokio::time::timeout(TASK_STOP_TIMEOUT, sync_task).await;
     db.close().await;
     tracing::info!("stopped");
 
-    if gateway_stopped {
-        bail!(
+    match outcome {
+        Ok(true) => bail!(
             "the gateway stopped unexpectedly; check the bot token and that the requested intents are enabled in the developer portal"
-        );
+        ),
+        Ok(false) => Ok(()),
+        Err(error) => Err(error),
     }
-    Ok(())
 }
 
 #[cfg(test)]

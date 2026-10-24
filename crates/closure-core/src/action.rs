@@ -563,6 +563,46 @@ impl Action {
         }
     }
 
+    /// The guild the action names, if it names one. Actions that identify only a channel, a
+    /// message or an interaction return `None`: their guild cannot be known without a lookup.
+    #[must_use]
+    pub fn guild_id(&self) -> Option<GuildId> {
+        match self {
+            Self::GetGuild { guild_id }
+            | Self::GetMember { guild_id, .. }
+            | Self::Kick { guild_id, .. }
+            | Self::Ban { guild_id, .. }
+            | Self::Unban { guild_id, .. }
+            | Self::Timeout { guild_id, .. }
+            | Self::SetNickname { guild_id, .. }
+            | Self::AddRole { guild_id, .. }
+            | Self::RemoveRole { guild_id, .. }
+            | Self::ListBans { guild_id, .. }
+            | Self::CreateChannel { guild_id, .. }
+            | Self::ListRoles { guild_id }
+            | Self::CreateRole { guild_id, .. }
+            | Self::EditRole { guild_id, .. }
+            | Self::DeleteRole { guild_id, .. }
+            | Self::ListAutoModRules { guild_id }
+            | Self::CreateAutoModRule { guild_id, .. }
+            | Self::DeleteAutoModRule { guild_id, .. }
+            | Self::GetAuditLog { guild_id, .. } => Some(*guild_id),
+            Self::SendMessage { .. }
+            | Self::EditMessage { .. }
+            | Self::DeleteMessage { .. }
+            | Self::BulkDeleteMessages { .. }
+            | Self::AddReaction { .. }
+            | Self::GetChannel { .. }
+            | Self::EditChannel { .. }
+            | Self::DeleteChannel { .. }
+            | Self::SetPermissionOverwrite { .. }
+            | Self::DeletePermissionOverwrite { .. }
+            | Self::Respond { .. }
+            | Self::Followup { .. }
+            | Self::EditResponse { .. } => None,
+        }
+    }
+
     /// A stable `snake_case` name for metrics labels and tracing.
     #[must_use]
     pub fn name(&self) -> &'static str {
@@ -811,6 +851,23 @@ mod tests {
         };
         assert!(make("あ".repeat(MAX_MESSAGE_CHARS)).validate().is_ok());
         assert!(make("あ".repeat(MAX_MESSAGE_CHARS + 1)).validate().is_err());
+    }
+
+    #[test]
+    fn guild_scoped_actions_name_their_guild_and_channel_actions_do_not() {
+        let ban = Action::Ban {
+            guild_id: id::<7, _>(),
+            user_id: id::<2, _>(),
+            delete_message_seconds: 0,
+            reason: reason(),
+        };
+        assert_eq!(ban.guild_id(), Some(id::<7, _>()));
+        let delete = Action::DeleteMessage {
+            channel_id: id::<1, _>(),
+            message_id: id::<2, _>(),
+            reason: reason(),
+        };
+        assert_eq!(delete.guild_id(), None);
     }
 
     #[test]

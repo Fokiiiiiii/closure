@@ -24,7 +24,9 @@ let manifest = ModuleManifest::new(ModuleId::new("warn")?, "Warnings", env!("CAR
   `modules:` in the configuration and the namespace of your messages.
 - Declare only the capabilities you use. A server can narrow them, never widen them.
 - Declare only the events and intents you need; the bot requests the union of all modules'
-  intents, and you receive only the events you subscribe to.
+  intents, and you receive only the events you subscribe to. Slash command events are the
+  exception: a `Command` event goes only to the module that owns the command, so a module does
+  not need to subscribe to `EventKind::Command` to receive its own commands.
 - Commands are data (`CommandSpec`): name, English description, options or subcommands (one level),
   default member permissions. Required options come before optional ones.
 - The registry refuses duplicate ids, unknown or cyclic dependencies and colliding commands at
@@ -61,7 +63,11 @@ Things to know:
 - **Return errors, do not swallow them.** A `DiscordError` becomes a localised answer to the user
   without internal details; other errors are logged and counted. A module that keeps failing in a
   guild is paused there for a while.
-- **Be quick.** Each call has a timeout (the guild's `handler_timeout_secs`). Do not block threads.
+- **Be quick, and never block a thread.** Each call has a timeout (the guild's
+  `handler_timeout_secs`), but it can only stop a module at an `await`; code that blocks or spawns
+  blocking work keeps running after the timeout.
+- **You act within one guild.** Your client is bound to the guild of the event, and an action that
+  names another guild is refused.
 - **Order**: events about one channel, user or role arrive in order; unrelated events may be handled
   at the same time, so share state through `Arc` and locks, not assumptions.
 - Check `ctx.policy().is_moderator(&roles)` (and the invoker's Discord permissions) before

@@ -44,7 +44,9 @@ impl TwilightApi {
             request = request.embeds(embeds);
         }
         if let Some(message) = reply_to {
-            request = request.reply(message);
+            // A reply to a message that has since been deleted (say, by auto moderation) should
+            // still be sent as a plain message rather than fail.
+            request = request.reply(message).fail_if_not_exists(false);
         }
         read(request)
             .await

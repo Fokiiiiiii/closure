@@ -187,7 +187,8 @@ pub struct ModuleManifest {
     pub version: String,
     pub description: String,
     pub runtime: ModuleRuntime,
-    /// Gateway intents the module needs. The bot requests the union of enabled modules.
+    /// Gateway intents the module needs. The bot requests the union over all registered
+    /// modules, because intents belong to the connection and cannot follow per-guild settings.
     pub intents: Intents,
     /// Events the module wants delivered.
     pub events: EventKinds,

@@ -1,9 +1,13 @@
 //! Role hierarchy checks performed before a request is sent.
 //!
 //! Discord refuses moderation of anyone whose highest role is not below the bot's own, and of the
-//! server owner. Checking this from the cache turns a vague `403 Missing Permissions` into a
-//! precise [`DiscordError::HierarchyViolation`] and saves the round trip. Whenever the cache does
-//! not know enough, the check is skipped and Discord has the final say.
+//! server owner. The cache is not always current (member roles go stale without the member
+//! intent), so only what is certain is rejected up front: the bot targeting itself, and the
+//! server owner. A rank problem seen in the cache is only a *suspicion*: the request is still
+//! sent, and if Discord then answers `403` the suspicion becomes a precise
+//! [`DiscordError::HierarchyViolation`] instead of a vague `Missing Permissions`. A stale cache
+//! can therefore never block a legitimate action. When the cache does not know enough, nothing
+//! is suspected.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -87,6 +91,18 @@ fn highest_rank(view: &dyn CacheView, guild: GuildId, user: UserId) -> Option<Ra
     Some(best)
 }
 
+/// What the cache says about an action before it is sent.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Preflight {
+    /// Nothing wrong was seen.
+    Pass,
+    /// Certainly wrong; do not send.
+    Reject(DiscordError),
+    /// Probably wrong according to a possibly stale cache. Send anyway, and use this error
+    /// to explain a `403` if one comes back.
+    Suspect(DiscordError),
+}
+
 fn violation(message: &str) -> DiscordError {
     DiscordError::HierarchyViolation(message.to_owned())
 }
@@ -96,40 +112,43 @@ fn check_member_target(
     guild: GuildId,
     target: UserId,
     forbid_self: bool,
-) -> Result<(), DiscordError> {
+) -> Preflight {
     let bot = view.bot_user();
-    if forbid_self && bot == Some(target) {
-        return Err(DiscordError::Invalid("the bot cannot target itself".into()));
+    if bot == Some(target) {
+        // Members may change their own nickname; moderating oneself makes no sense.
+        return if forbid_self {
+            Preflight::Reject(DiscordError::Invalid("the bot cannot target itself".into()))
+        } else {
+            Preflight::Pass
+        };
     }
     if view.guild_owner(guild) == Some(target) {
-        return Err(violation("the server owner cannot be moderated"));
+        return Preflight::Reject(violation("the server owner cannot be moderated"));
     }
-    let Some(bot) = bot else { return Ok(()) };
+    let Some(bot) = bot else {
+        return Preflight::Pass;
+    };
     if view.guild_owner(guild) == Some(bot) {
-        return Ok(());
+        return Preflight::Pass;
     }
     if let (Some(bot_rank), Some(target_rank)) = (
         highest_rank(view, guild, bot),
         highest_rank(view, guild, target),
     ) && bot_rank <= target_rank
     {
-        return Err(violation(
+        return Preflight::Suspect(violation(
             "the target's highest role is not below the bot's highest role",
         ));
     }
-    Ok(())
+    Preflight::Pass
 }
 
-fn check_role_target(
-    view: &dyn CacheView,
-    guild: GuildId,
-    role: RoleId,
-) -> Result<(), DiscordError> {
+fn check_role_target(view: &dyn CacheView, guild: GuildId, role: RoleId) -> Preflight {
     let Some(bot) = view.bot_user() else {
-        return Ok(());
+        return Preflight::Pass;
     };
     if view.guild_owner(guild) == Some(bot) {
-        return Ok(());
+        return Preflight::Pass;
     }
     if let (Some(bot_rank), Some(position)) =
         (highest_rank(view, guild, bot), view.role_position(role))
@@ -139,13 +158,13 @@ fn check_role_target(
                 id: role.get(),
             })
     {
-        return Err(violation("the role is not below the bot's highest role"));
+        return Preflight::Suspect(violation("the role is not below the bot's highest role"));
     }
-    Ok(())
+    Preflight::Pass
 }
 
-/// Rejects `action` if the cache proves Discord would refuse it for hierarchy reasons.
-pub fn preflight(view: &dyn CacheView, action: &Action) -> Result<(), DiscordError> {
+/// Judges `action` against what the cache knows.
+pub fn preflight(view: &dyn CacheView, action: &Action) -> Preflight {
     match action {
         Action::Kick {
             guild_id, user_id, ..
@@ -171,7 +190,7 @@ pub fn preflight(view: &dyn CacheView, action: &Action) -> Result<(), DiscordErr
         | Action::DeleteRole {
             guild_id, role_id, ..
         } => check_role_target(view, *guild_id, *role_id),
-        _ => Ok(()),
+        _ => Preflight::Pass,
     }
 }
 
@@ -244,39 +263,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_higher_bot_role_may_moderate() {
-        assert_eq!(preflight(&world(&[10], &[11]), &ban(TARGET)), Ok(()));
+    fn suspect(verdict: &Preflight) -> bool {
+        matches!(
+            verdict,
+            Preflight::Suspect(DiscordError::HierarchyViolation(_))
+        )
+    }
+
+    fn nickname(user: u64) -> Action {
+        Action::SetNickname {
+            guild_id: Id::new(GUILD),
+            user_id: Id::new(user),
+            nickname: Some("new".into()),
+            reason: Reason::new("test").unwrap(),
+        }
     }
 
     #[test]
-    fn a_lower_or_equal_bot_role_may_not() {
-        let lower = preflight(&world(&[13], &[11]), &ban(TARGET));
-        assert!(matches!(lower, Err(DiscordError::HierarchyViolation(_))));
-        let equal = preflight(&world(&[10], &[10]), &ban(TARGET));
-        assert!(matches!(equal, Err(DiscordError::HierarchyViolation(_))));
+    fn a_higher_bot_role_may_moderate() {
+        assert_eq!(
+            preflight(&world(&[10], &[11]), &ban(TARGET)),
+            Preflight::Pass
+        );
+    }
+
+    #[test]
+    fn a_lower_or_equal_bot_role_is_only_suspected_never_blocked() {
+        assert!(suspect(&preflight(&world(&[13], &[11]), &ban(TARGET))));
+        assert!(suspect(&preflight(&world(&[10], &[10]), &ban(TARGET))));
     }
 
     #[test]
     fn equal_positions_are_decided_by_the_older_role() {
         // Roles 11 and 12 share position 3; the smaller id outranks the larger.
-        assert_eq!(preflight(&world(&[11], &[12]), &ban(TARGET)), Ok(()));
-        assert!(preflight(&world(&[12], &[11]), &ban(TARGET)).is_err());
+        assert_eq!(
+            preflight(&world(&[11], &[12]), &ban(TARGET)),
+            Preflight::Pass
+        );
+        assert!(suspect(&preflight(&world(&[12], &[11]), &ban(TARGET))));
     }
 
     #[test]
     fn the_highest_of_several_roles_counts() {
         assert_eq!(
             preflight(&world(&[13, 10], &[11, 12]), &ban(TARGET)),
-            Ok(())
+            Preflight::Pass
         );
-        assert!(preflight(&world(&[13, 11], &[10, 13]), &ban(TARGET)).is_err());
+        assert!(suspect(&preflight(
+            &world(&[13, 11], &[10, 13]),
+            &ban(TARGET)
+        )));
     }
 
     #[test]
     fn members_without_roles_rank_as_everyone() {
-        assert_eq!(preflight(&world(&[13], &[]), &ban(TARGET)), Ok(()));
-        assert!(preflight(&world(&[], &[]), &ban(TARGET)).is_err());
+        assert_eq!(preflight(&world(&[13], &[]), &ban(TARGET)), Preflight::Pass);
+        assert!(suspect(&preflight(&world(&[], &[]), &ban(TARGET))));
     }
 
     #[test]
@@ -285,41 +327,46 @@ mod tests {
         fake.members.insert(OWNER, vec![13]);
         assert!(matches!(
             preflight(&fake, &ban(OWNER)),
-            Err(DiscordError::HierarchyViolation(_))
+            Preflight::Reject(DiscordError::HierarchyViolation(_))
         ));
 
         let mut owner_bot = world(&[13], &[10]);
         owner_bot.owner = Some(BOT);
-        assert_eq!(preflight(&owner_bot, &ban(TARGET)), Ok(()));
+        assert_eq!(preflight(&owner_bot, &ban(TARGET)), Preflight::Pass);
     }
 
     #[test]
-    fn the_bot_cannot_ban_itself() {
+    fn the_bot_cannot_ban_itself_but_may_change_its_own_nickname() {
         assert!(matches!(
             preflight(&world(&[10], &[]), &ban(BOT)),
-            Err(DiscordError::Invalid(_))
+            Preflight::Reject(DiscordError::Invalid(_))
         ));
+        assert_eq!(
+            preflight(&world(&[10], &[]), &nickname(BOT)),
+            Preflight::Pass
+        );
+        assert!(suspect(&preflight(&world(&[10], &[10]), &nickname(TARGET))));
     }
 
     #[test]
-    fn unknown_cache_data_defers_to_discord() {
+    fn unknown_cache_data_suspects_nothing() {
         let mut fake = world(&[10], &[11]);
         fake.members.remove(&TARGET);
-        assert_eq!(preflight(&fake, &ban(TARGET)), Ok(()));
-        assert_eq!(preflight(&Fake::default(), &ban(TARGET)), Ok(()));
+        assert_eq!(preflight(&fake, &ban(TARGET)), Preflight::Pass);
+        assert_eq!(preflight(&Fake::default(), &ban(TARGET)), Preflight::Pass);
         let mut unknown_role = world(&[10], &[99]);
         unknown_role.roles.remove(&99);
-        assert_eq!(preflight(&unknown_role, &ban(TARGET)), Ok(()));
+        assert_eq!(preflight(&unknown_role, &ban(TARGET)), Preflight::Pass);
     }
 
     #[test]
     fn assigning_a_role_needs_it_to_be_below_the_bot() {
-        assert_eq!(preflight(&world(&[10], &[]), &add_role(11)), Ok(()));
-        assert!(matches!(
-            preflight(&world(&[11], &[]), &add_role(10)),
-            Err(DiscordError::HierarchyViolation(_))
-        ));
-        assert!(preflight(&world(&[11], &[]), &add_role(11)).is_err());
+        assert_eq!(
+            preflight(&world(&[10], &[]), &add_role(11)),
+            Preflight::Pass
+        );
+        assert!(suspect(&preflight(&world(&[11], &[]), &add_role(10))));
+        assert!(suspect(&preflight(&world(&[11], &[]), &add_role(11))));
     }
 
     #[test]
@@ -327,6 +374,6 @@ mod tests {
         let action = Action::GetGuild {
             guild_id: Id::new(GUILD),
         };
-        assert_eq!(preflight(&Fake::default(), &action), Ok(()));
+        assert_eq!(preflight(&Fake::default(), &action), Preflight::Pass);
     }
 }

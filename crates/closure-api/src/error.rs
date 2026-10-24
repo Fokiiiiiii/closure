@@ -9,6 +9,7 @@ use serde::Serialize;
 pub(crate) enum ApiError {
     Unauthorized,
     BadRequest(String),
+    NotFound(String),
     /// A write that must say which revision it edits (`If-Match`) did not.
     PreconditionRequired,
     /// The configuration changed since the client read it.
@@ -90,6 +91,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(message) => {
                 respond(StatusCode::BAD_REQUEST, body("bad_request", message))
             }
+            Self::NotFound(message) => respond(StatusCode::NOT_FOUND, body("not_found", message)),
             Self::PreconditionRequired => respond(
                 StatusCode::PRECONDITION_REQUIRED,
                 body(

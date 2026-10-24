@@ -33,23 +33,32 @@ gateway shard ─► cache.update ─► convert ─► guild hooks ─► Dispa
 1. A shard receives a payload. The cache is updated, then the payload is converted to the stable
    `Event` model. Direct messages and guild outages are dropped here; every later stage can rely on
    an event belonging to a guild.
-2. Hooks run before dispatch, so settings and the database are current by the time a module sees
-   the event (a guild's Discord language, the guild being recorded, its configuration restored on
-   rejoin).
+2. Guild hooks (recording the guild, its Discord language, restoring its configuration on
+   rejoin) run in order on a background task right after the event is dispatched. A slow database
+   therefore never stops the shard from being read, which would get the connection cut; the cost
+   is that a module may see a guild arrive a moment before the hook has finished.
 3. The `Dispatcher` picks the guild's *lane* from the channel, user or role the event concerns.
-   Events in one lane run in order; lanes run in parallel. Queues are bounded: when one is full the
-   event is dropped and counted, never buffered without limit.
+   Events in one lane run in order; lanes run in parallel. Slash commands use lanes of their own.
+   The guild has one budget of events waiting or running (commands have another): when it is used
+   up the event is dropped and counted, never buffered without limit.
 4. Each module call runs in its own task with a timeout. A panic or a hang costs that call only.
    After repeated failures a module is paused for that guild and then given one trial call (circuit
    breaker). Errors that mean "Discord refused" do not count against the module.
 5. The module asks for Discord side effects through `ApiClient`. It rejects an action the module
    has no capability for, validates it (lengths, ranges, required audit-log reason), and only then
    hands it to `TwilightApi`.
-6. `TwilightApi` checks the role hierarchy from the cache (turning a vague 403 into a precise
-   error), sends the request, normalises failures into `DiscordError`, retries *reads* on
-   transient failures (never writes), and records metrics.
+6. `TwilightApi` consults the cache for the role hierarchy. What is certain (the bot targeting
+   itself, the server owner) is refused up front; a rank problem is only a *suspicion*, because
+   the cache can be stale. The request is sent anyway, and if Discord answers 403 the suspicion
+   turns a vague `Missing Permissions` into a precise `HierarchyViolation`. It then normalises
+   failures into `DiscordError`, retries *reads* on transient failures (never writes), and
+   records metrics.
 
-A module never receives an HTTP client, a token or a database handle.
+A module never receives an HTTP client, a token or a database handle. Its `ApiClient` is bound to
+the guild of the event: an action that names another guild is refused, whatever capabilities the
+module holds. Actions that identify only a channel or a message name no guild and cannot be checked
+that way; that is acceptable for trusted native modules, but must be closed (by resolving the
+channel's guild) before untrusted scripted modules are allowed to run.
 
 ## Configuration
 
@@ -107,6 +116,11 @@ returned actions into `ApiClient::execute` calls. Nothing else in the system wou
 
 ## Known gaps
 
+- `task.abort()` stops a timed-out module only at an `await`; a module that blocks a thread or
+  spawns blocking work keeps running. Modules must not block.
+- The HTTP API has no connection cap or header-read timeout of its own, and `/readyz` queries the
+  database on every call. Put it behind a reverse proxy if it is reachable by anyone untrusted.
+- Command events go only to the module that owns the command, not to other subscribers.
 - Subcommand *groups* (two levels of nesting) are not supported; one level is.
 - A stored document that fails to parse makes `GET /v1/guilds/{id}/config` return 500 for that
   guild, and a replacement needs the revision from the database.

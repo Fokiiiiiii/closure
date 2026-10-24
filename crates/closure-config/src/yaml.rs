@@ -11,8 +11,8 @@ pub const MAX_YAML_BYTES: usize = 64 * 1024;
 fn options() -> Options {
     let mut budget = Budget::default();
     budget.max_events = 100_000;
-    budget.max_aliases = 100;
-    budget.max_anchors = 100;
+    budget.max_aliases = 20;
+    budget.max_anchors = 20;
     let mut options = Options::default();
     options.budget = Some(budget);
     options

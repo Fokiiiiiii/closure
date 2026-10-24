@@ -16,6 +16,11 @@ use crate::model::{
 
 const MAX_MODERATOR_ROLES: usize = 100;
 
+/// A document may not grow beyond this once parsed. The YAML text is capped much lower, but
+/// aliases can expand a small text into a large value, and the result is stored twice (current
+/// and history).
+pub(crate) const MAX_DOCUMENT_BYTES: usize = 128 * 1024;
+
 /// Turns sparse [`GuildOverrides`] into validated [`GuildSettings`].
 ///
 /// Module config schemas are compiled once here, so a module that ships an unusable schema
@@ -89,6 +94,13 @@ fn compile_with(
         return Err(ConfigError::UnsupportedVersion {
             found,
             supported: CURRENT_VERSION,
+        });
+    }
+    let size = serde_json::to_vec(overrides).map_or(usize::MAX, |bytes| bytes.len());
+    if size > MAX_DOCUMENT_BYTES {
+        return Err(ConfigError::TooLarge {
+            size,
+            limit: MAX_DOCUMENT_BYTES,
         });
     }
 
@@ -210,6 +222,14 @@ fn compile_module(
         &manifest.default_config,
         module_override.and_then(|m| m.config.as_ref()),
     );
+    if contains_nul(&config) {
+        // PostgreSQL cannot store U+0000 in JSON text; refuse it here as a clear 422.
+        issues.push(Issue::new(
+            format!("modules.{id}.config"),
+            "invalid_module_config",
+            "text must not contain the NUL character (U+0000)",
+        ));
+    }
     if let Some(validator) = validator {
         for error in validator.iter_errors(&config) {
             issues.push(Issue::new(
@@ -227,6 +247,17 @@ fn compile_module(
         enabled,
         capabilities,
         config,
+    }
+}
+
+fn contains_nul(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains('\0'),
+        Value::Array(items) => items.iter().any(contains_nul),
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, item)| key.contains('\0') || contains_nul(item)),
+        _ => false,
     }
 }
 
@@ -486,6 +517,33 @@ mod tests {
             ConfigCompiler::new(registry),
             Err(ConfigError::BadModuleSchema { .. })
         ));
+    }
+
+    #[test]
+    fn documents_that_grow_too_large_once_parsed_are_refused() {
+        let huge = "x".repeat(MAX_DOCUMENT_BYTES);
+        let error = compiler()
+            .compile(&warn_override(json!({ "note": huge })))
+            .unwrap_err();
+        assert!(matches!(error, ConfigError::TooLarge { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn text_containing_nul_is_a_clear_validation_error() {
+        let error = compiler()
+            .compile(&warn_override(json!({ "limit": 3, "note": "a\u{0}b" })))
+            .unwrap_err();
+        assert!(
+            error
+                .issues()
+                .iter()
+                .any(|i| i.code == "invalid_module_config" && i.message.contains("NUL")),
+            "{error:?}"
+        );
+        let in_a_key = compiler()
+            .compile(&warn_override(json!({ "nested": { "a\u{0}": 1 } })))
+            .unwrap_err();
+        assert!(in_a_key.issues().iter().any(|i| i.message.contains("NUL")));
     }
 
     #[test]

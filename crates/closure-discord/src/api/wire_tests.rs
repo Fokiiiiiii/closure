@@ -15,6 +15,7 @@ use twilight_http::Client;
 use twilight_model::id::Id;
 
 use super::{RetryPolicy, TwilightApi};
+use crate::hierarchy::CacheView;
 
 #[derive(Debug, Clone)]
 struct Recorded {
@@ -346,4 +347,87 @@ async fn permanent_read_failures_are_not_retried() {
         Err(DiscordError::NotFound)
     );
     assert_eq!(discord.requests().len(), 1);
+}
+
+/// A cache that believes the bot (user 2, role 10) ranks below the target (user 3, role 11).
+struct BelievesBotRanksLower;
+
+impl CacheView for BelievesBotRanksLower {
+    fn bot_user(&self) -> Option<closure_core::event::UserId> {
+        Some(Id::new(2))
+    }
+
+    fn guild_owner(&self, _: closure_core::event::GuildId) -> Option<closure_core::event::UserId> {
+        Some(Id::new(1))
+    }
+
+    fn member_roles(
+        &self,
+        _: closure_core::event::GuildId,
+        user: closure_core::event::UserId,
+    ) -> Option<Vec<closure_core::event::RoleId>> {
+        Some(vec![Id::new(if user.get() == 2 { 10 } else { 11 })])
+    }
+
+    fn role_position(&self, role: closure_core::event::RoleId) -> Option<i64> {
+        Some(if role.get() == 10 { 1 } else { 5 })
+    }
+}
+
+fn kick_target() -> Action {
+    Action::Kick {
+        guild_id: Id::new(10),
+        user_id: Id::new(3),
+        reason: reason("spam"),
+    }
+}
+
+#[tokio::test]
+async fn a_stale_cache_cannot_block_an_action_discord_allows() {
+    let discord = FakeDiscord::start(vec![(204, "")]).await;
+    let api = discord.api().with_cache(Arc::new(BelievesBotRanksLower));
+    assert_eq!(api.execute(kick_target()).await, Ok(Outcome::None));
+    assert_eq!(
+        discord.requests().len(),
+        1,
+        "the request was sent despite the suspicion"
+    );
+}
+
+#[tokio::test]
+async fn a_403_after_a_rank_suspicion_is_explained_as_a_hierarchy_problem() {
+    let discord = FakeDiscord::start(vec![(403, FORBIDDEN)]).await;
+    let api = discord.api().with_cache(Arc::new(BelievesBotRanksLower));
+    let result = api.execute(kick_target()).await;
+    assert!(
+        matches!(result, Err(DiscordError::HierarchyViolation(_))),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_403_without_a_suspicion_stays_a_plain_forbidden() {
+    let discord = FakeDiscord::start(vec![(403, FORBIDDEN)]).await;
+    let result = discord.api().execute(kick_target()).await;
+    assert!(
+        matches!(result, Err(DiscordError::Forbidden(_))),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_server_owner_is_rejected_without_sending_anything() {
+    let discord = FakeDiscord::start(vec![(204, "")]).await;
+    let api = discord.api().with_cache(Arc::new(BelievesBotRanksLower));
+    let owner = Action::Kick {
+        guild_id: Id::new(10),
+        user_id: Id::new(1),
+        reason: reason("spam"),
+    };
+    let result = api.execute(owner).await;
+    assert!(
+        matches!(result, Err(DiscordError::HierarchyViolation(_))),
+        "{result:?}"
+    );
+    assert_eq!(discord.requests().len(), 0);
 }

@@ -25,7 +25,7 @@ use twilight_http::response::Response;
 use twilight_http::response::marker::ListBody;
 
 use crate::error::map_http_error;
-use crate::hierarchy::{CacheView, preflight};
+use crate::hierarchy::{CacheView, Preflight, preflight};
 
 /// How reads that failed transiently are repeated. Writes are never retried: repeating a ban
 /// or a message that may have gone through would be worse than reporting the failure.
@@ -199,8 +199,15 @@ impl DiscordApi for TwilightApi {
 
 impl TwilightApi {
     async fn execute_checked(&self, action: &Action) -> Result<Outcome, DiscordError> {
+        // A rank problem seen in the cache is only a suspicion (the cache may be stale): the
+        // request is sent anyway, and the suspicion explains a 403 should one come back.
+        let mut suspicion = None;
         if let Some(cache) = &self.cache {
-            preflight(cache.as_ref(), action)?;
+            match preflight(cache.as_ref(), action) {
+                Preflight::Pass => {}
+                Preflight::Reject(error) => return Err(error),
+                Preflight::Suspect(error) => suspicion = Some(error),
+            }
         }
         let retries = if is_read(action) {
             self.retry.max_retries
@@ -211,10 +218,16 @@ impl TwilightApi {
         loop {
             match self.perform(action).await {
                 Err(DiscordError::Transient(reason)) if attempt < retries => {
-                    let delay = self.retry.base_delay * 2u32.pow(attempt);
+                    let delay = self
+                        .retry
+                        .base_delay
+                        .saturating_mul(2u32.saturating_pow(attempt));
                     tracing::warn!(action = action.name(), attempt, %reason, ?delay, "retrying read");
                     tokio::time::sleep(delay).await;
                     attempt += 1;
+                }
+                Err(DiscordError::Forbidden(detail)) => {
+                    return Err(suspicion.unwrap_or(DiscordError::Forbidden(detail)));
                 }
                 other => return other,
             }

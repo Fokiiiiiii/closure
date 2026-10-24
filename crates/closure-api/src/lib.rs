@@ -25,7 +25,7 @@ use axum::{Router, middleware};
 use closure_config::SettingsStore;
 use closure_db::Db;
 use secrecy::{ExposeSecret, SecretString};
-use tower::limit::ConcurrencyLimitLayer;
+use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 
@@ -132,7 +132,7 @@ pub fn router(state: ApiState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ))
-        .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
+        .layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
         .layer(
             // A 503 from /readyz while starting up is expected, not an error.
             TraceLayer::new_for_http()
