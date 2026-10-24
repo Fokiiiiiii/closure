@@ -1,0 +1,23 @@
+[package]
+name = "closure-mod-diagnostics"
+description = "The diagnostics module for closure: /ping and /about, and the smallest complete module example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+closure-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+closure-i18n.workspace = true
+tokio.workspace = true
+twilight-model.workspace = true
+
+[lints]
+workspace = true

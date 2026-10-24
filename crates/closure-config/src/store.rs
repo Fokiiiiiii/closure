@@ -130,6 +130,12 @@ impl SettingsStore {
         )
     }
 
+    /// Whether the guild has a stored configuration in memory (as opposed to using defaults).
+    #[must_use]
+    pub fn is_configured(&self, guild: GuildId) -> bool {
+        self.guilds.contains_key(&guild)
+    }
+
     #[must_use]
     pub fn configured_guilds(&self) -> usize {
         self.guilds.len()

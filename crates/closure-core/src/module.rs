@@ -223,6 +223,20 @@ impl ModuleManifest {
     }
 
     #[must_use]
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    /// Sets the JSON Schema of the module's configuration section and its default value.
+    #[must_use]
+    pub fn config(mut self, schema: serde_json::Value, default: serde_json::Value) -> Self {
+        self.config_schema = schema;
+        self.default_config = default;
+        self
+    }
+
+    #[must_use]
     pub fn intents(mut self, intents: Intents) -> Self {
         self.intents = intents;
         self

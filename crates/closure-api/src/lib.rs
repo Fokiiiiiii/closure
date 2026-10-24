@@ -27,7 +27,7 @@ use closure_db::Db;
 use secrecy::{ExposeSecret, SecretString};
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultOnFailure, TraceLayer};
 
 /// Shorter tokens are refused: the token is the only thing protecting configuration writes.
 pub const MIN_TOKEN_CHARS: usize = 24;
@@ -133,7 +133,11 @@ pub fn router(state: ApiState) -> Router {
             REQUEST_TIMEOUT,
         ))
         .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            // A 503 from /readyz while starting up is expected, not an error.
+            TraceLayer::new_for_http()
+                .on_failure(DefaultOnFailure::new().level(tracing::Level::WARN)),
+        )
         .with_state(state)
 }
 

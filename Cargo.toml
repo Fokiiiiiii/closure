@@ -18,11 +18,13 @@ closure-db = { path = "crates/closure-db" }
 closure-discord = { path = "crates/closure-discord" }
 closure-api = { path = "crates/closure-api" }
 closure-i18n = { path = "crates/closure-i18n" }
+closure-mod-diagnostics = { path = "crates/closure-mod-diagnostics" }
 
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
 dashmap = "6"
+dotenvy = "0.15"
 clap = { version = "4", features = ["derive", "env"] }
 fluent-bundle = "0.16"
 fluent-syntax = "0.12"
