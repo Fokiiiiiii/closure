@@ -430,7 +430,7 @@ mod tests {
         let mut catalogs = TranslatorBuilder::new().unwrap();
         catalogs.add_registry(&registry).unwrap();
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
-        assert_eq!(commands.len(), 11);
+        assert_eq!(commands.len(), 13);
         for command in commands {
             // A name Discord would refuse (uppercase, too long) is dropped with only a log line,
             // so it is looked for here.

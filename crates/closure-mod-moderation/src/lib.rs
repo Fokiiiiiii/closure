@@ -18,6 +18,8 @@ use closure_sdk::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod restrict;
+
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 
@@ -44,7 +46,7 @@ const MAX_CHARS: usize = 1900;
 /// The module's section of a guild's configuration.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-struct Config {
+pub(crate) struct Config {
     /// After how many days a warning expires.
     warn_expire_days: u32,
     /// Whether the warned member gets a direct message.
@@ -55,6 +57,14 @@ struct Config {
     ban_delete_days: u32,
     /// What a warning brings about once a member reaches a number of active warnings.
     escalation: Vec<Rule>,
+    /// How a timeout is given: Discord's timeout, or a role that a timer takes off again.
+    timeout_method: restrict::Method,
+    /// The id of the role a timeout gives, when `timeout_method` is `role`.
+    timeout_role: Option<String>,
+    /// How a voice mute is given: Discord's voice mute, or a role that a timer takes off again.
+    voice_mute_method: restrict::Method,
+    /// The id of the role a voice mute gives, when `voice_mute_method` is `role`.
+    voice_mute_role: Option<String>,
 }
 
 impl Default for Config {
@@ -65,6 +75,10 @@ impl Default for Config {
             require_reason: false,
             ban_delete_days: 0,
             escalation: Vec::new(),
+            timeout_method: restrict::Method::Discord,
+            timeout_role: None,
+            voice_mute_method: restrict::Method::Discord,
+            voice_mute_role: None,
         }
     }
 }
@@ -169,7 +183,7 @@ struct Revoke {
 
 /// A member and the reason of an action on it.
 #[derive(CommandArgs)]
-struct MemberReason {
+pub(crate) struct MemberReason {
     /// Member
     user: UserId,
     /// Why
@@ -447,18 +461,18 @@ async fn time_out(
     duration: Duration,
     reason: Option<String>,
 ) -> Result<(Case, Vec<String>), UserError> {
-    let seconds = timeout_seconds(duration)?;
     let now = cx.now();
-    cx.api()
-        .timeout(
-            cx.guild_id(),
-            user,
-            Some(seconds),
-            audit_reason(cx, reason.as_deref()),
-        )
-        .await?;
     let reason_text = dm_reason(cx, reason.as_deref());
+    let role = restrict::give_timeout(cx, config, user, duration, reason.as_deref()).await?;
     let case = record(cx, "timeout", user, reason, Some(now + secs(duration))).await?;
+    // The role of a timeout is taken off by a timer; a note says when no timer could be set.
+    let timer_note = match role {
+        Some(role) => restrict::schedule_timeout_lift(cx, user, case.number, role, duration)
+            .await
+            .is_err()
+            .then(|| cx.t("timeout-no-timer", &Args::new())),
+        None => None,
+    };
     let note = notify(
         cx,
         config,
@@ -469,7 +483,7 @@ async fn time_out(
             .with("reason", reason_text),
     )
     .await;
-    Ok((case, note.into_iter().collect()))
+    Ok((case, [note, timer_note].into_iter().flatten().collect()))
 }
 
 /// Kicks a member and records it. The direct message comes first: a kicked member shares no server
@@ -788,12 +802,13 @@ async fn case_revoke(cx: CommandCx, args: Revoke) -> Result<(), UserError> {
         .await
 }
 
-/// Times a member out. Discord's limit is 28 days, so a longer timeout is refused before anything
-/// is done. The member stays in the server, so the direct message comes after the timeout.
+/// Times a member out. Discord's own timeout is 28 days at most, so a longer one is refused before
+/// anything is done; a timeout by role has no such limit. The member stays in the server, so the
+/// direct message comes after the timeout.
 async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
-    timeout_seconds(args.duration)?;
-    cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
+    restrict::check_timeout(&config, args.duration)?;
+    cx.check_target(args.user).await?;
     let reason = punishment_reason(&config, args.reason)?;
     let (case, notes) = time_out(&cx, &config, args.user, args.duration, reason).await?;
     let duration = cx.format_duration(args.duration);
@@ -812,15 +827,9 @@ async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
 /// Lifts a timeout. The newest timeout that still stands is revoked with it.
 async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
+    let config: Config = cx.config()?;
     let reason = reason_of(args.reason);
-    cx.api()
-        .timeout(
-            cx.guild_id(),
-            args.user,
-            None,
-            audit_reason(&cx, reason.as_deref()),
-        )
-        .await?;
+    restrict::lift_timeout(&cx, &config, args.user, reason.as_deref()).await?;
     let case = record(&cx, "untimeout", args.user, reason, None).await?;
     revoke_latest(
         &cx,
@@ -984,6 +993,26 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                         "required": ["warns", "action"],
                         "additionalProperties": false
                     }
+                },
+                "timeout_method": {
+                    "type": "string",
+                    "enum": ["discord", "role"],
+                    "description": "How a timeout is given: Discord's timeout, or a role that is taken off when its time is up."
+                },
+                "timeout_role": {
+                    "type": ["string", "null"],
+                    "pattern": "^[0-9]{1,20}$",
+                    "description": "The id of the role a timeout gives, when timeout_method is role."
+                },
+                "voice_mute_method": {
+                    "type": "string",
+                    "enum": ["discord", "role"],
+                    "description": "How a voice mute is given: Discord's voice mute, or a role that is taken off when its time is up."
+                },
+                "voice_mute_role": {
+                    "type": ["string", "null"],
+                    "pattern": "^[0-9]{1,20}$",
+                    "description": "The id of the role a voice mute gives, when voice_mute_method is role."
                 }
             },
             "additionalProperties": false
@@ -993,7 +1022,11 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "dm_on_action": true,
             "require_reason": false,
             "ban_delete_days": 0,
-            "escalation": []
+            "escalation": [],
+            "timeout_method": "discord",
+            "timeout_role": null,
+            "voice_mute_method": "discord",
+            "voice_mute_role": null
         }),
     )
 }
@@ -1031,7 +1064,21 @@ fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(unban),
         )
+        .command(
+            Command::<restrict::VoiceMute>::new("vcmute", "Mute a member in voice channels")
+                .requires("moderation.voice")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(restrict::voice_mute),
+        )
+        .command(
+            Command::<MemberReason>::new("vcunmute", "Lift the voice mute of a member")
+                .requires("moderation.voice")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(restrict::voice_unmute),
+        )
         .job("unban", lift_ban)
+        .job("untimeout", restrict::end_timeout)
+        .job("vc_unmute", restrict::end_voice_mute)
 }
 
 /// The module, still open for a test to build on.
@@ -1046,6 +1093,8 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .capability(Capability::KickMembers)
         .capability(Capability::BanMembers)
         .capability(Capability::TimeoutMembers)
+        .capability(Capability::ManageRoles)
+        .capability(Capability::MuteMembers)
         .permission(PermissionSpec::new(
             "moderation.warn",
             Level::MODERATOR,
@@ -1080,6 +1129,11 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             "moderation.ban",
             Level::ADMIN,
             "Ban and unban members",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.voice",
+            Level::MODERATOR,
+            "Mute members in voice channels and lift it",
         )?)
         .config(schema, defaults)
         .command(
