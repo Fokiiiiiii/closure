@@ -46,6 +46,7 @@ sdk-target-higher = You cannot do that to someone whose highest role is not belo
 modlog-title = Case #{ $number } · { $kind }
 modlog-kind-warn = Warning
 modlog-kind-timeout = Timeout
+modlog-kind-untimeout = Timeout removed
 modlog-kind-kick = Kick
 modlog-kind-ban = Ban
 modlog-kind-unban = Unban

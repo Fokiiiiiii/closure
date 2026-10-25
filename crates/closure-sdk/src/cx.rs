@@ -271,6 +271,13 @@ impl<I: InteractionRef + 'static> Cx<I> {
     /// Weeks are counted in days.
     #[must_use]
     pub fn format_duration(&self, duration: Duration) -> String {
+        self.format_duration_in(self.locale(), duration)
+    }
+
+    /// [`Self::format_duration`] in another language, for what is not said to the user: the
+    /// server's language for a message to a member or for the log.
+    #[must_use]
+    pub fn format_duration_in(&self, locale: Locale, duration: Duration) -> String {
         const UNITS: [(u64, &str); 4] = [
             (86_400, "sdk-unit-day"),
             (3_600, "sdk-unit-hour"),
@@ -284,11 +291,11 @@ impl<I: InteractionRef + 'static> Cx<I> {
             seconds %= size;
             if count > 0 && parts.len() < 2 {
                 let count = i64::try_from(count).unwrap_or(i64::MAX);
-                parts.push(self.core_message(key, &Args::new().with("n", count)));
+                parts.push(self.ctx.t_core(locale, key, &Args::new().with("n", count)));
             }
         }
         if parts.is_empty() {
-            return self.core_message("sdk-duration-none", &Args::new());
+            return self.ctx.t_core(locale, "sdk-duration-none", &Args::new());
         }
         parts.join(" ")
     }

@@ -48,7 +48,7 @@ pub mod testing;
 pub mod ui;
 
 pub use args::{ArgError, ArgProblem, CommandArgs, OptionType};
-pub use closure_core::action::InteractionReply;
+pub use closure_core::action::{InteractionReply, Reason};
 pub use closure_core::capability::Capability;
 pub use closure_core::cases::{Case, CaseError, CaseKind, Cases, NewCase, Revoked};
 pub use closure_core::error::{CoreError, DiscordError, ModuleError};

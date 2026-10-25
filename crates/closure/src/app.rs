@@ -430,7 +430,7 @@ mod tests {
         let mut catalogs = TranslatorBuilder::new().unwrap();
         catalogs.add_registry(&registry).unwrap();
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
-        assert_eq!(commands.len(), 6);
+        assert_eq!(commands.len(), 11);
         for command in commands {
             assert!(
                 command

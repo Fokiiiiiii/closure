@@ -563,7 +563,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_and_no_required_reason()
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "require_reason": false })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "require_reason": false, "ban_delete_days": 0 })
     );
 }
 
@@ -586,6 +586,8 @@ fn the_settings_are_checked_against_their_schema() {
     assert!(!accepted(json!({ "warn_expire_days": 366 })));
     assert!(!accepted(json!({ "dm_on_action": "yes" })));
     assert!(!accepted(json!({ "expire": 3 })));
+    assert!(accepted(json!({ "ban_delete_days": 7 })));
+    assert!(!accepted(json!({ "ban_delete_days": 8 })));
 }
 
 #[test]
@@ -606,4 +608,585 @@ fn dm_contents(harness: &Harness) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+// ---- /timeout, /untimeout, /kick, /ban, /unban ----
+
+fn by_admin(invocation: Invocation) -> Invocation {
+    invocation.roles([ADMIN_ROLE]).user(MODERATOR)
+}
+
+fn with_reason(invocation: Invocation, reason: Option<&str>) -> Invocation {
+    match reason {
+        Some(reason) => invocation.option("reason", CommandOptionValue::String(reason.to_owned())),
+        None => invocation,
+    }
+}
+
+fn timeout(target: u64, duration: &str, reason: Option<&str>) -> Invocation {
+    by_moderator(with_reason(
+        Invocation::new("timeout")
+            .option("user", user(target))
+            .option("duration", CommandOptionValue::String(duration.to_owned())),
+        reason,
+    ))
+}
+
+fn untimeout(target: u64, reason: Option<&str>) -> Invocation {
+    by_moderator(with_reason(
+        Invocation::new("untimeout").option("user", user(target)),
+        reason,
+    ))
+}
+
+fn kick(target: u64, reason: Option<&str>) -> Invocation {
+    by_moderator(with_reason(
+        Invocation::new("kick").option("user", user(target)),
+        reason,
+    ))
+}
+
+fn ban(
+    target: u64,
+    reason: Option<&str>,
+    duration: Option<&str>,
+    delete_days: Option<i64>,
+) -> Invocation {
+    let invocation = with_reason(Invocation::new("ban").option("user", user(target)), reason);
+    let invocation = match duration {
+        Some(duration) => {
+            invocation.option("duration", CommandOptionValue::String(duration.to_owned()))
+        }
+        None => invocation,
+    };
+    let invocation = match delete_days {
+        Some(days) => invocation.option("delete_days", CommandOptionValue::Integer(days)),
+        None => invocation,
+    };
+    by_admin(invocation)
+}
+
+fn unban(target: u64, reason: Option<&str>) -> Invocation {
+    by_admin(with_reason(
+        Invocation::new("unban").option("user", user(target)),
+        reason,
+    ))
+}
+
+/// What the module did to Discord, in order: the direct messages and the timeouts, kicks, bans
+/// and unbans. Lookups of members are left out.
+fn sequence(harness: &Harness) -> Vec<&'static str> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::SendDirectMessage { .. } => Some("dm"),
+            Action::Timeout {
+                duration_seconds: Some(_),
+                ..
+            } => Some("timeout"),
+            Action::Timeout {
+                duration_seconds: None,
+                ..
+            } => Some("untimeout"),
+            Action::Kick { .. } => Some("kick"),
+            Action::Ban { .. } => Some("ban"),
+            Action::Unban { .. } => Some("unban"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ban_deletions(harness: &Harness) -> Vec<u32> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::Ban {
+                delete_message_seconds,
+                ..
+            } => Some(*delete_message_seconds),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_timeout_is_applied_before_the_direct_message_and_expires_with_its_case() {
+    let harness = harness();
+    let replies = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert!(text(&replies).contains("1 hour"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["timeout", "dm"], "{replies:?}");
+    assert!(harness.api().actions().iter().any(|action| matches!(
+        action,
+        Action::Timeout {
+            duration_seconds: Some(3_600),
+            ..
+        }
+    )));
+
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.kind.as_str(), "timeout");
+    assert_eq!(case.target, Id::new(MEMBER));
+    assert_eq!(case.reason.as_deref(), Some("spam"));
+    assert_eq!(case.expires_at, Some(case.created_at + 3_600));
+    assert!(dm_contents(&harness)[0].contains("spam"));
+}
+
+#[tokio::test]
+async fn a_timeout_lasts_at_most_twenty_eight_days() {
+    let harness = harness();
+    harness.invoke(timeout(MEMBER, "28d", None)).await.unwrap();
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+
+    harness.advance(Duration::from_secs(3));
+    let refused = harness
+        .invoke(timeout(MEMBER, "2419201s", None))
+        .await
+        .unwrap();
+    assert!(text(&refused).contains("28 days"), "{refused:?}");
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+    assert_eq!(sequence(&harness), ["timeout", "dm"]);
+}
+
+#[tokio::test]
+async fn a_timeout_refuses_the_moderator_the_owner_a_bot_or_someone_above_them() {
+    let harness = harness();
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(BOT, &[], true));
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(ABOVE, &[ADMIN_ROLE], false));
+
+    for target in [MODERATOR, OWNER, BOT, ABOVE] {
+        harness.advance(Duration::from_secs(3));
+        let refused = harness
+            .invoke(timeout(target, "1h", Some("no")))
+            .await
+            .unwrap();
+        assert!(!text(&refused).is_empty(), "{target}: {refused:?}");
+        assert!(
+            cases_of(&harness, target).await.is_empty(),
+            "no case for {target}"
+        );
+    }
+    assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
+}
+
+#[tokio::test]
+async fn a_timeout_needs_a_duration_it_can_read() {
+    let harness = harness();
+    let replies = harness
+        .invoke(timeout(MEMBER, "banana", None))
+        .await
+        .unwrap();
+    assert!(!text(&replies).is_empty(), "{replies:?}");
+    assert!(sequence(&harness).is_empty());
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_timeout_needs_the_timeout_permission() {
+    let harness = harness();
+    let denied = harness
+        .invoke(
+            Invocation::new("timeout")
+                .option("user", user(MEMBER))
+                .option("duration", CommandOptionValue::String("1h".to_owned()))
+                .user(UNPRIVILEGED),
+        )
+        .await
+        .unwrap();
+    assert!(text(&denied).contains("level"), "{denied:?}");
+    assert!(sequence(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn an_untimeout_lifts_the_timeout_and_revokes_the_one_it_lifts() {
+    let harness = harness();
+    harness.invoke(timeout(MEMBER, "1h", None)).await.unwrap();
+    harness.advance(Duration::from_secs(3));
+    let replies = harness
+        .invoke(untimeout(MEMBER, Some("sorry")))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("case #2"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["timeout", "dm", "untimeout"]);
+
+    let lifted = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(lifted.kind.as_str(), "untimeout");
+    let timed = harness.cases().get(1).await.unwrap().unwrap();
+    let revoked = timed.revoked.expect("the timeout is revoked");
+    assert_eq!(revoked.reason.as_deref(), Some("removed by case #2"));
+}
+
+#[tokio::test]
+async fn an_untimeout_without_a_timeout_still_succeeds() {
+    let harness = harness();
+    let replies = harness.invoke(untimeout(MEMBER, None)).await.unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["untimeout"]);
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_kick_is_messaged_first_then_kicked_and_recorded() {
+    let harness = harness();
+    harness.set_log_channel(50);
+    let replies = harness.invoke(kick(MEMBER, Some("rude"))).await.unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["dm", "kick"]);
+
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.kind.as_str(), "kick");
+    assert_eq!(case.expires_at, None);
+    assert!(dm_contents(&harness)[0].contains("rude"));
+    let embeds = harness.sent_embeds();
+    assert_eq!(embeds.len(), 1, "{embeds:?}");
+    assert_eq!(embeds[0].title.as_deref(), Some("Case #1 · Kick"));
+}
+
+#[tokio::test]
+async fn a_kick_without_direct_messages_is_only_the_kick() {
+    let harness = harness();
+    harness.set_config(json!({ "dm_on_action": false }));
+    harness.invoke(kick(MEMBER, None)).await.unwrap();
+    assert_eq!(sequence(&harness), ["kick"]);
+}
+
+#[tokio::test]
+async fn a_kick_the_discord_refuses_leaves_no_case_and_no_log() {
+    let harness = harness();
+    harness.set_log_channel(50);
+    // The lookup of the member is the first call, the direct message the second, the kick the third.
+    harness
+        .api()
+        .fail_nth(3, DiscordError::Forbidden("missing permission".to_owned()));
+    assert!(harness.invoke(kick(MEMBER, None)).await.is_err());
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+    assert!(harness.sent_embeds().is_empty());
+}
+
+#[tokio::test]
+async fn a_permanent_ban_deletes_no_messages_by_default_and_schedules_nothing() {
+    let harness = harness();
+    let replies = harness
+        .invoke(ban(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["dm", "ban"]);
+    assert_eq!(ban_deletions(&harness), [0]);
+    assert_eq!(harness.jobs(), 0);
+
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.kind.as_str(), "ban");
+    assert_eq!(case.expires_at, None);
+    let banned = harness
+        .api()
+        .actions()
+        .into_iter()
+        .find_map(|action| match action {
+            Action::Ban { reason, .. } => Some(reason.as_str().to_owned()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(banned.contains("raid"), "{banned}");
+}
+
+#[tokio::test]
+async fn a_ban_deletes_the_days_of_the_server_setting_or_the_ones_given() {
+    let harness = harness();
+    harness.set_config(json!({ "ban_delete_days": 2 }));
+    harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(ban(FREE, None, None, Some(1)))
+        .await
+        .unwrap();
+    assert_eq!(ban_deletions(&harness), [172_800, 86_400]);
+}
+
+#[tokio::test]
+async fn a_ban_deletes_at_most_seven_days_of_messages() {
+    let harness = harness();
+    let refused = harness
+        .invoke(ban(MEMBER, None, None, Some(8)))
+        .await
+        .unwrap();
+    assert!(!text(&refused).contains("case #"), "{refused:?}");
+    assert!(sequence(&harness).is_empty());
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+}
+
+#[tokio::test]
+async fn only_an_admin_bans_or_unbans() {
+    let harness = harness();
+    let denied = harness
+        .invoke(
+            Invocation::new("ban")
+                .option("user", user(MEMBER))
+                .user(MODERATOR)
+                .roles([MODERATOR_ROLE]),
+        )
+        .await
+        .unwrap();
+    assert!(text(&denied).contains("level"), "{denied:?}");
+    let denied = harness
+        .invoke(
+            Invocation::new("unban")
+                .option("user", user(MEMBER))
+                .user(MODERATOR)
+                .roles([MODERATOR_ROLE]),
+        )
+        .await
+        .unwrap();
+    assert!(text(&denied).contains("level"), "{denied:?}");
+    assert!(sequence(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn a_timed_ban_is_lifted_when_its_time_is_up() {
+    let harness = harness();
+    let replies = harness
+        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("1 day"), "{replies:?}");
+    assert_eq!(harness.jobs(), 1);
+
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(
+        case.expires_at,
+        Some(case.created_at + i64::try_from(DAY).unwrap())
+    );
+
+    harness.advance(Duration::from_secs(DAY - 1));
+    assert!(harness.run_due_jobs().await.is_empty(), "not due yet");
+    harness.advance(Duration::from_secs(1));
+    let ended = harness.run_due_jobs().await;
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert!(ended[0].is_ok(), "{ended:?}");
+    assert_eq!(sequence(&harness), ["dm", "ban", "unban"]);
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_timed_ban_lifted_by_hand_is_not_an_error_for_its_lift() {
+    let harness = harness();
+    harness
+        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(DAY));
+    harness.api().fail_nth(1, DiscordError::NotFound);
+    let ended = harness.run_due_jobs().await;
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert!(ended[0].is_ok(), "{ended:?}");
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_lift_that_fails_otherwise_is_left_to_run_again() {
+    let harness = harness();
+    harness
+        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(DAY));
+    harness
+        .api()
+        .fail_nth(1, DiscordError::Forbidden("missing permission".to_owned()));
+    let ended = harness.run_due_jobs().await;
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert!(ended[0].is_err(), "{ended:?}");
+    assert_eq!(harness.jobs(), 1, "still waiting to run again");
+}
+
+#[tokio::test]
+async fn a_ban_the_discord_refuses_leaves_no_case_and_no_timer() {
+    let harness = harness();
+    // The lookup of the member, the direct message, then the ban.
+    harness
+        .api()
+        .fail_nth(3, DiscordError::Forbidden("missing permission".to_owned()));
+    assert!(
+        harness
+            .invoke(ban(MEMBER, None, Some("1d"), None))
+            .await
+            .is_err()
+    );
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_timed_ban_holds_even_when_its_timer_cannot_be_set() {
+    let harness = harness();
+    harness.set_log_channel(50);
+    // A server may hold 10 000 jobs at most; fill it up so that the timer is refused.
+    for n in 0..10_000_u32 {
+        harness
+            .scheduler()
+            .job("filler", &n)
+            .unwrap()
+            .after(Duration::from_secs(60))
+            .await
+            .unwrap();
+    }
+    let replies = harness
+        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert!(text(&replies).contains("timer"), "{replies:?}");
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+    assert_eq!(harness.sent_embeds().len(), 1);
+    assert_eq!(harness.jobs(), 10_000);
+}
+
+#[tokio::test]
+async fn a_ban_for_good_that_replaces_a_timed_one_drops_its_timer() {
+    let harness = harness();
+    harness
+        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    // The old timer would lift the new ban when its time is up.
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn an_unban_lifts_the_ban_cancels_its_timer_and_revokes_the_ban() {
+    let harness = harness();
+    harness
+        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .await
+        .unwrap();
+    assert_eq!(harness.jobs(), 1);
+    harness.advance(Duration::from_secs(3));
+    let replies = harness.invoke(unban(MEMBER, Some("appeal"))).await.unwrap();
+    assert!(text(&replies).contains("case #2"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["dm", "ban", "unban"]);
+    assert_eq!(harness.jobs(), 0, "the timer is cancelled");
+
+    let lifted = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(lifted.kind.as_str(), "unban");
+    let banned = harness.cases().get(1).await.unwrap().unwrap();
+    let revoked = banned.revoked.expect("the ban is revoked");
+    assert_eq!(revoked.reason.as_deref(), Some("unbanned by case #2"));
+}
+
+#[tokio::test]
+async fn an_unban_without_a_ban_still_succeeds() {
+    let harness = harness();
+    let replies = harness.invoke(unban(MEMBER, None)).await.unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["unban"]);
+}
+
+#[tokio::test]
+async fn every_action_is_posted_to_the_log_under_its_kind() {
+    let harness = harness();
+    harness.set_log_channel(50);
+    harness.invoke(timeout(MEMBER, "1h", None)).await.unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness.invoke(untimeout(MEMBER, None)).await.unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness.invoke(kick(MEMBER, None)).await.unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness.invoke(unban(MEMBER, None)).await.unwrap();
+
+    let embeds = harness.sent_embeds();
+    let titles: Vec<&str> = embeds
+        .iter()
+        .map(|embed| embed.title.as_deref().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "Case #1 · Timeout",
+            "Case #2 · Timeout removed",
+            "Case #3 · Kick",
+            "Case #4 · Ban",
+            "Case #5 · Unban",
+        ]
+    );
+    assert_eq!(embeds[1].color, Some(0x0057_F287), "the lift is green");
+}
+
+#[tokio::test]
+async fn the_actions_work_without_a_log_channel() {
+    let harness = harness();
+    harness.invoke(kick(MEMBER, None)).await.unwrap();
+    harness.invoke(ban(FREE, None, None, None)).await.unwrap();
+    assert!(harness.sent_embeds().is_empty());
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+    assert_eq!(cases_of(&harness, FREE).await.len(), 1);
+}
+
+#[tokio::test]
+async fn the_direct_message_and_the_log_speak_the_server_language() {
+    let harness = harness();
+    harness.set_log_channel(50);
+    harness.set_guild_locale(Locale::Ja);
+    harness.invoke(kick(MEMBER, Some("荒らし"))).await.unwrap();
+    let messages = dm_contents(&harness);
+    assert!(
+        messages[0].contains("サーバーからキックされました"),
+        "{messages:?}"
+    );
+    assert!(messages[0].contains("荒らし"), "{messages:?}");
+    let title = harness.sent_embeds()[0].title.clone().unwrap_or_default();
+    assert!(title.contains("キック"), "{title}");
+}
+
+#[tokio::test]
+async fn a_closed_direct_message_does_not_fail_a_ban() {
+    let harness = harness();
+    // The lookup of the member is the first call, the direct message the second.
+    harness
+        .api()
+        .fail_nth(2, DiscordError::DirectMessagesClosed);
+    let replies = harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert!(
+        text(&replies).contains("could not be delivered"),
+        "{replies:?}"
+    );
+    assert_eq!(sequence(&harness), ["ban"]);
+}
+
+#[tokio::test]
+async fn the_message_to_the_member_names_the_time_in_the_language_of_the_server() {
+    let harness = harness();
+    // The server speaks English; the moderator reads Japanese.
+    let replies = harness
+        .invoke(ban(MEMBER, None, Some("1h"), None).locale(Locale::Ja))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("1時間"), "{replies:?}");
+    let direct = dm_contents(&harness);
+    assert_eq!(direct.len(), 1, "{direct:?}");
+    assert!(direct[0].contains("1 hour"), "{direct:?}");
+    assert!(!direct[0].contains("1時間"), "{direct:?}");
+
+    harness.advance(Duration::from_secs(5));
+    harness
+        .invoke(by_admin(timeout(MEMBER, "2h", None)).locale(Locale::Ja))
+        .await
+        .unwrap();
+    let direct = dm_contents(&harness);
+    assert!(direct[1].contains("2 hours"), "{direct:?}");
 }

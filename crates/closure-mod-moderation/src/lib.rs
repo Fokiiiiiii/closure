@@ -11,16 +11,22 @@ use closure_sdk::embed::{escape, truncate};
 use closure_sdk::modlog;
 use closure_sdk::{
     Args, Capability, Case, CaseError, CaseKind, Cases, Command, CommandArgs, CommandCx, Cooldown,
-    CoreError, DirectMessage, InteractionReply, Level, Locale, ModuleBuilder, NewCase,
-    PermissionSpec, SdkModule, Sent, UserError, UserId,
+    CoreError, DirectMessage, DiscordError, InteractionReply, JobCx, Level, Locale, ModuleBuilder,
+    ModuleError, NewCase, PermissionSpec, Reason, ScheduleError, SdkModule, Sent, UserError,
+    UserId,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 
 const DAY: i64 = 86_400;
+/// Discord's longest timeout, 28 days in seconds.
+const MAX_TIMEOUT_SECONDS: u32 = 28 * 86_400;
+/// The most messages a ban deletes, 7 days in seconds. The argument's bounds are only a hint to
+/// Discord, so the module checks them too.
+const MAX_BAN_DELETE_SECONDS: u32 = 7 * 86_400;
 /// How many active warnings `/warnings` lists, the newest first.
 const SHOWN: usize = 10;
 /// How many cases `/case list` lists.
@@ -45,6 +51,8 @@ struct Config {
     dm_on_action: bool,
     /// Whether a warning needs a reason.
     require_reason: bool,
+    /// How many days of messages a ban deletes.
+    ban_delete_days: u32,
 }
 
 impl Default for Config {
@@ -53,6 +61,7 @@ impl Default for Config {
             warn_expire_days: 30,
             dm_on_action: true,
             require_reason: false,
+            ban_delete_days: 0,
         }
     }
 }
@@ -104,6 +113,48 @@ struct Revoke {
     reason: Option<String>,
 }
 
+/// A member and the reason of an action on it.
+#[derive(CommandArgs)]
+struct MemberReason {
+    /// Member
+    user: UserId,
+    /// Why
+    #[arg(max_length = 512)]
+    reason: Option<String>,
+}
+
+#[derive(CommandArgs)]
+struct TimeoutArgs {
+    /// Member to time out
+    user: UserId,
+    /// How long, such as 1h or 7d; at most 28 days
+    duration: Duration,
+    /// Why
+    #[arg(max_length = 512)]
+    reason: Option<String>,
+}
+
+#[derive(CommandArgs)]
+struct BanArgs {
+    /// Member to ban
+    user: UserId,
+    /// Why
+    #[arg(max_length = 512)]
+    reason: Option<String>,
+    /// How long the ban lasts, such as 7d; forever when left out
+    duration: Option<Duration>,
+    /// How many days of the member's messages to delete, 0 to 7
+    #[arg(min = 0, max = 7)]
+    delete_days: Option<i64>,
+}
+
+/// The payload of a `unban` job: the member, and the case of the ban it lifts.
+#[derive(Debug, Serialize, Deserialize)]
+struct Unban {
+    user: u64,
+    case: i64,
+}
+
 /// Where a case stands at a given time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -133,16 +184,17 @@ fn state(case: &Case, now: i64) -> State {
     }
 }
 
-/// The one place that decides whether a case is a warning that still counts.
-fn counts_as_warning(case: &Case, now: i64) -> bool {
-    case.kind.as_str() == "warn" && state(case, now) == State::Active
+/// The one place that decides whether a case of `kind` still stands.
+fn stands(case: &Case, kind: &str, now: i64) -> bool {
+    case.kind.as_str() == kind && state(case, now) == State::Active
 }
 
-/// The active warnings of `target`, newest first, at most `wanted`. Looks back over at most
-/// [`SCAN`] cases.
-async fn active_warnings(
+/// The cases of `kind` against `target` that still stand, newest first, at most `wanted`. Looks
+/// back over at most [`SCAN`] cases.
+async fn active_cases(
     cases: &Cases,
     target: UserId,
+    kind: &str,
     now: i64,
     wanted: usize,
 ) -> Result<Vec<Case>, CaseError> {
@@ -153,11 +205,7 @@ async fn active_warnings(
         let page = cases.for_target(target, before, PAGE).await?;
         looked += page.len();
         before = page.last().map(|case| case.number);
-        found.extend(
-            page.iter()
-                .filter(|case| counts_as_warning(case, now))
-                .cloned(),
-        );
+        found.extend(page.iter().filter(|case| stands(case, kind, now)).cloned());
         if page.len() < PAGE {
             break;
         }
@@ -193,81 +241,173 @@ fn not_found(number: i64) -> UserError {
     UserError::message("case-not-found").with("number", number)
 }
 
+/// A length of time in seconds, as the clock and the cases count it.
+fn secs(duration: Duration) -> i64 {
+    i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+}
+
+/// The reason of a punishment: a blank one is no reason, and the server may ask for one.
+fn punishment_reason(config: &Config, text: Option<String>) -> Result<Option<String>, UserError> {
+    let reason = reason_of(text);
+    if config.require_reason && reason.is_none() {
+        return Err(UserError::message("reason-required"));
+    }
+    Ok(reason)
+}
+
+/// The reason as a direct message says it, in the language of the server.
+fn dm_reason(cx: &CommandCx, reason: Option<&str>) -> String {
+    match reason {
+        Some(text) => escape(text),
+        None => cx.ctx().t_in(cx.ctx().locale, "reason-none", &Args::new()),
+    }
+}
+
+/// The reason Discord's audit log keeps: who did it, then why.
+fn audit_reason(cx: &CommandCx, reason: Option<&str>) -> Reason {
+    let who = &cx.user().name;
+    Reason::truncated(&match reason {
+        Some(reason) => format!("{who}: {reason}"),
+        None => who.to_owned(),
+    })
+}
+
+/// Messages the member about an action, when the server wants that, in the server language. Returns
+/// the note for the reply when the message did not arrive. A member who is not in the server is
+/// not messaged and gets no note.
+async fn notify(
+    cx: &CommandCx,
+    config: &Config,
+    user: UserId,
+    key: &str,
+    args: &Args,
+) -> Option<String> {
+    if !config.dm_on_action {
+        return None;
+    }
+    let text = cx.ctx().t_in(cx.ctx().locale, key, args);
+    match cx.direct_message(user, DirectMessage::text(text)).await {
+        Ok(Sent::Delivered(_))
+        | Err(UserError::Module(ModuleError::Discord(DiscordError::NotFound))) => None,
+        Ok(Sent::Closed) | Err(_) => Some(cx.t("dm-not-delivered", &Args::new())),
+    }
+}
+
+/// Answers the moderator in private, with the notes that apply.
+async fn answer(
+    cx: &CommandCx,
+    key: &str,
+    args: &Args,
+    notes: &[Option<String>],
+) -> Result<(), UserError> {
+    let mut text = cx.t(key, args);
+    for note in notes.iter().flatten() {
+        text.push(' ');
+        text.push_str(note);
+    }
+    cx.reply_private(text).await
+}
+
+/// Records an action as a case and posts it to the log. A log that cannot take it does not undo
+/// the action.
+async fn record(
+    cx: &CommandCx,
+    kind: &str,
+    target: UserId,
+    reason: Option<String>,
+    expires_at: Option<i64>,
+) -> Result<Case, UserError> {
+    let case = cx
+        .cases()
+        .create(NewCase {
+            kind: CaseKind::new(kind)?,
+            target,
+            moderator: cx.user().id,
+            reason,
+            expires_at,
+        })
+        .await?;
+    let _ = cx.modlog(&case).await;
+    Ok(case)
+}
+
+/// Revokes the newest case of `kind` that still stands against `target`. Best effort: the Discord
+/// action is done already, so a failure here does not fail the command.
+async fn revoke_latest(cx: &CommandCx, target: UserId, kind: &str, reason: String) {
+    if let Ok(cases) = active_cases(cx.cases(), target, kind, cx.now(), 1).await
+        && let Some(case) = cases.first()
+    {
+        let _ = cx
+            .cases()
+            .revoke(case.number, cx.user().id, Some(reason))
+            .await;
+    }
+}
+
+/// The key of the timer that lifts the ban of `user`.
+fn unban_key(user: UserId) -> String {
+    format!("unban:{}", user.get())
+}
+
+/// Sets the timer that lifts the ban of `user` (case `case`) after `after`.
+async fn schedule_unban(
+    cx: &CommandCx,
+    user: UserId,
+    case: i64,
+    after: Duration,
+) -> Result<(), ScheduleError> {
+    cx.scheduler()
+        .job(
+            "unban",
+            &Unban {
+                user: user.get(),
+                case,
+            },
+        )?
+        .key(&unban_key(user))
+        .after(after)
+        .await
+}
+
 /// Warns a member. The warning is a case that expires after `warn_expire_days`.
 async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
-    let reason = reason_of(args.reason);
-    if config.require_reason && reason.is_none() {
-        return Err(UserError::message("reason-required"));
-    }
+    let reason = punishment_reason(&config, args.reason)?;
     let now = cx.now();
-    let case = cx
-        .cases()
-        .create(NewCase {
-            kind: CaseKind::new("warn")?,
-            target: args.user,
-            moderator: cx.user().id,
-            reason: reason.clone(),
-            expires_at: Some(now + i64::from(config.warn_expire_days) * DAY),
-        })
-        .await?;
-    let active = active_warnings(cx.cases(), args.user, now, usize::MAX)
+    let expires_at = now + i64::from(config.warn_expire_days) * DAY;
+    let case = record(&cx, "warn", args.user, reason.clone(), Some(expires_at)).await?;
+    let active = active_cases(cx.cases(), args.user, "warn", now, usize::MAX)
         .await?
         .len();
 
     // The warning is stored already: a member who cannot be messaged keeps it, and the reply says
     // that the message did not arrive instead of failing.
-    let mut delivered = true;
-    if config.dm_on_action {
-        let reason_words = match reason.as_deref() {
-            Some(text) => escape(text),
-            None => cx.ctx().t_in(cx.ctx().locale, "reason-none", &Args::new()),
-        };
-        let text = cx.ctx().t_in(
-            cx.ctx().locale,
-            "dm-warned",
-            &Args::new()
-                .with("reason", reason_words)
-                .with("active", count(active)),
-        );
-        delivered = matches!(
-            cx.direct_message(args.user, DirectMessage::text(text))
-                .await,
-            Ok(Sent::Delivered(_))
-        );
-    }
-
-    // A log that cannot take the case must not turn the warning into a failure.
-    let _ = cx.modlog(&case).await;
-
-    let mut answer = cx.t(
+    let note = notify(
+        &cx,
+        &config,
+        args.user,
+        "dm-warned",
+        &Args::new()
+            .with("reason", dm_reason(&cx, reason.as_deref()))
+            .with("active", count(active)),
+    )
+    .await;
+    answer(
+        &cx,
         "warned",
         &Args::new()
             .with("user", mention(args.user))
             .with("number", case.number)
             .with("active", count(active)),
-    );
-    if config.dm_on_action && !delivered {
-        answer.push(' ');
-        answer.push_str(&cx.t("dm-not-delivered", &Args::new()));
-    }
-    cx.reply_private(answer).await
+        &[note],
+    )
+    .await
 }
 
 /// Notes something about a member. A note is a case without expiry and is not a warning.
 async fn note(cx: CommandCx, args: Note) -> Result<(), UserError> {
-    let case = cx
-        .cases()
-        .create(NewCase {
-            kind: CaseKind::new("note")?,
-            target: args.user,
-            moderator: cx.user().id,
-            reason: Some(args.text),
-            expires_at: None,
-        })
-        .await?;
-    let _ = cx.modlog(&case).await;
+    let case = record(&cx, "note", args.user, Some(args.text), None).await?;
     cx.reply_private_t(
         "noted",
         &Args::new()
@@ -280,7 +420,7 @@ async fn note(cx: CommandCx, args: Note) -> Result<(), UserError> {
 /// Lists the warnings of a member that still count, newest first.
 async fn warnings(cx: CommandCx, args: Target) -> Result<(), UserError> {
     let now = cx.now();
-    let found = active_warnings(cx.cases(), args.user, now, SHOWN).await?;
+    let found = active_cases(cx.cases(), args.user, "warn", now, SHOWN).await?;
     if found.is_empty() {
         return cx
             .reply_private_t(
@@ -383,98 +523,392 @@ async fn case_revoke(cx: CommandCx, args: Revoke) -> Result<(), UserError> {
         .await
 }
 
+/// Times a member out. Discord's limit is 28 days, so a longer timeout is refused before anything
+/// is done. The member stays in the server, so the direct message comes after the timeout.
+async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
+    let seconds = u32::try_from(args.duration.as_secs())
+        .ok()
+        .filter(|seconds| *seconds <= MAX_TIMEOUT_SECONDS)
+        .ok_or_else(|| UserError::message("timeout-too-long"))?;
+    cx.check_target(args.user).await?;
+    let config: Config = cx.config()?;
+    let reason = punishment_reason(&config, args.reason)?;
+    let now = cx.now();
+    cx.api()
+        .timeout(
+            cx.guild_id(),
+            args.user,
+            Some(seconds),
+            audit_reason(&cx, reason.as_deref()),
+        )
+        .await?;
+    let case = record(
+        &cx,
+        "timeout",
+        args.user,
+        reason.clone(),
+        Some(now + secs(args.duration)),
+    )
+    .await?;
+    let duration = cx.format_duration(args.duration);
+    let note = notify(
+        &cx,
+        &config,
+        args.user,
+        "dm-timed-out",
+        &Args::new()
+            .with(
+                "duration",
+                cx.format_duration_in(cx.ctx().locale, args.duration),
+            )
+            .with("reason", dm_reason(&cx, reason.as_deref())),
+    )
+    .await;
+    answer(
+        &cx,
+        "timed-out",
+        &Args::new()
+            .with("user", mention(args.user))
+            .with("duration", duration)
+            .with("number", case.number),
+        &[note],
+    )
+    .await
+}
+
+/// Lifts a timeout. The newest timeout that still stands is revoked with it.
+async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
+    cx.check_target(args.user).await?;
+    let reason = reason_of(args.reason);
+    cx.api()
+        .timeout(
+            cx.guild_id(),
+            args.user,
+            None,
+            audit_reason(&cx, reason.as_deref()),
+        )
+        .await?;
+    let case = record(&cx, "untimeout", args.user, reason, None).await?;
+    revoke_latest(
+        &cx,
+        args.user,
+        "timeout",
+        format!("removed by case #{}", case.number),
+    )
+    .await;
+    cx.reply_private_t(
+        "untimed-out",
+        &Args::new()
+            .with("user", mention(args.user))
+            .with("number", case.number),
+    )
+    .await
+}
+
+/// Kicks a member. The direct message comes first: a kicked member shares no server with the bot.
+async fn kick(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
+    cx.check_target(args.user).await?;
+    let config: Config = cx.config()?;
+    let reason = punishment_reason(&config, args.reason)?;
+    let note = notify(
+        &cx,
+        &config,
+        args.user,
+        "dm-kicked",
+        &Args::new().with("reason", dm_reason(&cx, reason.as_deref())),
+    )
+    .await;
+    cx.api()
+        .kick(
+            cx.guild_id(),
+            args.user,
+            audit_reason(&cx, reason.as_deref()),
+        )
+        .await?;
+    let case = record(&cx, "kick", args.user, reason, None).await?;
+    answer(
+        &cx,
+        "kicked",
+        &Args::new()
+            .with("user", mention(args.user))
+            .with("number", case.number),
+        &[note],
+    )
+    .await
+}
+
+/// Bans a member, for good or for a while. A timed ban gets a timer that lifts it when its time is
+/// up. The direct message comes first, as with a kick.
+async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
+    cx.check_target(args.user).await?;
+    let config: Config = cx.config()?;
+    let reason = punishment_reason(&config, args.reason)?;
+    let days = args
+        .delete_days
+        .unwrap_or(i64::from(config.ban_delete_days));
+    let delete_message_seconds = match u32::try_from(days * DAY) {
+        Ok(seconds) if seconds <= MAX_BAN_DELETE_SECONDS => seconds,
+        _ => return Err(UserError::message("ban-delete-days-range")),
+    };
+    let note = match args.duration {
+        Some(duration) => {
+            notify(
+                &cx,
+                &config,
+                args.user,
+                "dm-banned-for",
+                &Args::new()
+                    .with("duration", cx.format_duration_in(cx.ctx().locale, duration))
+                    .with("reason", dm_reason(&cx, reason.as_deref())),
+            )
+            .await
+        }
+        None => {
+            notify(
+                &cx,
+                &config,
+                args.user,
+                "dm-banned",
+                &Args::new().with("reason", dm_reason(&cx, reason.as_deref())),
+            )
+            .await
+        }
+    };
+    cx.api()
+        .ban(
+            cx.guild_id(),
+            args.user,
+            delete_message_seconds,
+            audit_reason(&cx, reason.as_deref()),
+        )
+        .await?;
+    let expires_at = args.duration.map(|duration| cx.now() + secs(duration));
+    let case = record(&cx, "ban", args.user, reason, expires_at).await?;
+
+    let mut words = Args::new()
+        .with("user", mention(args.user))
+        .with("number", case.number);
+    let key = match args.duration {
+        Some(duration) => {
+            words = words.with("duration", cx.format_duration(duration));
+            "banned-for"
+        }
+        None => "banned",
+    };
+    // A new ban replaces the timer of an earlier one, which would lift this ban too early.
+    let _ = cx.scheduler().cancel(&unban_key(args.user)).await;
+    // The ban holds even when its timer cannot be set; the answer says so.
+    let timer_note = match args.duration {
+        Some(duration) => schedule_unban(&cx, args.user, case.number, duration)
+            .await
+            .is_err()
+            .then(|| cx.t("ban-no-timer", &Args::new())),
+        None => None,
+    };
+    answer(&cx, key, &words, &[note, timer_note]).await
+}
+
+/// Lifts a ban. The timer of a timed ban goes, and the newest ban that still stands is revoked.
+async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
+    cx.check_target(args.user).await?;
+    let reason = reason_of(args.reason);
+    cx.api()
+        .unban(
+            cx.guild_id(),
+            args.user,
+            audit_reason(&cx, reason.as_deref()),
+        )
+        .await?;
+    let case = record(&cx, "unban", args.user, reason, None).await?;
+    // Both are best effort: the member is unbanned already.
+    let _ = cx.scheduler().cancel(&unban_key(args.user)).await;
+    revoke_latest(
+        &cx,
+        args.user,
+        "ban",
+        format!("unbanned by case #{}", case.number),
+    )
+    .await;
+    cx.reply_private_t(
+        "unbanned",
+        &Args::new()
+            .with("user", mention(args.user))
+            .with("number", case.number),
+    )
+    .await
+}
+
+/// Lifts a timed ban when its time is up. A member who was unbanned by hand is done already, so
+/// the job may run twice.
+async fn lift_ban(cx: JobCx) -> Result<(), ModuleError> {
+    let payload: Unban = cx.payload()?;
+    let Some(user) = UserId::new_checked(payload.user) else {
+        return Err(ModuleError::other("a ban job names no member"));
+    };
+    let reason = Reason::truncated(&format!("the ban of case #{} ran out", payload.case));
+    match cx.api().unban(cx.guild_id(), user, reason).await {
+        Ok(()) | Err(DiscordError::NotFound) => Ok(()),
+        Err(error) => Err(ModuleError::Discord(error)),
+    }
+}
+
+/// The module, still open for a test to build on.
+/// The settings a server can change: their schema, and their defaults.
+fn settings() -> (serde_json::Value, serde_json::Value) {
+    (
+        json!({
+            "type": "object",
+            "properties": {
+                "warn_expire_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 365,
+                    "description": "After how many days a warning expires."
+                },
+                "dm_on_action": {
+                    "type": "boolean",
+                    "description": "Whether the warned member gets a direct message."
+                },
+                "require_reason": {
+                    "type": "boolean",
+                    "description": "Whether a warning needs a reason."
+                },
+                "ban_delete_days": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 7,
+                    "description": "How many days of the messages of a banned member are deleted."
+                }
+            },
+            "additionalProperties": false
+        }),
+        json!({
+            "warn_expire_days": 30,
+            "dm_on_action": true,
+            "require_reason": false,
+            "ban_delete_days": 0
+        }),
+    )
+}
+
+/// The commands that act on members, and the job that lifts a timed ban.
+fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
+    builder
+        .command(
+            Command::<TimeoutArgs>::new("timeout", "Time a member out")
+                .requires("moderation.timeout")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(timeout),
+        )
+        .command(
+            Command::<MemberReason>::new("untimeout", "Lift the timeout of a member")
+                .requires("moderation.timeout")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(untimeout),
+        )
+        .command(
+            Command::<MemberReason>::new("kick", "Kick a member")
+                .requires("moderation.kick")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(kick),
+        )
+        .command(
+            Command::<BanArgs>::new("ban", "Ban a member, for good or for a while")
+                .requires("moderation.ban")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(ban),
+        )
+        .command(
+            Command::<MemberReason>::new("unban", "Lift the ban of a member")
+                .requires("moderation.ban")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(unban),
+        )
+        .job("unban", lift_ban)
+}
+
 /// The module, still open for a test to build on.
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
-    Ok(
-        ModuleBuilder::new("moderation", "Moderation", env!("CARGO_PKG_VERSION"))?
-            .description(
-                "Warn members, note about them, and look at and revoke the cases of a server.",
-            )
-            .capability(Capability::Cases)
-            .capability(Capability::SendMessages)
-            .capability(Capability::ReadGuild)
-            .capability(Capability::SendDirectMessages)
-            .permission(PermissionSpec::new(
-                "moderation.warn",
-                Level::MODERATOR,
-                "Warn members",
-            )?)
-            .permission(PermissionSpec::new(
-                "moderation.note",
-                Level::MODERATOR,
-                "Add notes about members",
-            )?)
-            .permission(PermissionSpec::new(
-                "moderation.cases",
-                Level::MODERATOR,
-                "See the cases and warnings of members",
-            )?)
-            .permission(PermissionSpec::new(
-                "moderation.revoke",
-                Level::MODERATOR,
-                "Revoke cases",
-            )?)
-            .config(
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "warn_expire_days": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 365,
-                            "description": "After how many days a warning expires."
-                        },
-                        "dm_on_action": {
-                            "type": "boolean",
-                            "description": "Whether the warned member gets a direct message."
-                        },
-                        "require_reason": {
-                            "type": "boolean",
-                            "description": "Whether a warning needs a reason."
-                        }
-                    },
-                    "additionalProperties": false
-                }),
-                json!({
-                    "warn_expire_days": 30,
-                    "dm_on_action": true,
-                    "require_reason": false
-                }),
-            )
-            .command(
-                Command::<Warn>::new("warn", "Warn a member")
-                    .requires("moderation.warn")
-                    .cooldown(Cooldown::per_user(Duration::from_secs(2)))
-                    .handler(warn),
-            )
-            .command(
-                Command::<Note>::new("note", "Add a note about a member")
-                    .requires("moderation.note")
-                    .handler(note),
-            )
-            .command(
-                Command::<Target>::new("warnings", "Show the active warnings of a member")
+    let (schema, defaults) = settings();
+    let builder = ModuleBuilder::new("moderation", "Moderation", env!("CARGO_PKG_VERSION"))?
+        .description("Warn members, note about them, and look at and revoke the cases of a server.")
+        .capability(Capability::Cases)
+        .capability(Capability::SendMessages)
+        .capability(Capability::ReadGuild)
+        .capability(Capability::SendDirectMessages)
+        .capability(Capability::KickMembers)
+        .capability(Capability::BanMembers)
+        .capability(Capability::TimeoutMembers)
+        .permission(PermissionSpec::new(
+            "moderation.warn",
+            Level::MODERATOR,
+            "Warn members",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.note",
+            Level::MODERATOR,
+            "Add notes about members",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.cases",
+            Level::MODERATOR,
+            "See the cases and warnings of members",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.revoke",
+            Level::MODERATOR,
+            "Revoke cases",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.timeout",
+            Level::MODERATOR,
+            "Time members out and lift timeouts",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.kick",
+            Level::MODERATOR,
+            "Kick members",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.ban",
+            Level::ADMIN,
+            "Ban and unban members",
+        )?)
+        .config(schema, defaults)
+        .command(
+            Command::<Warn>::new("warn", "Warn a member")
+                .requires("moderation.warn")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(warn),
+        )
+        .command(
+            Command::<Note>::new("note", "Add a note about a member")
+                .requires("moderation.note")
+                .handler(note),
+        )
+        .command(
+            Command::<Target>::new("warnings", "Show the active warnings of a member")
+                .requires("moderation.cases")
+                .handler(warnings),
+        )
+        .group(
+            "case",
+            "Look at, list and revoke cases",
+            [
+                Command::<Number>::new("view", "Show a case")
                     .requires("moderation.cases")
-                    .handler(warnings),
-            )
-            .group(
-                "case",
-                "Look at, list and revoke cases",
-                [
-                    Command::<Number>::new("view", "Show a case")
-                        .requires("moderation.cases")
-                        .handler(case_view),
-                    Command::<Listing>::new("list", "List the cases of a member")
-                        .requires("moderation.cases")
-                        .handler(case_list),
-                    Command::<Revoke>::new("revoke", "Revoke a case")
-                        .requires("moderation.revoke")
-                        .handler(case_revoke),
-                ],
-            )
-            .catalog(Locale::En, EN)
-            .catalog(Locale::Ja, JA),
-    )
+                    .handler(case_view),
+                Command::<Listing>::new("list", "List the cases of a member")
+                    .requires("moderation.cases")
+                    .handler(case_list),
+                Command::<Revoke>::new("revoke", "Revoke a case")
+                    .requires("moderation.revoke")
+                    .handler(case_revoke),
+            ],
+        );
+    Ok(punishments(builder)
+        .catalog(Locale::En, EN)
+        .catalog(Locale::Ja, JA))
 }
 
 /// The module as the host loads it.

@@ -13,7 +13,15 @@ use crate::duration::{TimeStyle, timestamp};
 use crate::embed::{Color, EmbedBuilder, FIELD_VALUE_LIMIT, escape, truncate};
 
 /// The kinds the catalog names (`modlog-kind-<kind>`). Any other kind is shown as it is.
-const KNOWN_KINDS: [&str; 6] = ["warn", "timeout", "kick", "ban", "unban", "note"];
+const KNOWN_KINDS: [&str; 7] = [
+    "warn",
+    "timeout",
+    "untimeout",
+    "kick",
+    "ban",
+    "unban",
+    "note",
+];
 
 /// Grey, for a case that was revoked whatever its kind.
 const REVOKED_COLOR: Color = Color::Rgb(0x0095_A5A6);
@@ -121,7 +129,7 @@ fn color(kind: &str, revoked: bool) -> Color {
     match kind {
         "warn" | "timeout" | "kick" => Color::Warning,
         "ban" => Color::Error,
-        "unban" => Color::Success,
+        "unban" | "untimeout" => Color::Success,
         _ => Color::Info,
     }
 }

@@ -2,8 +2,8 @@
 
 A module is a Rust crate that implements `closure_core::module::Module`. The smallest complete
 example is [`crates/closure-mod-diagnostics`](../crates/closure-mod-diagnostics/src/lib.rs); the
-example that uses the SDK in full (permissions, a cooldown, cases, the log, direct messages, two
-languages) is [`crates/closure-mod-moderation`](../crates/closure-mod-moderation/src/lib.rs)
+example that uses the SDK in full (permissions, a cooldown, cases, the log, direct messages,
+timers, two languages) is [`crates/closure-mod-moderation`](../crates/closure-mod-moderation/src/lib.rs)
 with its [tests](../crates/closure-mod-moderation/tests/moderation.rs). Read them alongside this page.
 
 ## The short way: the SDK

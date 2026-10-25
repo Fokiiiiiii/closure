@@ -369,3 +369,24 @@ async fn checking_a_target_needs_the_read_guild_capability() {
         ModuleError::Discord(DiscordError::CapabilityDenied(Capability::ReadGuild))
     ));
 }
+
+#[tokio::test]
+async fn a_time_can_be_said_in_another_language_than_the_users() {
+    let module = ModuleBuilder::new("fmt", "Fmt", "0.1.0").unwrap().command(
+        Command::<()>::new("say", "Says a time twice").handler(|cx, ()| async move {
+            let hour = Duration::from_secs(3600);
+            cx.reply(format!(
+                "{} | {}",
+                cx.format_duration(hour),
+                cx.format_duration_in(Locale::En, hour)
+            ))
+            .await
+        }),
+    );
+    let harness = Harness::new(module).unwrap();
+    let replies = harness
+        .invoke(Invocation::new("say").locale(Locale::Ja))
+        .await
+        .unwrap();
+    assert_eq!(replies[0].content, "1時間 | 1 hour");
+}

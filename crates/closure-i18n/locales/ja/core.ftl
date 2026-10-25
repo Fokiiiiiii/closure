@@ -34,6 +34,7 @@ sdk-target-higher = 最も上位のロールが自分以上のメンバーには
 modlog-title = ケース #{ $number } · { $kind }
 modlog-kind-warn = 警告
 modlog-kind-timeout = タイムアウト
+modlog-kind-untimeout = タイムアウト解除
 modlog-kind-kick = キック
 modlog-kind-ban = BAN
 modlog-kind-unban = BAN 解除
