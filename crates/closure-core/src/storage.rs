@@ -52,11 +52,13 @@ pub enum StorageError {
     Backend(String),
 }
 
-/// A stored value and how many times the entry was written.
+/// A stored value and the revision it was written at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub value: serde_json::Value,
-    /// 1 for a new entry, one more for every write.
+    /// A number that changes with every write. No two writes share one, not even those of an
+    /// entry that was deleted (or expired) and made again, so a revision read earlier can
+    /// never match a later entry by accident.
     pub revision: i64,
 }
 
@@ -472,6 +474,8 @@ struct CounterRow {
 
 #[derive(Debug, Default)]
 struct Inner {
+    /// The revision of the latest write; every write takes the next one.
+    revisions: i64,
     entries: HashMap<RowKey, Row>,
     counters: HashMap<CounterKey, CounterRow>,
 }
@@ -572,7 +576,8 @@ impl StorageBackend for MemoryStorage {
                 return Err(StorageError::QuotaExceeded { limit: MAX_ENTRIES });
             }
         }
-        let revision = revision.unwrap_or(0) + 1;
+        inner.revisions += 1;
+        let revision = inner.revisions;
         let expires = ttl
             .map(|ttl| now.saturating_add(i64::try_from(ttl.as_secs().max(1)).unwrap_or(i64::MAX)));
         inner.entries.insert(
@@ -785,7 +790,7 @@ mod tests {
                 .replace("session", &"y", Expect::Missing, None)
                 .await
                 .unwrap(),
-            1
+            2
         );
     }
 
@@ -816,6 +821,41 @@ mod tests {
             Err(StorageError::Conflict)
         );
         assert_eq!(store.get::<i64>("n").await.unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn a_revision_read_before_a_delete_never_matches_the_entry_made_again() {
+        let f = fixture();
+        let store = f.store("warn", 1);
+        store.set("n", &"first").await.unwrap();
+        let old = store.entry("n").await.unwrap().unwrap().revision;
+        store.delete("n").await.unwrap();
+        store.set("n", &"second").await.unwrap();
+        assert_eq!(
+            store
+                .replace("n", &"stale", Expect::Revision(old), None)
+                .await,
+            Err(StorageError::Conflict)
+        );
+        assert_eq!(
+            store.get::<String>("n").await.unwrap().as_deref(),
+            Some("second")
+        );
+
+        // The same when the first one ran out instead of being deleted.
+        store
+            .set_for("t", &"first", Duration::from_secs(1))
+            .await
+            .unwrap();
+        let old = store.entry("t").await.unwrap().unwrap().revision;
+        f.advance(2);
+        store.set("t", &"second").await.unwrap();
+        assert_eq!(
+            store
+                .replace("t", &"stale", Expect::Revision(old), None)
+                .await,
+            Err(StorageError::Conflict)
+        );
     }
 
     #[tokio::test]

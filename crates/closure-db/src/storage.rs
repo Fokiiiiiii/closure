@@ -128,12 +128,12 @@ impl StorageBackend for Db {
         let seconds = ttl.map(|ttl| ttl.as_secs_f64().max(1.0));
         let revision: i64 = sqlx::query_scalar(
             "INSERT INTO module_kv (module, guild_id, key, value, revision, expires_at)
-             VALUES ($1, $2, $3, $4, 1,
+             VALUES ($1, $2, $3, $4, nextval('module_kv_revisions'),
                      CASE WHEN $5::float8 IS NULL THEN NULL
                           ELSE now() + make_interval(secs => $5::float8) END)
              ON CONFLICT (module, guild_id, key) DO UPDATE
                 SET value = EXCLUDED.value,
-                    revision = module_kv.revision + 1,
+                    revision = EXCLUDED.revision,
                     expires_at = EXCLUDED.expires_at,
                     updated_at = now()
              RETURNING revision",
@@ -156,16 +156,21 @@ impl StorageBackend for Db {
         guild: GuildId,
         key: &str,
     ) -> Result<bool, StorageError> {
+        // Takes its turn with the writes, so one in the middle of its check cannot be undone by it.
+        let guild = guild_id(guild)?;
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        lock(&mut tx, module, guild).await?;
         let live: Option<bool> = sqlx::query_scalar(
             "DELETE FROM module_kv WHERE module = $1 AND guild_id = $2 AND key = $3
              RETURNING (expires_at IS NULL OR expires_at > now())",
         )
         .bind(module.as_str())
-        .bind(guild_id(guild)?)
+        .bind(guild)
         .bind(key)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
         Ok(live.unwrap_or(false))
     }
 
@@ -309,17 +314,23 @@ impl StorageBackend for Db {
         counter: &str,
         subject: u64,
     ) -> Result<(), StorageError> {
+        // Takes its turn with the additions: one in progress adds its minute row before this
+        // deletes, so the total and the minutes are never left disagreeing.
+        let guild = guild_id(guild)?;
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        lock(&mut tx, module, guild).await?;
         sqlx::query(
             "DELETE FROM module_counters
              WHERE module = $1 AND guild_id = $2 AND name = $3 AND subject = $4",
         )
         .bind(module.as_str())
-        .bind(guild_id(guild)?)
+        .bind(guild)
         .bind(counter)
         .bind(subject_id(subject)?)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
         Ok(())
     }
 }
@@ -450,7 +461,7 @@ mod tests {
                 .replace("short", &5, Expect::Missing, None)
                 .await
                 .unwrap(),
-            1
+            4
         );
         sqlx::query(
             "UPDATE module_kv SET expires_at = now() - interval '1 second' WHERE key = 'short'",
@@ -459,6 +470,63 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(db.purge_module_storage().await.unwrap().0, 1);
+    }
+
+    #[sqlx::test]
+    async fn a_revision_read_before_a_delete_never_matches_the_entry_made_again(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let store = store(&db, "warn", 1);
+        store.set("n", &"first").await.unwrap();
+        let old = store.entry("n").await.unwrap().unwrap().revision;
+        store.delete("n").await.unwrap();
+        store.set("n", &"second").await.unwrap();
+        assert_eq!(
+            store
+                .replace("n", &"stale", Expect::Revision(old), None)
+                .await,
+            Err(StorageError::Conflict)
+        );
+        assert_eq!(
+            store.get::<String>("n").await.unwrap().as_deref(),
+            Some("second")
+        );
+    }
+
+    /// Whether `call` waits while a writer of the module holds its turn, and then finishes.
+    async fn waits_for_the_writers_turn<F, T>(db: &Db, call: F)
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let module = ModuleId::new("warn").unwrap();
+        let mut tx = db.pool.begin().await.unwrap();
+        lock(&mut tx, &module, 1).await.unwrap();
+        let task = tokio::spawn(call);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!task.is_finished(), "it did not wait for the writer");
+        tx.commit().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("it finishes once the writer is done")
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn deleting_and_resetting_take_their_turn_with_the_writers(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let store = store(&db, "warn", 1);
+        store.set("n", &1).await.unwrap();
+        store.counter_add("c", 1_u64, 1).await.unwrap();
+        let (deleter, resetter) = (store.clone(), store.clone());
+        waits_for_the_writers_turn(&db, async move { deleter.delete("n").await.unwrap() }).await;
+        waits_for_the_writers_turn(&db, async move {
+            resetter.counter_reset("c", 1_u64).await.unwrap();
+        })
+        .await;
+        assert_eq!(store.get::<i64>("n").await.unwrap(), None);
+        assert_eq!(store.counter_total("c", 1_u64).await.unwrap(), 0);
     }
 
     #[sqlx::test]
