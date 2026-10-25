@@ -30,10 +30,13 @@ pub enum Capability {
     Schedule,
     /// Record moderation cases, numbered per guild and shared by modules (see [`crate::cases`]).
     Cases,
+    /// Message a member of the guild privately. Separate from `SendMessages`: a user may be
+    /// messaged without any channel being shared.
+    SendDirectMessages,
 }
 
 impl Capability {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::SendMessages,
         Self::AddReactions,
         Self::ManageMessages,
@@ -51,6 +54,7 @@ impl Capability {
         Self::Storage,
         Self::Schedule,
         Self::Cases,
+        Self::SendDirectMessages,
     ];
 
     #[must_use]
@@ -73,6 +77,7 @@ impl Capability {
             Self::Storage => "storage",
             Self::Schedule => "schedule",
             Self::Cases => "cases",
+            Self::SendDirectMessages => "send_direct_messages",
         }
     }
 }

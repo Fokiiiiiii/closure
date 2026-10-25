@@ -276,6 +276,13 @@ pub enum Action {
         #[serde(default)]
         mentions: MentionPolicy,
     },
+    /// Privately to a member of `guild_id`: the host checks the membership before sending.
+    SendDirectMessage {
+        guild_id: GuildId,
+        user_id: UserId,
+        content: Option<String>,
+        embeds: Vec<Embed>,
+    },
     EditMessage {
         channel_id: ChannelId,
         message_id: MessageId,
@@ -473,6 +480,15 @@ fn check_message_body(content: Option<&str>, embeds: &[Embed]) -> Result<(), Dis
     ensure(embeds.len() <= MAX_EMBEDS, || {
         format!("at most {MAX_EMBEDS} embeds are allowed")
     })
+}
+
+/// A new message says something: content or at least one embed.
+fn check_new_message(content: Option<&str>, embeds: &[Embed]) -> Result<(), DiscordError> {
+    check_message_body(content, embeds)?;
+    ensure(
+        content.is_some_and(|c| !c.is_empty()) || !embeds.is_empty(),
+        || "message needs content or at least one embed".into(),
+    )
 }
 
 fn check_reply(reply: &InteractionReply, require_body: bool) -> Result<(), DiscordError> {
@@ -715,6 +731,7 @@ impl Action {
     pub fn capability(&self) -> Capability {
         match self {
             Self::SendMessage { .. } | Self::EditMessage { .. } => Capability::SendMessages,
+            Self::SendDirectMessage { .. } => Capability::SendDirectMessages,
             Self::AddReaction { .. } => Capability::AddReactions,
             Self::DeleteMessage { .. } | Self::BulkDeleteMessages { .. } => {
                 Capability::ManageMessages
@@ -774,7 +791,8 @@ impl Action {
             | Self::ListAutoModRules { guild_id }
             | Self::CreateAutoModRule { guild_id, .. }
             | Self::DeleteAutoModRule { guild_id, .. }
-            | Self::GetAuditLog { guild_id, .. } => Some(*guild_id),
+            | Self::GetAuditLog { guild_id, .. }
+            | Self::SendDirectMessage { guild_id, .. } => Some(*guild_id),
             Self::SendMessage { .. }
             | Self::EditMessage { .. }
             | Self::DeleteMessage { .. }
@@ -839,6 +857,7 @@ impl Action {
             | Self::ListAutoModRules { .. }
             | Self::DeleteAutoModRule { .. }
             | Self::GetAuditLog { .. }
+            | Self::SendDirectMessage { .. }
             | Self::Respond { .. }
             | Self::Followup { .. }
             | Self::EditResponse { .. } => Vec::new(),
@@ -882,7 +901,8 @@ impl Action {
             | Self::ListAutoModRules { .. }
             | Self::CreateAutoModRule { .. }
             | Self::DeleteAutoModRule { .. }
-            | Self::GetAuditLog { .. } => None,
+            | Self::GetAuditLog { .. }
+            | Self::SendDirectMessage { .. } => None,
         }
     }
 
@@ -891,6 +911,7 @@ impl Action {
     pub fn name(&self) -> &'static str {
         match self {
             Self::SendMessage { .. } => "send_message",
+            Self::SendDirectMessage { .. } => "send_direct_message",
             Self::EditMessage { .. } => "edit_message",
             Self::DeleteMessage { .. } => "delete_message",
             Self::BulkDeleteMessages { .. } => "bulk_delete_messages",
@@ -930,13 +951,10 @@ impl Action {
         match self {
             Self::SendMessage {
                 content, embeds, ..
-            } => {
-                check_message_body(content.as_deref(), embeds)?;
-                ensure(
-                    content.as_deref().is_some_and(|c| !c.is_empty()) || !embeds.is_empty(),
-                    || "message needs content or at least one embed".into(),
-                )
             }
+            | Self::SendDirectMessage {
+                content, embeds, ..
+            } => check_new_message(content.as_deref(), embeds),
             Self::EditMessage {
                 content, embeds, ..
             } => check_message_body(content.as_deref(), embeds.as_deref().unwrap_or_default()),
@@ -1369,5 +1387,42 @@ mod tests {
         assert!(check_auto_mod(&spec).is_ok());
         spec.actions.clear();
         assert!(check_auto_mod(&spec).is_err());
+    }
+
+    #[test]
+    fn direct_messages_need_their_own_capability_and_name_their_guild() {
+        let action = Action::SendDirectMessage {
+            guild_id: id::<7, _>(),
+            user_id: id::<2, _>(),
+            content: Some("hi".into()),
+            embeds: vec![],
+        };
+        assert_eq!(action.capability(), Capability::SendDirectMessages);
+        assert_eq!(action.guild_id(), Some(id::<7, _>()));
+        assert_eq!(action.name(), "send_direct_message");
+        assert!(action.channels().is_empty());
+        assert!(action.validate().is_ok());
+    }
+
+    #[test]
+    fn direct_message_body_is_checked_like_a_message() {
+        let make = |content: Option<String>| Action::SendDirectMessage {
+            guild_id: id::<1, _>(),
+            user_id: id::<2, _>(),
+            content,
+            embeds: vec![],
+        };
+        assert!(make(None).validate().is_err());
+        assert!(make(Some(String::new())).validate().is_err());
+        assert!(
+            make(Some("あ".repeat(MAX_MESSAGE_CHARS)))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            make(Some("あ".repeat(MAX_MESSAGE_CHARS + 1)))
+                .validate()
+                .is_err()
+        );
     }
 }

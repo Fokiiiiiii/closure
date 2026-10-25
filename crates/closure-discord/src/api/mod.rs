@@ -190,6 +190,7 @@ fn error_label(error: &DiscordError) -> &'static str {
         DiscordError::Forbidden(_) => "forbidden",
         DiscordError::HierarchyViolation(_) => "hierarchy",
         DiscordError::NotFound => "not_found",
+        DiscordError::DirectMessagesClosed => "direct_messages_closed",
         DiscordError::RateLimited { .. } => "rate_limited",
         DiscordError::Transient(_) => "transient",
         DiscordError::Fatal(_) => "fatal",
@@ -396,6 +397,15 @@ impl TwilightApi {
                 mentions,
             } => {
                 self.send_message(*channel_id, content.as_deref(), embeds, *reply_to, mentions)
+                    .await
+            }
+            Action::SendDirectMessage {
+                guild_id,
+                user_id,
+                content,
+                embeds,
+            } => {
+                self.send_direct_message(*guild_id, *user_id, content.as_deref(), embeds)
                     .await
             }
             Action::EditMessage {

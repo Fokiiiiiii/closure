@@ -8,6 +8,10 @@ use twilight_http::error::{Error, ErrorType};
 /// The longest retry hint we pass on; Discord never legitimately asks for more.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
 
+/// Discord's error code for "Cannot send messages to this user": the user closed direct messages
+/// from the bot or shares no server with it.
+const CANNOT_SEND_TO_USER: u64 = 50_007;
+
 /// Maps an HTTP status and Discord error body onto [`DiscordError`].
 ///
 /// Kept free of Twilight types so every branch can be tested with plain values.
@@ -41,6 +45,11 @@ pub(crate) fn map_http_error(error: &Error) -> DiscordError {
             error: api_error,
             ..
         } => {
+            if let ApiError::General(general) = api_error
+                && general.code == CANNOT_SEND_TO_USER
+            {
+                return DiscordError::DirectMessagesClosed;
+            }
             let retry_after = match api_error {
                 ApiError::Ratelimited(limited) => Some(limited.retry_after),
                 _ => None,

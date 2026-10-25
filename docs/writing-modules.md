@@ -144,6 +144,8 @@ Cases: a moderation record (warning, timeout, kick, ...) numbered per server. De
 
 ModLog: `cx.modlog(&case)` (or `job.modlog(&case)`) posts a case to the server's log channel as an embed. The embed is in the server's language, not the invoker's, since moderators read the log. With no log channel it does nothing and returns `Ok(None)`. The module needs the capability `SendMessages` as well as `cases`. A revoked case is posted in grey, with who revoked it and why. Tests set the channel with `Harness::set_log_channel(id)` and read the embeds with `Harness::sent_embeds()`.
 
+Direct messages: `cx.direct_message(user, DirectMessage::text("..."))` (or `DirectMessage::embed(embed)`) sends a private message. The module needs the capability `send_direct_messages`, which is separate from `send_messages`. The user must be a member of the server; the host checks that before sending, and anyone else is refused. `Sent::Closed` means the user does not accept direct messages from the bot: that is an answer, not an error, and the module should carry on. Discord may limit a bot that sends many direct messages in a short time, so send them sparingly, one notice per action rather than one per message.
+
 A `Duration` field is a command option typed as words: `#[derive(CommandArgs)] struct Mute { user: UserId, time: Duration }`
 accepts `10m`, `1h30m`, `1h 30m`, `2d` or `1w2d` (units `s m h d w`, lowercase; at most ten years).
 Anything else is refused with the usual bad-argument message before the handler runs. The same

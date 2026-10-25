@@ -89,7 +89,9 @@ to (the parent category of a new channel, the alert and exempt channels of an au
 rule) are checked the same way. A channel in another guild, in no guild (a direct message), or
 whose guild cannot be determined is refused, so a failing lookup never lets an action through.
 Lookups of one channel that happen at the same time make one request and share its answer, a
-failure included; a failure is not remembered.
+failure included; a failure is not remembered. Direct messages (`Action::SendDirectMessage`, guarded by the capability
+`send_direct_messages`) reach only members of the guild of the event: the host checks the membership
+before it opens the private channel, and a user it cannot confirm as a member gets nothing.
 
 Answers to an interaction (`Respond`, `Followup`, `EditResponse`) are checked against a record the
 host keeps: when a command arrives, before any module sees it, its token is recorded together

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use twilight_model::channel::message::Message;
+use twilight_model::channel::message::{Embed, Message};
 use twilight_model::guild::Member;
 
 use crate::action::{
@@ -206,6 +206,31 @@ impl ApiClient {
         match self.execute(action).await? {
             Outcome::Message(message) => Ok(*message),
             _ => Err(unexpected("send_message")),
+        }
+    }
+
+    /// Privately to a member of the guild the client is bound to; the host checks that the user
+    /// is one.
+    pub async fn send_direct_message(
+        &self,
+        user_id: UserId,
+        content: impl Into<String> + Send,
+        embeds: Vec<Embed>,
+    ) -> Result<Message, DiscordError> {
+        let Some(guild_id) = self.guild else {
+            return Err(DiscordError::Invalid(
+                "direct messages need a client bound to a guild".into(),
+            ));
+        };
+        let action = Action::SendDirectMessage {
+            guild_id,
+            user_id,
+            content: Some(content.into()),
+            embeds,
+        };
+        match self.execute(action).await? {
+            Outcome::Message(message) => Ok(*message),
+            _ => Err(unexpected("send_direct_message")),
         }
     }
 
@@ -989,5 +1014,79 @@ mod tests {
         let client = client(&api, &[Capability::KickMembers]);
         let result = client.kick(Id::new(1), Id::new(2), reason()).await;
         assert_eq!(result, Err(DiscordError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn a_direct_message_needs_its_own_capability() {
+        let api = Arc::new(MockApi::default());
+        let client = client(&api, &[Capability::SendMessages]).scoped_to(Id::new(1));
+        let result = client
+            .send_direct_message(Id::new(9), "hi", Vec::new())
+            .await;
+        assert_eq!(
+            result,
+            Err(DiscordError::CapabilityDenied(
+                Capability::SendDirectMessages
+            ))
+        );
+        assert_eq!(api.actions(), []);
+    }
+
+    #[tokio::test]
+    async fn a_direct_message_goes_to_the_user_in_the_bound_guild() {
+        let api = Arc::new(MockApi::default());
+        let client = client(&api, &[Capability::SendDirectMessages]).scoped_to(Id::new(1));
+        let message = client
+            .send_direct_message(Id::new(9), "hi", Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(message.content, "");
+        assert_eq!(
+            api.actions(),
+            [Action::SendDirectMessage {
+                guild_id: Id::new(1),
+                user_id: Id::new(9),
+                content: Some("hi".into()),
+                embeds: Vec::new(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direct_message_of_another_guild_or_without_a_guild_is_refused() {
+        let api = Arc::new(MockApi::default());
+        let scoped = client(&api, &[Capability::SendDirectMessages]).scoped_to(Id::new(1));
+        let elsewhere = Action::SendDirectMessage {
+            guild_id: Id::new(2),
+            user_id: Id::new(9),
+            content: Some("hi".into()),
+            embeds: Vec::new(),
+        };
+        assert!(matches!(
+            scoped.execute(elsewhere).await,
+            Err(DiscordError::Forbidden(_))
+        ));
+
+        let unbound = client(&api, &[Capability::SendDirectMessages]);
+        let result = unbound
+            .send_direct_message(Id::new(9), "hi", Vec::new())
+            .await;
+        assert!(
+            matches!(result, Err(DiscordError::Invalid(_))),
+            "{result:?}"
+        );
+        assert_eq!(api.actions(), []);
+    }
+
+    #[tokio::test]
+    async fn an_empty_direct_message_is_rejected_before_discord() {
+        let api = Arc::new(MockApi::default());
+        let client = client(&api, &[Capability::SendDirectMessages]).scoped_to(Id::new(1));
+        let result = client.send_direct_message(Id::new(9), "", Vec::new()).await;
+        assert!(
+            matches!(result, Err(DiscordError::Invalid(_))),
+            "{result:?}"
+        );
+        assert_eq!(api.actions(), []);
     }
 }

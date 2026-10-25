@@ -19,6 +19,7 @@ use closure_core::schedule::ScheduledJob;
 use serde::de::DeserializeOwned;
 use twilight_model::guild::Permissions;
 
+use crate::dm::{DirectMessage, Sent};
 use crate::error::{TargetProblem, UserError};
 use crate::ui::CustomId;
 
@@ -238,6 +239,16 @@ impl<I: InteractionRef + 'static> Cx<I> {
         case: &closure_core::cases::Case,
     ) -> Result<Option<closure_core::event::MessageId>, UserError> {
         crate::modlog::post(self.ctx(), case).await
+    }
+
+    /// Sends `message` privately to `user`, who has to be a member of this guild (see
+    /// [`crate::dm`]). The module needs the capability `SendDirectMessages`.
+    pub async fn direct_message(
+        &self,
+        user: UserId,
+        message: DirectMessage,
+    ) -> Result<Sent, UserError> {
+        crate::dm::send(self.ctx(), user, message).await
     }
 
     /// A message of the module's catalog in the language of the answer.
@@ -562,6 +573,16 @@ impl JobCx {
         case: &closure_core::cases::Case,
     ) -> Result<Option<closure_core::event::MessageId>, UserError> {
         crate::modlog::post(&self.ctx, case).await
+    }
+
+    /// Sends `message` privately to `user`, who has to be a member of this guild (see
+    /// [`crate::dm`]). The module needs the capability `SendDirectMessages`.
+    pub async fn direct_message(
+        &self,
+        user: UserId,
+        message: DirectMessage,
+    ) -> Result<Sent, UserError> {
+        crate::dm::send(&self.ctx, user, message).await
     }
 
     /// The module's configuration in this guild, as its own type.

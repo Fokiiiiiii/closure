@@ -4,6 +4,7 @@ error-capability-denied = このモジュールにはこの操作が許可され
 error-forbidden = その操作を行う権限がありません。
 error-hierarchy = ロールの階層が原因で実行できません。私の最上位ロールが、対象の最上位ロールより上にある必要があります。
 error-not-found = 対象が見つかりません。すでに削除された可能性があります。
+error-dm-closed = そのユーザーはこのボットからのダイレクトメッセージを受け付けていません。
 error-rate-limited = Discord のレート制限中です。しばらくしてからもう一度お試しください。
 error-transient = Discord 側で一時的な問題が発生しています。しばらくしてからもう一度お試しください。
 error-fatal = Discord との通信中に問題が発生しました。

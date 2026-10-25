@@ -1,6 +1,6 @@
 use closure_core::action::{Emoji, MentionPolicy, Outcome, Reason};
 use closure_core::error::DiscordError;
-use closure_core::event::{ChannelId, MessageId};
+use closure_core::event::{ChannelId, GuildId, MessageId, UserId};
 use twilight_http::request::AuditLogReason;
 use twilight_http::request::channel::reaction::RequestReactionType;
 use twilight_model::channel::message::{AllowedMentions, Embed};
@@ -47,6 +47,40 @@ impl TwilightApi {
             // A reply to a message that has since been deleted (say, by auto moderation) should
             // still be sent as a plain message rather than fail.
             request = request.reply(message).fail_if_not_exists(false);
+        }
+        read(request)
+            .await
+            .map(|message| Outcome::Message(Box::new(message)))
+    }
+
+    /// Opens the private channel with `user` and sends the message there. The user must be a
+    /// member of `guild`: the cache is trusted when it knows, otherwise Discord is asked, and
+    /// when that fails nothing is sent.
+    pub(super) async fn send_direct_message(
+        &self,
+        guild: GuildId,
+        user: UserId,
+        content: Option<&str>,
+        embeds: &[Embed],
+    ) -> Result<Outcome, DiscordError> {
+        let known = self
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.member_roles(guild, user).is_some());
+        if !known {
+            self.get_member(guild, user).await?;
+        }
+        let channel = read(self.http.create_private_channel(user)).await?;
+        let allowed = AllowedMentions::default();
+        let mut request = self
+            .http
+            .create_message(channel.id)
+            .allowed_mentions(Some(&allowed));
+        if let Some(content) = content {
+            request = request.content(content);
+        }
+        if !embeds.is_empty() {
+            request = request.embeds(embeds);
         }
         read(request)
             .await

@@ -749,3 +749,138 @@ mod scoped_client {
         }
     }
 }
+
+mod direct_messages {
+    use closure_core::event::{GuildId, RoleId, UserId};
+
+    use super::*;
+
+    const MEMBER: &str = r#"{"communication_disabled_until":null,"deaf":false,"flags":0,"joined_at":"2026-01-01T00:00:00.000000+00:00","mute":false,"nick":null,"roles":[],"user":{"id":"20","username":"u","discriminator":"0","avatar":null}}"#;
+    const DM_CHANNEL: &str = r#"{"id":"300","type":1,"recipients":[{"id":"20","username":"u","discriminator":"0","avatar":null}]}"#;
+    const DM_MESSAGE: &str = r#"{"id":"400","channel_id":"300","content":"hi","author":{"id":"1","username":"closure","discriminator":"0","avatar":null,"bot":true},"attachments":[],"embeds":[],"mention_everyone":false,"mention_roles":[],"mentions":[],"pinned":false,"timestamp":"2026-10-24T00:00:00.000000+00:00","edited_timestamp":null,"tts":false,"type":0}"#;
+    const DM_CLOSED: &str = r#"{"message":"Cannot send messages to this user","code":50007}"#;
+
+    /// A cache that knows every member of every guild.
+    struct KnowsMember;
+
+    impl CacheView for KnowsMember {
+        fn bot_user(&self) -> Option<UserId> {
+            None
+        }
+
+        fn guild_owner(&self, _: GuildId) -> Option<UserId> {
+            None
+        }
+
+        fn member_roles(&self, _: GuildId, _: UserId) -> Option<Vec<RoleId>> {
+            Some(Vec::new())
+        }
+
+        fn role_position(&self, _: RoleId) -> Option<i64> {
+            None
+        }
+    }
+
+    fn direct_message() -> Action {
+        Action::SendDirectMessage {
+            guild_id: Id::new(10),
+            user_id: Id::new(20),
+            content: Some("hi".into()),
+            embeds: vec![],
+        }
+    }
+
+    /// Method and path of each request, in the order Discord received them.
+    fn calls(discord: &FakeDiscord) -> Vec<String> {
+        discord
+            .requests()
+            .into_iter()
+            .map(|request| {
+                let path = request
+                    .path
+                    .split_once("/api/v10")
+                    .map_or(request.path.as_str(), |(_, rest)| rest);
+                format!("{} {path}", request.method)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_member_gets_a_private_message_without_pings() {
+        let discord =
+            FakeDiscord::start(vec![(200, MEMBER), (200, DM_CHANNEL), (200, DM_MESSAGE)]).await;
+
+        let outcome = discord.api().execute(direct_message()).await;
+
+        assert!(matches!(outcome, Ok(Outcome::Message(_))), "{outcome:?}");
+        assert_eq!(
+            calls(&discord),
+            [
+                "GET /guilds/10/members/20",
+                "POST /users/@me/channels",
+                "POST /channels/300/messages",
+            ]
+        );
+        let requests = discord.requests();
+        let channel: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert_eq!(channel["recipient_id"], "20");
+        let message: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+        assert_eq!(message["content"], "hi");
+        assert_eq!(message["allowed_mentions"]["parse"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_user_who_is_not_known_to_be_a_member_gets_nothing() {
+        for response in [(404, NOT_FOUND), (500, "{}")] {
+            let discord = FakeDiscord::start(vec![response]).await;
+
+            let result = discord.api().execute(direct_message()).await;
+
+            assert!(result.is_err(), "{response:?}: {result:?}");
+            assert_eq!(
+                calls(&discord),
+                ["GET /guilds/10/members/20"],
+                "{response:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_user_who_closed_direct_messages_is_reported_at_either_step() {
+        let at_channel = FakeDiscord::start(vec![(200, MEMBER), (403, DM_CLOSED)]).await;
+        assert_eq!(
+            at_channel.api().execute(direct_message()).await,
+            Err(DiscordError::DirectMessagesClosed)
+        );
+
+        let at_message =
+            FakeDiscord::start(vec![(200, MEMBER), (200, DM_CHANNEL), (403, DM_CLOSED)]).await;
+        assert_eq!(
+            at_message.api().execute(direct_message()).await,
+            Err(DiscordError::DirectMessagesClosed)
+        );
+    }
+
+    #[tokio::test]
+    async fn other_refusals_stay_forbidden() {
+        let discord =
+            FakeDiscord::start(vec![(200, MEMBER), (200, DM_CHANNEL), (403, FORBIDDEN)]).await;
+        let result = discord.api().execute(direct_message()).await;
+        assert!(
+            matches!(result, Err(DiscordError::Forbidden(_))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_known_to_the_cache_is_not_looked_up() {
+        let discord = FakeDiscord::start(vec![(200, DM_CHANNEL), (200, DM_MESSAGE)]).await;
+        let api = discord.api().with_cache(Arc::new(KnowsMember));
+
+        assert!(api.execute(direct_message()).await.is_ok());
+        assert_eq!(
+            calls(&discord),
+            ["POST /users/@me/channels", "POST /channels/300/messages"]
+        );
+    }
+}

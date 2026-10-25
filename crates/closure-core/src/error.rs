@@ -88,6 +88,10 @@ pub enum DiscordError {
     HierarchyViolation(String),
     #[error("not found")]
     NotFound,
+    /// The user does not accept direct messages from the bot (Discord's error 50007). Retrying
+    /// cannot change that, and it is no fault of the module.
+    #[error("the user does not accept direct messages from this bot")]
+    DirectMessagesClosed,
     #[error("rate limited{}", .retry_after.map(|d| format!(" (retry after {d:?})")).unwrap_or_default())]
     RateLimited { retry_after: Option<Duration> },
     /// A failure that may succeed on retry: 5xx, network or timeout.
@@ -103,5 +107,15 @@ impl DiscordError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Transient(_) | Self::RateLimited { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_closed_direct_message_is_not_worth_repeating() {
+        assert!(!DiscordError::DirectMessagesClosed.is_retryable());
     }
 }

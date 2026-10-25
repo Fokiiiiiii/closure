@@ -83,14 +83,19 @@ impl MockApi {
             Action::ListRoles { guild_id } => Ok(lock(&self.roles)
                 .get(guild_id)
                 .map_or(Outcome::None, |roles| Outcome::Roles(roles.clone()))),
-            // Each message gets an id of its own, so a test can tell them apart.
-            Action::SendMessage { channel_id, .. } => {
-                let id = u64::try_from(lock(&self.actions).len()).unwrap_or(u64::MAX) + 1;
-                Ok(sent_message(*channel_id, id)
-                    .map_or(Outcome::None, |message| Outcome::Message(Box::new(message))))
-            }
+            Action::SendMessage { channel_id, .. } => Ok(self.sent(*channel_id)),
+            // The channel of a direct message is not known to the mock; any id will do.
+            Action::SendDirectMessage { .. } => Ok(self.sent(ChannelId::new(1))),
             _ => Ok(Outcome::None),
         }
+    }
+
+    /// The answer to a message sent to `channel`. Each message gets an id of its own, so a test
+    /// can tell them apart. Called before the action is recorded.
+    fn sent(&self, channel: ChannelId) -> Outcome {
+        let id = u64::try_from(lock(&self.actions).len()).unwrap_or(u64::MAX) + 1;
+        sent_message(channel, id)
+            .map_or(Outcome::None, |message| Outcome::Message(Box::new(message)))
     }
 
     /// Every action received so far, in order.
