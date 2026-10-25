@@ -28,7 +28,30 @@ pub enum UserError {
     Cooldown {
         remaining: Duration,
     },
+    /// The target of a moderation action may not be acted on (see `Cx::check_target`).
+    Target(TargetProblem),
     Module(ModuleError),
+}
+
+/// Why a user may not be the target of a moderation action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetProblem {
+    SelfTarget,
+    Bot,
+    Owner,
+    Higher,
+}
+
+impl TargetProblem {
+    /// The message of the SDK's catalog that tells the user.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::SelfTarget => "sdk-target-self",
+            Self::Bot => "sdk-target-bot",
+            Self::Owner => "sdk-target-owner",
+            Self::Higher => "sdk-target-higher",
+        }
+    }
 }
 
 impl UserError {

@@ -3,12 +3,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use closure_core::action::{Action, InteractionReply, ModalSpec};
+use closure_core::action::{Action, InteractionReply, ModalSpec, Outcome};
 use closure_core::client::ApiClient;
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{
-    CommandInvocation, ComponentInvocation, GuildId, InteractionRef, ModalSubmission, UserInfo,
+    CommandInvocation, ComponentInvocation, GuildId, InteractionRef, ModalSubmission, RoleId,
+    UserId, UserInfo,
 };
 use closure_core::locale::{Args, Locale};
 use closure_core::module::EventContext;
@@ -17,7 +19,7 @@ use closure_core::schedule::ScheduledJob;
 use serde::de::DeserializeOwned;
 use twilight_model::guild::Permissions;
 
-use crate::error::UserError;
+use crate::error::{TargetProblem, UserError};
 use crate::ui::CustomId;
 
 /// Where the answer to one interaction stands.
@@ -232,6 +234,32 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.ctx.t_core(self.locale(), key, args)
     }
 
+    /// A length of time in the user's language, in its two largest units that are not zero.
+    /// Weeks are counted in days.
+    #[must_use]
+    pub fn format_duration(&self, duration: Duration) -> String {
+        const UNITS: [(u64, &str); 4] = [
+            (86_400, "sdk-unit-day"),
+            (3_600, "sdk-unit-hour"),
+            (60, "sdk-unit-minute"),
+            (1, "sdk-unit-second"),
+        ];
+        let mut seconds = duration.as_secs();
+        let mut parts = Vec::new();
+        for (size, key) in UNITS {
+            let count = seconds / size;
+            seconds %= size;
+            if count > 0 && parts.len() < 2 {
+                let count = i64::try_from(count).unwrap_or(i64::MAX);
+                parts.push(self.core_message(key, &Args::new().with("n", count)));
+            }
+        }
+        if parts.is_empty() {
+            return self.core_message("sdk-duration-none", &Args::new());
+        }
+        parts.join(" ")
+    }
+
     /// Whether anything was answered yet (a deferral counts).
     #[must_use]
     pub fn has_replied(&self) -> bool {
@@ -381,6 +409,54 @@ impl<I: InteractionRef + 'static> Cx<I> {
         } else {
             Err(UserError::PermissionDenied(decision))
         }
+    }
+
+    /// Fails unless the module may act on `user` (a kick, a ban, a timeout): not the invoker
+    /// themselves, not the owner, not a bot, and not someone whose highest role is not below the
+    /// invoker's (the owner is exempt from that). Someone who is not a member passes. Needs the
+    /// capability `ReadGuild`.
+    pub async fn check_target(&self, user: UserId) -> Result<(), UserError> {
+        if user == self.user().id {
+            return Err(UserError::Target(TargetProblem::SelfTarget));
+        }
+        if self.api().guild_owner().await? == Some(user) {
+            return Err(UserError::Target(TargetProblem::Owner));
+        }
+        let member = match self.api().get_member(self.guild_id(), user).await {
+            Ok(member) => member,
+            Err(DiscordError::NotFound) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if member.user.bot {
+            return Err(UserError::Target(TargetProblem::Bot));
+        }
+        if self.actor().await.owner {
+            return Ok(());
+        }
+        let Outcome::Roles(roles) = self
+            .api()
+            .execute(Action::ListRoles {
+                guild_id: self.guild_id(),
+            })
+            .await?
+        else {
+            return Err(UserError::Module(ModuleError::other(
+                "the roles of the guild were not listed",
+            )));
+        };
+        // Without a role a member ranks below every role, so two members without roles tie.
+        let highest = |ids: &[RoleId]| {
+            roles
+                .iter()
+                .filter(|role| ids.contains(&role.id))
+                .map(|role| role.position)
+                .max()
+                .unwrap_or(-1)
+        };
+        if highest(&member.roles) >= highest(self.interaction.roles()) {
+            return Err(UserError::Target(TargetProblem::Higher));
+        }
+        Ok(())
     }
 }
 

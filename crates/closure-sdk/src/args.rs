@@ -1,7 +1,11 @@
 //! The options of a slash command, as typed values.
 
+use std::time::Duration;
+
 use closure_core::event::{ChannelId, CommandInvocation, CommandOptionValue, RoleId, UserId};
 use closure_core::module::{OptionKind, OptionSpec};
+
+use crate::duration;
 
 /// The options of a command, written as a struct (`#[derive(CommandArgs)]`) or by hand.
 pub trait CommandArgs: Sized + Send + 'static {
@@ -52,6 +56,18 @@ option_type!(bool, Boolean, Boolean);
 option_type!(UserId, User, User);
 option_type!(ChannelId, Channel, Channel);
 option_type!(RoleId, Role, Role);
+
+/// A duration typed as words (`1h30m`), see [`crate::duration::parse`].
+impl OptionType for Duration {
+    const KIND: OptionKind = OptionKind::String;
+
+    fn from_value(value: &CommandOptionValue) -> Option<Self> {
+        match value {
+            CommandOptionValue::String(text) => duration::parse(text).ok(),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgProblem {

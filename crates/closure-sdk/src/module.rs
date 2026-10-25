@@ -634,6 +634,7 @@ impl SdkModule {
                 "sdk-cooldown",
                 &Args::new().with("seconds", remaining.as_secs() + 1),
             ),
+            UserError::Target(problem) => cx.core_message(problem.key(), &Args::new()),
         };
         cx.reply_private(text).await.map_err(module_error)
     }

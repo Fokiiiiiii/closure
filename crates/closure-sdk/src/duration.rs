@@ -1,0 +1,156 @@
+//! Durations and points in time for moderation: what a user types (`1h30m`) and how Discord
+//! shows a moment.
+
+use std::time::Duration;
+
+use closure_core::schedule::MAX_DELAY;
+use thiserror::Error;
+
+/// Longer than any digits a moderation duration can reasonably have; more is `TooLarge`.
+const MAX_DIGITS: usize = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum DurationError {
+    #[error("the duration is empty")]
+    Empty,
+    #[error("the duration is not of the form 1h30m")]
+    Invalid,
+    #[error("the duration is longer than ten years")]
+    TooLarge,
+}
+
+/// Parses `1h30m`, `1h 30m`, `2d`, `1w2d` and the like: numbers with one unit each, the units
+/// `s m h d w` in lowercase. A total of zero is refused, since it would moderate nothing.
+pub fn parse(text: &str) -> Result<Duration, DurationError> {
+    let mut rest = text.trim();
+    if rest.is_empty() {
+        return Err(DurationError::Empty);
+    }
+    let mut total: u64 = 0;
+    while !rest.is_empty() {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > MAX_DIGITS {
+            return Err(DurationError::TooLarge);
+        }
+        let (number, after) = rest.split_at(digits);
+        let value: u64 = number.parse().map_err(|_| DurationError::Invalid)?;
+        let unit = after.chars().next().ok_or(DurationError::Invalid)?;
+        let seconds = match unit {
+            's' => 1,
+            'm' => 60,
+            'h' => 3_600,
+            'd' => 86_400,
+            'w' => 604_800,
+            _ => return Err(DurationError::Invalid),
+        };
+        let seconds = value.checked_mul(seconds).ok_or(DurationError::TooLarge)?;
+        total = total.checked_add(seconds).ok_or(DurationError::TooLarge)?;
+        rest = after[unit.len_utf8()..].trim_start();
+    }
+    match total {
+        0 => Err(DurationError::Invalid),
+        total if total > MAX_DELAY.as_secs() => Err(DurationError::TooLarge),
+        total => Ok(Duration::from_secs(total)),
+    }
+}
+
+/// How Discord shows a moment (`<t:…:R>` is "in 2 hours").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeStyle {
+    ShortTime,
+    LongTime,
+    ShortDate,
+    LongDate,
+    ShortDateTime,
+    LongDateTime,
+    Relative,
+}
+
+impl TimeStyle {
+    fn code(self) -> char {
+        match self {
+            Self::ShortTime => 't',
+            Self::LongTime => 'T',
+            Self::ShortDate => 'd',
+            Self::LongDate => 'D',
+            Self::ShortDateTime => 'f',
+            Self::LongDateTime => 'F',
+            Self::Relative => 'R',
+        }
+    }
+}
+
+/// The Discord markup of a moment, in seconds since the Unix epoch.
+#[must_use]
+pub fn timestamp(unix_seconds: i64, style: TimeStyle) -> String {
+    format!("<t:{unix_seconds}:{}>", style.code())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use closure_core::schedule::MAX_DELAY;
+
+    use super::{DurationError, TimeStyle, parse, timestamp};
+
+    #[test]
+    fn parses_the_usual_forms() {
+        for (text, seconds) in [
+            ("10m", 600),
+            ("1h30m", 5400),
+            ("1h 30m", 5400),
+            ("2d", 172_800),
+            ("1w2d", 9 * 86_400),
+            ("90s", 90),
+        ] {
+            assert_eq!(parse(text), Ok(Duration::from_secs(seconds)), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_what_is_not_a_duration() {
+        use DurationError::{Empty, Invalid, TooLarge};
+        for (text, expected) in [
+            ("", Empty),
+            (" ", Empty),
+            ("10", Invalid),
+            ("m", Invalid),
+            ("10x", Invalid),
+            ("-5m", Invalid),
+            ("1.5h", Invalid),
+            ("10M", Invalid),
+            ("１０ｍ", Invalid),
+            ("0m", Invalid),
+            ("0s", Invalid),
+            ("99999999999w", TooLarge),
+            ("3651d", TooLarge),
+        ] {
+            assert_eq!(parse(text), Err(expected), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn ten_years_is_the_longest_allowed() {
+        assert_eq!(parse("3650d"), Ok(MAX_DELAY));
+        assert_eq!(parse("3651d"), Err(DurationError::TooLarge));
+    }
+
+    #[test]
+    fn timestamps_have_one_code_per_style() {
+        for (style, code) in [
+            (TimeStyle::ShortTime, 't'),
+            (TimeStyle::LongTime, 'T'),
+            (TimeStyle::ShortDate, 'd'),
+            (TimeStyle::LongDate, 'D'),
+            (TimeStyle::ShortDateTime, 'f'),
+            (TimeStyle::LongDateTime, 'F'),
+            (TimeStyle::Relative, 'R'),
+        ] {
+            assert_eq!(
+                timestamp(1_700_000_000, style),
+                format!("<t:1700000000:{code}>")
+            );
+        }
+    }
+}

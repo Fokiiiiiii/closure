@@ -19,3 +19,24 @@ sdk-permission-level = You are not allowed to do that here. It needs level { $re
 sdk-permission-denied = You are not allowed to do that here.
 sdk-cooldown = Please wait { $seconds } more second(s) before using that again.
 sdk-bad-argument = The value of `{ $option }` is missing or not valid.
+sdk-unit-day = { $n ->
+    [one] { $n } day
+   *[other] { $n } days
+}
+sdk-unit-hour = { $n ->
+    [one] { $n } hour
+   *[other] { $n } hours
+}
+sdk-unit-minute = { $n ->
+    [one] { $n } minute
+   *[other] { $n } minutes
+}
+sdk-unit-second = { $n ->
+    [one] { $n } second
+   *[other] { $n } seconds
+}
+sdk-duration-none = less than a second
+sdk-target-self = You cannot do that to yourself.
+sdk-target-bot = You cannot do that to a bot.
+sdk-target-owner = You cannot do that to the owner of the server.
+sdk-target-higher = You cannot do that to someone whose highest role is not below yours.

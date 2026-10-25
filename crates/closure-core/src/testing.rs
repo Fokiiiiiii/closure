@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
+use twilight_model::guild::{Member, Role};
 
 use crate::action::{Action, Outcome};
 use crate::client::DiscordApi;
@@ -46,10 +47,31 @@ pub struct MockApi {
     /// Which guild each known channel belongs to (`None`: a direct message channel).
     channels: Mutex<HashMap<ChannelId, Option<GuildId>>>,
     owners: Mutex<HashMap<GuildId, UserId>>,
+    /// Members the pretend Discord knows, by guild and user; `None` is a user who is not one.
+    members: Mutex<HashMap<(GuildId, UserId), Option<Member>>>,
+    roles: Mutex<HashMap<GuildId, Vec<Role>>>,
     lookups: Mutex<usize>,
 }
 
 impl MockApi {
+    /// What the pretend Discord answers an action with: what was declared for the members and
+    /// roles it asks about, nothing for everything else.
+    fn answer(&self, action: &Action) -> Result<Outcome, DiscordError> {
+        match action {
+            Action::GetMember { guild_id, user_id } => {
+                match lock(&self.members).get(&(*guild_id, *user_id)) {
+                    Some(Some(member)) => Ok(Outcome::Member(Box::new(member.clone()))),
+                    Some(None) => Err(DiscordError::NotFound),
+                    None => Ok(Outcome::None),
+                }
+            }
+            Action::ListRoles { guild_id } => Ok(lock(&self.roles)
+                .get(guild_id)
+                .map_or(Outcome::None, |roles| Outcome::Roles(roles.clone()))),
+            _ => Ok(Outcome::None),
+        }
+    }
+
     /// Every action received so far, in order.
     #[must_use]
     pub fn actions(&self) -> Vec<Action> {
@@ -77,6 +99,22 @@ impl MockApi {
         lock(&self.owners).insert(guild, owner);
     }
 
+    /// Declares a member of `guild`; a member asked for without a declaration is an error of
+    /// the mock, not of Discord.
+    pub fn set_member(&self, guild: GuildId, member: Member) {
+        lock(&self.members).insert((guild, member.user.id), Some(member));
+    }
+
+    /// Declares that `user` is not a member of `guild`.
+    pub fn set_not_a_member(&self, guild: GuildId, user: UserId) {
+        lock(&self.members).insert((guild, user), None);
+    }
+
+    /// Declares the roles of `guild`.
+    pub fn set_roles(&self, guild: GuildId, roles: Vec<Role>) {
+        lock(&self.roles).insert(guild, roles);
+    }
+
     /// How often a channel's guild was looked up.
     #[must_use]
     pub fn channel_lookups(&self) -> usize {
@@ -101,10 +139,11 @@ impl DiscordApi for MockApi {
         if let Some(error) = injected {
             return Err(error);
         }
+        let answer = self.answer(&action);
         lock(&self.actions).push(action);
         match lock(&self.failure).clone() {
             Some(error) => Err(error),
-            None => Ok(Outcome::None),
+            None => answer,
         }
     }
 

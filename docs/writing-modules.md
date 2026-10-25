@@ -140,6 +140,19 @@ counted. The handler is called like an event handler: same timeout, same panic i
 circuit breaker. Test with `Harness::run_due_jobs()` after `Harness::advance(..)`, and set up a
 job with `Harness::scheduler()`.
 
+A `Duration` field is a command option typed as words: `#[derive(CommandArgs)] struct Mute { user: UserId, time: Duration }`
+accepts `10m`, `1h30m`, `1h 30m`, `2d` or `1w2d` (units `s m h d w`, lowercase; at most ten years).
+Anything else is refused with the usual bad-argument message before the handler runs. The same
+parser is `closure_sdk::duration::parse`. To show a length, use `cx.format_duration(duration)`
+(in the user's language, the two largest units, e.g. "2 days 3 hours"). To show a moment that
+Discord renders in each reader's own time zone, use `duration::timestamp(unix, TimeStyle::Relative)`.
+
+Before a moderation action on a member (kick, ban, timeout), call `cx.check_target(user).await?`.
+It refuses, in the user's language, the invoker themselves, the server owner, bots, and members whose
+highest role is not below the invoker's; the owner of the server is exempt from that last rule, and
+someone who is not a member passes. It reads the members and roles of the guild, so the module
+declares `Capability::ReadGuild`.
+
 Test with `closure_sdk::testing::Harness`: it runs a command with a given user, roles and
 language against a pretend Discord, lets you change the guild's permissions and move the clock for
 cooldowns and jobs, and returns what the module answered. See
