@@ -3,6 +3,8 @@
 closure is a Cargo workspace. The dependency direction is one-way: the binary depends on
 everything, and everything depends downwards on `closure-core`, which depends on nothing of ours.
 
+What is built and what is planned next: [roadmap](roadmap.md).
+
 ```text
 closure (binary)
  ├─ closure-api ───────┐

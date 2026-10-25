@@ -31,7 +31,7 @@ use closure_core::storage::{MemoryStorage, StorageBackend, Store};
 use closure_core::subscription::Flow;
 use closure_core::testing::MockApi;
 use closure_i18n::TranslatorBuilder;
-use twilight_model::channel::message::Component;
+use twilight_model::channel::message::{Component, Embed};
 use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 
@@ -148,6 +148,8 @@ pub struct Reply {
     pub ephemeral: bool,
     /// Buttons and menus (for a modal: its inputs).
     pub components: Vec<Component>,
+    /// The embeds of the message.
+    pub embeds: Vec<Embed>,
 }
 
 impl Reply {
@@ -603,6 +605,7 @@ fn reply_of(action: &Action) -> Option<Reply> {
                 content: String::new(),
                 ephemeral: *ephemeral,
                 components: Vec::new(),
+                embeds: Vec::new(),
             });
         }
         Action::Respond {
@@ -614,6 +617,7 @@ fn reply_of(action: &Action) -> Option<Reply> {
                 content: String::new(),
                 ephemeral: false,
                 components: Vec::new(),
+                embeds: Vec::new(),
             });
         }
         Action::Respond {
@@ -625,6 +629,7 @@ fn reply_of(action: &Action) -> Option<Reply> {
                 content: spec.title.clone(),
                 ephemeral: false,
                 components: spec.components.clone(),
+                embeds: Vec::new(),
             });
         }
         Action::EditResponse { reply, .. } => (ReplyKind::Edit, reply),
@@ -636,5 +641,6 @@ fn reply_of(action: &Action) -> Option<Reply> {
         content: reply.content.clone().unwrap_or_default(),
         ephemeral: reply.ephemeral,
         components: reply.components.clone(),
+        embeds: reply.embeds.clone(),
     })
 }

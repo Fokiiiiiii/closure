@@ -147,6 +147,23 @@ parser is `closure_sdk::duration::parse`. To show a length, use `cx.format_durat
 (in the user's language, the two largest units, e.g. "2 days 3 hours"). To show a moment that
 Discord renders in each reader's own time zone, use `duration::timestamp(unix, TimeStyle::Relative)`.
 
+An embed (the box under a message) is built with `EmbedBuilder`, which checks Discord's limits when
+you call `build()` (characters, not bytes; the whole embed at most 6000), so a too-long embed is an
+`EmbedError` that the SDK reports as a module failure instead of a message Discord refuses:
+
+```rust
+let embed = EmbedBuilder::new()
+    .title("Warning")
+    .description(embed::escape(&reason))
+    .field("Member", member, true)
+    .color(Color::Warning)
+    .build()?;
+cx.reply_with(InteractionReply { embeds: vec![embed], ..InteractionReply::default() }).await
+```
+
+Text a user wrote should go through `embed::escape` (Markdown and mentions are made harmless) before
+it is shown, and `embed::truncate(text, max_chars)` shortens text to a limit, ending it with `…`.
+
 Before a moderation action on a member (kick, ban, timeout), call `cx.check_target(user).await?`.
 It refuses, in the user's language, the invoker themselves, the server owner, bots, and members whose
 highest role is not below the invoker's; the owner of the server is exempt from that last rule, and
