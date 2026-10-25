@@ -92,16 +92,106 @@ pub enum OptionKind {
     Role,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One value the user may pick for an option.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OptionChoice {
+    /// What the user sees (1-100 characters).
+    pub name: String,
+    pub value: ChoiceValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChoiceValue {
+    String(String),
+    Integer(i64),
+    Number(f64),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptionSpec {
     pub name: String,
     /// English description; other languages come from the catalog.
     pub description: String,
     pub kind: OptionKind,
     pub required: bool,
+    /// The only values the user may pick (strings, integers and numbers; at most 25).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<OptionChoice>,
+    /// Smallest value of an integer or number option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_value: Option<f64>,
+    /// Largest value of an integer or number option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_value: Option<f64>,
+    /// Fewest characters of a string option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u16>,
+    /// Most characters of a string option (at most 6000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u16>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl OptionSpec {
+    /// An optional option without further limits.
+    #[must_use]
+    pub fn new(name: impl Into<String>, description: impl Into<String>, kind: OptionKind) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            kind,
+            required: false,
+            choices: Vec::new(),
+            min_value: None,
+            max_value: None,
+            min_length: None,
+            max_length: None,
+        }
+    }
+
+    #[must_use]
+    pub fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
+
+    /// Whether the limits fit the kind: choices only for strings and numbers (and then nothing
+    /// else), a range only for numbers, lengths only for strings, each in order and in bounds.
+    fn limits_ok(&self) -> bool {
+        let text = self.kind == OptionKind::String;
+        let number = matches!(self.kind, OptionKind::Integer | OptionKind::Number);
+        let choices_ok = self.choices.len() <= 25
+            && self.choices.iter().all(|choice| {
+                (1..=100).contains(&choice.name.chars().count())
+                    && match (&choice.value, self.kind) {
+                        (ChoiceValue::String(value), OptionKind::String) => {
+                            (1..=100).contains(&value.chars().count())
+                        }
+                        (ChoiceValue::Integer(_), OptionKind::Integer)
+                        | (ChoiceValue::Number(_), OptionKind::Number) => true,
+                        _ => false,
+                    }
+            });
+        let range = self.min_value.is_some() || self.max_value.is_some();
+        let length = self.min_length.is_some() || self.max_length.is_some();
+        choices_ok
+            && (self.choices.is_empty() || !(range || length))
+            && (!range || number)
+            && (!length || text)
+            && self
+                .min_value
+                .zip(self.max_value)
+                .is_none_or(|(min, max)| min <= max)
+            && self
+                .min_length
+                .zip(self.max_length)
+                .is_none_or(|(min, max)| min <= max)
+            && self.max_length.is_none_or(|max| (1..=6000).contains(&max))
+            && self.min_length.is_none_or(|min| min <= 6000)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubcommandSpec {
     pub name: String,
     pub description: String,
@@ -118,7 +208,7 @@ fn required_first(options: &[OptionSpec]) -> bool {
 ///
 /// Localised names and descriptions are not stored here: for command `ping` the catalog holds
 /// `command-ping` (the name) with a `.description` attribute, per locale.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub name: String,
     /// English description.
@@ -158,9 +248,13 @@ impl CommandSpec {
         if self.options.len() > 25 || self.subcommands.len() > 25 {
             return Err(invalid("at most 25 options or subcommands"));
         }
-        let option_ok = |option: &OptionSpec| name_ok(&option.name) && text_ok(&option.description);
+        let option_ok = |option: &OptionSpec| {
+            name_ok(&option.name) && text_ok(&option.description) && option.limits_ok()
+        };
         if !self.options.iter().all(option_ok) {
-            return Err(invalid("an option has an invalid name or description"));
+            return Err(invalid(
+                "an option has an invalid name, description or limit",
+            ));
         }
         if !required_first(&self.options) {
             return Err(invalid("required options must come before optional ones"));
@@ -320,6 +414,7 @@ impl ModuleManifest {
 }
 
 /// What a module sees while handling one event.
+#[derive(Clone)]
 pub struct EventContext {
     pub module: ModuleId,
     pub guild_id: GuildId,
@@ -394,6 +489,18 @@ impl EventContext {
     pub fn parse_config<T: DeserializeOwned>(&self) -> Result<T, ModuleError> {
         serde_json::from_value((*self.config).clone())
             .map_err(|error| ModuleError::Config(error.to_string()))
+    }
+
+    /// The translator, for messages that belong to no module (see [`Self::t_core`]).
+    #[must_use]
+    pub fn translator(&self) -> &dyn Translator {
+        self.translator.as_ref()
+    }
+
+    /// A message of the catalog every module shares (`core`), such as the SDK's own.
+    #[must_use]
+    pub fn t_core(&self, locale: Locale, key: &str, args: &Args) -> String {
+        self.translator.translate(locale, "core", key, args)
     }
 
     /// Translates `key` into the guild language.

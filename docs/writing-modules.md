@@ -4,6 +4,64 @@ A module is a Rust crate that implements `closure_core::module::Module`. The sma
 example is [`crates/closure-mod-diagnostics`](../crates/closure-mod-diagnostics/src/lib.rs); read
 it alongside this page.
 
+## The short way: the SDK
+
+Most modules are commands. With `closure-sdk` you declare a command and write what it does; the
+rest below (the manifest, matching events to commands, reading options, checking permissions,
+answering in the user's language) is done for you.
+
+```rust
+#[derive(CommandArgs)]
+struct Warn {
+    /// Member to warn          <- the doc comment is the option's description
+    user: UserId,
+    /// Why
+    #[arg(max_length = 512)]
+    reason: Option<String>,    // Option<_> = optional
+}
+
+pub fn module() -> Result<SdkModule, CoreError> {
+    ModuleBuilder::new("warn", "Warnings", env!("CARGO_PKG_VERSION"))?
+        .permission(PermissionSpec::new("warn.add", Level::MODERATOR, "Warn members")?)
+        .command(
+            Command::<Warn>::new("warn", "Warn a member")
+                .requires("warn.add")                               // checked before the handler
+                .cooldown(Cooldown::per_user(Duration::from_secs(5)))
+                .handler(|cx, args| async move {
+                    cx.reply_t("warned", &Args::new().with("user", args.user.get())).await
+                }),
+        )
+        .catalog(Locale::En, EN)
+        .catalog(Locale::Ja, JA)
+        .build()
+}
+```
+
+What the SDK does for each command:
+
+- a user without the permission, or who has to wait for the cooldown, or whose option is invalid,
+  gets a private answer in their language, and your handler does not run;
+- `UserError::message("key")` from a handler answers privately with `key` of your catalog
+  (`.with("name", value)` fills its variables); any other error (`?` on a Discord call) goes to the
+  dispatcher, which says that something went wrong and counts the failure;
+- a handler that answers nothing is answered with "Done." so Discord does not show a failure;
+- the first answer is the response to the interaction, the following ones are follow-ups;
+  `cx.defer(ephemeral)` first lets the answer take longer than three seconds;
+- `cx.require("warn.add")`, `cx.level()` and `cx.actor()` are there for checks inside a handler;
+- subcommands: `.group("warnings", "Look at warnings", [Command::<A>::new("show", ..).handler(..), ..])`.
+
+Options are typed fields: `String`, `i64`, `f64`, `bool`, `UserId`, `ChannelId`, `RoleId`;
+`#[arg(name = "..", desc = "..", min = 1, max = 5, min_length = 2, max_length = 40,
+choices = ["a", "b"])]`. Required options must come before optional ones.
+
+Test with `closure_sdk::testing::Harness`: it runs a command with a given user, roles and
+language against a pretend Discord, lets you change the guild's permissions and move the clock for
+cooldowns, and returns what the module answered. See
+[`crates/closure-sdk/tests/commands.rs`](../crates/closure-sdk/tests/commands.rs).
+
+The sections below describe what is under the SDK, and what a module that is not only commands
+(reacting to messages, members, bans) needs to know.
+
 ## 1. Describe the module (the manifest)
 
 The manifest is data. The host reads it before running a single line of your code.

@@ -322,12 +322,7 @@ mod tests {
 
     #[test]
     fn a_command_cannot_mix_options_and_subcommands() {
-        let option = OptionSpec {
-            name: "user".into(),
-            description: "d".into(),
-            kind: OptionKind::User,
-            required: true,
-        };
+        let option = OptionSpec::new("user", "d", OptionKind::User).required();
         let sub = crate::module::SubcommandSpec {
             name: "add".into(),
             description: "d".into(),
@@ -349,11 +344,9 @@ mod tests {
 
     #[test]
     fn required_options_must_come_first() {
-        let option = |name: &str, required| OptionSpec {
-            name: name.into(),
-            description: "d".into(),
-            kind: OptionKind::String,
-            required,
+        let option = |name: &str, required| {
+            let option = OptionSpec::new(name, "d", OptionKind::String);
+            if required { option.required() } else { option }
         };
         let command = |options| CommandSpec {
             name: "warn".into(),
@@ -368,6 +361,69 @@ mod tests {
         };
         assert!(registry(vec![option("a", true), option("b", false)]).is_ok());
         assert!(registry(vec![option("a", false), option("b", true)]).is_err());
+    }
+
+    #[test]
+    fn option_limits_must_fit_the_kind_of_the_option() {
+        use crate::module::{ChoiceValue, OptionChoice};
+
+        let pick = |value| OptionChoice {
+            name: "x".into(),
+            value,
+        };
+        let with = |kind: OptionKind, change: &dyn Fn(&mut OptionSpec)| {
+            let mut option = OptionSpec::new("value", "d", kind);
+            change(&mut option);
+            let manifest = ModuleManifest::new(id("a"), "a", "0.1.0").command(CommandSpec {
+                name: "warn".into(),
+                description: "d".into(),
+                options: vec![option],
+                subcommands: vec![],
+                default_member_permissions: None,
+            });
+            ModuleRegistry::new(vec![Arc::new(Stub(manifest))]).is_ok()
+        };
+        // What fits.
+        assert!(with(OptionKind::Integer, &|o| {
+            o.min_value = Some(1.0);
+            o.max_value = Some(5.0);
+        }));
+        assert!(with(OptionKind::String, &|o| {
+            o.min_length = Some(1);
+            o.max_length = Some(6000);
+        }));
+        assert!(with(OptionKind::String, &|o| o.choices =
+            vec![pick(ChoiceValue::String("a".into()))]));
+        assert!(with(OptionKind::Number, &|o| o.choices =
+            vec![pick(ChoiceValue::Number(1.5))]));
+        // What does not.
+        assert!(!with(OptionKind::Boolean, &|o| o.choices =
+            vec![pick(ChoiceValue::Integer(1))]));
+        assert!(!with(OptionKind::Integer, &|o| o.choices =
+            vec![pick(ChoiceValue::String("a".into()))]));
+        assert!(!with(OptionKind::Integer, &|o| {
+            o.choices = vec![pick(ChoiceValue::Integer(1))];
+            o.min_value = Some(0.0);
+        }));
+        assert!(!with(OptionKind::String, &|o| o.min_value = Some(1.0)));
+        assert!(!with(OptionKind::Integer, &|o| o.max_length = Some(5)));
+        assert!(!with(OptionKind::Integer, &|o| {
+            o.min_value = Some(5.0);
+            o.max_value = Some(1.0);
+        }));
+        assert!(!with(OptionKind::String, &|o| {
+            o.min_length = Some(9);
+            o.max_length = Some(2);
+        }));
+        assert!(!with(OptionKind::String, &|o| o.max_length = Some(6001)));
+        assert!(!with(OptionKind::String, &|o| o.max_length = Some(0)));
+        assert!(!with(OptionKind::String, &|o| {
+            o.choices = (0..26)
+                .map(|n| pick(ChoiceValue::String(n.to_string())))
+                .collect();
+        }));
+        assert!(!with(OptionKind::String, &|o| o.choices =
+            vec![pick(ChoiceValue::String(String::new()))]));
     }
 
     #[test]

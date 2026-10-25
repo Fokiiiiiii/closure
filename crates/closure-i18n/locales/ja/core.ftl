@@ -10,3 +10,10 @@ error-fatal = Discord との通信中に問題が発生しました。
 error-internal = 内部でエラーが発生しました。内容は記録されています。
 error-module-disabled = この機能はこのサーバーでは無効になっています。
 error-command-failed = コマンドの実行中に問題が発生しました。しばらくしてからもう一度お試しください。
+
+# モジュールSDK (closure-sdk) の返信。
+sdk-done = 完了しました。
+sdk-permission-level = ここでそれを行う権限がありません。レベル { $required } が必要で、あなたはレベル { $actual } です。
+sdk-permission-denied = ここでそれを行う権限がありません。
+sdk-cooldown = あと { $seconds } 秒待ってから、もう一度お試しください。
+sdk-bad-argument = `{ $option }` の値がないか、正しくありません。

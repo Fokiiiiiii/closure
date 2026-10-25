@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use closure_core::action::{Action, Outcome};
 use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
-use closure_core::event::{ApplicationId, ChannelId, GuildId};
+use closure_core::event::{ApplicationId, ChannelId, GuildId, UserId};
 use serde::de::DeserializeOwned;
 use tokio::sync::OnceCell;
 use twilight_http::Client;
@@ -210,6 +210,13 @@ impl DiscordApi for TwilightApi {
         metrics::histogram!("closure_discord_action_seconds", "action" => name)
             .record(started.elapsed().as_secs_f64());
         result
+    }
+
+    async fn guild_owner(&self, guild: GuildId) -> Result<Option<UserId>, DiscordError> {
+        Ok(self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.guild_owner(guild)))
     }
 
     /// Answered from the cache, then from earlier answers of Discord; otherwise Discord is asked

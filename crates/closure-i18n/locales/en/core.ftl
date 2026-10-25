@@ -10,3 +10,10 @@ error-fatal = Something went wrong while talking to Discord.
 error-internal = Something went wrong on my side. The incident has been logged.
 error-module-disabled = That feature is turned off on this server.
 error-command-failed = Something went wrong while running that command. Please try again later.
+
+# Replies of the module SDK (closure-sdk).
+sdk-done = Done.
+sdk-permission-level = You are not allowed to do that here. It needs level { $required } and you are at level { $actual }.
+sdk-permission-denied = You are not allowed to do that here.
+sdk-cooldown = Please wait { $seconds } more second(s) before using that again.
+sdk-bad-argument = The value of `{ $option }` is missing or not valid.

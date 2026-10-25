@@ -18,6 +18,8 @@ closure-db = { path = "crates/closure-db" }
 closure-discord = { path = "crates/closure-discord" }
 closure-api = { path = "crates/closure-api" }
 closure-i18n = { path = "crates/closure-i18n" }
+closure-sdk = { path = "crates/closure-sdk" }
+closure-sdk-macros = { path = "crates/closure-sdk-macros" }
 closure-mod-diagnostics = { path = "crates/closure-mod-diagnostics" }
 
 anyhow = "1"
@@ -51,6 +53,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["limit", "util"] }
 tower-http = { version = "0.7", features = ["timeout", "limit", "trace", "request-id", "util"] }
+proc-macro2 = "1"
+quote = "1"
+syn = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 twilight-cache-inmemory = "0.17"

@@ -27,6 +27,11 @@ pub trait DiscordApi: Send + Sync {
     /// This is what lets [`ApiClient`] keep actions that identify only a channel or a message
     /// inside the guild the client is bound to.
     async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError>;
+
+    /// The owner of `guild`, when it is known without asking Discord (from the cache).
+    async fn guild_owner(&self, _guild: GuildId) -> Result<Option<UserId>, DiscordError> {
+        Ok(None)
+    }
 }
 
 /// What a module holds instead of a raw HTTP client.
@@ -100,6 +105,15 @@ impl ApiClient {
         // be able to rebind its own copy to another guild.
         self.guild.get_or_insert(guild);
         self
+    }
+
+    /// The owner of the guild the client is bound to, if the host knows. Needs no capability: it
+    /// is what the host itself knows, not something fetched for the module.
+    pub async fn guild_owner(&self) -> Result<Option<UserId>, DiscordError> {
+        match self.guild {
+            Some(guild) => self.api.guild_owner(guild).await,
+            None => Ok(None),
+        }
     }
 
     pub async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
@@ -403,6 +417,21 @@ mod tests {
             granted.iter().copied().collect(),
             ModuleId::new("test").unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn the_owner_of_the_bound_guild_is_known_without_a_capability() {
+        let api = Arc::new(MockApi::default());
+        api.set_owner(Id::new(1), Id::new(7));
+        api.set_owner(Id::new(2), Id::new(8));
+        let bound = client(&api, &[]).scoped_to(Id::new(1));
+        assert_eq!(bound.guild_owner().await, Ok(Some(Id::new(7))));
+        // A client bound to a guild never learns about another one's owner.
+        assert_eq!(
+            client(&api, &[]).scoped_to(Id::new(2)).guild_owner().await,
+            Ok(Some(Id::new(8)))
+        );
+        assert_eq!(client(&api, &[]).guild_owner().await, Ok(None));
     }
 
     fn reason() -> Reason {

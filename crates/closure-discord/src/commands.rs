@@ -18,7 +18,9 @@
 use closure_core::error::DiscordError;
 use closure_core::event::{ApplicationId, GuildId};
 use closure_core::locale::{Args, Locale, Translator};
-use closure_core::module::{CommandSpec, ModuleId, OptionKind, OptionSpec, SubcommandSpec};
+use closure_core::module::{
+    ChoiceValue, CommandSpec, ModuleId, OptionKind, OptionSpec, SubcommandSpec,
+};
 use closure_core::registry::ModuleRegistry;
 use twilight_http::Client;
 use twilight_model::application::command::{Command, CommandOption, CommandType};
@@ -97,21 +99,100 @@ impl Localizer<'_> {
 
 macro_rules! build_option {
     ($builder:ident, $spec:expr, $names:expr, $descriptions:expr) => {
-        $builder::new(&$spec.name, &$spec.description)
-            .required($spec.required)
-            .name_localizations($names)
-            .description_localizations($descriptions)
-            .build()
+        build_option!($builder, $spec, $names, $descriptions, |builder| builder)
     };
+    ($builder:ident, $spec:expr, $names:expr, $descriptions:expr, $limits:expr) => {
+        $limits(
+            $builder::new(&$spec.name, &$spec.description)
+                .required($spec.required)
+                .name_localizations($names)
+                .description_localizations($descriptions),
+        )
+        .build()
+    };
+}
+
+/// The choices of an option whose values are of one kind, as Discord takes them.
+fn choices<T>(spec: &OptionSpec, value: impl Fn(&ChoiceValue) -> Option<T>) -> Vec<(String, T)> {
+    spec.choices
+        .iter()
+        .filter_map(|choice| Some((choice.name.clone(), value(&choice.value)?)))
+        .collect()
 }
 
 fn option(spec: &OptionSpec, localizer: &Localizer<'_>, key: &str) -> CommandOption {
     let names = localizer.names(key);
     let descriptions = localizer.descriptions(key);
+    // Whole numbers a range may be written with; the manifest checked that it is in order.
+    #[allow(clippy::cast_possible_truncation)]
+    let whole = |value: f64| value as i64;
     match spec.kind {
-        OptionKind::String => build_option!(StringBuilder, spec, names, descriptions),
-        OptionKind::Integer => build_option!(IntegerBuilder, spec, names, descriptions),
-        OptionKind::Number => build_option!(NumberBuilder, spec, names, descriptions),
+        OptionKind::String => build_option!(
+            StringBuilder,
+            spec,
+            names,
+            descriptions,
+            |mut b: StringBuilder| {
+                let picks = choices(spec, |value| match value {
+                    ChoiceValue::String(text) => Some(text.clone()),
+                    _ => None,
+                });
+                if !picks.is_empty() {
+                    b = b.choices(picks);
+                }
+                if let Some(min) = spec.min_length {
+                    b = b.min_length(min);
+                }
+                if let Some(max) = spec.max_length {
+                    b = b.max_length(max);
+                }
+                b
+            }
+        ),
+        OptionKind::Integer => build_option!(
+            IntegerBuilder,
+            spec,
+            names,
+            descriptions,
+            |mut b: IntegerBuilder| {
+                let picks = choices(spec, |value| match value {
+                    ChoiceValue::Integer(number) => Some(*number),
+                    _ => None,
+                });
+                if !picks.is_empty() {
+                    b = b.choices(picks);
+                }
+                if let Some(min) = spec.min_value {
+                    b = b.min_value(whole(min));
+                }
+                if let Some(max) = spec.max_value {
+                    b = b.max_value(whole(max));
+                }
+                b
+            }
+        ),
+        OptionKind::Number => build_option!(
+            NumberBuilder,
+            spec,
+            names,
+            descriptions,
+            |mut b: NumberBuilder| {
+                let picks = choices(spec, |value| match value {
+                    ChoiceValue::Number(number) => Some(*number),
+                    _ => None,
+                });
+                if !picks.is_empty() {
+                    b = b.choices(picks);
+                }
+                if let Some(min) = spec.min_value {
+                    b = b.min_value(min);
+                }
+                if let Some(max) = spec.max_value {
+                    b = b.max_value(max);
+                }
+                b
+            }
+        ),
         OptionKind::Boolean => build_option!(BooleanBuilder, spec, names, descriptions),
         OptionKind::User => build_option!(UserBuilder, spec, names, descriptions),
         OptionKind::Channel => build_option!(ChannelBuilder, spec, names, descriptions),
@@ -204,7 +285,7 @@ pub async fn register_commands(
 mod tests {
     use std::sync::Arc;
 
-    use closure_core::module::{Module, ModuleManifest};
+    use closure_core::module::{Module, ModuleManifest, OptionChoice};
     use closure_core::testing::StubModule;
     use closure_i18n::TranslatorBuilder;
     use twilight_model::application::command::CommandOptionType;
@@ -234,12 +315,8 @@ subcommand-warn-list = 一覧
     }
 
     fn option_spec(name: &str, kind: OptionKind, required: bool) -> OptionSpec {
-        OptionSpec {
-            name: name.into(),
-            description: format!("{name} option"),
-            kind,
-            required,
-        }
+        let option = OptionSpec::new(name, format!("{name} option"), kind);
+        if required { option.required() } else { option }
     }
 
     fn registry(spec: CommandSpec) -> ModuleRegistry {
@@ -363,5 +440,58 @@ subcommand-warn-list = 一覧
             };
             assert_eq!(built(spec, EN, JA).options[0].kind, expected, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn choices_ranges_and_lengths_are_published() {
+        let mut level = OptionSpec::new("level", "How serious", OptionKind::Integer);
+        level.min_value = Some(1.0);
+        level.max_value = Some(5.0);
+        let mut ratio = OptionSpec::new("ratio", "A ratio", OptionKind::Number);
+        ratio.min_value = Some(0.5);
+        let mut note = OptionSpec::new("note", "A note", OptionKind::String);
+        note.min_length = Some(2);
+        note.max_length = Some(40);
+        let mut kind = OptionSpec::new("kind", "Which", OptionKind::String);
+        kind.choices = vec![
+            OptionChoice {
+                name: "Spam".into(),
+                value: ChoiceValue::String("spam".into()),
+            },
+            OptionChoice {
+                name: "Abuse".into(),
+                value: ChoiceValue::String("abuse".into()),
+            },
+        ];
+        let spec = CommandSpec {
+            options: vec![level, ratio, note, kind],
+            ..warn_spec()
+        };
+        let command = built(spec, EN, JA);
+        let [level, ratio, note, kind] = &command.options[..] else {
+            panic!("four options");
+        };
+        assert_eq!(
+            level.min_value,
+            Some(twilight_model::application::command::CommandOptionValue::Integer(1))
+        );
+        assert_eq!(
+            level.max_value,
+            Some(twilight_model::application::command::CommandOptionValue::Integer(5))
+        );
+        assert_eq!(
+            ratio.min_value,
+            Some(twilight_model::application::command::CommandOptionValue::Number(0.5))
+        );
+        assert_eq!((note.min_length, note.max_length), (Some(2), Some(40)));
+        let names: Vec<&str> = kind
+            .choices
+            .iter()
+            .flatten()
+            .map(|choice| choice.name.as_str())
+            .collect();
+        assert_eq!(names, ["Spam", "Abuse"]);
+        assert_eq!(level.choices.iter().flatten().count(), 0);
+        assert_eq!(note.choices.iter().flatten().count(), 0);
     }
 }

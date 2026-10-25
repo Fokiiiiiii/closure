@@ -567,6 +567,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "closure-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk-macros",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "twilight-model",
+]
+
+[[package]]
+name = "closure-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

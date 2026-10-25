@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use crate::action::{Action, Outcome};
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
-use crate::event::{ChannelId, Event, GuildId};
+use crate::event::{ChannelId, Event, GuildId, UserId};
 use crate::locale::Locale;
 use crate::module::{EventContext, Module, ModuleId, ModuleManifest};
 use crate::permission::GuildPermissions;
@@ -43,6 +43,7 @@ pub struct MockApi {
     failure: Mutex<Option<DiscordError>>,
     /// Which guild each known channel belongs to (`None`: a direct message channel).
     channels: Mutex<HashMap<ChannelId, Option<GuildId>>>,
+    owners: Mutex<HashMap<GuildId, UserId>>,
     lookups: Mutex<usize>,
 }
 
@@ -61,6 +62,11 @@ impl MockApi {
     /// Declares that `channel` belongs to `guild`. Channels never declared do not exist.
     pub fn add_channel(&self, channel: ChannelId, guild: Option<GuildId>) {
         lock(&self.channels).insert(channel, guild);
+    }
+
+    /// Declares who owns `guild`.
+    pub fn set_owner(&self, guild: GuildId, owner: UserId) {
+        lock(&self.owners).insert(guild, owner);
     }
 
     /// How often a channel's guild was looked up.
@@ -86,6 +92,10 @@ impl DiscordApi for MockApi {
             .get(&channel)
             .copied()
             .ok_or(DiscordError::NotFound)
+    }
+
+    async fn guild_owner(&self, guild: GuildId) -> Result<Option<UserId>, DiscordError> {
+        Ok(lock(&self.owners).get(&guild).copied())
     }
 }
 
