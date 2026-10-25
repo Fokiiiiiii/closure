@@ -145,6 +145,8 @@ pub enum ReplyKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
     pub kind: ReplyKind,
+    /// The text: the content of the message, else the description of its first embed (where
+    /// the SDK's replies put their text), else empty.
     pub content: String,
     pub ephemeral: bool,
     /// Buttons and menus (for a modal: its inputs).
@@ -704,7 +706,13 @@ fn reply_of(action: &Action) -> Option<Reply> {
     };
     Some(Reply {
         kind,
-        content: reply.content.clone().unwrap_or_default(),
+        content: reply.content.clone().unwrap_or_else(|| {
+            reply
+                .embeds
+                .first()
+                .and_then(|embed| embed.description.clone())
+                .unwrap_or_default()
+        }),
         ephemeral: reply.ephemeral,
         components: reply.components.clone(),
         embeds: reply.embeds.clone(),

@@ -19,12 +19,14 @@ use closure_core::schedule::ScheduledJob;
 use closure_core::subscription::{Flow, Subscription};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
+use serde_json::json;
 use twilight_model::gateway::Intents;
 use twilight_model::guild::Permissions;
 
 use crate::args::CommandArgs;
 use crate::cooldown::{Cooldown, Cooldowns};
-use crate::cx::{CommandCx, ComponentCx, Cx, JobCx, ModalCx};
+use crate::cx::{CommandCx, ComponentCx, Cx, JobCx, ModalCx, REPLIES};
+use crate::embed::Tone;
 use crate::error::UserError;
 use crate::ui::CustomId;
 
@@ -468,6 +470,49 @@ impl ModuleBuilder {
                 ));
             }
         }
+        // Every module gets the setting that decides who sees its replies (see `Cx::reply_with`).
+        if self
+            .manifest
+            .config_schema
+            .get("properties")
+            .and_then(|properties| properties.get(REPLIES))
+            .is_some()
+        {
+            self.problem.get_or_insert(self.invalid(
+                "",
+                format!("declares the config key `{REPLIES}`, which the SDK reserves"),
+            ));
+        }
+        let added = self
+            .manifest
+            .config_schema
+            .as_object_mut()
+            .and_then(|schema| {
+                schema
+                    .entry("properties")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+            })
+            .map(|properties| {
+                properties.insert(
+                    REPLIES.to_owned(),
+                    json!({
+                        "type": "string",
+                        "enum": ["private", "public"],
+                        "description": "Who sees the replies of the module's commands: \"private\" only the user who used the command, \"public\" everyone in the channel. Unset: as the module chose."
+                    }),
+                );
+            })
+            .is_some();
+        if !added {
+            self.problem.get_or_insert(
+                self.invalid(
+                    "",
+                    "the config schema must be a JSON object whose `properties` is an object"
+                        .to_owned(),
+                ),
+            );
+        }
         if let Some(problem) = self.problem {
             return Err(problem);
         }
@@ -603,7 +648,7 @@ impl SdkModule {
         cx: &Cx<I>,
         key: &str,
     ) -> Result<Flow, ModuleError> {
-        cx.reply_private(cx.core_message(key, &Args::new()))
+        cx.say_locked(Tone::Info, cx.core_message(key, &Args::new()))
             .await
             .map_err(module_error)?;
         Ok(Flow::Continue)
@@ -636,7 +681,7 @@ impl SdkModule {
             ),
             UserError::Target(problem) => cx.core_message(problem.key(), &Args::new()),
         };
-        cx.reply_private(text).await.map_err(module_error)
+        cx.say_locked(Tone::Error, text).await.map_err(module_error)
     }
 }
 

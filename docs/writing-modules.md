@@ -181,6 +181,20 @@ language against a pretend Discord, lets you change the guild's permissions and 
 cooldowns and jobs, and returns what the module answered. See
 [`crates/closure-sdk/tests/commands.rs`](../crates/closure-sdk/tests/commands.rs).
 
+### Replies
+
+A reply is one embed whose description is the text. `reply` and `reply_private` use the `Info`
+tone; `say`, `say_private`, `say_t` and `say_private_t` take a `Tone` (`Info`, `Success`, `Warning`
+or `Error`) for the colour of the bar. Empty text is refused as before.
+
+Errors the SDK answers (a `UserError` such as a missing permission or a cooldown) are `Error`
+embeds and always private, whatever the setting below says.
+
+The administrator chooses per module with the `replies` key: `"private"` makes every reply and
+deferral ephemeral (only the user sees it), `"public"` makes them public, and when the key is unset
+each reply keeps its own visibility. The SDK adds the key to every module's schema, so a module must
+not declare it itself. `cx.config()` leaves the key out before it reads the module's own type.
+
 The sections below describe what is under the SDK, and what a module that is not only commands
 (reacting to messages, members, bans) needs to know.
 

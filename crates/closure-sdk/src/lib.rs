@@ -66,7 +66,7 @@ pub use cooldown::{Cooldown, CooldownScope};
 pub use cx::{CommandCx, ComponentCx, Cx, JobCx, ModalCx};
 pub use dm::{DirectMessage, Sent};
 pub use duration::{DurationError, TimeStyle};
-pub use embed::{Color, EmbedBuilder, EmbedError};
+pub use embed::{Color, EmbedBuilder, EmbedError, Tone};
 pub use error::{TargetProblem, UserError};
 pub use module::{BoundCommand, Command, ModuleBuilder, SdkModule};
 pub use twilight_model::gateway::Intents;

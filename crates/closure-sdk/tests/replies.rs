@@ -34,8 +34,9 @@ fn module() -> ModuleBuilder {
         .command(
             Command::<()>::new("too-long", "A first answer that cannot be sent").handler(
                 |cx, ()| async move {
-                    // Refused before anything is sent; the handler tries again with less.
-                    if cx.reply("x".repeat(2001)).await.is_err() {
+                    // Refused before anything is sent (an embed holds 4096 characters); the
+                    // handler tries again with less.
+                    if cx.reply("x".repeat(4097)).await.is_err() {
                         cx.reply("short").await?;
                     }
                     Ok(())

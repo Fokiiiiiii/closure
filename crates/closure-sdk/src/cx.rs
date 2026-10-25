@@ -20,8 +20,56 @@ use serde::de::DeserializeOwned;
 use twilight_model::guild::Permissions;
 
 use crate::dm::{DirectMessage, Sent};
+use crate::embed::{EmbedBuilder, Tone};
 use crate::error::{TargetProblem, UserError};
 use crate::ui::CustomId;
+
+/// The key of the module's configuration that the SDK reads for every module: who sees its replies.
+pub(crate) const REPLIES: &str = "replies";
+
+/// Whether the administrator made the replies private (`Some(true)`) or public (`Some(false)`);
+/// `None` leaves each reply as the module's code chose it.
+fn replies_private(ctx: &EventContext) -> Option<bool> {
+    match ctx.config().get(REPLIES)?.as_str()? {
+        "private" => Some(true),
+        "public" => Some(false),
+        _ => None,
+    }
+}
+
+/// The module's configuration as its own type. The `replies` key is taken out first, so a
+/// module that denies unknown fields still reads its configuration.
+fn parse_module_config<T: DeserializeOwned>(ctx: &EventContext) -> Result<T, ModuleError> {
+    let mut config = ctx.config().clone();
+    if let Some(object) = config.as_object_mut() {
+        object.remove(REPLIES);
+    }
+    serde_json::from_value(config).map_err(|error| ModuleError::Config(error.to_string()))
+}
+
+/// A reply that shows `text` as the description of one embed. Empty text makes no embed, so
+/// Discord's refusal of an empty reply applies as before.
+fn embed_reply(
+    tone: Tone,
+    text: String,
+    ephemeral: bool,
+) -> Result<InteractionReply, DiscordError> {
+    let embeds = if text.is_empty() {
+        Vec::new()
+    } else {
+        let embed = EmbedBuilder::new()
+            .description(text)
+            .color(tone.color())
+            .build()
+            .map_err(|error| DiscordError::Invalid(error.to_string()))?;
+        vec![embed]
+    };
+    Ok(InteractionReply {
+        embeds,
+        ephemeral,
+        ..InteractionReply::default()
+    })
+}
 
 /// Where the answer to one interaction stands.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -215,7 +263,7 @@ impl<I: InteractionRef + 'static> Cx<I> {
 
     /// The module's configuration in this guild, as its own type.
     pub fn config<T: DeserializeOwned>(&self) -> Result<T, UserError> {
-        Ok(self.ctx.parse_config()?)
+        Ok(parse_module_config(&self.ctx)?)
     }
 
     /// The module's own data in this guild: entries and counters. The module needs the
@@ -306,50 +354,74 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.answers.answered.load(Ordering::Acquire)
     }
 
-    /// Answers where everyone in the channel sees it.
+    /// Answers with the text as an embed where everyone in the channel sees it.
     pub async fn reply(&self, content: impl Into<String>) -> Result<(), UserError> {
-        self.reply_with(InteractionReply {
-            content: Some(content.into()),
-            ..InteractionReply::default()
-        })
-        .await
+        self.say(Tone::Info, content).await
     }
 
     /// Answers so that only the user who sent the interaction sees it.
     pub async fn reply_private(&self, content: impl Into<String>) -> Result<(), UserError> {
-        self.reply_with(InteractionReply {
-            content: Some(content.into()),
-            ephemeral: true,
-            ..InteractionReply::default()
-        })
-        .await
+        self.say_private(Tone::Info, content).await
     }
 
     /// [`Self::reply`] with a message of the module's catalog.
     pub async fn reply_t(&self, key: &str, args: &Args) -> Result<(), UserError> {
-        self.reply(self.t(key, args)).await
+        self.say_t(Tone::Info, key, args).await
     }
 
     /// [`Self::reply_private`] with a message of the module's catalog.
     pub async fn reply_private_t(&self, key: &str, args: &Args) -> Result<(), UserError> {
-        self.reply_private(self.t(key, args)).await
+        self.say_private_t(Tone::Info, key, args).await
+    }
+
+    /// Answers with the text as an embed of `tone`, where everyone in the channel sees it.
+    pub async fn say(&self, tone: Tone, text: impl Into<String>) -> Result<(), UserError> {
+        self.reply_with(embed_reply(tone, text.into(), false)?)
+            .await
+    }
+
+    /// [`Self::say`] so that only the user who sent the interaction sees it.
+    pub async fn say_private(&self, tone: Tone, text: impl Into<String>) -> Result<(), UserError> {
+        self.reply_with(embed_reply(tone, text.into(), true)?).await
+    }
+
+    /// [`Self::say`] with a message of the module's catalog.
+    pub async fn say_t(&self, tone: Tone, key: &str, args: &Args) -> Result<(), UserError> {
+        self.say(tone, self.t(key, args)).await
+    }
+
+    /// [`Self::say_private`] with a message of the module's catalog.
+    pub async fn say_private_t(&self, tone: Tone, key: &str, args: &Args) -> Result<(), UserError> {
+        self.say_private(tone, self.t(key, args)).await
+    }
+
+    /// Answers privately whatever the `replies` setting says; for errors and refusals.
+    pub(crate) async fn say_locked(&self, tone: Tone, text: String) -> Result<(), UserError> {
+        self.send(embed_reply(tone, text, true)?).await
     }
 
     /// The first answer is the response to the interaction (or, after [`Self::defer`], the
     /// edit of the "thinking" message); every later one is a follow-up. An answer for the user
     /// alone after a public [`Self::defer`] finishes the public message with a plain "Done." and
-    /// goes to the user as a follow-up, because a public message cannot be made private.
+    /// goes to the user as a follow-up, because a public message cannot be made private. The
+    /// administrator's `replies` setting, when set, decides whether the reply is private.
     pub async fn reply_with(&self, reply: InteractionReply) -> Result<(), UserError> {
+        let ephemeral = replies_private(&self.ctx).unwrap_or(reply.ephemeral);
+        self.send(InteractionReply { ephemeral, ..reply }).await
+    }
+
+    async fn send(&self, reply: InteractionReply) -> Result<(), UserError> {
         let mut phase = self.answers.phase.lock().await;
         // What the interaction is back to if nothing could be sent.
         let mut back_to = *phase;
         let result = match back_to {
             Phase::Fresh => self.ctx.api.respond(&*self.interaction, reply).await,
             Phase::Deferred { private: false } if reply.ephemeral => {
-                let done = InteractionReply {
-                    content: Some(self.core_message("sdk-done", &Args::new())),
-                    ..InteractionReply::default()
-                };
+                let done = embed_reply(
+                    Tone::Info,
+                    self.core_message("sdk-done", &Args::new()),
+                    false,
+                )?;
                 match self.edit_original(done).await {
                     Ok(()) => {
                         back_to = Phase::Replied;
@@ -384,6 +456,7 @@ impl<I: InteractionRef + 'static> Cx<I> {
     /// Acknowledges the interaction, for work that takes more than Discord's three seconds. The
     /// next answer replaces the "thinking" message. Does nothing after an answer.
     pub async fn defer(&self, ephemeral: bool) -> Result<(), UserError> {
+        let ephemeral = replies_private(&self.ctx).unwrap_or(ephemeral);
         let mut phase = self.answers.phase.lock().await;
         if *phase != Phase::Fresh {
             return Ok(());
@@ -606,7 +679,7 @@ impl JobCx {
 
     /// The module's configuration in this guild, as its own type.
     pub fn config<T: DeserializeOwned>(&self) -> Result<T, ModuleError> {
-        self.ctx.parse_config()
+        parse_module_config(&self.ctx)
     }
 
     /// A message of the module's catalog in the guild's language.

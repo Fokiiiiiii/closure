@@ -41,7 +41,8 @@ modules:
 ```
 
 Every key is optional; the values above are the defaults. Unknown keys and out-of-range values are
-refused when the configuration is read.
+refused when the configuration is read. The `replies` key (`private` or `public`) is available as
+well, to show the replies of this module to the invoking user only or to everyone in the channel.
 
 ## Escalation
 

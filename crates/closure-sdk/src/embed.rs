@@ -42,6 +42,26 @@ impl Color {
     }
 }
 
+/// How a reply reads; the colour of its bar follows from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl Tone {
+    pub(crate) fn color(self) -> Color {
+        match self {
+            Self::Info => Color::Info,
+            Self::Success => Color::Success,
+            Self::Warning => Color::Warning,
+            Self::Error => Color::Error,
+        }
+    }
+}
+
 /// Builds an embed; [`Self::build`] checks it against Discord's limits.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EmbedBuilder {
