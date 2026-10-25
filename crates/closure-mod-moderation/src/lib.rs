@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use closure_sdk::duration::{TimeStyle, timestamp};
+use closure_sdk::duration::{TimeStyle, parse as parse_duration, timestamp};
 use closure_sdk::embed::{escape, truncate};
 use closure_sdk::modlog;
 use closure_sdk::{
@@ -53,6 +53,8 @@ struct Config {
     require_reason: bool,
     /// How many days of messages a ban deletes.
     ban_delete_days: u32,
+    /// What a warning brings about once a member reaches a number of active warnings.
+    escalation: Vec<Rule>,
 }
 
 impl Default for Config {
@@ -62,8 +64,60 @@ impl Default for Config {
             dm_on_action: true,
             require_reason: false,
             ban_delete_days: 0,
+            escalation: Vec::new(),
         }
     }
+}
+
+/// A rule of `escalation`: when a warning brings a member to exactly `warns` active warnings,
+/// `action` is taken. The fields are optional, so a rule without one is skipped rather than
+/// refusing the whole configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rule {
+    warns: Option<u32>,
+    action: Option<Action>,
+    /// How long: needed by a timeout, optional for a ban, not used by a kick.
+    duration: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Action {
+    Timeout,
+    Kick,
+    Ban,
+}
+
+/// What a valid rule does, with its duration read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Escalation {
+    Timeout(Duration),
+    Kick,
+    Ban(Option<Duration>),
+}
+
+/// The escalation of a rule, or `None` when the rule is not valid: a timeout needs a readable
+/// duration of at most 28 days, and a ban's duration, if given, must be readable.
+fn plan(rule: &Rule) -> Option<Escalation> {
+    match rule.action? {
+        Action::Timeout => {
+            let duration = parse_duration(rule.duration.as_deref()?).ok()?;
+            (duration.as_secs() <= u64::from(MAX_TIMEOUT_SECONDS))
+                .then_some(Escalation::Timeout(duration))
+        }
+        Action::Kick => Some(Escalation::Kick),
+        Action::Ban => match rule.duration.as_deref() {
+            Some(text) => Some(Escalation::Ban(Some(parse_duration(text).ok()?))),
+            None => Some(Escalation::Ban(None)),
+        },
+    }
+}
+
+/// The rule that applies at `active` warnings: the first one that names that number.
+fn rule_for(rules: &[Rule], active: usize) -> Option<&Rule> {
+    let active = u32::try_from(active).ok()?;
+    rules.iter().find(|rule| rule.warns == Some(active))
 }
 
 #[derive(CommandArgs)]
@@ -293,19 +347,18 @@ async fn notify(
     }
 }
 
-/// Answers the moderator in private, with the notes that apply.
-async fn answer(
-    cx: &CommandCx,
-    key: &str,
-    args: &Args,
-    notes: &[Option<String>],
-) -> Result<(), UserError> {
-    let mut text = cx.t(key, args);
-    for note in notes.iter().flatten() {
+/// A reply with its notes, each after a space.
+fn with_notes(mut text: String, notes: &[String]) -> String {
+    for note in notes {
         text.push(' ');
         text.push_str(note);
     }
-    cx.reply_private(text).await
+    text
+}
+
+/// Answers the moderator in private, with the notes that apply.
+async fn answer(cx: &CommandCx, key: &str, args: &Args, notes: &[String]) -> Result<(), UserError> {
+    cx.reply_private(with_notes(cx.t(key, args), notes)).await
 }
 
 /// Records an action as a case and posts it to the log. A log that cannot take it does not undo
@@ -369,7 +422,215 @@ async fn schedule_unban(
         .await
 }
 
-/// Warns a member. The warning is a case that expires after `warn_expire_days`.
+/// The seconds of a timeout, which Discord takes at most 28 days of.
+fn timeout_seconds(duration: Duration) -> Result<u32, UserError> {
+    u32::try_from(duration.as_secs())
+        .ok()
+        .filter(|seconds| *seconds <= MAX_TIMEOUT_SECONDS)
+        .ok_or_else(|| UserError::message("timeout-too-long"))
+}
+
+/// The seconds of messages a ban deletes, which Discord takes at most 7 days of.
+fn delete_seconds(days: i64) -> Result<u32, UserError> {
+    match u32::try_from(days * DAY) {
+        Ok(seconds) if seconds <= MAX_BAN_DELETE_SECONDS => Ok(seconds),
+        _ => Err(UserError::message("ban-delete-days-range")),
+    }
+}
+
+/// Times a member out and records it, then messages the member: the member stays in the server,
+/// so the message comes after. Returns the case and the note of the message.
+async fn time_out(
+    cx: &CommandCx,
+    config: &Config,
+    user: UserId,
+    duration: Duration,
+    reason: Option<String>,
+) -> Result<(Case, Vec<String>), UserError> {
+    let seconds = timeout_seconds(duration)?;
+    let now = cx.now();
+    cx.api()
+        .timeout(
+            cx.guild_id(),
+            user,
+            Some(seconds),
+            audit_reason(cx, reason.as_deref()),
+        )
+        .await?;
+    let reason_text = dm_reason(cx, reason.as_deref());
+    let case = record(cx, "timeout", user, reason, Some(now + secs(duration))).await?;
+    let note = notify(
+        cx,
+        config,
+        user,
+        "dm-timed-out",
+        &Args::new()
+            .with("duration", cx.format_duration_in(cx.ctx().locale, duration))
+            .with("reason", reason_text),
+    )
+    .await;
+    Ok((case, note.into_iter().collect()))
+}
+
+/// Kicks a member and records it. The direct message comes first: a kicked member shares no server
+/// with the bot. Returns the case and the note of the message.
+async fn kick_member(
+    cx: &CommandCx,
+    config: &Config,
+    user: UserId,
+    reason: Option<String>,
+) -> Result<(Case, Vec<String>), UserError> {
+    let note = notify(
+        cx,
+        config,
+        user,
+        "dm-kicked",
+        &Args::new().with("reason", dm_reason(cx, reason.as_deref())),
+    )
+    .await;
+    cx.api()
+        .kick(cx.guild_id(), user, audit_reason(cx, reason.as_deref()))
+        .await?;
+    let case = record(cx, "kick", user, reason, None).await?;
+    Ok((case, note.into_iter().collect()))
+}
+
+/// Bans a member for good or for `duration`, deleting `delete_message_seconds` of their messages.
+/// The direct message comes first, as with a kick. A timed ban gets a timer that lifts it. Returns
+/// the case and the notes: the message, and a note when the timer could not be set.
+async fn ban_member(
+    cx: &CommandCx,
+    config: &Config,
+    user: UserId,
+    duration: Option<Duration>,
+    delete_message_seconds: u32,
+    reason: Option<String>,
+) -> Result<(Case, Vec<String>), UserError> {
+    let note = match duration {
+        Some(duration) => {
+            notify(
+                cx,
+                config,
+                user,
+                "dm-banned-for",
+                &Args::new()
+                    .with("duration", cx.format_duration_in(cx.ctx().locale, duration))
+                    .with("reason", dm_reason(cx, reason.as_deref())),
+            )
+            .await
+        }
+        None => {
+            notify(
+                cx,
+                config,
+                user,
+                "dm-banned",
+                &Args::new().with("reason", dm_reason(cx, reason.as_deref())),
+            )
+            .await
+        }
+    };
+    cx.api()
+        .ban(
+            cx.guild_id(),
+            user,
+            delete_message_seconds,
+            audit_reason(cx, reason.as_deref()),
+        )
+        .await?;
+    let expires_at = duration.map(|duration| cx.now() + secs(duration));
+    let case = record(cx, "ban", user, reason, expires_at).await?;
+    // A new ban replaces the timer of an earlier one, which would lift this ban too early.
+    let _ = cx.scheduler().cancel(&unban_key(user)).await;
+    // The ban holds even when its timer cannot be set; the note says so.
+    let timer_note = match duration {
+        Some(duration) => schedule_unban(cx, user, case.number, duration)
+            .await
+            .is_err()
+            .then(|| cx.t("ban-no-timer", &Args::new())),
+        None => None,
+    };
+    Ok((case, [note, timer_note].into_iter().flatten().collect()))
+}
+
+/// Carries out the escalation that the warning `warning` brought about, at `active` active
+/// warnings. The reason is kept in the case, so it is written in the server language.
+async fn escalate(
+    cx: &CommandCx,
+    config: &Config,
+    user: UserId,
+    escalation: Escalation,
+    active: usize,
+    warning: i64,
+) -> Result<(Case, Vec<String>), UserError> {
+    let reason = cx.ctx().t_in(
+        cx.ctx().locale,
+        "escalation-reason",
+        &Args::new()
+            .with("count", count(active))
+            .with("case", warning),
+    );
+    match escalation {
+        Escalation::Timeout(duration) => time_out(cx, config, user, duration, Some(reason)).await,
+        Escalation::Kick => kick_member(cx, config, user, Some(reason)).await,
+        Escalation::Ban(duration) => {
+            let delete = delete_seconds(i64::from(config.ban_delete_days))?;
+            ban_member(cx, config, user, duration, delete, Some(reason)).await
+        }
+    }
+}
+
+/// What an escalation does, in words, in the language of the moderator.
+fn escalation_phrase(cx: &CommandCx, escalation: Escalation) -> String {
+    match escalation {
+        Escalation::Timeout(duration) => cx.t(
+            "escalation-timeout",
+            &Args::new().with("duration", cx.format_duration(duration)),
+        ),
+        Escalation::Kick => cx.t("escalation-kick", &Args::new()),
+        Escalation::Ban(None) => cx.t("escalation-ban", &Args::new()),
+        Escalation::Ban(Some(duration)) => cx.t(
+            "escalation-ban-for",
+            &Args::new().with("duration", cx.format_duration(duration)),
+        ),
+    }
+}
+
+/// The line of the reply about the escalation that the warning `warning` brings about, if a rule
+/// asks for one. A failed escalation leaves the warning standing and says so.
+async fn escalation_line(
+    cx: &CommandCx,
+    config: &Config,
+    user: UserId,
+    active: usize,
+    warning: i64,
+) -> Option<String> {
+    let rule = rule_for(&config.escalation, active)?;
+    let Some(escalation) = plan(rule) else {
+        return Some(cx.t(
+            "escalation-invalid",
+            &Args::new().with("count", count(active)),
+        ));
+    };
+    let phrase = escalation_phrase(cx, escalation);
+    Some(
+        match escalate(cx, config, user, escalation, active, warning).await {
+            Ok((case, notes)) => with_notes(
+                cx.t(
+                    "escalated",
+                    &Args::new()
+                        .with("action", phrase)
+                        .with("number", case.number),
+                ),
+                &notes,
+            ),
+            Err(_) => cx.t("escalation-failed", &Args::new().with("action", phrase)),
+        },
+    )
+}
+
+/// Warns a member. The warning is a case that expires after `warn_expire_days`. Once it brings the
+/// member to a number of active warnings that a rule names, that rule's action follows.
 async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
@@ -393,16 +654,20 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
             .with("active", count(active)),
     )
     .await;
-    answer(
-        &cx,
-        "warned",
-        &Args::new()
-            .with("user", mention(args.user))
-            .with("number", case.number)
-            .with("active", count(active)),
-        &[note],
-    )
-    .await
+    let escalation = escalation_line(&cx, &config, args.user, active, case.number).await;
+    let notes: Vec<String> = note.into_iter().collect();
+    let mut text = with_notes(
+        cx.t(
+            "warned",
+            &Args::new()
+                .with("user", mention(args.user))
+                .with("number", case.number)
+                .with("active", count(active)),
+        ),
+        &notes,
+    );
+    text.extend(escalation.map(|line| format!("\n{line}")));
+    cx.reply_private(text).await
 }
 
 /// Notes something about a member. A note is a case without expiry and is not a warning.
@@ -526,44 +791,12 @@ async fn case_revoke(cx: CommandCx, args: Revoke) -> Result<(), UserError> {
 /// Times a member out. Discord's limit is 28 days, so a longer timeout is refused before anything
 /// is done. The member stays in the server, so the direct message comes after the timeout.
 async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
-    let seconds = u32::try_from(args.duration.as_secs())
-        .ok()
-        .filter(|seconds| *seconds <= MAX_TIMEOUT_SECONDS)
-        .ok_or_else(|| UserError::message("timeout-too-long"))?;
+    timeout_seconds(args.duration)?;
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let reason = punishment_reason(&config, args.reason)?;
-    let now = cx.now();
-    cx.api()
-        .timeout(
-            cx.guild_id(),
-            args.user,
-            Some(seconds),
-            audit_reason(&cx, reason.as_deref()),
-        )
-        .await?;
-    let case = record(
-        &cx,
-        "timeout",
-        args.user,
-        reason.clone(),
-        Some(now + secs(args.duration)),
-    )
-    .await?;
+    let (case, notes) = time_out(&cx, &config, args.user, args.duration, reason).await?;
     let duration = cx.format_duration(args.duration);
-    let note = notify(
-        &cx,
-        &config,
-        args.user,
-        "dm-timed-out",
-        &Args::new()
-            .with(
-                "duration",
-                cx.format_duration_in(cx.ctx().locale, args.duration),
-            )
-            .with("reason", dm_reason(&cx, reason.as_deref())),
-    )
-    .await;
     answer(
         &cx,
         "timed-out",
@@ -571,7 +804,7 @@ async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
             .with("user", mention(args.user))
             .with("duration", duration)
             .with("number", case.number),
-        &[note],
+        &notes,
     )
     .await
 }
@@ -610,29 +843,14 @@ async fn kick(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let reason = punishment_reason(&config, args.reason)?;
-    let note = notify(
-        &cx,
-        &config,
-        args.user,
-        "dm-kicked",
-        &Args::new().with("reason", dm_reason(&cx, reason.as_deref())),
-    )
-    .await;
-    cx.api()
-        .kick(
-            cx.guild_id(),
-            args.user,
-            audit_reason(&cx, reason.as_deref()),
-        )
-        .await?;
-    let case = record(&cx, "kick", args.user, reason, None).await?;
+    let (case, notes) = kick_member(&cx, &config, args.user, reason).await?;
     answer(
         &cx,
         "kicked",
         &Args::new()
             .with("user", mention(args.user))
             .with("number", case.number),
-        &[note],
+        &notes,
     )
     .await
 }
@@ -646,44 +864,15 @@ async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
     let days = args
         .delete_days
         .unwrap_or(i64::from(config.ban_delete_days));
-    let delete_message_seconds = match u32::try_from(days * DAY) {
-        Ok(seconds) if seconds <= MAX_BAN_DELETE_SECONDS => seconds,
-        _ => return Err(UserError::message("ban-delete-days-range")),
-    };
-    let note = match args.duration {
-        Some(duration) => {
-            notify(
-                &cx,
-                &config,
-                args.user,
-                "dm-banned-for",
-                &Args::new()
-                    .with("duration", cx.format_duration_in(cx.ctx().locale, duration))
-                    .with("reason", dm_reason(&cx, reason.as_deref())),
-            )
-            .await
-        }
-        None => {
-            notify(
-                &cx,
-                &config,
-                args.user,
-                "dm-banned",
-                &Args::new().with("reason", dm_reason(&cx, reason.as_deref())),
-            )
-            .await
-        }
-    };
-    cx.api()
-        .ban(
-            cx.guild_id(),
-            args.user,
-            delete_message_seconds,
-            audit_reason(&cx, reason.as_deref()),
-        )
-        .await?;
-    let expires_at = args.duration.map(|duration| cx.now() + secs(duration));
-    let case = record(&cx, "ban", args.user, reason, expires_at).await?;
+    let (case, notes) = ban_member(
+        &cx,
+        &config,
+        args.user,
+        args.duration,
+        delete_seconds(days)?,
+        reason,
+    )
+    .await?;
 
     let mut words = Args::new()
         .with("user", mention(args.user))
@@ -695,17 +884,7 @@ async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
         }
         None => "banned",
     };
-    // A new ban replaces the timer of an earlier one, which would lift this ban too early.
-    let _ = cx.scheduler().cancel(&unban_key(args.user)).await;
-    // The ban holds even when its timer cannot be set; the answer says so.
-    let timer_note = match args.duration {
-        Some(duration) => schedule_unban(&cx, args.user, case.number, duration)
-            .await
-            .is_err()
-            .then(|| cx.t("ban-no-timer", &Args::new())),
-        None => None,
-    };
-    answer(&cx, key, &words, &[note, timer_note]).await
+    answer(&cx, key, &words, &notes).await
 }
 
 /// Lifts a ban. The timer of a timed ban goes, and the newest ban that still stands is revoked.
@@ -778,6 +957,33 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "minimum": 0,
                     "maximum": 7,
                     "description": "How many days of the messages of a banned member are deleted."
+                },
+                "escalation": {
+                    "type": "array",
+                    "maxItems": 10,
+                    "description": "What a warning brings about when a member reaches a number of active warnings.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "warns": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 100,
+                                "description": "The number of active warnings that triggers the action."
+                            },
+                            "action": {
+                                "type": "string",
+                                "enum": ["timeout", "kick", "ban"]
+                            },
+                            "duration": {
+                                "type": "string",
+                                "pattern": "^([0-9]{1,10}[smhdw] ?)+$",
+                                "description": "How long, such as 1h or 7d. A timeout needs it; a ban may have it."
+                            }
+                        },
+                        "required": ["warns", "action"],
+                        "additionalProperties": false
+                    }
                 }
             },
             "additionalProperties": false
@@ -786,7 +992,8 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "warn_expire_days": 30,
             "dm_on_action": true,
             "require_reason": false,
-            "ban_delete_days": 0
+            "ban_delete_days": 0,
+            "escalation": []
         }),
     )
 }

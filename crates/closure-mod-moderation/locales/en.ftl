@@ -100,3 +100,14 @@ dm-timed-out = You were timed out in a server for { $duration }. Reason: { $reas
 dm-kicked = You were kicked from a server. Reason: { $reason }
 dm-banned = You were banned from a server. Reason: { $reason }
 dm-banned-for = You were banned from a server for { $duration }. Reason: { $reason }
+escalated = Escalation: { $action } — case #{ $number }.
+escalation-failed = Escalation to { $action } failed, so only the warning was recorded.
+escalation-invalid = The escalation rule for { $count } warnings is not valid and was skipped.
+escalation-reason = { $count ->
+    [one] Automatic: { $count } active warning (case #{ $case })
+   *[other] Automatic: { $count } active warnings (case #{ $case })
+}
+escalation-timeout = timed out for { $duration }
+escalation-kick = kicked
+escalation-ban = banned
+escalation-ban-for = banned for { $duration }

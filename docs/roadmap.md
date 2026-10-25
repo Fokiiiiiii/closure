@@ -18,7 +18,7 @@ the reference module `closure-mod-moderation`.
 | M9b | Cases: records of moderation, numbered per guild, shared by modules (host service, capability `cases`) | moderation and automod share them |
 | M9c | ModLog: posts a case to the log channel in the guild's language | uses M9a and M9b |
 | M9d | Direct messages to a user (`Action::SendDirectMessage`), with the refusals Discord gives | warn/ban notices |
-| — | **`moderation` module**: ban, kick, timeout, warn, cases, log (all done: warn, note, cases, log, timeout, kick, and ban with timed bans and unban; see [moderation](moderation.md)) | first real module |
+| — | **`moderation` module**: ban, kick, timeout, warn, cases, log (all done: warn, note, cases, log, timeout, kick, ban with timed bans and unban, and escalation of warnings; see [moderation](moderation.md)) | first real module |
 | M10 | Message kit: richer `MessageInfo`, message history, optional bounded cache, text matching helpers, the content intent | automod and logging |
 | M11 | Interaction surface (below) | convenience for every module |
 | M12 | Events and actions that Discord has and we do not (below) | breadth |

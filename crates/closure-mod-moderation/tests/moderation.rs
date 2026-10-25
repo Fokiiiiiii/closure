@@ -563,7 +563,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_and_no_required_reason()
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "require_reason": false, "ban_delete_days": 0 })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "require_reason": false, "ban_delete_days": 0, "escalation": [] })
     );
 }
 
@@ -1189,4 +1189,348 @@ async fn the_message_to_the_member_names_the_time_in_the_language_of_the_server(
         .unwrap();
     let direct = dm_contents(&harness);
     assert!(direct[1].contains("2 hours"), "{direct:?}");
+}
+
+// ---- escalation ----
+
+/// Warns `target` `times` times in a row, letting the cooldown pass before each. Returns the
+/// replies to the last one.
+async fn warn_times(harness: &Harness, target: u64, times: usize) -> Vec<Reply> {
+    let mut replies = Vec::new();
+    for _ in 0..times {
+        harness.advance(Duration::from_secs(3));
+        replies = harness.invoke(warn(target, Some("spam"))).await.unwrap();
+    }
+    replies
+}
+
+async fn cases_of_kind(harness: &Harness, target: u64, kind: &str) -> usize {
+    cases_of(harness, target)
+        .await
+        .iter()
+        .filter(|case| case.kind.as_str() == kind)
+        .count()
+}
+
+#[tokio::test]
+async fn the_third_warning_times_the_member_out_once_and_says_so() {
+    let harness = harness();
+    harness.set_log_channel(50);
+    harness.set_config(json!({
+        "escalation": [{ "warns": 3, "action": "timeout", "duration": "1h" }]
+    }));
+
+    let second = warn_times(&harness, MEMBER, 2).await;
+    assert!(!text(&second).contains("Escalation"), "{second:?}");
+    assert_eq!(harness.sent_embeds().len(), 2);
+
+    let third = warn_times(&harness, MEMBER, 1).await;
+    assert!(text(&third).contains("case #3"), "{third:?}");
+    assert!(
+        text(&third).contains("Escalation: timed out for 1 hour — case #4."),
+        "{third:?}"
+    );
+    assert_eq!(
+        sequence(&harness),
+        ["dm", "dm", "dm", "timeout", "dm"],
+        "{third:?}"
+    );
+
+    let case = harness.cases().get(4).await.unwrap().unwrap();
+    assert_eq!(case.kind.as_str(), "timeout");
+    assert_eq!(case.target, Id::new(MEMBER));
+    assert_eq!(
+        case.moderator,
+        Id::new(MODERATOR),
+        "the warning's moderator"
+    );
+    assert_eq!(case.expires_at, Some(case.created_at + 3_600));
+    assert_eq!(
+        case.reason.as_deref(),
+        Some("Automatic: 3 active warnings (case #3)")
+    );
+    let embeds = harness.sent_embeds();
+    assert_eq!(embeds.len(), 4, "{embeds:?}");
+    assert_eq!(embeds[2].title.as_deref(), Some("Case #3 · Warning"));
+    assert_eq!(embeds[3].title.as_deref(), Some("Case #4 · Timeout"));
+
+    // Exactly three: a fourth warning does not time the member out again.
+    let fourth = warn_times(&harness, MEMBER, 1).await;
+    assert!(!text(&fourth).contains("Escalation"), "{fourth:?}");
+    assert_eq!(
+        sequence(&harness),
+        ["dm", "dm", "dm", "timeout", "dm", "dm"]
+    );
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 5);
+}
+
+#[tokio::test]
+async fn an_escalated_kick_or_ban_is_messaged_first_and_a_timeout_after() {
+    let rules = [
+        (
+            json!({ "warns": 1, "action": "kick" }),
+            ["dm", "dm", "kick"],
+        ),
+        (json!({ "warns": 1, "action": "ban" }), ["dm", "dm", "ban"]),
+        (
+            json!({ "warns": 1, "action": "timeout", "duration": "1h" }),
+            ["dm", "timeout", "dm"],
+        ),
+    ];
+    for (rule, expected) in rules {
+        let harness = harness();
+        harness.set_config(json!({ "escalation": [rule] }));
+        harness.invoke(warn(MEMBER, Some("x"))).await.unwrap();
+        assert_eq!(sequence(&harness), expected);
+    }
+}
+
+#[tokio::test]
+async fn a_kick_escalation_kicks_and_records_a_kick_with_an_automatic_reason() {
+    let harness = harness();
+    harness.set_log_channel(50);
+    harness.set_config(json!({ "escalation": [{ "warns": 1, "action": "kick" }] }));
+    let replies = harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
+    assert!(
+        text(&replies).contains("Escalation: kicked — case #2."),
+        "{replies:?}"
+    );
+    let case = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(case.kind.as_str(), "kick");
+    assert_eq!(case.moderator, Id::new(MODERATOR));
+    assert_eq!(case.expires_at, None);
+    assert_eq!(
+        case.reason.as_deref(),
+        Some("Automatic: 1 active warning (case #1)")
+    );
+    assert_eq!(
+        harness.sent_embeds()[1].title.as_deref(),
+        Some("Case #2 · Kick")
+    );
+}
+
+#[tokio::test]
+async fn a_ban_escalation_bans_for_good_or_sets_a_timer_for_a_timed_one() {
+    let forever = harness();
+    forever.set_config(json!({ "escalation": [{ "warns": 1, "action": "ban" }] }));
+    let replies = forever.invoke(warn(MEMBER, Some("raid"))).await.unwrap();
+    assert!(
+        text(&replies).contains("Escalation: banned — case #2."),
+        "{replies:?}"
+    );
+    assert_eq!(sequence(&forever), ["dm", "dm", "ban"]);
+    assert_eq!(forever.jobs(), 0, "a ban for good has no timer");
+
+    let timed = harness();
+    timed.set_config(json!({
+        "escalation": [{ "warns": 1, "action": "ban", "duration": "1d" }]
+    }));
+    let replies = timed.invoke(warn(MEMBER, Some("raid"))).await.unwrap();
+    assert!(
+        text(&replies).contains("Escalation: banned for 1 day — case #2."),
+        "{replies:?}"
+    );
+    assert_eq!(timed.jobs(), 1);
+
+    timed.advance(Duration::from_secs(DAY));
+    let ended = timed.run_due_jobs().await;
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert!(ended[0].is_ok(), "{ended:?}");
+    assert_eq!(sequence(&timed), ["dm", "dm", "ban", "unban"]);
+}
+
+#[tokio::test]
+async fn a_timeout_rule_that_is_too_long_or_unreadable_is_skipped() {
+    let rules = [
+        json!({ "warns": 1, "action": "timeout", "duration": "29d" }),
+        json!({ "warns": 1, "action": "timeout" }),
+        json!({ "warns": 1, "action": "timeout", "duration": "banana" }),
+    ];
+    for rule in rules {
+        let harness = harness();
+        harness.set_config(json!({ "escalation": [rule] }));
+        let replies = harness.invoke(warn(MEMBER, Some("x"))).await.unwrap();
+        assert!(text(&replies).contains("case #1"), "{replies:?}");
+        assert!(
+            text(&replies).contains("is not valid and was skipped"),
+            "{replies:?}"
+        );
+        assert!(!text(&replies).contains("Escalation:"), "{replies:?}");
+        assert_eq!(sequence(&harness), ["dm"], "nothing is done");
+        assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_failed_escalation_leaves_the_warning_and_no_escalation_case() {
+    let harness = harness();
+    harness.set_log_channel(50);
+    harness.set_config(json!({
+        "escalation": [{ "warns": 3, "action": "timeout", "duration": "1h" }]
+    }));
+    warn_times(&harness, MEMBER, 2).await;
+    // Counted from here: the lookup of the member, the log of the warning, the warning's direct
+    // message, then the timeout.
+    harness
+        .api()
+        .fail_nth(4, DiscordError::Forbidden("missing permission".to_owned()));
+    let replies = warn_times(&harness, MEMBER, 1).await;
+    assert!(text(&replies).contains("case #3"), "{replies:?}");
+    assert!(
+        text(&replies).contains(
+            "Escalation to timed out for 1 hour failed, so only the warning was recorded."
+        ),
+        "{replies:?}"
+    );
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 3);
+    assert_eq!(sequence(&harness), ["dm", "dm", "dm"]);
+    assert_eq!(harness.sent_embeds().len(), 3, "the warnings, no timeout");
+}
+
+#[tokio::test]
+async fn two_rules_for_different_counts_each_apply_at_their_count() {
+    let harness = harness();
+    harness.set_config(json!({
+        "escalation": [
+            { "warns": 3, "action": "timeout", "duration": "1h" },
+            { "warns": 5, "action": "ban", "duration": "7d" }
+        ]
+    }));
+    warn_times(&harness, MEMBER, 5).await;
+    assert_eq!(
+        sequence(&harness),
+        ["dm", "dm", "dm", "timeout", "dm", "dm", "dm", "dm", "ban"]
+    );
+    assert_eq!(harness.jobs(), 1, "the timer of the seven day ban");
+}
+
+#[tokio::test]
+async fn of_two_rules_for_the_same_count_only_the_first_applies() {
+    let harness = harness();
+    harness.set_config(json!({
+        "escalation": [
+            { "warns": 1, "action": "kick" },
+            { "warns": 1, "action": "ban" }
+        ]
+    }));
+    harness.invoke(warn(MEMBER, Some("x"))).await.unwrap();
+    assert_eq!(sequence(&harness), ["dm", "dm", "kick"]);
+}
+
+#[tokio::test]
+async fn without_rules_no_warning_escalates() {
+    let harness = harness();
+    let replies = warn_times(&harness, MEMBER, 5).await;
+    assert!(!text(&replies).contains("Escalation"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["dm"; 5]);
+}
+
+#[tokio::test]
+async fn an_escalation_runs_without_the_direct_messages() {
+    let harness = harness();
+    harness.set_config(json!({
+        "dm_on_action": false,
+        "escalation": [{ "warns": 1, "action": "kick" }]
+    }));
+    let replies = harness.invoke(warn(MEMBER, Some("x"))).await.unwrap();
+    assert!(text(&replies).contains("Escalation: kicked"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["kick"]);
+}
+
+#[tokio::test]
+async fn once_the_warnings_expire_the_same_count_escalates_again() {
+    let harness = harness();
+    harness.set_config(json!({
+        "warn_expire_days": 1,
+        "escalation": [{ "warns": 3, "action": "timeout", "duration": "1h" }]
+    }));
+    warn_times(&harness, MEMBER, 3).await;
+    assert_eq!(cases_of_kind(&harness, MEMBER, "timeout").await, 1);
+
+    harness.advance(Duration::from_secs(2 * DAY));
+    let two = warn_times(&harness, MEMBER, 2).await;
+    assert!(!text(&two).contains("Escalation"), "{two:?}");
+    let three = warn_times(&harness, MEMBER, 1).await;
+    assert!(
+        text(&three).contains("Escalation: timed out for 1 hour"),
+        "{three:?}"
+    );
+    assert_eq!(cases_of_kind(&harness, MEMBER, "timeout").await, 2);
+}
+
+#[tokio::test]
+async fn a_revoked_warning_is_not_counted() {
+    let harness = harness();
+    harness.set_config(json!({
+        "escalation": [{ "warns": 3, "action": "timeout", "duration": "1h" }]
+    }));
+    warn_times(&harness, MEMBER, 2).await;
+    harness.invoke(case_revoke(1, None)).await.unwrap();
+
+    // Two stand now: the second and this one.
+    let third = warn_times(&harness, MEMBER, 1).await;
+    assert!(!text(&third).contains("Escalation"), "{third:?}");
+    let fourth = warn_times(&harness, MEMBER, 1).await;
+    assert!(
+        text(&fourth).contains("Escalation: timed out for 1 hour"),
+        "{fourth:?}"
+    );
+    assert_eq!(cases_of_kind(&harness, MEMBER, "timeout").await, 1);
+}
+
+#[tokio::test]
+async fn the_escalation_speaks_the_server_language_in_its_reason_and_reply() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+    harness.set_config(json!({
+        "escalation": [{ "warns": 1, "action": "timeout", "duration": "1h" }]
+    }));
+    let replies = harness
+        .invoke(warn(MEMBER, Some("荒らし")).locale(Locale::Ja))
+        .await
+        .unwrap();
+    assert!(
+        text(&replies).contains("1時間のタイムアウト"),
+        "{replies:?}"
+    );
+    let case = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(
+        case.reason.as_deref(),
+        Some("自動: 有効な警告が 1 件 (ケース #1)")
+    );
+}
+
+#[test]
+fn the_escalation_rules_are_checked_against_their_schema() {
+    let registry = Arc::new(
+        ModuleRegistry::new(vec![Arc::new(module().unwrap()) as Arc<dyn Module>]).unwrap(),
+    );
+    let compiler = ConfigCompiler::new(registry).unwrap();
+    let accepted = |config: serde_json::Value| {
+        let yaml = format!(
+            "modules:\n  moderation:\n    config: {}\n",
+            serde_json::to_string(&config).unwrap()
+        );
+        compiler.compile(&parse_overrides(&yaml).unwrap()).is_ok()
+    };
+    let one = |rule: serde_json::Value| accepted(json!({ "escalation": [rule] }));
+    assert!(one(
+        json!({ "warns": 3, "action": "timeout", "duration": "1h" })
+    ));
+    assert!(one(json!({ "warns": 1, "action": "kick" })));
+    assert!(one(
+        json!({ "warns": 100, "action": "ban", "duration": "7d" })
+    ));
+    assert!(one(json!({ "warns": 5, "action": "ban" })));
+    assert!(!one(json!({ "warns": 0, "action": "kick" })));
+    assert!(!one(json!({ "warns": 101, "action": "kick" })));
+    assert!(!one(json!({ "warns": 3, "action": "mute" })));
+    assert!(!one(
+        json!({ "warns": 3, "action": "timeout", "duration": "banana" })
+    ));
+    assert!(!one(json!({ "warns": 3, "action": "kick", "expire": 1 })));
+
+    let rule = json!({ "warns": 3, "action": "kick" });
+    assert!(accepted(json!({ "escalation": vec![rule.clone(); 10] })));
+    assert!(!accepted(json!({ "escalation": vec![rule; 11] })));
 }

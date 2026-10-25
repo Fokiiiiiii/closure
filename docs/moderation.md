@@ -9,7 +9,7 @@ them, keeps notes, and records every one of these as a case. The code is in
 
 | Command | What it does | Permission key (default level) |
 | --- | --- | --- |
-| `/warn user [reason]` | Warns a member. The warning expires after `warn_expire_days`. | `moderation.warn` (moderator) |
+| `/warn user [reason]` | Warns a member. The warning expires after `warn_expire_days`, and may bring an [escalation](#escalation). | `moderation.warn` (moderator) |
 | `/note user text` | Notes something about a member. A note is not a warning and does not expire. | `moderation.note` (moderator) |
 | `/warnings user` | Lists the warnings of a member that still count. | `moderation.cases` (moderator) |
 | `/case view number` | Shows a case as the log shows it. | `moderation.cases` (moderator) |
@@ -37,10 +37,40 @@ modules:
       dm_on_action: true     # whether the member is sent a direct message about the action
       require_reason: false  # whether warn, timeout, kick and ban need a reason
       ban_delete_days: 0     # 0 to 7; the days of messages a ban deletes unless the command says otherwise
+      escalation: []         # rules: what a warning brings about at a number of active warnings
 ```
 
 Every key is optional; the values above are the defaults. Unknown keys and out-of-range values are
 refused when the configuration is read.
+
+## Escalation
+
+`escalation` is a list of up to 10 rules. When a `/warn` brings a member to **exactly** `warns`
+active warnings (the new one included), the rule's action follows, once:
+
+```yaml
+    config:
+      escalation:
+        - { warns: 3, action: timeout, duration: 1h }   # the third warning: a one hour timeout
+        - { warns: 5, action: ban, duration: 7d }       # the fifth: a seven day ban
+```
+
+- `action` is `timeout`, `kick` or `ban`. A `timeout` needs a `duration` of at most 28 days, such as
+  `1h` or `7d`. A `kick` takes no duration. A `ban` takes an optional `duration`: without one the ban
+  is for good, with one it is a timed ban, as `/ban` makes it.
+- It is "exactly", not "at least": a fourth warning does not repeat the timeout of the third. When
+  warnings expire or are revoked, the count can fall and reach the number again, and then the action
+  runs again.
+- Two rules for the same number: the first one in the list is used.
+- A rule that cannot be used is skipped, and the reply says so: a timeout without a duration or with
+  one longer than 28 days, or a ban with a duration that cannot be read. The warning is still recorded.
+- The action is carried out as a moderator's command would carry it out. A kick or a ban messages the
+  member before it, a timeout after it, as `dm_on_action` allows.
+- The case of the action has the moderator who gave the warning as its moderator, and a reason that
+  says it was automatic, such as `Automatic: 3 active warnings (case #12)`, in the server's language.
+  The number in the reason is the case of the warning.
+- If Discord refuses the action, the warning stays, no case of the action is recorded, and the reply
+  says that the escalation failed.
 
 ## Cases and the log
 
