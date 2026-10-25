@@ -4,7 +4,7 @@
 use closure_core::action::InteractionReply;
 use closure_sdk::testing::{Click, Harness, Invocation, ReplyKind};
 use closure_sdk::ui::{button, row};
-use closure_sdk::{Command, CustomId, ModuleBuilder, UserError};
+use closure_sdk::{Command, CustomId, DiscordError, ModuleBuilder, UserError};
 use twilight_model::channel::message::component::ButtonStyle;
 
 const EN: &str = "
@@ -62,6 +62,42 @@ fn module() -> ModuleBuilder {
             })
             .await
         })
+        .command(
+            Command::<()>::new("ask", "Asks with a button whose answer is private").handler(
+                |cx, ()| async move {
+                    let id = CustomId::new("open").encode(cx.module());
+                    cx.reply_with(InteractionReply {
+                        content: Some("choose".into()),
+                        components: vec![row([button(ButtonStyle::Primary, "Open", id)])],
+                        ..InteractionReply::default()
+                    })
+                    .await
+                },
+            ),
+        )
+        .component("open", |cx| async move {
+            cx.defer_update().await?;
+            cx.reply_private("only you").await
+        })
+        .command(
+            Command::<()>::new(
+                "public-then-secret",
+                "Closes a public wait, then answers privately",
+            )
+            .handler(|cx, ()| async move {
+                cx.defer(false).await?;
+                // If closing the public message fails, the retry must not leak the secret.
+                if cx
+                    .reply_private_t("secret", &closure_sdk::Args::new())
+                    .await
+                    .is_err()
+                {
+                    cx.reply_private_t("secret", &closure_sdk::Args::new())
+                        .await?;
+                }
+                Ok(())
+            }),
+        )
         .catalog(closure_sdk::Locale::En, EN)
 }
 
@@ -114,4 +150,38 @@ async fn a_click_can_be_acknowledged_first_and_the_message_changed_after() {
     assert_eq!(kinds, [ReplyKind::Acknowledged, ReplyKind::Edit]);
     assert_eq!(replies[1].content, "done");
     assert!(replies[1].components.is_empty(), "the button is taken off");
+}
+
+#[tokio::test]
+async fn a_private_answer_after_acknowledging_a_click_does_not_rewrite_the_message() {
+    let harness = Harness::new(module()).unwrap();
+    let asked = harness.invoke(Invocation::new("ask")).await.unwrap();
+    let id = asked[0].custom_ids().remove(0);
+    let replies = harness.click(Click::new(id)).await.unwrap();
+    let kinds: Vec<ReplyKind> = replies.iter().map(|reply| reply.kind).collect();
+    assert_eq!(kinds, [ReplyKind::Acknowledged, ReplyKind::Followup]);
+    assert_eq!(replies[1].content, "only you");
+    assert!(replies[1].ephemeral, "the answer goes to the user alone");
+}
+
+#[tokio::test]
+async fn a_failed_attempt_to_close_the_public_message_does_not_let_the_retry_leak() {
+    let harness = Harness::new(module()).unwrap();
+    // Call 1 is the deferral, call 2 the "Done." edit that closes the public message.
+    harness
+        .api()
+        .fail_nth(2, DiscordError::Transient("discord is down".into()));
+    let replies = harness
+        .invoke(Invocation::new("public-then-secret"))
+        .await
+        .unwrap();
+    let kinds: Vec<ReplyKind> = replies.iter().map(|reply| reply.kind).collect();
+    assert_eq!(
+        kinds,
+        [ReplyKind::Deferred, ReplyKind::Edit, ReplyKind::Followup]
+    );
+    assert!(!replies[1].content.contains("Only for you"), "{replies:?}");
+    assert!(!replies[1].ephemeral);
+    assert_eq!(replies[2].content, "Only for you.");
+    assert!(replies[2].ephemeral, "the secret goes to the user alone");
 }

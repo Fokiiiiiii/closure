@@ -529,6 +529,38 @@ fn buttons_and_forms_are_not_subscribed_to_and_routes_survive_a_custom_id() {
 }
 
 #[test]
+fn a_route_that_makes_every_custom_id_too_long_is_refused() {
+    // The shortest custom_id of a route is "{module}:{route}:*:": 2 + route + 4 characters.
+    let fits = "r".repeat(94);
+    let too_long = "r".repeat(95);
+    let module = || ModuleBuilder::new("ui", "u", "0.1.0").unwrap();
+    assert!(
+        module()
+            .component(&fits, |_cx| async { Ok(()) })
+            .build()
+            .is_ok()
+    );
+    assert!(
+        module()
+            .component(&too_long, |_cx| async { Ok(()) })
+            .build()
+            .is_err()
+    );
+    assert!(
+        module()
+            .modal(&fits, |_cx| async { Ok(()) })
+            .build()
+            .is_ok()
+    );
+    assert!(
+        module()
+            .modal(&too_long, |_cx| async { Ok(()) })
+            .build()
+            .is_err()
+    );
+}
+
+#[test]
 fn a_subcommand_cannot_carry_what_only_a_command_can() {
     let group = ModuleBuilder::new("warn", "w", "0.1.0").unwrap().group(
         "warn",

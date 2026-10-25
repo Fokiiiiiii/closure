@@ -59,10 +59,13 @@ impl Answers {
         after: Phase,
         result: &Result<(), DiscordError>,
     ) {
-        *phase = match result {
-            Err(DiscordError::Invalid(_)) => before,
-            _ => after,
+        // A deferred interaction must stay deferred after any failure: the next try has to close
+        // the public message again, not answer on top of it.
+        let keep = match before {
+            Phase::Deferred { .. } | Phase::DeferredUpdate => result.is_err(),
+            _ => matches!(result, Err(DiscordError::Invalid(_))),
         };
+        *phase = if keep { before } else { after };
         self.answered
             .store(*phase != Phase::Fresh, Ordering::Release);
     }
@@ -110,6 +113,13 @@ impl CommandCx {
     pub fn invocation(&self) -> &CommandInvocation {
         &self.interaction
     }
+
+    /// Shows the user a form; it comes back as a [`ModalCx`] under the modal's `custom_id`.
+    /// Counts as the answer to the interaction. A submitted form cannot be answered with another
+    /// form (Discord refuses it), so [`ModalCx`] has no `show_modal`.
+    pub async fn show_modal(&self, spec: ModalSpec) -> Result<(), UserError> {
+        self.show_modal_inner(spec).await
+    }
 }
 
 impl ComponentCx {
@@ -117,6 +127,13 @@ impl ComponentCx {
     #[must_use]
     pub fn click(&self) -> &ComponentInvocation {
         &self.interaction
+    }
+
+    /// Shows the user a form; it comes back as a [`ModalCx`] under the modal's `custom_id`.
+    /// Counts as the answer to the interaction. A submitted form cannot be answered with another
+    /// form (Discord refuses it), so [`ModalCx`] has no `show_modal`.
+    pub async fn show_modal(&self, spec: ModalSpec) -> Result<(), UserError> {
+        self.show_modal_inner(spec).await
     }
 
     /// What was chosen in a select menu (nothing for a button).
@@ -273,6 +290,10 @@ impl<I: InteractionRef + 'static> Cx<I> {
                     Err(error) => Err(error),
                 }
             }
+            // The message of a click belongs to everyone, so a private answer cannot edit it.
+            Phase::DeferredUpdate if reply.ephemeral => {
+                self.ctx.api.followup(&*self.interaction, reply).await
+            }
             Phase::Deferred { .. } | Phase::DeferredUpdate => self.edit_original(reply).await,
             Phase::Replied => self.ctx.api.followup(&*self.interaction, reply).await,
         };
@@ -309,9 +330,7 @@ impl<I: InteractionRef + 'static> Cx<I> {
         Ok(result?)
     }
 
-    /// Shows the user a form; it comes back as a [`ModalCx`] under the modal's `custom_id`.
-    /// Counts as the answer to the interaction.
-    pub async fn show_modal(&self, spec: ModalSpec) -> Result<(), UserError> {
+    async fn show_modal_inner(&self, spec: ModalSpec) -> Result<(), UserError> {
         let mut phase = self.answers.phase.lock().await;
         if *phase != Phase::Fresh {
             return Err(UserError::Module(ModuleError::other(

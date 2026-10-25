@@ -307,3 +307,22 @@ async fn a_warning_that_could_not_be_given_is_not_counted_as_given() {
         "the number was used up: {list:?}"
     );
 }
+
+#[tokio::test]
+async fn a_new_warning_never_takes_the_number_of_an_older_one() {
+    let harness = harness();
+    // A warning from before the numbers were counted separately: the counter has not counted it.
+    harness
+        .store()
+        .set("user:7", &json!([{ "id": 1, "reason": null, "by": 1 }]))
+        .await
+        .unwrap();
+    harness.invoke(add(MEMBER, "new")).await.unwrap();
+    let list = harness
+        .invoke(sub("list", MEMBER).roles([MODERATOR_ROLE]))
+        .await
+        .unwrap();
+    assert!(text(&list).contains("#1 "), "{list:?}");
+    assert!(text(&list).contains("#2 new"), "{list:?}");
+    assert_eq!(harness.jobs(), 1);
+}

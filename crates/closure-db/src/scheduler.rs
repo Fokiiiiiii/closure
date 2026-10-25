@@ -65,9 +65,10 @@ impl SchedulerBackend for Db {
         .await
         .map_err(backend)?;
         let existing: Option<i64> = match &job.key {
+            // Locks the row, so a concurrent complete() cannot delete it before the UPDATE.
             Some(key) => sqlx::query_scalar(
                 "SELECT id FROM scheduled_jobs
-                 WHERE module = $1 AND guild_id = $2 AND dedupe_key = $3",
+                 WHERE module = $1 AND guild_id = $2 AND dedupe_key = $3 FOR UPDATE",
             )
             .bind(job.module.as_str())
             .bind(guild)
@@ -663,5 +664,55 @@ mod tests {
         .await
         .unwrap();
         assert!((50.0..=56.0).contains(&ahead), "{ahead}");
+    }
+
+    #[sqlx::test]
+    async fn replacing_a_key_waits_for_the_row_and_never_loses_the_new_job(pool: PgPool) {
+        let db = database(pool).await;
+        scheduler(&db, "warn", 1)
+            .job("old", &1)
+            .unwrap()
+            .key("c")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        // Holds the row the way a concurrent complete() would, before it deletes it.
+        let mut tx = db.pool.begin().await.unwrap();
+        sqlx::query(
+            "SELECT id FROM scheduled_jobs
+             WHERE module = 'warn' AND guild_id = 1 AND dedupe_key = 'c' FOR UPDATE",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        let replacing = tokio::spawn({
+            let db = db.clone();
+            async move {
+                scheduler(&db, "warn", 1)
+                    .job("new", &2)
+                    .unwrap()
+                    .key("c")
+                    .after(Duration::ZERO)
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !replacing.is_finished(),
+            "replacing must wait for the row lock"
+        );
+        sqlx::query("DELETE FROM scheduled_jobs WHERE dedupe_key = 'c'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), replacing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(count(&db).await, 1);
+        let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
+        assert_eq!(job.payload, json!(2));
     }
 }

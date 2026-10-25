@@ -41,6 +41,8 @@ impl Module for StubModule {
 pub struct MockApi {
     actions: Mutex<Vec<Action>>,
     failure: Mutex<Option<DiscordError>>,
+    /// The call that fails once, counted from the moment it was set (1 is the next call).
+    failing_call: Mutex<Option<(usize, DiscordError)>>,
     /// Which guild each known channel belongs to (`None`: a direct message channel).
     channels: Mutex<HashMap<ChannelId, Option<GuildId>>>,
     owners: Mutex<HashMap<GuildId, UserId>>,
@@ -57,6 +59,12 @@ impl MockApi {
     /// Makes every following call fail with `error`.
     pub fn fail_with(&self, error: DiscordError) {
         *lock(&self.failure) = Some(error);
+    }
+
+    /// Makes the `n`th following call fail once with `error`. A call failed this way is not
+    /// recorded in [`Self::actions`]: it did not get through.
+    pub fn fail_nth(&self, n: usize, error: DiscordError) {
+        *lock(&self.failing_call) = Some((n, error));
     }
 
     /// Declares that `channel` belongs to `guild`. Channels never declared do not exist.
@@ -79,6 +87,20 @@ impl MockApi {
 #[async_trait]
 impl DiscordApi for MockApi {
     async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
+        let injected = {
+            let mut slot = lock(&self.failing_call);
+            match slot.take() {
+                Some((1, error)) => Some(error),
+                Some((n, error)) => {
+                    *slot = Some((n - 1, error));
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(error) = injected {
+            return Err(error);
+        }
         lock(&self.actions).push(action);
         match lock(&self.failure).clone() {
             Some(error) => Err(error),

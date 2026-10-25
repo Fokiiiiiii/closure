@@ -175,11 +175,15 @@ async fn add(cx: closure_sdk::CommandCx, args: Add) -> Result<(), UserError> {
     let config: Config = cx.config()?;
     // Looked at first so a member who is full costs no number and no job; looked at again when
     // storing, where the list is the one this write replaces.
-    if read(cx.store(), user).await?.0.len() >= MAX_ACTIVE {
+    let (warnings, _) = read(cx.store(), user).await?;
+    if warnings.len() >= MAX_ACTIVE {
         return Err(full(user));
     }
 
-    let id = cx.store().counter_add(NUMBERS, user, 1).await?;
+    // Warnings stored before the counter existed carry numbers the counter does not know of.
+    let counted = cx.store().counter_add(NUMBERS, user, 1).await?;
+    let highest = warnings.iter().map(|warning| warning.id).max().unwrap_or(0);
+    let id = counted.max(highest + 1);
     // The job first: one for a warning that was not stored does nothing (and is taken back
     // below), but a warning without its job would never expire.
     let days = u64::from(config.expire_days);
@@ -202,7 +206,9 @@ async fn add(cx: closure_sdk::CommandCx, args: Add) -> Result<(), UserError> {
             return Err(error);
         }
     };
-    cx.store().counter_add(ISSUED, user, 1).await?;
+    // Only a statistic: a warning that is stored must not turn into an error because the count
+    // could not be kept.
+    let _ = cx.store().counter_add(ISSUED, user, 1).await;
     cx.reply_private_t(
         "warn-added",
         &Args::new()

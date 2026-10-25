@@ -340,6 +340,12 @@ impl ModuleBuilder {
                 route,
                 "is not a usable route: it must not be empty or contain `:`".to_owned(),
             ));
+        } else if self.manifest.id.as_str().len() + route.len() + 4 > 100 {
+            // The shortest custom_id of the route is "{module}:{route}:*:".
+            self.problem.get_or_insert(self.invalid(
+                route,
+                "makes a custom_id longer than Discord allows (100 characters)".to_owned(),
+            ));
         }
     }
 
