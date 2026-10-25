@@ -340,7 +340,7 @@ impl ModuleBuilder {
                 route,
                 "is not a usable route: it must not be empty or contain `:`".to_owned(),
             ));
-        } else if self.manifest.id.as_str().len() + route.len() + 4 > 100 {
+        } else if self.manifest.id.as_str().chars().count() + route.chars().count() + 4 > 100 {
             // The shortest custom_id of the route is "{module}:{route}:*:".
             self.problem.get_or_insert(self.invalid(
                 route,

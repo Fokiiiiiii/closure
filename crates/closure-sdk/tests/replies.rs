@@ -1,5 +1,5 @@
 //! How a handler's answers turn into responses, follow-ups and edits.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use closure_core::action::InteractionReply;
 use closure_sdk::testing::{Click, Harness, Invocation, ReplyKind};
@@ -78,6 +78,50 @@ fn module() -> ModuleBuilder {
         .component("open", |cx| async move {
             cx.defer_update().await?;
             cx.reply_private("only you").await
+        })
+        .command(
+            Command::<()>::new(
+                "ask-update",
+                "Asks with two buttons that change the message",
+            )
+            .handler(|cx, ()| async move {
+                let fresh = CustomId::new("update").encode(cx.module());
+                let deferred = CustomId::new("update-after-defer").encode(cx.module());
+                cx.reply_with(InteractionReply {
+                    content: Some("choose".into()),
+                    components: vec![row([
+                        button(ButtonStyle::Primary, "Fresh", fresh),
+                        button(ButtonStyle::Primary, "Deferred", deferred),
+                    ])],
+                    ..InteractionReply::default()
+                })
+                .await
+            }),
+        )
+        .component("update", |cx| async move {
+            let secret = InteractionReply {
+                content: Some("secret".into()),
+                ephemeral: true,
+                ..InteractionReply::default()
+            };
+            if cx.update(secret).await.is_err() {
+                cx.reply_private("only you").await
+            } else {
+                Ok(())
+            }
+        })
+        .component("update-after-defer", |cx| async move {
+            cx.defer_update().await?;
+            let secret = InteractionReply {
+                content: Some("secret".into()),
+                ephemeral: true,
+                ..InteractionReply::default()
+            };
+            if cx.update(secret).await.is_err() {
+                cx.reply_private("only you").await
+            } else {
+                Ok(())
+            }
         })
         .command(
             Command::<()>::new(
@@ -162,6 +206,37 @@ async fn a_private_answer_after_acknowledging_a_click_does_not_rewrite_the_messa
     assert_eq!(kinds, [ReplyKind::Acknowledged, ReplyKind::Followup]);
     assert_eq!(replies[1].content, "only you");
     assert!(replies[1].ephemeral, "the answer goes to the user alone");
+}
+
+#[tokio::test]
+async fn an_update_cannot_be_private_because_it_changes_a_shared_message() {
+    let harness = Harness::new(module()).unwrap();
+    let asked = harness.invoke(Invocation::new("ask-update")).await.unwrap();
+    let ids = asked[0].custom_ids();
+
+    let fresh = harness.click(Click::new(ids[0].clone())).await.unwrap();
+    let kinds: Vec<ReplyKind> = fresh.iter().map(|reply| reply.kind).collect();
+    assert_eq!(kinds, [ReplyKind::Response], "{fresh:?}");
+    assert!(fresh[0].ephemeral);
+    assert_eq!(fresh[0].content, "only you");
+
+    let deferred = harness.click(Click::new(ids[1].clone())).await.unwrap();
+    let kinds: Vec<ReplyKind> = deferred.iter().map(|reply| reply.kind).collect();
+    assert_eq!(
+        kinds,
+        [ReplyKind::Acknowledged, ReplyKind::Followup],
+        "{deferred:?}"
+    );
+    assert!(deferred[1].ephemeral);
+    assert_eq!(deferred[1].content, "only you");
+
+    assert!(
+        fresh
+            .iter()
+            .chain(&deferred)
+            .all(|reply| reply.content != "secret"),
+        "the secret went into the shared message: {fresh:?} {deferred:?}"
+    );
 }
 
 #[tokio::test]

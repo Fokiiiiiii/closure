@@ -6,7 +6,8 @@
 //!
 //! A user's warnings are one entry of the module's storage (`user:{id}`), changed with
 //! compare-and-set so two moderators warning at once do not lose each other's warning. Each
-//! warning has an id from a counter and a job that removes it after `expire_days`; removing a
+//! warning has an id that the entry hands out with the write that stores it, and a job that
+//! removes it after `expire_days`; removing a
 //! warning by id does nothing when it is already gone, so the job may safely run twice.
 
 use std::time::Duration;
@@ -30,9 +31,6 @@ const MAX_ACTIVE: usize = 25;
 const SHOWN: usize = 10;
 /// How many characters of a reason `/warn list` shows.
 const REASON_SHOWN: usize = 80;
-/// The counter that numbers a member's warnings; it never goes down, and a number whose warning
-/// could not be stored is simply not used.
-const NUMBERS: &str = "numbers";
 /// The counter of the warnings that were really given.
 const ISSUED: &str = "issued";
 /// How often a change is tried again when somebody else changed the same entry meanwhile.
@@ -60,6 +58,44 @@ struct Warning {
     id: i64,
     reason: Option<String>,
     by: u64,
+}
+
+/// What a member's entry keeps: the warnings, and the number the next one gets. The number is
+/// taken in the same write that stores the warning, so no two warnings share one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Stored {
+    next: i64,
+    warnings: Vec<Warning>,
+}
+
+impl Stored {
+    fn empty() -> Self {
+        Self {
+            next: 1,
+            warnings: Vec::new(),
+        }
+    }
+}
+
+/// An entry is either the current [`Stored`] or, from before the numbers were kept in it, a plain
+/// list of warnings.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Saved {
+    Current(Stored),
+    Legacy(Vec<Warning>),
+}
+
+impl From<Saved> for Stored {
+    fn from(saved: Saved) -> Self {
+        match saved {
+            Saved::Current(stored) => stored,
+            Saved::Legacy(warnings) => Self {
+                next: warnings.iter().map(|warning| warning.id).max().unwrap_or(0) + 1,
+                warnings,
+            },
+        }
+    }
 }
 
 /// What the job that removes a warning needs.
@@ -107,33 +143,33 @@ fn module_error(error: UserError) -> ModuleError {
     }
 }
 
-/// The warnings of a member, and the revision they were read at.
-async fn read(store: &Store, user: u64) -> Result<(Vec<Warning>, Expect), UserError> {
+/// The entry of a member as it is, and the revision it was read at.
+async fn read(store: &Store, user: u64) -> Result<(Stored, Expect), UserError> {
     match store.entry(&entry_key(user)).await? {
         Some(entry) => {
-            let list = serde_json::from_value(entry.value)
+            let saved: Saved = serde_json::from_value(entry.value)
                 .map_err(|error| ModuleError::other(format!("a stored warning list: {error}")))?;
-            Ok((list, Expect::Revision(entry.revision)))
+            Ok((saved.into(), Expect::Revision(entry.revision)))
         }
-        None => Ok((Vec::new(), Expect::Missing)),
+        None => Ok((Stored::empty(), Expect::Missing)),
     }
 }
 
-/// Changes the warnings of a member and returns them as they are now.
+/// Changes the entry of a member and returns it as it is now.
 async fn change(
     store: &Store,
     user: u64,
-    mut edit: impl FnMut(&mut Vec<Warning>) -> Result<(), UserError>,
-) -> Result<Vec<Warning>, UserError> {
+    mut edit: impl FnMut(&mut Stored) -> Result<(), UserError>,
+) -> Result<Stored, UserError> {
     for _ in 0..TRIES {
-        let (mut list, expect) = read(store, user).await?;
-        edit(&mut list)?;
-        if list.is_empty() && expect == Expect::Missing {
-            return Ok(list);
+        let (mut saved, expect) = read(store, user).await?;
+        edit(&mut saved)?;
+        if saved.warnings.is_empty() && expect == Expect::Missing {
+            return Ok(saved);
         }
-        let ttl = list.is_empty().then_some(EMPTY_KEPT);
-        match store.replace(&entry_key(user), &list, expect, ttl).await {
-            Ok(_) => return Ok(list),
+        let ttl = saved.warnings.is_empty().then_some(EMPTY_KEPT);
+        match store.replace(&entry_key(user), &saved, expect, ttl).await {
+            Ok(_) => return Ok(saved),
             Err(StorageError::Conflict) => {}
             Err(error) => return Err(error.into()),
         }
@@ -141,14 +177,37 @@ async fn change(
     Err(ModuleError::other("the warnings are being changed too often").into())
 }
 
-/// Adds a warning unless the member is full. Run on the list that is being replaced, so a
-/// warning given at the same moment as another cannot take the member over the limit.
-fn push(list: &mut Vec<Warning>, user: u64, warning: Warning) -> Result<(), UserError> {
-    if list.len() >= MAX_ACTIVE {
+/// Gives the next number to a new warning unless the member is full. Runs on the entry that is
+/// being replaced, so a warning given at the same moment as another gets a number of its own
+/// and cannot take the member over the limit.
+fn push(saved: &mut Stored, user: u64, reason: Option<&str>, by: u64) -> Result<i64, UserError> {
+    if saved.warnings.len() >= MAX_ACTIVE {
         return Err(full(user));
     }
-    list.push(warning);
-    Ok(())
+    let id = saved.next;
+    saved.next += 1;
+    saved.warnings.push(Warning {
+        id,
+        reason: reason.map(str::to_owned),
+        by,
+    });
+    Ok(id)
+}
+
+/// Stores a new warning of a member and returns its number with the entry as it is now.
+async fn give(
+    store: &Store,
+    user: u64,
+    reason: Option<&str>,
+    by: u64,
+) -> Result<(i64, Stored), UserError> {
+    let mut id = 0;
+    let stored = change(store, user, |saved| {
+        id = push(saved, user, reason, by)?;
+        Ok(())
+    })
+    .await?;
+    Ok((id, stored))
 }
 
 fn full(user: u64) -> UserError {
@@ -173,39 +232,34 @@ async fn add(cx: closure_sdk::CommandCx, args: Add) -> Result<(), UserError> {
         return Err(UserError::message("warn-self"));
     }
     let config: Config = cx.config()?;
-    // Looked at first so a member who is full costs no number and no job; looked at again when
-    // storing, where the list is the one this write replaces.
-    let (warnings, _) = read(cx.store(), user).await?;
-    if warnings.len() >= MAX_ACTIVE {
+    // Looked at first so a member who is full costs no job; the limit is checked again when storing.
+    if read(cx.store(), user).await?.0.warnings.len() >= MAX_ACTIVE {
         return Err(full(user));
     }
 
-    // Warnings stored before the counter existed carry numbers the counter does not know of.
-    let counted = cx.store().counter_add(NUMBERS, user, 1).await?;
-    let highest = warnings.iter().map(|warning| warning.id).max().unwrap_or(0);
-    let id = counted.max(highest + 1);
-    // The job first: one for a warning that was not stored does nothing (and is taken back
-    // below), but a warning without its job would never expire.
+    let (id, stored) = give(cx.store(), user, args.reason.as_deref(), moderator.get()).await?;
+    // Booked after the warning is stored. If that fails, the warning is taken back, so that none
+    // is kept without its expiry; its number stays used.
     let days = u64::from(config.expire_days);
-    cx.scheduler()
-        .job("expire", &Expire { user, id })?
-        .key(&expire_key(user, id))
-        .after(Duration::from_secs(days * 86_400))
-        .await?;
-    let warning = Warning {
-        id,
-        reason: args.reason.clone(),
-        by: moderator.get(),
-    };
-    let stored = change(cx.store(), user, |list| push(list, user, warning.clone())).await;
-    let list = match stored {
-        Ok(list) => list,
-        Err(error) => {
-            // Best effort: a job left behind finds no warning and does nothing.
-            let _ = cx.scheduler().cancel(&expire_key(user, id)).await;
-            return Err(error);
-        }
-    };
+    let booked: Result<(), UserError> = async {
+        cx.scheduler()
+            .job("expire", &Expire { user, id })?
+            .key(&expire_key(user, id))
+            .after(Duration::from_secs(days * 86_400))
+            .await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = booked {
+        // If taking it back fails too, the warning stays without its expiry; the booking error is
+        // still the one reported.
+        let _ = change(cx.store(), user, |saved| {
+            saved.warnings.retain(|warning| warning.id != id);
+            Ok(())
+        })
+        .await;
+        return Err(error);
+    }
     // Only a statistic: a warning that is stored must not turn into an error because the count
     // could not be kept.
     let _ = cx.store().counter_add(ISSUED, user, 1).await;
@@ -213,7 +267,7 @@ async fn add(cx: closure_sdk::CommandCx, args: Add) -> Result<(), UserError> {
         "warn-added",
         &Args::new()
             .with("user", mention(user))
-            .with("active", count(list.len()))
+            .with("active", count(stored.warnings.len()))
             .with("days", i64::from(config.expire_days)),
     )
     .await
@@ -221,7 +275,7 @@ async fn add(cx: closure_sdk::CommandCx, args: Add) -> Result<(), UserError> {
 
 async fn list(cx: closure_sdk::CommandCx, args: Target) -> Result<(), UserError> {
     let user = args.user.get();
-    let (warnings, _) = read(cx.store(), user).await?;
+    let (Stored { warnings, .. }, _) = read(cx.store(), user).await?;
     if warnings.is_empty() {
         return cx
             .reply_private_t("warn-none", &Args::new().with("user", mention(user)))
@@ -260,7 +314,7 @@ async fn list(cx: closure_sdk::CommandCx, args: Target) -> Result<(), UserError>
 /// Asks before removing anything: the buttons work for the moderator who asked only.
 async fn clear(cx: closure_sdk::CommandCx, args: Target) -> Result<(), UserError> {
     let user = args.user.get();
-    let (warnings, _) = read(cx.store(), user).await?;
+    let (Stored { warnings, .. }, _) = read(cx.store(), user).await?;
     if warnings.is_empty() {
         return cx
             .reply_private_t("warn-none", &Args::new().with("user", mention(user)))
@@ -307,8 +361,8 @@ async fn confirm_clear(cx: ComponentCx) -> Result<(), UserError> {
         .parse()
         .map_err(|_| ModuleError::other("the button names no member"))?;
     let mut removed = Vec::new();
-    change(cx.store(), user, |list| {
-        removed = std::mem::take(list);
+    change(cx.store(), user, |saved| {
+        removed = std::mem::take(&mut saved.warnings);
         Ok(())
     })
     .await?;
@@ -393,8 +447,8 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .component("keep", keep)
             .job("expire", |cx| async move {
                 let Expire { user, id } = cx.payload()?;
-                change(cx.store(), user, |list| {
-                    list.retain(|warning| warning.id != id);
+                change(cx.store(), user, |saved| {
+                    saved.warnings.retain(|warning| warning.id != id);
                     Ok(())
                 })
                 .await
@@ -429,12 +483,14 @@ mod tests {
         }
     }
 
-    /// Storage where somebody else writes the entry once, right before the first write that
-    /// expects a revision: what two moderators warning the same member at the same time cause.
+    /// Storage where somebody else adds a warning once, right before the first conditional write
+    /// made after `armed` is set: what two moderators warning the same member at the same time
+    /// cause.
     struct Rival {
         inner: MemoryStorage,
-        extra: Warning,
+        armed: AtomicBool,
         done: AtomicBool,
+        reason: &'static str,
     }
 
     type Id = closure_sdk::GuildId;
@@ -459,11 +515,25 @@ mod tests {
             ttl: Option<Duration>,
             expect: Expect,
         ) -> Result<i64, StorageError> {
-            if matches!(expect, Expect::Revision(_)) && !self.done.swap(true, Ordering::SeqCst) {
-                let entry = self.inner.get(module, guild, key).await?.unwrap();
-                let mut list: Vec<Warning> = serde_json::from_value(entry.value).unwrap();
-                list.push(self.extra.clone());
-                let value = serde_json::to_value(list).unwrap();
+            let conditional = matches!(expect, Expect::Revision(_) | Expect::Missing);
+            if self.armed.load(Ordering::SeqCst)
+                && conditional
+                && !self.done.swap(true, Ordering::SeqCst)
+            {
+                let mut saved = match self.inner.get(module, guild, key).await? {
+                    Some(entry) => {
+                        Stored::from(serde_json::from_value::<Saved>(entry.value).unwrap())
+                    }
+                    None => Stored::empty(),
+                };
+                let id = saved.next;
+                saved.next += 1;
+                saved.warnings.push(Warning {
+                    id,
+                    reason: Some(self.reason.to_owned()),
+                    by: 2,
+                });
+                let value = serde_json::to_value(&saved).unwrap();
                 self.inner
                     .put(module, guild, key, value, None, Expect::Any)
                     .await?;
@@ -529,33 +599,69 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_warning_added_at_the_same_moment_cannot_take_a_member_over_the_limit() {
-        let backend = Arc::new(Rival {
+    fn rival(reason: &'static str) -> Arc<Rival> {
+        Arc::new(Rival {
             inner: MemoryStorage::default(),
-            extra: warning(100),
+            armed: AtomicBool::new(false),
             done: AtomicBool::new(false),
-        });
+            reason,
+        })
+    }
+
+    fn store_of(backend: &Arc<Rival>) -> Store {
         let granted: CapabilitySet = [Capability::Storage].into_iter().collect();
-        let store = Store::new(
-            Arc::clone(&backend) as Arc<dyn StorageBackend>,
+        Store::new(
+            Arc::clone(backend) as Arc<dyn StorageBackend>,
             &granted,
             closure_sdk::ModuleId::new("warn").unwrap(),
             twilight_model::id::Id::new(1),
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn a_warning_added_at_the_same_moment_cannot_take_a_member_over_the_limit() {
+        let backend = rival("the rival's");
+        let store = store_of(&backend);
         let user = 7;
-        change(&store, user, |list| {
-            list.extend((1..=24).map(warning));
+        change(&store, user, |saved| {
+            saved.warnings.extend((1..=24).map(warning));
+            saved.next = 25;
             Ok(())
         })
         .await
         .unwrap();
 
+        backend.armed.store(true, Ordering::SeqCst);
         // This one saw 24 and goes on; the rival's write makes 25 before it is stored.
-        let result = change(&store, user, |list| push(list, user, warning(101))).await;
+        let result = give(&store, user, Some("the 26th"), 1).await;
 
         assert!(result.is_err(), "the 26th is refused");
-        let (list, _) = read(&store, user).await.unwrap();
-        assert_eq!(list.len(), 25, "24 and the rival's");
+        let (saved, _) = read(&store, user).await.unwrap();
+        assert_eq!(saved.warnings.len(), 25, "24 and the rival's");
+    }
+
+    #[tokio::test]
+    async fn two_warnings_added_at_the_same_moment_get_different_numbers() {
+        let backend = rival("the rival's");
+        let store = store_of(&backend);
+        let user = 7;
+
+        backend.armed.store(true, Ordering::SeqCst);
+        // Both saw no warning; the rival's write lands first, so the first try of this one fails.
+        let (number, _) = give(&store, user, Some("ours"), 1).await.unwrap();
+
+        let (saved, _) = read(&store, user).await.unwrap();
+        assert_eq!(saved.warnings.len(), 2, "{saved:?}");
+        let mut numbers: Vec<i64> = saved.warnings.iter().map(|warning| warning.id).collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        assert_eq!(numbers.len(), 2, "two numbers for two warnings: {saved:?}");
+        assert!(
+            saved
+                .warnings
+                .iter()
+                .any(|warning| warning.id == number && warning.reason.as_deref() == Some("ours")),
+            "{saved:?}"
+        );
     }
 }

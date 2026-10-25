@@ -561,6 +561,38 @@ fn a_route_that_makes_every_custom_id_too_long_is_refused() {
 }
 
 #[test]
+fn a_route_is_measured_in_characters_not_bytes() {
+    // Discord counts a custom_id in characters: "あ" is one, though it is three bytes.
+    let fits = "あ".repeat(94);
+    let too_long = "あ".repeat(95);
+    let module = || ModuleBuilder::new("ui", "u", "0.1.0").unwrap();
+    assert!(
+        module()
+            .component(&fits, |_cx| async { Ok(()) })
+            .build()
+            .is_ok()
+    );
+    assert!(
+        module()
+            .component(&too_long, |_cx| async { Ok(()) })
+            .build()
+            .is_err()
+    );
+    assert!(
+        module()
+            .modal(&fits, |_cx| async { Ok(()) })
+            .build()
+            .is_ok()
+    );
+    assert!(
+        module()
+            .modal(&too_long, |_cx| async { Ok(()) })
+            .build()
+            .is_err()
+    );
+}
+
+#[test]
 fn a_subcommand_cannot_carry_what_only_a_command_can() {
     let group = ModuleBuilder::new("warn", "w", "0.1.0").unwrap().group(
         "warn",

@@ -55,7 +55,8 @@ What the SDK does for each command:
   `UserError`, `reply_private`) finishes the public message with "Done." and goes to the user as a
   follow-up; use `cx.defer(true)` when the answer is private;
 - on a click, `cx.defer_update()` acknowledges it and `cx.update(..)` changes the message
-  afterwards; an update takes off the embeds and components the reply does not have;
+  afterwards; an update takes off the embeds and components the reply does not have, and it
+  cannot be private (the message belongs to everyone): a private answer to a click is `reply_private`;
 - `cx.require("warn.add")`, `cx.level()` and `cx.actor()` are there for checks inside a handler
   (`require` asks about your module's own keys only);
 - subcommands: `.group("warnings", "Look at warnings", [Command::<A>::new("show", ..).handler(..), ..])`.

@@ -504,7 +504,13 @@ impl ComponentCx {
     /// Answers the click by changing the message the component is on: its text, embeds and
     /// components (those the reply does not have are taken off). Works as the first answer, or
     /// after [`Self::defer_update`].
+    /// Refuses a private reply, since the message everyone sees cannot be private ([`Self::reply_private`]).
     pub async fn update(&self, reply: InteractionReply) -> Result<(), UserError> {
+        if reply.ephemeral {
+            return Err(UserError::Module(ModuleError::other(
+                "an update changes the message the component is on, which everyone sees; answer privately with reply_private",
+            )));
+        }
         let mut phase = self.answers.phase.lock().await;
         let before = *phase;
         let result = match before {

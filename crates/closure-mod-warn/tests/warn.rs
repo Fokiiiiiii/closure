@@ -326,3 +326,35 @@ async fn a_new_warning_never_takes_the_number_of_an_older_one() {
     assert!(text(&list).contains("#2 new"), "{list:?}");
     assert_eq!(harness.jobs(), 1);
 }
+
+#[tokio::test]
+async fn a_failed_warning_does_not_take_the_expiry_of_another_one_with_it() {
+    let harness = harness();
+    harness.invoke(add(MEMBER, "first")).await.unwrap();
+    harness.advance(Duration::from_secs(5));
+    // Fills the scheduler, so that booking the expiry of the next warning fails.
+    let scheduler = harness.scheduler();
+    for n in 0..(closure_core::schedule::MAX_JOBS - harness.jobs()) {
+        scheduler
+            .job("fill", &n)
+            .unwrap()
+            .key(&format!("f{n}"))
+            .after(Duration::from_secs(3600))
+            .await
+            .unwrap();
+    }
+    assert_eq!(harness.jobs(), closure_core::schedule::MAX_JOBS);
+
+    assert!(harness.invoke(add(MEMBER, "second")).await.is_err());
+    assert_eq!(
+        harness.jobs(),
+        closure_core::schedule::MAX_JOBS,
+        "the expiry of the first warning is still booked"
+    );
+    let list = harness
+        .invoke(sub("list", MEMBER).roles([MODERATOR_ROLE]))
+        .await
+        .unwrap();
+    assert!(text(&list).contains("1 active"), "{list:?}");
+    assert!(text(&list).contains("#1 first"), "{list:?}");
+}
