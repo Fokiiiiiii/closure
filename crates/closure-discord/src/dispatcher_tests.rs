@@ -50,6 +50,8 @@ enum Behavior {
     HoldThenReplay,
     /// Logs the guild policy the module was given.
     ReadPolicy,
+    /// Logs the bot's own user id as the context carries it.
+    ReadBot,
     /// Counts the events it sees in its own storage and logs the total.
     CountEvents,
     /// Answers the click it got, then tries a token it was never given.
@@ -286,6 +288,8 @@ fn label(event: &Event) -> String {
     }
 }
 
+// The probe has one arm per behaviour, so its `on_event` grows with every test that needs one.
+#[allow(clippy::too_many_lines)]
 #[async_trait]
 impl Module for Probe {
     fn manifest(&self) -> &ModuleManifest {
@@ -357,6 +361,13 @@ impl Module for Probe {
             Behavior::RecordCase => self.record_case(ctx).await,
             Behavior::ReadPolicy => {
                 self.read_policy(ctx);
+                Ok(())
+            }
+            Behavior::ReadBot => {
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("bot:{:?}", ctx.bot().map(Id::get)));
                 Ok(())
             }
             Behavior::HoldThenReplay => {
@@ -954,6 +965,54 @@ async fn modules_are_given_the_guilds_policy() {
     dispatcher.flush().await;
 
     assert_eq!(probe.log(), ["load", "msg:1", "policy:Some(9):true"]);
+}
+
+#[tokio::test]
+async fn the_bot_id_reaches_the_events_commands_and_jobs_of_a_module() {
+    let mut module = Probe::new(
+        "tools",
+        &[EventKind::MessageCreated],
+        &[Capability::Schedule],
+    );
+    Arc::get_mut(&mut module)
+        .unwrap()
+        .manifest
+        .commands
+        .push(CommandSpec {
+            name: "ping".into(),
+            description: "d".into(),
+            options: vec![],
+            subcommands: vec![],
+            default_member_permissions: None,
+        });
+    module.set(Behavior::ReadBot);
+    let config = DispatcherConfig {
+        bot_id: Some(Id::new(60)),
+        ..DispatcherConfig::default()
+    };
+    let h = harness(&[(&module, true)], limits(64, 4), config).await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.flush().await;
+    h.dispatcher.dispatch(command("ping", None));
+    h.dispatcher.flush().await;
+    assert_eq!(
+        h.dispatcher.run_job(due_job("tools")).await,
+        JobOutcome::Done
+    );
+
+    assert_eq!(
+        module.log(),
+        [
+            "load",
+            "msg:1",
+            "bot:Some(60)",
+            "command",
+            "bot:Some(60)",
+            "scheduled",
+            "bot:Some(60)",
+        ]
+    );
 }
 
 #[tokio::test]

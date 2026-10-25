@@ -44,6 +44,7 @@ pub mod embed;
 mod error;
 pub mod modlog;
 mod module;
+pub mod punish;
 pub mod testing;
 pub mod ui;
 

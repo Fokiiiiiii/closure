@@ -245,7 +245,11 @@ async fn serve(
                 Arc::clone(&core.store) as Arc<dyn SettingsProvider>,
                 api,
                 Arc::clone(&core.translator),
-                DispatcherConfig::default(),
+                // A bot's user id is its application id.
+                DispatcherConfig {
+                    bot_id: Some(Id::new(args.application_id.get())),
+                    ..DispatcherConfig::default()
+                },
                 Arc::new(db.clone()) as Arc<dyn StorageBackend>,
                 Arc::new(db.clone()) as Arc<dyn SchedulerBackend>,
                 Arc::new(db.clone()) as Arc<dyn CaseBackend>,

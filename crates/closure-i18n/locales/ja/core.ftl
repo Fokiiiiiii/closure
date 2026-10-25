@@ -47,3 +47,21 @@ modlog-no-reason = 理由なし
 modlog-expires = 期限
 modlog-revoked = 取り消し
 modlog-revoked-by = { $who }（{ $when }）
+
+# Punishments the SDK gives (closure-sdk `punish`): the direct messages, the notes and the errors.
+punish-dm-warned = サーバーで警告を受けました。理由: { $reason } (有効な警告: { $active } 件)
+punish-dm-kicked = サーバーからキックされました。理由: { $reason }
+punish-dm-timed-out = サーバーで { $duration } タイムアウトされました。理由: { $reason }
+punish-dm-banned = サーバーから BAN されました。理由: { $reason }
+punish-dm-banned-for = サーバーから { $duration } の間 BAN されました。理由: { $reason }
+punish-dm-voice-muted = サーバーのボイスチャンネルでミュートされました。理由: { $reason }
+punish-dm-voice-muted-for = サーバーのボイスチャンネルで { $duration } の間ミュートされました。理由: { $reason }
+punish-dm-not-delivered = (ダイレクトメッセージは届きませんでした。)
+punish-reason-none = 理由なし
+punish-timeout-no-timer = タイムアウトは期間が過ぎても解除されません。タイマーを設定できませんでした。
+punish-ban-no-timer = 期間が過ぎても解除されません。タイマーを設定できませんでした。
+punish-vc-no-timer = ボイスミュートは期間が過ぎても解除されません。タイマーを設定できませんでした。
+punish-timeout-too-long = Discord のタイムアウトは最長 28 日です。
+punish-timeout-role-missing = ロールによるタイムアウトには、設定の timeout_role にロールが必要です。
+punish-voice-role-missing = ロールによるボイスミュートには、設定の voice_mute_role にロールが必要です。
+punish-ban-delete-days-range = 削除するメッセージの日数は 0 から 7 までです。

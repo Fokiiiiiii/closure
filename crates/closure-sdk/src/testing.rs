@@ -19,7 +19,7 @@ use closure_core::client::ApiClient;
 use closure_core::error::ModuleError;
 use closure_core::event::{
     CommandInvocation, CommandOption, CommandOptionValue, ComponentInvocation, Event, GuildId,
-    InteractionToken, ModalSubmission, UserInfo,
+    InteractionToken, ModalSubmission, UserId, UserInfo,
 };
 use closure_core::interaction::InteractionGuilds;
 use closure_core::locale::{Locale, Translator};
@@ -273,6 +273,7 @@ pub struct Harness {
     policy: Mutex<GuildPolicy>,
     locale: Mutex<Locale>,
     next: AtomicU64,
+    bot: Mutex<Option<UserId>>,
 }
 
 impl std::fmt::Debug for Harness {
@@ -286,6 +287,9 @@ const GUILD: u64 = 1;
 
 /// Who owns the server when the invocation does not say its user does.
 const OTHER_OWNER: u64 = 999_999_999;
+
+/// The bot's own user id (its application id) in every run, until a test changes it.
+const BOT: u64 = 9_999;
 
 impl Harness {
     /// Builds the module on a clock the test controls ([`Self::advance`]) and makes its
@@ -342,6 +346,7 @@ impl Harness {
             policy: Mutex::new(GuildPolicy::default()),
             locale: Mutex::new(Locale::DEFAULT),
             next: AtomicU64::new(1),
+            bot: Mutex::new(Some(Id::new(BOT))),
             module,
         })
     }
@@ -373,6 +378,18 @@ impl Harness {
     /// Sets the guild's language (English when not set).
     pub fn set_guild_locale(&self, locale: Locale) {
         *self.locale.lock().unwrap_or_else(PoisonError::into_inner) = locale;
+    }
+
+    /// The bot's own user id that the module's contexts carry (`9999` unless changed); `None`
+    /// when the host does not know it.
+    #[must_use]
+    pub fn bot_id(&self) -> Option<UserId> {
+        *self.bot.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Changes, or with `None` removes, the bot's own user id.
+    pub fn set_bot_id(&self, bot: Option<UserId>) {
+        *self.bot.lock().unwrap_or_else(PoisonError::into_inner) = bot;
     }
 
     /// Lets time pass for the cooldowns.
@@ -494,7 +511,7 @@ impl Harness {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        EventContext::new(
+        let context = EventContext::new(
             manifest.id.clone(),
             guild,
             client,
@@ -530,7 +547,11 @@ impl Harness {
         .with_clock({
             let clock = Arc::clone(&self.clock);
             move || clock()
-        })
+        });
+        match self.bot_id() {
+            Some(bot) => context.with_bot(bot),
+            None => context,
+        }
     }
 
     /// Delivers an event the way the dispatcher would: only if the module subscribed to its kind

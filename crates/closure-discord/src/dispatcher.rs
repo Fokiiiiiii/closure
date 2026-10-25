@@ -19,7 +19,7 @@ use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::cases::{CaseBackend, Cases, MemoryCases};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
-use closure_core::event::{Event, GuildId, InteractionRef};
+use closure_core::event::{Event, GuildId, InteractionRef, UserId};
 use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{EventContext, Module, ModuleId};
@@ -64,6 +64,9 @@ pub struct DispatcherConfig {
     pub reap_every: Duration,
     /// How many interactions may be waiting for an answer; see [`InteractionLimits`].
     pub interaction_limits: InteractionLimits,
+    /// The bot's own user id (its application id), given to every module call. `None` when
+    /// unknown, as in tests that do not need it.
+    pub bot_id: Option<UserId>,
 }
 
 impl Default for DispatcherConfig {
@@ -73,6 +76,7 @@ impl Default for DispatcherConfig {
             idle_after: Duration::from_secs(60),
             reap_every: Duration::from_secs(30),
             interaction_limits: InteractionLimits::default(),
+            bot_id: None,
         }
     }
 }
@@ -857,7 +861,7 @@ fn context_for(
     )
     .with_interactions(Arc::clone(&shared.interactions))
     .scoped_to(guild);
-    EventContext::new(
+    let context = EventContext::new(
         id.clone(),
         guild,
         api,
@@ -884,7 +888,11 @@ fn context_for(
         &settings.granted,
         id.clone(),
         guild,
-    ))
+    ));
+    match shared.config.bot_id {
+        Some(bot) => context.with_bot(bot),
+        None => context,
+    }
 }
 
 /// Updates the breaker and logs. An error from Discord (forbidden, not found, ...) means the

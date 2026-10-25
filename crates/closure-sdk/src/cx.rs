@@ -327,26 +327,7 @@ impl<I: InteractionRef + 'static> Cx<I> {
     /// server's language for a message to a member or for the log.
     #[must_use]
     pub fn format_duration_in(&self, locale: Locale, duration: Duration) -> String {
-        const UNITS: [(u64, &str); 4] = [
-            (86_400, "sdk-unit-day"),
-            (3_600, "sdk-unit-hour"),
-            (60, "sdk-unit-minute"),
-            (1, "sdk-unit-second"),
-        ];
-        let mut seconds = duration.as_secs();
-        let mut parts = Vec::new();
-        for (size, key) in UNITS {
-            let count = seconds / size;
-            seconds %= size;
-            if count > 0 && parts.len() < 2 {
-                let count = i64::try_from(count).unwrap_or(i64::MAX);
-                parts.push(self.ctx.t_core(locale, key, &Args::new().with("n", count)));
-            }
-        }
-        if parts.is_empty() {
-            return self.ctx.t_core(locale, "sdk-duration-none", &Args::new());
-        }
-        parts.join(" ")
+        crate::duration::format_in(&self.ctx, locale, duration)
     }
 
     /// Whether anything was answered yet (a deferral counts).

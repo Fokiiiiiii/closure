@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use closure_core::locale::{Args, Locale};
+use closure_core::module::EventContext;
 use closure_core::schedule::MAX_DELAY;
 use thiserror::Error;
 
@@ -84,6 +86,32 @@ impl TimeStyle {
 #[must_use]
 pub fn timestamp(unix_seconds: i64, style: TimeStyle) -> String {
     format!("<t:{unix_seconds}:{}>", style.code())
+}
+
+/// A length of time in `locale`, in its two largest units that are not zero. Weeks are counted in
+/// days. Used for what is said to a member or to the log, in the server's language.
+#[must_use]
+pub fn format_in(ctx: &EventContext, locale: Locale, duration: Duration) -> String {
+    const UNITS: [(u64, &str); 4] = [
+        (86_400, "sdk-unit-day"),
+        (3_600, "sdk-unit-hour"),
+        (60, "sdk-unit-minute"),
+        (1, "sdk-unit-second"),
+    ];
+    let mut seconds = duration.as_secs();
+    let mut parts = Vec::new();
+    for (size, key) in UNITS {
+        let count = seconds / size;
+        seconds %= size;
+        if count > 0 && parts.len() < 2 {
+            let count = i64::try_from(count).unwrap_or(i64::MAX);
+            parts.push(ctx.t_core(locale, key, &Args::new().with("n", count)));
+        }
+    }
+    if parts.is_empty() {
+        return ctx.t_core(locale, "sdk-duration-none", &Args::new());
+    }
+    parts.join(" ")
 }
 
 #[cfg(test)]

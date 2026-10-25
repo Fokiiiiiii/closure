@@ -13,7 +13,7 @@ use crate::capability::{Capability, CapabilitySet};
 use crate::cases::Cases;
 use crate::client::ApiClient;
 use crate::error::{CoreError, ModuleError};
-use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId};
+use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId, UserId};
 use crate::locale::{Args, Catalog, Locale, Translator};
 use crate::permission::{GuildPermissions, PermissionSpec};
 use crate::schedule::Scheduler;
@@ -478,6 +478,7 @@ pub struct EventContext {
     config: Arc<serde_json::Value>,
     translator: Arc<dyn Translator>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    bot: Option<UserId>,
 }
 
 impl fmt::Debug for EventContext {
@@ -514,7 +515,21 @@ impl EventContext {
             config,
             translator,
             clock: Arc::new(system_unix_now),
+            bot: None,
         }
+    }
+
+    /// Gives the context the bot's own user id, which is its application id.
+    #[must_use]
+    pub fn with_bot(mut self, bot: UserId) -> Self {
+        self.bot = Some(bot);
+        self
+    }
+
+    /// The bot's own user id, for a module that acts as the bot (automod has no moderator).
+    #[must_use]
+    pub fn bot(&self) -> Option<UserId> {
+        self.bot
     }
 
     /// Replaces the clock the module reads with [`Self::now`]; for tests.

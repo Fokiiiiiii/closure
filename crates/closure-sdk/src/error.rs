@@ -24,6 +24,11 @@ pub enum UserError {
         key: String,
         args: Args,
     },
+    /// A message from the SDK's catalog (`core`), such as the refusals of a punishment.
+    Sdk {
+        key: String,
+        args: Args,
+    },
     BadArgument(ArgError),
     PermissionDenied(Decision),
     Cooldown {
@@ -65,10 +70,19 @@ impl UserError {
         }
     }
 
+    /// Answers with the message `key` of the SDK's catalog.
+    #[must_use]
+    pub fn sdk(key: impl Into<String>) -> Self {
+        Self::Sdk {
+            key: key.into(),
+            args: Args::new(),
+        }
+    }
+
     /// Adds a value for the message. Does nothing to the other kinds of error.
     #[must_use]
     pub fn with(mut self, name: impl Into<String>, value: impl Into<ArgValue>) -> Self {
-        if let Self::Message { args, .. } = &mut self {
+        if let Self::Message { args, .. } | Self::Sdk { args, .. } = &mut self {
             *args = std::mem::take(args).with(name, value);
         }
         self

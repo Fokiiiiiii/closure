@@ -59,3 +59,21 @@ modlog-no-reason = No reason given
 modlog-expires = Expires
 modlog-revoked = Revoked
 modlog-revoked-by = By { $who } { $when }
+
+# Punishments the SDK gives (closure-sdk `punish`): the direct messages, the notes and the errors.
+punish-dm-warned = You were warned in a server. Reason: { $reason } (Active warnings: { $active })
+punish-dm-kicked = You were kicked from a server. Reason: { $reason }
+punish-dm-timed-out = You were timed out in a server for { $duration }. Reason: { $reason }
+punish-dm-banned = You were banned from a server. Reason: { $reason }
+punish-dm-banned-for = You were banned from a server for { $duration }. Reason: { $reason }
+punish-dm-voice-muted = You were muted in voice channels in a server. Reason: { $reason }
+punish-dm-voice-muted-for = You were muted in voice channels in a server for { $duration }. Reason: { $reason }
+punish-dm-not-delivered = (The direct message could not be delivered.)
+punish-reason-none = no reason given
+punish-timeout-no-timer = The timeout does not end by itself: its timer could not be set.
+punish-ban-no-timer = The ban does not end by itself: its timer could not be set.
+punish-vc-no-timer = The voice mute does not end by itself: its timer could not be set.
+punish-timeout-too-long = Discord allows a timeout of 28 days at most.
+punish-timeout-role-missing = Timeouts by role need a role: set timeout_role in the moderation settings.
+punish-voice-role-missing = Voice mutes by role need a role: set voice_mute_role in the moderation settings.
+punish-ban-delete-days-range = The days of messages to delete are 0 to 7.

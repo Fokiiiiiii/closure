@@ -662,6 +662,7 @@ impl SdkModule {
         let text = match error {
             UserError::Module(error) => return Err(error),
             UserError::Message { key, args } => cx.t(&key, &args),
+            UserError::Sdk { key, args } => cx.core_message(&key, &args),
             UserError::BadArgument(error) => cx.core_message(
                 "sdk-bad-argument",
                 &Args::new().with("option", error.option),
