@@ -7,6 +7,7 @@ use crate::error::CoreError;
 use crate::event::EventKind;
 use crate::module::{CommandSpec, Module, ModuleId};
 use crate::permission::{PermissionKey, PermissionSpec};
+use crate::subscription::Subscription;
 
 /// The validated, dependency-ordered set of modules the bot runs.
 ///
@@ -136,6 +137,19 @@ impl ModuleRegistry {
                 .iter()
                 .map(move |command| (&manifest.id, command))
         })
+    }
+
+    /// The modules that receive `kind` with the priority and filter of their subscription,
+    /// highest priority first and, among equals, in dependency order.
+    #[must_use]
+    pub fn subscriptions(&self, kind: EventKind) -> Vec<(&Arc<dyn Module>, Subscription)> {
+        let mut found: Vec<_> = self
+            .modules
+            .iter()
+            .filter_map(|module| Some((module, module.manifest().subscription(kind)?)))
+            .collect();
+        found.sort_by_key(|(_, subscription)| std::cmp::Reverse(subscription.priority));
+        found
     }
 
     /// Every permission key a module declares.
@@ -488,5 +502,52 @@ mod tests {
             ModuleRegistry::new(vec![with_permissions("warn", &["warn.add", "warn.add"])]),
             Err(CoreError::DuplicatePermission { .. })
         ));
+    }
+
+    #[test]
+    fn subscriptions_come_highest_priority_first_and_are_checked() {
+        let named = |name: &str, priority: Option<i16>| {
+            let mut manifest =
+                ModuleManifest::new(id(name), name, "0.1.0").events([EventKind::MessageCreated]);
+            if let Some(priority) = priority {
+                manifest = manifest
+                    .subscribe(Subscription::new(EventKind::MessageCreated).priority(priority));
+            }
+            Arc::new(Stub(manifest)) as Arc<dyn Module>
+        };
+        let registry = ModuleRegistry::new(vec![
+            named("plain", None),
+            named("low", Some(-5)),
+            named("high", Some(10)),
+            named("also-plain", None),
+        ])
+        .unwrap();
+        let order: Vec<String> = registry
+            .subscriptions(EventKind::MessageCreated)
+            .into_iter()
+            .map(|(module, _)| module.manifest().id.to_string())
+            .collect();
+        // Equal priorities keep the order of the registry.
+        assert_eq!(order, ["high", "also-plain", "plain", "low"]);
+        assert!(registry.subscriptions(EventKind::BanAdded).is_empty());
+
+        // A subscription for a kind the module does not take, twice, or with a huge filter.
+        let mut outside = ModuleManifest::new(id("a"), "a", "0.1.0");
+        outside
+            .subscriptions
+            .push(Subscription::new(EventKind::BanAdded));
+        let twice = ModuleManifest::new(id("a"), "a", "0.1.0")
+            .subscribe(Subscription::new(EventKind::BanAdded))
+            .subscribe(Subscription::new(EventKind::BanAdded).priority(1));
+        let huge = ModuleManifest::new(id("a"), "a", "0.1.0").subscribe(
+            Subscription::new(EventKind::BanAdded)
+                .in_channels((1..=101).map(crate::event::ChannelId::new)),
+        );
+        for manifest in [outside, twice, huge] {
+            assert!(matches!(
+                ModuleRegistry::new(vec![Arc::new(Stub(manifest))]),
+                Err(CoreError::InvalidSubscription { .. })
+            ));
+        }
     }
 }

@@ -54,6 +54,15 @@ Options are typed fields: `String`, `i64`, `f64`, `bool`, `UserId`, `ChannelId`,
 `#[arg(name = "..", desc = "..", min = 1, max = 5, min_length = 2, max_length = 40,
 choices = ["a", "b"])]`. Required options must come before optional ones.
 
+Reacting to events (not commands): `.on(Subscription::new(EventKind::MessageCreated).ignore_bots()
+.not_in_channels([log_channel]).priority(10), |ctx, event| async move { .. Ok(Flow::Continue) })`.
+The handler gets only the events that pass the filter (`in_channels`, `not_in_channels`,
+`ignore_bots`, `ignore_roles`), after modules with a higher priority (default 0; equal priorities
+run together). Returning `Flow::Stop` keeps the event from the modules with a lower priority, which
+is how an auto-moderation module claims a message it deleted. One handler per kind of event;
+declare the capabilities it needs. In a plain module the same is `ModuleManifest::subscribe(..)`
+plus `Module::on_event_flow`. `Harness::emit(event)` delivers an event as the dispatcher would.
+
 Keeping data: declare `.capability(Capability::Storage)` and use `cx.store()` (or `ctx.store()` in
 a plain module):
 

@@ -16,6 +16,7 @@ use crate::locale::{Args, Catalog, Locale, Translator};
 use crate::permission::{GuildPermissions, PermissionSpec};
 use crate::settings::GuildPolicy;
 use crate::storage::Store;
+use crate::subscription::{Flow, Subscription};
 
 /// Stable identifier of a module, used in configuration keys, metrics and translation
 /// namespaces. Restricted to `[a-z0-9_-]`, starting with a letter, at most 32 characters.
@@ -296,6 +297,10 @@ pub struct ModuleManifest {
     /// What the module lets a guild decide who may do; every key starts with the module's id.
     #[serde(default)]
     pub permissions: Vec<PermissionSpec>,
+    /// Filters and priorities for some of `events`; an event kind without an entry here is
+    /// delivered whole and at priority 0.
+    #[serde(default)]
+    pub subscriptions: Vec<Subscription>,
     /// JSON Schema for the module's section of the guild configuration.
     pub config_schema: serde_json::Value,
     pub default_config: serde_json::Value,
@@ -318,6 +323,7 @@ impl ModuleManifest {
             dependencies: Vec::new(),
             commands: Vec::new(),
             permissions: Vec::new(),
+            subscriptions: Vec::new(),
             config_schema: serde_json::json!({ "type": "object" }),
             default_config: serde_json::json!({}),
             default_enabled: false,
@@ -369,6 +375,26 @@ impl ModuleManifest {
         self
     }
 
+    /// Subscribes to an event kind with a filter and a priority (and so adds it to `events`).
+    #[must_use]
+    pub fn subscribe(mut self, subscription: Subscription) -> Self {
+        self.events.insert(subscription.kind);
+        self.subscriptions.push(subscription);
+        self
+    }
+
+    /// The subscription for `kind`: the declared one, or the plain one.
+    #[must_use]
+    pub fn subscription(&self, kind: EventKind) -> Option<Subscription> {
+        self.events.contains(&kind).then(|| {
+            self.subscriptions
+                .iter()
+                .find(|subscription| subscription.kind == kind)
+                .cloned()
+                .unwrap_or_else(|| Subscription::new(kind))
+        })
+    }
+
     #[must_use]
     pub fn permission(mut self, permission: PermissionSpec) -> Self {
         self.permissions.push(permission);
@@ -393,6 +419,25 @@ impl ModuleManifest {
     pub(crate) fn validate(&self) -> Result<(), CoreError> {
         for command in &self.commands {
             command.validate(&self.id)?;
+        }
+        let mut kinds = BTreeSet::new();
+        for subscription in &self.subscriptions {
+            let invalid = |reason: &str| CoreError::InvalidSubscription {
+                module: self.id.clone(),
+                kind: subscription.kind.as_str().to_owned(),
+                reason: reason.to_owned(),
+            };
+            if !self.events.contains(&subscription.kind) {
+                return Err(invalid(
+                    "the module does not subscribe to this kind of event",
+                ));
+            }
+            if !kinds.insert(subscription.kind) {
+                return Err(invalid("is declared twice"));
+            }
+            if !subscription.filter.fits_limits() {
+                return Err(invalid("a filter lists too many entries"));
+            }
         }
         let mut seen = BTreeSet::new();
         for permission in &self.permissions {
@@ -558,6 +603,12 @@ pub trait Module: Send + Sync + 'static {
 
     /// Called for each subscribed event of a guild where the module is enabled.
     async fn on_event(&self, ctx: &EventContext, event: &Event) -> Result<(), ModuleError>;
+
+    /// [`Self::on_event`] that also says whether the modules with a lower priority get the
+    /// event. The dispatcher calls this one; a module that never stops an event leaves it be.
+    async fn on_event_flow(&self, ctx: &EventContext, event: &Event) -> Result<Flow, ModuleError> {
+        self.on_event(ctx, event).await.map(|()| Flow::Continue)
+    }
 
     /// Called once during graceful shutdown.
     async fn on_unload(&self) {}

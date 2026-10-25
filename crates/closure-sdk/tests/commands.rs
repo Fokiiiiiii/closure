@@ -6,8 +6,8 @@ use std::time::Duration;
 use closure_core::event::CommandOptionValue;
 use closure_sdk::testing::{Harness, Invocation, Reply, ReplyKind};
 use closure_sdk::{
-    Args, Capability, Command, CommandArgs, Cooldown, Level, Locale, ModuleBuilder, PermissionKey,
-    PermissionSpec, UserError, UserId,
+    Args, Capability, Command, CommandArgs, Cooldown, Event, EventKind, Flow, Level, Locale,
+    ModuleBuilder, PermissionKey, PermissionSpec, Subscription, UserError, UserId, UserInfo,
 };
 use twilight_model::id::Id;
 
@@ -289,6 +289,106 @@ fn a_declaration_that_cannot_work_is_refused_when_the_module_is_built() {
         .command(Command::<()>::new("a", "d").handler(|_cx, ()| async { Ok(()) }))
         .command(Command::<()>::new("a", "d").handler(|_cx, ()| async { Ok(()) }));
     assert!(twice.build().is_err());
+}
+
+fn message_event(channel: u64, bot: bool, roles: &[u64]) -> Event {
+    Event::MessageCreated(closure_core::event::MessageInfo {
+        id: Id::new(1),
+        channel_id: Id::new(channel),
+        guild_id: Id::new(1),
+        author: UserInfo {
+            id: Id::new(7),
+            name: "u".into(),
+            bot,
+        },
+        author_roles: roles.iter().map(|id| Id::new(*id)).collect(),
+        content: "hello".into(),
+        mentioned_users: vec![],
+        mentions_everyone: false,
+        attachment_count: 0,
+    })
+}
+
+#[tokio::test]
+async fn an_event_handler_gets_what_passes_its_filter_and_says_whether_the_event_goes_on() {
+    let module = ModuleBuilder::new("watch", "Watching", "0.1.0")
+        .unwrap()
+        .capability(Capability::Storage)
+        .on(
+            Subscription::new(EventKind::MessageCreated)
+                .ignore_bots()
+                .not_in_channels([Id::new(9)])
+                .priority(5),
+            |ctx, event| async move {
+                let Event::MessageCreated(message) = event else {
+                    return Ok(Flow::Continue);
+                };
+                let seen = ctx
+                    .store()
+                    .counter_add("seen", message.author.id, 1)
+                    .await
+                    .map_err(|error| closure_sdk::ModuleError::other(error.to_string()))?;
+                // The third message of a user is dealt with here.
+                Ok(if seen >= 3 {
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                })
+            },
+        );
+    let harness = Harness::new(module).unwrap();
+
+    assert_eq!(
+        harness.emit(message_event(3, false, &[])).await.unwrap(),
+        Some(Flow::Continue)
+    );
+    // Not delivered: a bot, and a channel the module left out.
+    assert_eq!(
+        harness.emit(message_event(3, true, &[])).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        harness.emit(message_event(9, false, &[])).await.unwrap(),
+        None
+    );
+    // A kind it never subscribed to.
+    let left = Event::MemberLeft {
+        guild_id: Id::new(1),
+        user: UserInfo {
+            id: Id::new(7),
+            name: "u".into(),
+            bot: false,
+        },
+    };
+    assert_eq!(harness.emit(left).await.unwrap(), None);
+    harness.emit(message_event(3, false, &[])).await.unwrap();
+    assert_eq!(
+        harness.emit(message_event(3, false, &[])).await.unwrap(),
+        Some(Flow::Stop)
+    );
+    assert_eq!(
+        harness.store().counter_total("seen", 7_u64).await.unwrap(),
+        3
+    );
+}
+
+#[test]
+fn a_second_handler_for_a_kind_and_a_subscription_to_commands_are_refused() {
+    let twice = ModuleBuilder::new("watch", "w", "0.1.0")
+        .unwrap()
+        .on(Subscription::new(EventKind::MessageCreated), |_, _| async {
+            Ok(Flow::Continue)
+        })
+        .on(Subscription::new(EventKind::MessageCreated), |_, _| async {
+            Ok(Flow::Continue)
+        });
+    assert!(twice.build().is_err());
+    let commands = ModuleBuilder::new("watch", "w", "0.1.0")
+        .unwrap()
+        .on(Subscription::new(EventKind::Command), |_, _| async {
+            Ok(Flow::Continue)
+        });
+    assert!(commands.build().is_err());
 }
 
 /// A module that keeps a count of warnings per user, as the SDK is meant to be used.

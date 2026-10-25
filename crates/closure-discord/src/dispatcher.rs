@@ -25,6 +25,7 @@ use closure_core::module::{EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
 use closure_core::settings::{ModuleSettings, SettingsProvider};
 use closure_core::storage::{MemoryStorage, StorageBackend, Store};
+use closure_core::subscription::Flow;
 use closure_core::throttle::LogGate;
 use closure_i18n::{CORE_NAMESPACE, user_message};
 use dashmap::DashMap;
@@ -332,9 +333,7 @@ impl Dispatcher {
             lanes.state.pending.fetch_sub(1, Ordering::AcqRel);
             metrics::counter!("closure_events_dropped_total", "reason" => "queue_full")
                 .increment(1);
-            if let Some(held_back) = lanes.state.queue_full_log.pass() {
-                tracing::warn!(%guild, kind, held_back, "events are dropped: the guild's queue is full");
-            }
+            log_queue_full(&lanes.state, guild, kind);
             return;
         }
 
@@ -561,6 +560,16 @@ fn settle(shared: &Shared, state: &GuildState, job: &Job) {
     shared.pending_total.fetch_sub(1, Ordering::AcqRel);
 }
 
+/// Says that events are dropped because the guild's queue is full, but not for every one of
+/// them (see [`QUEUE_FULL_LOG_EVERY`]). Whether it said so.
+fn log_queue_full(state: &GuildState, guild: GuildId, kind: &str) -> bool {
+    let Some(held_back) = state.queue_full_log.pass() else {
+        return false;
+    };
+    tracing::warn!(%guild, kind, held_back, "events are dropped: the guild's queue is full");
+    true
+}
+
 impl Shared {
     fn is_wedged(&self, module: &ModuleId) -> bool {
         self.wedged
@@ -571,7 +580,7 @@ impl Shared {
     /// Takes note of an aborted call that did not stop: it blocks a thread and keeps running
     /// until it returns on its own. The module gets no new calls meanwhile, or each of them
     /// would take another worker thread until the runtime has none left for anyone.
-    fn wedge(&self, module: &ModuleId, task: JoinHandle<Result<(), ModuleError>>) {
+    fn wedge(&self, module: &ModuleId, task: JoinHandle<Result<Flow, ModuleError>>) {
         let count = Arc::clone(&*self.wedged.entry(module.clone()).or_default());
         let now = count.fetch_add(1, Ordering::AcqRel) + 1;
         metrics::gauge!("closure_module_wedged_calls", "module" => module.to_string())
@@ -615,18 +624,33 @@ async fn handle_event(
         handle_command(shared, guild, state, event, invocation).await;
         return;
     }
-    let kind = event.kind();
-    let calls = shared
+    // Modules with the same priority run together; the groups follow each other, highest first,
+    // and a module that stops the event keeps it from the groups after its own.
+    let receivers: Vec<(Arc<dyn Module>, i16)> = shared
         .registry
-        .subscribers(kind)
-        .map(|module| call_module(shared, guild, state, Arc::clone(module), event));
-    futures_util::future::join_all(calls).await;
+        .subscriptions(event.kind())
+        .into_iter()
+        .filter(|(_, subscription)| subscription.filter.matches(event))
+        .map(|(module, subscription)| (Arc::clone(module), subscription.priority))
+        .collect();
+    for group in receivers.chunk_by(|a, b| a.1 == b.1) {
+        let calls = group
+            .iter()
+            .map(|(module, _)| call_module(shared, guild, state, Arc::clone(module), event));
+        let verdicts = futures_util::future::join_all(calls).await;
+        if verdicts
+            .iter()
+            .any(|verdict| matches!(verdict, Verdict::Done(Flow::Stop)))
+        {
+            break;
+        }
+    }
 }
 
 /// How a module call ended, as far as the breaker and the user are concerned.
 #[derive(Debug)]
 enum Verdict {
-    Done,
+    Done(Flow),
     /// The module ran but returned an error.
     Failed(ModuleError),
     Panicked,
@@ -664,7 +688,7 @@ async fn call_module(
     let started = Instant::now();
     let mut task = tokio::spawn({
         let event = Arc::clone(event);
-        async move { module.on_event(&ctx, &event).await }
+        async move { module.on_event_flow(&ctx, &event).await }
     });
     let waited = tokio::select! {
         result = tokio::time::timeout(handler_timeout, &mut task) => Some(result),
@@ -677,7 +701,7 @@ async fn call_module(
         return Verdict::Skipped;
     };
     let verdict = match waited {
-        Ok(Ok(Ok(()))) => Verdict::Done,
+        Ok(Ok(Ok(flow))) => Verdict::Done(flow),
         Ok(Ok(Err(error))) => Verdict::Failed(error),
         Ok(Err(join_error)) => {
             tracing::error!(module = %id, %guild, kind = event.kind().as_str(), panic = join_error.is_panic(), "module task failed");
@@ -742,7 +766,7 @@ fn record_verdict(
 ) {
     let now = Instant::now();
     let (result, blame_module) = match verdict {
-        Verdict::Done => ("ok", false),
+        Verdict::Done(_) => ("ok", false),
         Verdict::Failed(ModuleError::Discord(_)) => ("discord_error", false),
         Verdict::Failed(_) => ("error", true),
         Verdict::Panicked => ("panic", true),
@@ -804,7 +828,7 @@ async fn handle_command(
 
     let verdict = call_module(shared, guild, state, Arc::clone(module), event).await;
     let message = match verdict {
-        Verdict::Done => return,
+        Verdict::Done(_) => return,
         Verdict::Failed(ModuleError::Discord(error)) => {
             user_message(shared.translator.as_ref(), locale, &error)
         }

@@ -30,6 +30,12 @@ pub enum CoreError {
     InvalidPermissionKey(String),
     #[error("module `{module}` declares the permission `{key}`, which does not start with its id")]
     PermissionOutsideModule { module: ModuleId, key: String },
+    #[error("invalid subscription to `{kind}` in module `{module}`: {reason}")]
+    InvalidSubscription {
+        module: ModuleId,
+        kind: String,
+        reason: String,
+    },
     #[error("module `{module}` declares the permission `{key}` twice")]
     DuplicatePermission { module: ModuleId, key: String },
     #[error("command `{command}` is declared by both `{first}` and `{second}`")]

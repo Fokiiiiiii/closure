@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use closure_core::interaction::InteractionGuilds;
 use closure_core::locale::Locale;
 use closure_core::module::{CommandSpec, EventContext, Module, ModuleId, ModuleManifest};
 use closure_core::settings::{GuildPolicy, RuntimeLimits, SettingsProvider};
+use closure_core::subscription::Subscription;
 use closure_core::testing::{MockApi, StaticSettings};
 use closure_i18n::TranslatorBuilder;
 use serde_json::json;
@@ -64,6 +65,11 @@ struct Probe {
     running_at_unload: AtomicUsize,
     /// A client a module kept from an earlier event.
     held: Mutex<Option<ApiClient>>,
+    /// The log entries say which module made them (for tests that look at the order across
+    /// modules, which share one log).
+    prefixed: bool,
+    /// The module keeps the lower priorities from the events it handles.
+    stops: AtomicBool,
 }
 
 impl Probe {
@@ -79,7 +85,43 @@ impl Probe {
             max_running: AtomicUsize::new(0),
             running_at_unload: AtomicUsize::new(usize::MAX),
             held: Mutex::new(None),
+            prefixed: false,
+            stops: AtomicBool::new(false),
         })
+    }
+
+    /// A module with one subscription, writing to the log all such modules share.
+    fn subscribed(
+        id: &str,
+        subscription: Subscription,
+        log: &Arc<Mutex<Vec<String>>>,
+    ) -> Arc<Self> {
+        let manifest =
+            ModuleManifest::new(ModuleId::new(id).unwrap(), id, "0.1.0").subscribe(subscription);
+        Arc::new(Self {
+            manifest,
+            log: Arc::clone(log),
+            behavior: Mutex::new(Behavior::Ok),
+            running: AtomicUsize::new(0),
+            max_running: AtomicUsize::new(0),
+            running_at_unload: AtomicUsize::new(usize::MAX),
+            held: Mutex::new(None),
+            prefixed: true,
+            stops: AtomicBool::new(false),
+        })
+    }
+
+    /// A log entry, saying whose it is when several modules share the log.
+    fn entry(&self, text: String) -> String {
+        if self.prefixed {
+            format!("{}:{text}", self.manifest.id)
+        } else {
+            text
+        }
+    }
+
+    fn stop_events(&self) {
+        self.stops.store(true, Ordering::SeqCst);
     }
 
     fn with_command(id: &str, command: &str) -> Arc<Self> {
@@ -186,7 +228,7 @@ impl Module for Probe {
     }
 
     async fn on_load(&self) -> Result<(), ModuleError> {
-        self.log.lock().unwrap().push("load".into());
+        self.log.lock().unwrap().push(self.entry("load".into()));
         Ok(())
     }
 
@@ -201,7 +243,7 @@ impl Module for Probe {
         let running = self.running.fetch_add(1, Ordering::SeqCst) + 1;
         let _running = Running(&self.running);
         self.max_running.fetch_max(running, Ordering::SeqCst);
-        self.log.lock().unwrap().push(label(event));
+        self.log.lock().unwrap().push(self.entry(label(event)));
 
         let behavior = self.behavior.lock().unwrap().clone();
         match behavior {
@@ -292,10 +334,19 @@ impl Module for Probe {
         }
     }
 
+    async fn on_event_flow(&self, ctx: &EventContext, event: &Event) -> Result<Flow, ModuleError> {
+        self.on_event(ctx, event).await?;
+        Ok(if self.stops.load(Ordering::SeqCst) {
+            Flow::Stop
+        } else {
+            Flow::Continue
+        })
+    }
+
     async fn on_unload(&self) {
         self.running_at_unload
             .store(self.running(), Ordering::SeqCst);
-        self.log.lock().unwrap().push("unload".into());
+        self.log.lock().unwrap().push(self.entry("unload".into()));
     }
 }
 
@@ -1132,45 +1183,13 @@ async fn a_module_that_blocks_a_thread_gets_no_further_calls_until_it_is_back() 
     assert_eq!(blocker.log(), ["load", "msg:1", "msg:4"]);
 }
 
-#[tokio::test]
-async fn a_full_queue_is_one_line_of_log_however_many_events_it_drops() {
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Capture {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let held = messages_only("held");
-    let gate = Arc::new(Semaphore::new(0));
-    held.set(Behavior::Gate(Arc::clone(&gate)));
-    let h = harness(&[(&held, true)], limits(8, 1), DispatcherConfig::default()).await;
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer({
-            let captured = Arc::clone(&captured);
-            move || Capture(Arc::clone(&captured))
-        })
-        .finish();
-    // `dispatch` logs on the calling thread.
-    tracing::subscriber::with_default(subscriber, || {
-        for id in 1..=1000 {
-            h.dispatcher.dispatch(message(3, id));
-        }
-    });
-
-    let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
-    let lines = log.matches("the guild's queue is full").count();
-    assert_eq!(lines, 1, "{log}");
-    gate.add_permits(10_000);
-    h.dispatcher.flush().await;
+#[test]
+fn a_full_queue_is_one_line_of_log_however_many_events_it_drops() {
+    let state = GuildState::new();
+    let logged = (0..1000)
+        .filter(|_| log_queue_full(&state, Id::new(GUILD), "message_created"))
+        .count();
+    assert_eq!(logged, 1);
 }
 
 #[tokio::test]
@@ -1200,6 +1219,143 @@ async fn modules_keep_data_through_the_dispatcher_and_only_with_the_capability()
     );
     // Not granted `storage`: the call fails and nothing is logged.
     assert_eq!(without.log(), ["load", "msg:1", "msg:2"]);
+}
+
+fn shared_log() -> Arc<Mutex<Vec<String>>> {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+fn seen(log: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| !entry.ends_with(":load"))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn higher_priorities_handle_an_event_first_and_equal_ones_together() {
+    let log = shared_log();
+    let kind = EventKind::MessageCreated;
+    let low = Probe::subscribed("low", Subscription::new(kind).priority(-5), &log);
+    let high = Probe::subscribed("high", Subscription::new(kind).priority(10), &log);
+    let middle = Probe::subscribed("middle", Subscription::new(kind), &log);
+    let also_middle = Probe::subscribed("also", Subscription::new(kind), &log);
+    // The two in the middle meet at a barrier, so they only finish if they run at the same time.
+    let barrier = Arc::new(Barrier::new(2));
+    middle.set(Behavior::Rendezvous(Arc::clone(&barrier)));
+    also_middle.set(Behavior::Rendezvous(barrier));
+    let h = harness(
+        &[
+            (&low, true),
+            (&high, true),
+            (&middle, true),
+            (&also_middle, true),
+        ],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.flush().await;
+
+    let order = seen(&log);
+    assert_eq!(order.first().map(String::as_str), Some("high:msg:1"));
+    assert_eq!(order.last().map(String::as_str), Some("low:msg:1"));
+    assert_eq!(order.len(), 4, "{order:?}");
+}
+
+#[tokio::test]
+async fn a_module_that_stops_an_event_keeps_it_from_the_lower_priorities_only() {
+    let log = shared_log();
+    let kind = EventKind::MessageCreated;
+    let first = Probe::subscribed("first", Subscription::new(kind).priority(10), &log);
+    let peer = Probe::subscribed("peer", Subscription::new(kind).priority(10), &log);
+    let later = Probe::subscribed("later", Subscription::new(kind), &log);
+    first.stop_events();
+    let h = harness(
+        &[(&first, true), (&peer, true), (&later, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.flush().await;
+
+    let mut order = seen(&log);
+    order.sort();
+    // The peer of the same priority still gets it; the lower one does not.
+    assert_eq!(order, ["first:msg:1", "peer:msg:1"]);
+
+    // A module that fails does not stop anything.
+    first.set(Behavior::Fail);
+    log.lock().unwrap().clear();
+    h.dispatcher.dispatch(message(3, 2));
+    h.dispatcher.flush().await;
+    assert!(seen(&log).contains(&"later:msg:2".to_owned()));
+}
+
+#[tokio::test]
+async fn filters_keep_out_events_the_module_did_not_ask_for() {
+    let log = shared_log();
+    let kind = EventKind::MessageCreated;
+    let only_three = Probe::subscribed(
+        "only3",
+        Subscription::new(kind).in_channels([Id::new(3)]),
+        &log,
+    );
+    let not_three = Probe::subscribed(
+        "not3",
+        Subscription::new(kind).not_in_channels([Id::new(3)]),
+        &log,
+    );
+    let humans = Probe::subscribed("humans", Subscription::new(kind).ignore_bots(), &log);
+    let no_staff = Probe::subscribed(
+        "nostaff",
+        Subscription::new(kind).ignore_roles([Id::new(50)]),
+        &log,
+    );
+    let h = harness(
+        &[
+            (&only_three, true),
+            (&not_three, true),
+            (&humans, true),
+            (&no_staff, true),
+        ],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+    let from = |channel, id, bot: bool, roles: &[u64]| {
+        let Event::MessageCreated(mut info) = message(channel, id) else {
+            unreachable!()
+        };
+        info.author.bot = bot;
+        info.author_roles = roles.iter().map(|role| Id::new(*role)).collect();
+        Event::MessageCreated(info)
+    };
+
+    h.dispatcher.dispatch(from(3, 1, false, &[]));
+    h.dispatcher.dispatch(from(4, 2, false, &[]));
+    h.dispatcher.dispatch(from(4, 3, true, &[]));
+    h.dispatcher.dispatch(from(4, 4, false, &[50]));
+    h.dispatcher.flush().await;
+
+    let by_module = |name: &str| {
+        let mut entries: Vec<String> = seen(&log)
+            .into_iter()
+            .filter_map(|entry| entry.strip_prefix(&format!("{name}:")).map(str::to_owned))
+            .collect();
+        entries.sort();
+        entries
+    };
+    assert_eq!(by_module("only3"), ["msg:1"]);
+    assert_eq!(by_module("not3"), ["msg:2", "msg:3", "msg:4"]);
+    assert_eq!(by_module("humans"), ["msg:1", "msg:2", "msg:4"]);
+    assert_eq!(by_module("nostaff"), ["msg:1", "msg:2", "msg:3"]);
 }
 
 /// A module that only counts, for measuring the dispatcher itself.

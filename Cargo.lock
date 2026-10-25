@@ -534,7 +534,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "twilight-cache-inmemory",
  "twilight-gateway",
  "twilight-http",

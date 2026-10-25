@@ -27,6 +27,7 @@ use closure_core::permission::GuildPermissions;
 use closure_core::registry::ModuleRegistry;
 use closure_core::settings::GuildPolicy;
 use closure_core::storage::{MemoryStorage, StorageBackend, Store};
+use closure_core::subscription::Flow;
 use closure_core::testing::MockApi;
 use closure_i18n::TranslatorBuilder;
 use twilight_model::guild::Permissions;
@@ -250,6 +251,58 @@ impl Harness {
         &self.api
     }
 
+    /// What the module gets with an event of `guild`.
+    fn context(&self, guild: GuildId) -> EventContext {
+        let manifest = self.module.manifest();
+        let client = ApiClient::new(
+            Arc::clone(&self.api) as _,
+            manifest.capabilities.clone(),
+            manifest.id.clone(),
+        )
+        .with_interactions(Arc::clone(&self.interactions))
+        .scoped_to(guild);
+        let permissions = self
+            .permissions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        EventContext::new(
+            manifest.id.clone(),
+            guild,
+            client,
+            Locale::DEFAULT,
+            Arc::new(GuildPolicy::default()),
+            Arc::new(config),
+            Arc::clone(&self.translator),
+        )
+        .with_permissions(Arc::new(permissions))
+        .with_store(Store::new(
+            Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
+            &manifest.capabilities,
+            manifest.id.clone(),
+            guild,
+        ))
+    }
+
+    /// Delivers an event the way the dispatcher would: only if the module subscribed to its kind
+    /// and the event passes the filter. `None` when it was not delivered.
+    pub async fn emit(&self, event: Event) -> Result<Option<Flow>, ModuleError> {
+        let manifest = self.module.manifest();
+        let wanted = manifest
+            .subscription(event.kind())
+            .is_some_and(|subscription| subscription.filter.matches(&event));
+        if !wanted {
+            return Ok(None);
+        }
+        let ctx = self.context(event.guild_id());
+        self.module.on_event_flow(&ctx, &event).await.map(Some)
+    }
+
     /// Runs a command and returns what the module answered during this run.
     pub async fn invoke(&self, invocation: Invocation) -> Result<Vec<Reply>, ModuleError> {
         let number = self.next.fetch_add(1, Ordering::Relaxed);
@@ -289,41 +342,7 @@ impl Harness {
             options: invocation.options,
         };
 
-        let manifest = self.module.manifest();
-        let client = ApiClient::new(
-            Arc::clone(&self.api) as _,
-            manifest.capabilities.clone(),
-            manifest.id.clone(),
-        )
-        .with_interactions(Arc::clone(&self.interactions))
-        .scoped_to(guild);
-        let permissions = self
-            .permissions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let config = self
-            .config
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let ctx = EventContext::new(
-            manifest.id.clone(),
-            guild,
-            client,
-            Locale::DEFAULT,
-            Arc::new(GuildPolicy::default()),
-            Arc::new(config),
-            Arc::clone(&self.translator),
-        )
-        .with_permissions(Arc::new(permissions))
-        .with_store(Store::new(
-            Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
-            &manifest.capabilities,
-            manifest.id.clone(),
-            guild,
-        ));
-
+        let ctx = self.context(guild);
         let before = self.api.actions().len();
         self.module.on_event(&ctx, &Event::Command(event)).await?;
         Ok(self.api.actions()[before..]

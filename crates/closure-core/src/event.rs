@@ -287,6 +287,52 @@ impl Event {
         }
     }
 
+    /// The channel the event happened in, when it is about one.
+    #[must_use]
+    pub fn channel_id(&self) -> Option<ChannelId> {
+        match self {
+            Self::MessageCreated(message) | Self::MessageUpdated(message) => {
+                Some(message.channel_id)
+            }
+            Self::MessageDeleted { channel_id, .. }
+            | Self::MessagesBulkDeleted { channel_id, .. } => Some(*channel_id),
+            Self::ReactionAdded(reaction) | Self::ReactionRemoved(reaction) => {
+                Some(reaction.channel_id)
+            }
+            Self::ChannelCreated(channel)
+            | Self::ChannelUpdated(channel)
+            | Self::ChannelDeleted(channel) => Some(channel.id),
+            Self::Command(invocation) => Some(invocation.channel_id),
+            _ => None,
+        }
+    }
+
+    /// Whether the user the event is about (who wrote the message, joined, was banned, ran the
+    /// command) is a bot.
+    #[must_use]
+    pub fn caused_by_bot(&self) -> bool {
+        match self {
+            Self::MessageCreated(message) | Self::MessageUpdated(message) => message.author.bot,
+            Self::MemberJoined(member) | Self::MemberUpdated(member) => member.user.bot,
+            Self::MemberLeft { user, .. }
+            | Self::BanAdded { user, .. }
+            | Self::BanRemoved { user, .. } => user.bot,
+            Self::Command(invocation) => invocation.user.bot,
+            _ => false,
+        }
+    }
+
+    /// The roles of the member the event is about, when the event carries them.
+    #[must_use]
+    pub fn member_roles(&self) -> &[RoleId] {
+        match self {
+            Self::MessageCreated(message) | Self::MessageUpdated(message) => &message.author_roles,
+            Self::MemberJoined(member) | Self::MemberUpdated(member) => &member.roles,
+            Self::Command(invocation) => &invocation.roles,
+            _ => &[],
+        }
+    }
+
     /// Every event is scoped to one guild; events outside a guild (DMs) are dropped when the
     /// gateway payload is converted, so dispatch can always key on this value.
     #[must_use]

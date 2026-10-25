@@ -32,7 +32,6 @@ twilight-util.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
-tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

@@ -15,6 +15,7 @@ use closure_core::module::{
     CommandSpec, EventContext, Module, ModuleId, ModuleManifest, SubcommandSpec,
 };
 use closure_core::permission::{PermissionKey, PermissionSpec};
+use closure_core::subscription::{Flow, Subscription};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use twilight_model::guild::Permissions;
@@ -126,10 +127,14 @@ struct Route {
 
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
+type EventRun =
+    dyn Fn(EventContext, Event) -> BoxFuture<'static, Result<Flow, ModuleError>> + Send + Sync;
+
 /// Builds a module from its commands.
 pub struct ModuleBuilder {
     manifest: ModuleManifest,
     routes: HashMap<(String, Option<String>), Route>,
+    handlers: HashMap<EventKind, Arc<EventRun>>,
     problem: Option<CoreError>,
     clock: Clock,
 }
@@ -156,6 +161,7 @@ impl ModuleBuilder {
         Ok(Self {
             manifest,
             routes: HashMap::new(),
+            handlers: HashMap::new(),
             problem: None,
             clock: Arc::new(Instant::now),
         })
@@ -205,6 +211,34 @@ impl ModuleBuilder {
     #[must_use]
     pub fn clock(mut self, clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
         self.clock = Arc::new(clock);
+        self
+    }
+
+    /// Handles an event kind (other than commands): the handler gets only the events that pass
+    /// the subscription's filter, after the modules with a higher priority, and says whether
+    /// the modules below it get the event too ([`Flow::Stop`] keeps it from them). A module has
+    /// one handler per kind; the capabilities the handler needs have to be declared too.
+    #[must_use]
+    pub fn on<F, Fut>(mut self, subscription: Subscription, handler: F) -> Self
+    where
+        F: Fn(EventContext, Event) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Flow, ModuleError>> + Send + 'static,
+    {
+        let kind = subscription.kind;
+        if kind == EventKind::Command {
+            self.problem.get_or_insert(self.invalid(
+                "",
+                "commands are declared with `command`, not subscribed to".to_owned(),
+            ));
+        }
+        let run: Arc<EventRun> = Arc::new(move |ctx, event| handler(ctx, event).boxed());
+        if self.handlers.insert(kind, run).is_some() {
+            self.problem.get_or_insert(self.invalid(
+                "",
+                format!("has two handlers for `{}` events", kind.as_str()),
+            ));
+        }
+        self.manifest = self.manifest.subscribe(subscription);
         self
     }
 
@@ -310,6 +344,7 @@ impl ModuleBuilder {
         Ok(SdkModule {
             manifest: self.manifest,
             routes: self.routes,
+            handlers: self.handlers,
             cooldowns: Cooldowns::default(),
             clock: self.clock,
         })
@@ -322,6 +357,7 @@ impl ModuleBuilder {
 pub struct SdkModule {
     manifest: ModuleManifest,
     routes: HashMap<(String, Option<String>), Route>,
+    handlers: HashMap<EventKind, Arc<EventRun>>,
     cooldowns: Cooldowns,
     clock: Clock,
 }
@@ -389,12 +425,19 @@ impl Module for SdkModule {
     }
 
     async fn on_event(&self, ctx: &EventContext, event: &Event) -> Result<(), ModuleError> {
+        self.on_event_flow(ctx, event).await.map(drop)
+    }
+
+    async fn on_event_flow(&self, ctx: &EventContext, event: &Event) -> Result<Flow, ModuleError> {
         let Event::Command(invocation) = event else {
-            return Ok(());
+            return match self.handlers.get(&event.kind()) {
+                Some(handler) => handler(ctx.clone(), event.clone()).await,
+                None => Ok(Flow::Continue),
+            };
         };
         let key = (invocation.command.clone(), invocation.subcommand.clone());
         let Some(route) = self.routes.get(&key) else {
-            return Ok(());
+            return Ok(Flow::Continue);
         };
         let cx = CommandCx::new(ctx, invocation);
         let name = match &key.1 {
@@ -408,9 +451,9 @@ impl Module for SdkModule {
                     let done = cx.core_message("sdk-done", &Args::new());
                     cx.reply_private(done).await.map_err(module_error)?;
                 }
-                Ok(())
             }
-            Err(error) => Self::answer(&cx, error).await,
+            Err(error) => Self::answer(&cx, error).await?,
         }
+        Ok(Flow::Continue)
     }
 }
