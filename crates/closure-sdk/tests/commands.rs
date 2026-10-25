@@ -6,8 +6,9 @@ use std::time::Duration;
 use closure_core::event::CommandOptionValue;
 use closure_sdk::testing::{Harness, Invocation, Reply, ReplyKind};
 use closure_sdk::{
-    Args, Capability, Command, CommandArgs, Cooldown, Event, EventKind, Flow, Level, Locale,
-    ModuleBuilder, PermissionKey, PermissionSpec, Subscription, UserError, UserId, UserInfo,
+    Args, Capability, Command, CommandArgs, Cooldown, Event, EventKind, Flow, Intents, Level,
+    Locale, ModuleBuilder, PermissionKey, PermissionSpec, Subscription, UserError, UserId,
+    UserInfo,
 };
 use twilight_model::id::Id;
 
@@ -313,6 +314,7 @@ fn message_event(channel: u64, bot: bool, roles: &[u64]) -> Event {
 async fn an_event_handler_gets_what_passes_its_filter_and_says_whether_the_event_goes_on() {
     let module = ModuleBuilder::new("watch", "Watching", "0.1.0")
         .unwrap()
+        .intents(Intents::GUILD_MESSAGES)
         .capability(Capability::Storage)
         .on(
             Subscription::new(EventKind::MessageCreated)
@@ -376,6 +378,7 @@ async fn an_event_handler_gets_what_passes_its_filter_and_says_whether_the_event
 fn a_second_handler_for_a_kind_and_a_subscription_to_commands_are_refused() {
     let twice = ModuleBuilder::new("watch", "w", "0.1.0")
         .unwrap()
+        .intents(Intents::GUILD_MESSAGES)
         .on(Subscription::new(EventKind::MessageCreated), |_, _| async {
             Ok(Flow::Continue)
         })
@@ -465,4 +468,96 @@ async fn a_module_without_the_capability_cannot_keep_data() {
     let harness = Harness::new(module).unwrap();
     let error = harness.invoke(Invocation::new("last")).await.unwrap_err();
     assert!(error.to_string().contains("storage"), "{error}");
+}
+
+fn message_watcher() -> ModuleBuilder {
+    ModuleBuilder::new("watch", "w", "0.1.0")
+        .unwrap()
+        .on(Subscription::new(EventKind::MessageCreated), |_, _| async {
+            Ok(Flow::Continue)
+        })
+}
+
+#[test]
+fn events_the_gateway_would_never_send_are_refused_when_the_module_is_built() {
+    let error = message_watcher().build().unwrap_err().to_string();
+    assert!(error.contains("GUILD_MESSAGES"), "{error}");
+    message_watcher()
+        .intents(Intents::GUILD_MESSAGES)
+        .build()
+        .unwrap();
+    // Members are a privileged intent, so it has to be asked for in words.
+    let members = ModuleBuilder::new("watch", "w", "0.1.0")
+        .unwrap()
+        .on(Subscription::new(EventKind::MemberJoined), |_, _| async {
+            Ok(Flow::Continue)
+        });
+    assert!(members.build().is_err());
+}
+
+#[test]
+fn the_order_of_the_calls_does_not_matter_for_a_permission_and_its_command() {
+    let module = ModuleBuilder::new("warn", "w", "0.1.0")
+        .unwrap()
+        .command(
+            Command::<()>::new("a", "d")
+                .requires("warn.add")
+                .handler(|_cx, ()| async { Ok(()) }),
+        )
+        .permission(PermissionSpec::new("warn.add", Level::MODERATOR, "Warn").unwrap());
+    module.build().unwrap();
+}
+
+#[test]
+fn buttons_and_forms_are_not_subscribed_to_and_routes_survive_a_custom_id() {
+    for kind in [EventKind::Component, EventKind::Modal] {
+        let module = ModuleBuilder::new("ui", "u", "0.1.0")
+            .unwrap()
+            .on(Subscription::new(kind), |_, _| async { Ok(Flow::Continue) });
+        assert!(module.build().is_err(), "{kind:?}");
+    }
+    for route in ["", "a:b"] {
+        let component = ModuleBuilder::new("ui", "u", "0.1.0")
+            .unwrap()
+            .component(route, |_cx| async { Ok(()) });
+        assert!(component.build().is_err(), "{route:?}");
+        let modal = ModuleBuilder::new("ui", "u", "0.1.0")
+            .unwrap()
+            .modal(route, |_cx| async { Ok(()) });
+        assert!(modal.build().is_err(), "{route:?}");
+    }
+}
+
+#[test]
+fn a_subcommand_cannot_carry_what_only_a_command_can() {
+    let group = ModuleBuilder::new("warn", "w", "0.1.0").unwrap().group(
+        "warn",
+        "d",
+        [Command::<()>::new("add", "d")
+            .default_member_permissions(twilight_model::guild::Permissions::BAN_MEMBERS)
+            .handler(|_cx, ()| async { Ok(()) })],
+    );
+    assert!(group.build().is_err());
+}
+
+#[tokio::test]
+async fn a_command_asks_about_its_own_permission_keys_only() {
+    let module = ModuleBuilder::new("warn", "w", "0.1.0")
+        .unwrap()
+        .permission(PermissionSpec::new("warn.add", Level::MODERATOR, "Warn").unwrap())
+        .command(
+            Command::<()>::new("probe", "d").handler(|cx, ()| async move {
+                cx.require("warn.add").await?;
+                // The server's key of another module is not for this one to ask about.
+                cx.require("ban.use").await?;
+                cx.reply("both").await
+            }),
+        );
+    let harness = Harness::new(module).unwrap();
+    harness.permissions(|permissions| {
+        permissions.role_levels.insert(Id::new(10), Level::OWNER);
+    });
+    let result = harness.invoke(Invocation::new("probe").roles([10])).await;
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("its own permission keys"), "{error}");
 }

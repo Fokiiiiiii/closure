@@ -347,6 +347,11 @@ impl<I: InteractionRef + 'static> Cx<I> {
     pub async fn require(&self, key: &str) -> Result<(), UserError> {
         let key = PermissionKey::new(key)
             .map_err(|error| UserError::Module(ModuleError::other(error.to_string())))?;
+        if key.module() != self.ctx.module.as_str() {
+            return Err(UserError::Module(ModuleError::other(format!(
+                "a module asks only about its own permission keys, not `{key}`"
+            ))));
+        }
         self.require_key(&key).await
     }
 

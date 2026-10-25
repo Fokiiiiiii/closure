@@ -61,4 +61,5 @@ pub use cooldown::{Cooldown, CooldownScope};
 pub use cx::{CommandCx, ComponentCx, Cx, JobCx, ModalCx};
 pub use error::UserError;
 pub use module::{BoundCommand, Command, ModuleBuilder, SdkModule};
+pub use twilight_model::gateway::Intents;
 pub use ui::{CustomId, Pager};

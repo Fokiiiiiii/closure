@@ -19,6 +19,7 @@ use closure_core::schedule::ScheduledJob;
 use closure_core::subscription::{Flow, Subscription};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
+use twilight_model::gateway::Intents;
 use twilight_model::guild::Permissions;
 
 use crate::args::CommandArgs;
@@ -194,6 +195,16 @@ impl ModuleBuilder {
         self
     }
 
+    /// The Gateway intents the module needs for the events it handles (`GUILD_MESSAGES` for
+    /// messages, `GUILD_MEMBERS` for members, ...); the bot asks Discord for the union over all
+    /// its modules. A module that subscribes to events whose intent it does not declare is
+    /// refused when it is built, because Discord would never send it those events.
+    #[must_use]
+    pub fn intents(mut self, intents: Intents) -> Self {
+        self.manifest = self.manifest.intents(intents);
+        self
+    }
+
     /// Declares a permission key; a command can require it and a server can decide who has it.
     #[must_use]
     pub fn permission(mut self, permission: PermissionSpec) -> Self {
@@ -251,6 +262,13 @@ impl ModuleBuilder {
                 "jobs are declared with `job`, not subscribed to".to_owned(),
             ));
         }
+        if matches!(kind, EventKind::Component | EventKind::Modal) {
+            self.problem.get_or_insert(self.invalid(
+                "",
+                "buttons, menus and forms are handled with `component` and `modal`, not subscribed to"
+                    .to_owned(),
+            ));
+        }
         let run: Arc<EventRun> = Arc::new(move |ctx, event| handler(ctx, event).boxed());
         if self.handlers.insert(kind, run).is_some() {
             self.problem.get_or_insert(self.invalid(
@@ -271,6 +289,7 @@ impl ModuleBuilder {
         F: Fn(ComponentCx) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), UserError>> + Send + 'static,
     {
+        self.check_route(route);
         let run: Arc<UiRun<ComponentInvocation>> = Arc::new(move |cx| handler(cx).boxed());
         if self.components.insert(route.to_owned(), run).is_some() {
             self.problem
@@ -286,6 +305,7 @@ impl ModuleBuilder {
         F: Fn(ModalCx) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), UserError>> + Send + 'static,
     {
+        self.check_route(route);
         let run: Arc<UiRun<ModalSubmission>> = Arc::new(move |cx| handler(cx).boxed());
         if self.modals.insert(route.to_owned(), run).is_some() {
             self.problem
@@ -311,6 +331,16 @@ impl ModuleBuilder {
         }
         self.manifest.capabilities.insert(Capability::Schedule);
         self
+    }
+
+    /// A route is written into a `custom_id` between colons, so it has to survive that.
+    fn check_route(&mut self, route: &str) {
+        if route.is_empty() || route.contains(':') {
+            self.problem.get_or_insert(self.invalid(
+                route,
+                "is not a usable route: it must not be empty or contain `:`".to_owned(),
+            ));
+        }
     }
 
     /// Adds a command that has no subcommands.
@@ -340,6 +370,13 @@ impl ModuleBuilder {
         let name = name.into();
         let mut specs = Vec::new();
         for sub in subcommands {
+            if sub.default_member_permissions.is_some() {
+                self.problem.get_or_insert(self.invalid(
+                    &sub.name,
+                    "is a subcommand: Discord decides who sees a command by the command, not by its subcommands"
+                        .to_owned(),
+                ));
+            }
             specs.push(SubcommandSpec {
                 name: sub.name.clone(),
                 description: sub.description.clone(),
@@ -372,18 +409,6 @@ impl ModuleBuilder {
                 None
             }
         };
-        if let Some(key) = &requires
-            && !self
-                .manifest
-                .permissions
-                .iter()
-                .any(|spec| spec.key == *key)
-        {
-            self.problem.get_or_insert(self.invalid(
-                command,
-                format!("requires the permission `{key}`, which the module does not declare"),
-            ));
-        }
         let route = Route {
             requires,
             cooldown: bound.cooldown,
@@ -408,7 +433,35 @@ impl ModuleBuilder {
     }
 
     /// The module, or what is wrong with its declaration.
-    pub fn build(self) -> Result<SdkModule, CoreError> {
+    pub fn build(mut self) -> Result<SdkModule, CoreError> {
+        // Looked at here and not as each command is added, so the order of the calls does not
+        // matter: a permission may be declared after the command that requires it.
+        for ((command, _), route) in &self.routes {
+            if let Some(key) = &route.requires
+                && !self
+                    .manifest
+                    .permissions
+                    .iter()
+                    .any(|spec| spec.key == *key)
+            {
+                self.problem.get_or_insert(self.invalid(
+                    command,
+                    format!("requires the permission `{key}`, which the module does not declare"),
+                ));
+            }
+        }
+        for kind in &self.manifest.events {
+            let missing = kind.required_intents() - self.manifest.intents;
+            if !missing.is_empty() {
+                self.problem.get_or_insert(self.invalid(
+                    "",
+                    format!(
+                        "handles `{}` events, which need the Gateway intent {missing:?}; declare it with `intents(..)`",
+                        kind.as_str()
+                    ),
+                ));
+            }
+        }
         if let Some(problem) = self.problem {
             return Err(problem);
         }

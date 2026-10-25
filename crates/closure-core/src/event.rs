@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use twilight_model::gateway::Intents;
 use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 use twilight_model::id::marker::{
@@ -349,6 +350,34 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// The Gateway intents Discord needs to send events of this kind (besides `GUILDS`, which the
+    /// bot always asks for). Some are privileged: they have to be switched on for the bot in the
+    /// Discord developer portal.
+    #[must_use]
+    pub fn required_intents(self) -> Intents {
+        match self {
+            Self::MemberJoined | Self::MemberUpdated | Self::MemberLeft => Intents::GUILD_MEMBERS,
+            Self::MessageCreated
+            | Self::MessageUpdated
+            | Self::MessageDeleted
+            | Self::MessagesBulkDeleted => Intents::GUILD_MESSAGES,
+            Self::ReactionAdded | Self::ReactionRemoved => Intents::GUILD_MESSAGE_REACTIONS,
+            Self::BanAdded | Self::BanRemoved => Intents::GUILD_MODERATION,
+            Self::GuildAvailable
+            | Self::GuildRemoved
+            | Self::ChannelCreated
+            | Self::ChannelUpdated
+            | Self::ChannelDeleted
+            | Self::RoleCreated
+            | Self::RoleUpdated
+            | Self::RoleDeleted
+            | Self::Command
+            | Self::Component
+            | Self::Modal
+            | Self::Scheduled => Intents::empty(),
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
