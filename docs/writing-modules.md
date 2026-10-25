@@ -346,6 +346,57 @@ See the `tests` module of the diagnostics crate for a complete set: replies in e
 configuration, ignoring unrelated events, invalid configuration, manifest validity and catalog
 parity.
 
+## Reading messages
+
+A module that reads messages subscribes to `EventKind::MessageCreated`, `MessageUpdated`,
+`MessageDeleted` or `MessagesBulkDeleted`. Created and updated events carry a `MessageInfo`: the
+guild, channel, author and their roles, content, mentioned users and roles, attachments, number of
+embeds and stickers, the message it replies to, whether a webhook sent it, and the times it was
+sent and last edited. Deleted events carry the ids only, since the message is gone.
+
+What differs on an update:
+
+- `created_at` is when the message was sent, also on an update. `edited_at` is set once it was
+  edited.
+- Twilight reads an update as a whole message. A field its payload leaves out comes out empty, and
+  a payload without the fields Discord always sends (an embed-only update, for instance, when a link
+  preview loads) is not delivered at all.
+- `content` is empty without the content intent (below). `author_roles` is empty when there is no
+  member data, as for a webhook's message.
+
+`content` needs the privileged `MESSAGE_CONTENT` intent. A module that reads it declares that:
+
+```rust
+ModuleBuilder::new("automod", "Automod", env!("CARGO_PKG_VERSION"))?
+    .intents(Intents::MESSAGE_CONTENT)
+```
+
+The intent must also be switched on for the bot in the Discord Developer Portal, otherwise
+`content` is empty. The bot asks Discord for the union of the intents of all modules, so a module
+that declares it makes the bot require it, in every guild.
+
+`closure_sdk::text` has plain-text helpers (no I/O), each documented with an example:
+
+- `normalize(text)`: lower case, fullwidth ASCII folded, zero-width and combining marks removed,
+  whitespace collapsed. It is not full Unicode NFKC.
+- `WordList::new(words, MatchMode::Contains | MatchMode::Whole)`, with `find` (the first listed
+  word that matches) and `find_all`. `Whole` needs no letter or digit next to the match, so `ass`
+  does not match `class`. Japanese has no spaces, so use `Contains` for it.
+- `links(text)` gives each `Link { url, host }`; `link.is_domain("example.com")` is true for the
+  domain and its subdomains only.
+- `invites`, `mention_count`, `caps_ratio`, `longest_run`, `emoji_count` and `combining_run`.
+
+```rust
+use closure_sdk::text::{MatchMode, WordList, links};
+
+let banned = WordList::new(["spam"], MatchMode::Whole);
+let spam = banned.find(&message.content);
+let foreign = links(&message.content).iter().any(|link| !link.is_domain("example.com"));
+```
+
+In a test, `Harness::message(Message::new(author, channel).content("…"))` delivers a message the
+way the dispatcher does, and returns what the module's filter let through.
+
 ## Later: scripts
 
 A Lua or WebAssembly module would supply the same manifest from a file and exchange the same

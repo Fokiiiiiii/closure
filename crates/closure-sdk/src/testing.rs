@@ -18,8 +18,8 @@ use closure_core::cases::{CaseBackend, Cases, MemoryCases};
 use closure_core::client::ApiClient;
 use closure_core::error::ModuleError;
 use closure_core::event::{
-    CommandInvocation, CommandOption, CommandOptionValue, ComponentInvocation, Event, GuildId,
-    InteractionToken, ModalSubmission, UserId, UserInfo,
+    AttachmentInfo, CommandInvocation, CommandOption, CommandOptionValue, ComponentInvocation,
+    Event, GuildId, InteractionToken, MessageInfo, ModalSubmission, UserId, UserInfo,
 };
 use closure_core::interaction::InteractionGuilds;
 use closure_core::locale::{Locale, Translator};
@@ -253,6 +253,89 @@ impl Submit {
     #[must_use]
     pub fn user(mut self, id: u64) -> Self {
         self.user = id;
+        self
+    }
+}
+
+/// A message a member posted in the guild, as a test describes it.
+#[derive(Debug, Clone)]
+pub struct Message {
+    author: u64,
+    bot: bool,
+    channel: u64,
+    roles: Vec<u64>,
+    content: String,
+    mentioned_users: Vec<u64>,
+    mentioned_roles: Vec<u64>,
+    mentions_everyone: bool,
+    attachments: Vec<AttachmentInfo>,
+}
+
+impl Message {
+    /// A message from `author` in `channel`, with no content, mentions or attachments.
+    #[must_use]
+    pub fn new(author: u64, channel: u64) -> Self {
+        Self {
+            author,
+            bot: false,
+            channel,
+            roles: Vec::new(),
+            content: String::new(),
+            mentioned_users: Vec::new(),
+            mentioned_roles: Vec::new(),
+            mentions_everyone: false,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn content(mut self, content: impl Into<String>) -> Self {
+        self.content = content.into();
+        self
+    }
+
+    /// The author is a bot.
+    #[must_use]
+    pub fn bot(mut self) -> Self {
+        self.bot = true;
+        self
+    }
+
+    /// The roles the author holds.
+    #[must_use]
+    pub fn roles(mut self, roles: impl IntoIterator<Item = u64>) -> Self {
+        self.roles = roles.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn mention(mut self, user: u64) -> Self {
+        self.mentioned_users.push(user);
+        self
+    }
+
+    #[must_use]
+    pub fn mention_role(mut self, role: u64) -> Self {
+        self.mentioned_roles.push(role);
+        self
+    }
+
+    #[must_use]
+    pub fn mention_everyone(mut self) -> Self {
+        self.mentions_everyone = true;
+        self
+    }
+
+    /// Attaches a file of `size` bytes, with the id it has in the message (counted from 1).
+    #[must_use]
+    pub fn attachment(mut self, filename: &str, size: u64) -> Self {
+        let id = u64::try_from(self.attachments.len() + 1).unwrap_or(u64::MAX);
+        self.attachments.push(AttachmentInfo {
+            id,
+            filename: filename.to_owned(),
+            size,
+            content_type: None,
+        });
         self
     }
 }
@@ -607,6 +690,43 @@ impl Harness {
             fields: submit.fields,
         };
         self.deliver(guild, Event::Modal(event)).await
+    }
+
+    /// Delivers a message posted in the guild, the way the dispatcher would: `None` when the
+    /// module did not subscribe to message creation, or its filter left the message out.
+    pub async fn message(&self, message: Message) -> Result<Option<Flow>, ModuleError> {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let info = MessageInfo {
+            id: Id::new(id),
+            channel_id: Id::new(message.channel),
+            guild_id: Id::new(GUILD),
+            author: UserInfo {
+                id: Id::new(message.author),
+                name: "tester".into(),
+                bot: message.bot,
+            },
+            author_roles: message.roles.iter().map(|id| Id::new(*id)).collect(),
+            content: message.content,
+            mentioned_users: message
+                .mentioned_users
+                .iter()
+                .map(|id| Id::new(*id))
+                .collect(),
+            mentioned_roles: message
+                .mentioned_roles
+                .iter()
+                .map(|id| Id::new(*id))
+                .collect(),
+            mentions_everyone: message.mentions_everyone,
+            attachments: message.attachments,
+            embed_count: 0,
+            sticker_count: 0,
+            reply_to: None,
+            from_webhook: false,
+            created_at: (self.clock)(),
+            edited_at: None,
+        };
+        self.emit(Event::MessageCreated(info)).await
     }
 
     /// A new interaction of `guild`: its number and its recorded token. Somebody owns the server

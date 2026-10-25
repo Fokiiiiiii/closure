@@ -46,6 +46,7 @@ pub mod modlog;
 mod module;
 pub mod punish;
 pub mod testing;
+pub mod text;
 pub mod ui;
 
 pub use args::{ArgError, ArgProblem, CommandArgs, OptionType};
@@ -53,8 +54,8 @@ pub use closure_core::action::{InteractionReply, Reason};
 pub use closure_core::capability::Capability;
 pub use closure_core::cases::{Case, CaseError, CaseKind, Cases, NewCase, Revoked};
 pub use closure_core::error::{CoreError, DiscordError, ModuleError};
+pub use closure_core::event::{AttachmentInfo, Event, EventKind, InteractionRef, MessageInfo};
 pub use closure_core::event::{ChannelId, CommandInvocation, GuildId, RoleId, UserId, UserInfo};
-pub use closure_core::event::{Event, EventKind, InteractionRef};
 pub use closure_core::locale::{Args, Locale};
 pub use closure_core::module::EventContext;
 pub use closure_core::module::{ChoiceValue, ModuleId, OptionChoice, OptionKind, OptionSpec};

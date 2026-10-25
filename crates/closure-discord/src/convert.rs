@@ -5,9 +5,9 @@
 
 use closure_core::action::Emoji;
 use closure_core::event::{
-    ChannelInfo, CommandInvocation, CommandOption, CommandOptionValue, ComponentInvocation, Event,
-    GuildId, InteractionToken, MemberInfo, MessageInfo, ModalSubmission, ReactionInfo, RoleInfo,
-    UserInfo,
+    AttachmentInfo, ChannelInfo, CommandInvocation, CommandOption, CommandOptionValue,
+    ComponentInvocation, Event, GuildId, InteractionToken, MemberInfo, MessageInfo,
+    ModalSubmission, ReactionInfo, RoleInfo, UserInfo,
 };
 use closure_core::locale::Locale;
 use twilight_gateway::Event as Gateway;
@@ -16,8 +16,8 @@ use twilight_model::application::interaction::application_command::{
 };
 use twilight_model::application::interaction::modal::ModalInteractionComponent;
 use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
-use twilight_model::channel::Channel;
-use twilight_model::channel::message::{EmojiReactionType, Message};
+use twilight_model::channel::message::{EmojiReactionType, Message, MessageType};
+use twilight_model::channel::{Attachment, Channel};
 use twilight_model::gateway::payload::incoming::GuildCreate;
 use twilight_model::guild::{Member, Role};
 use twilight_model::user::User;
@@ -46,6 +46,15 @@ fn member(guild_id: GuildId, member: &Member) -> MemberInfo {
     }
 }
 
+fn attachment(attachment: &Attachment) -> AttachmentInfo {
+    AttachmentInfo {
+        id: attachment.id.get(),
+        filename: attachment.filename.clone(),
+        size: attachment.size,
+        content_type: attachment.content_type.clone(),
+    }
+}
+
 fn message(message: &Message) -> Option<MessageInfo> {
     Some(MessageInfo {
         id: message.id,
@@ -59,8 +68,19 @@ fn message(message: &Message) -> Option<MessageInfo> {
             .unwrap_or_default(),
         content: message.content.clone(),
         mentioned_users: message.mentions.iter().map(|mention| mention.id).collect(),
+        mentioned_roles: message.mention_roles.clone(),
         mentions_everyone: message.mention_everyone,
-        attachment_count: u32::try_from(message.attachments.len()).unwrap_or(u32::MAX),
+        attachments: message.attachments.iter().map(attachment).collect(),
+        embed_count: u32::try_from(message.embeds.len()).unwrap_or(u32::MAX),
+        sticker_count: u32::try_from(message.sticker_items.len()).unwrap_or(u32::MAX),
+        // Only a reply answers its reference; pins and crossposts point at a message too.
+        reply_to: match (message.kind, &message.reference) {
+            (MessageType::Reply, Some(reference)) => reference.message_id,
+            _ => None,
+        },
+        from_webhook: message.webhook_id.is_some(),
+        created_at: seconds(message.timestamp),
+        edited_at: message.edited_timestamp.map(seconds),
     })
 }
 
@@ -350,7 +370,7 @@ fn reaction(reaction: &twilight_model::gateway::GatewayReaction) -> Option<React
 mod tests {
     use serde_json::{Value, json};
     use twilight_model::gateway::payload::incoming::{
-        BanAdd, GuildDelete, InteractionCreate, MessageCreate, MessageDelete,
+        BanAdd, GuildDelete, InteractionCreate, MessageCreate, MessageDelete, MessageUpdate,
     };
 
     use super::*;
@@ -405,8 +425,123 @@ mod tests {
             [8]
         );
         assert!(info.mentions_everyone);
-        assert_eq!(info.attachment_count, 1);
+        assert_eq!(info.attachments.len(), 1);
         assert_eq!(info.content, "hello");
+        assert!(!info.from_webhook);
+        assert_eq!(info.created_at, 1_792_800_000);
+        assert_eq!(info.edited_at, None);
+    }
+
+    /// Converts a message payload, as the gateway hands it over.
+    fn converted(json: Value) -> MessageInfo {
+        let payload: Message = serde_json::from_value(json).unwrap();
+        message(&payload).unwrap()
+    }
+
+    #[test]
+    fn attachments_keep_their_size_and_content_type_when_discord_has_one() {
+        let mut json = message_json(Some("1"));
+        json["attachments"] = json!([
+            { "id": "1", "filename": "a.png", "size": 1, "url": "u", "proxy_url": "p", "content_type": "image/png" },
+            { "id": "2", "filename": "b.bin", "size": 2048, "url": "u", "proxy_url": "p" }
+        ]);
+        let info = converted(json);
+        assert_eq!(
+            info.attachments,
+            [
+                AttachmentInfo {
+                    id: 1,
+                    filename: "a.png".into(),
+                    size: 1,
+                    content_type: Some("image/png".into()),
+                },
+                AttachmentInfo {
+                    id: 2,
+                    filename: "b.bin".into(),
+                    size: 2048,
+                    content_type: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn embeds_stickers_and_mentioned_roles_are_counted_or_listed() {
+        let mut json = message_json(Some("1"));
+        json["embeds"] =
+            json!([{ "type": "rich", "title": "t" }, { "type": "rich", "description": "d" }]);
+        json["sticker_items"] = json!([{ "id": "5", "format_type": 1, "name": "s" }]);
+        json["mention_roles"] = json!(["12", "13"]);
+        let info = converted(json);
+        assert_eq!(info.embed_count, 2);
+        assert_eq!(info.sticker_count, 1);
+        assert_eq!(
+            info.mentioned_roles
+                .iter()
+                .map(|r| r.get())
+                .collect::<Vec<_>>(),
+            [12, 13]
+        );
+    }
+
+    #[test]
+    fn a_reply_names_the_message_it_answers() {
+        let mut json = message_json(Some("1"));
+        json["type"] = json!(19);
+        json["message_reference"] =
+            json!({ "message_id": "55", "channel_id": "3", "guild_id": "1" });
+        assert_eq!(
+            converted(json).reply_to,
+            Some(twilight_model::id::Id::new(55))
+        );
+    }
+
+    #[test]
+    fn a_message_that_only_points_at_another_one_is_not_a_reply() {
+        // A pinned-message notice refers to the pinned message without replying to it.
+        let mut json = message_json(Some("1"));
+        json["type"] = json!(6);
+        json["message_reference"] =
+            json!({ "message_id": "55", "channel_id": "3", "guild_id": "1" });
+        assert_eq!(converted(json).reply_to, None);
+    }
+
+    #[test]
+    fn a_webhook_message_is_marked_and_has_no_member_roles() {
+        let mut json = message_json(Some("1"));
+        json.as_object_mut().unwrap().remove("member");
+        json["webhook_id"] = json!("77");
+        let info = converted(json);
+        assert!(info.from_webhook);
+        assert!(info.author_roles.is_empty());
+    }
+
+    #[test]
+    fn an_update_leaves_empty_what_the_payload_did_not_carry() {
+        // Without the content intent Discord sends no content; without member data, no roles.
+        let mut json = message_json(Some("1"));
+        json["content"] = json!("");
+        json["attachments"] = json!([]);
+        json["edited_timestamp"] = json!("2026-10-24T01:00:00.000000+00:00");
+        json.as_object_mut().unwrap().remove("member");
+        let update: MessageUpdate = serde_json::from_value(json).unwrap();
+        let Some(Event::MessageUpdated(info)) = event(&Gateway::MessageUpdate(Box::new(update)))
+        else {
+            panic!("expected a message update event");
+        };
+        assert_eq!(info.content, "");
+        assert!(info.author_roles.is_empty());
+        assert!(info.attachments.is_empty());
+        assert_eq!(info.created_at, 1_792_800_000);
+        assert_eq!(info.edited_at, Some(1_792_803_600));
+    }
+
+    #[test]
+    fn an_update_missing_required_fields_does_not_parse_at_all() {
+        // Twilight reads an update as a whole message, so a partial one (an embed-only update)
+        // never reaches the converter. This pins that assumption.
+        let partial = json!({ "id": "100", "channel_id": "3", "guild_id": "1", "embeds": [] });
+        assert!(serde_json::from_value::<MessageUpdate>(partial).is_err());
     }
 
     #[test]

@@ -452,7 +452,14 @@ fn message(channel: u64, id: u64) -> Event {
         content: String::new(),
         mentioned_users: vec![],
         mentions_everyone: false,
-        attachment_count: 0,
+        mentioned_roles: Vec::new(),
+        attachments: Vec::new(),
+        embed_count: 0,
+        sticker_count: 0,
+        reply_to: None,
+        from_webhook: false,
+        created_at: 0,
+        edited_at: None,
     })
 }
 

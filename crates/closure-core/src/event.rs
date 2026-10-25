@@ -41,6 +41,22 @@ pub struct MemberInfo {
     pub timed_out_until: Option<i64>,
 }
 
+/// A file attached to a message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentInfo {
+    pub id: u64,
+    pub filename: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// `None` when Discord does not know the type.
+    pub content_type: Option<String>,
+}
+
+/// A message in a guild. `created_at` is when it was sent, also on a `MessageUpdated` event.
+/// An update is read as a whole message: a field its payload leaves out comes out empty, and a
+/// payload without the fields Discord always sends is not delivered at all. Without the content
+/// intent `content` is empty; without member data `author_roles` is. Fields added after a
+/// release are `#[serde(default)]`, so an event serialised before them still parses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageInfo {
     pub id: MessageId,
@@ -52,8 +68,28 @@ pub struct MessageInfo {
     /// Empty when the bot lacks the message content intent or the update did not carry it.
     pub content: String,
     pub mentioned_users: Vec<UserId>,
+    #[serde(default)]
+    pub mentioned_roles: Vec<RoleId>,
     pub mentions_everyone: bool,
-    pub attachment_count: u32,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentInfo>,
+    /// Number of embeds (link previews included).
+    #[serde(default)]
+    pub embed_count: u32,
+    #[serde(default)]
+    pub sticker_count: u32,
+    /// The message this one replies to. `None` for anything that is not a reply.
+    #[serde(default)]
+    pub reply_to: Option<MessageId>,
+    /// Posted by a webhook rather than a user (`author` is then the webhook's user).
+    #[serde(default)]
+    pub from_webhook: bool,
+    /// Unix seconds, when the message was sent.
+    #[serde(default)]
+    pub created_at: i64,
+    /// Unix seconds of the last edit; `None` when it was never edited.
+    #[serde(default)]
+    pub edited_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -534,6 +570,8 @@ pub type EventKinds = BTreeSet<EventKind>;
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn user() -> UserInfo {
@@ -564,6 +602,21 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"message_deleted\""));
         assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
+    }
+
+    #[test]
+    fn messages_serialised_before_the_richer_kit_still_parse() {
+        let old = json!({
+            "id": "1", "channel_id": "2", "guild_id": "3",
+            "author": { "id": "4", "name": "u", "bot": false },
+            "author_roles": [], "content": "hi", "mentioned_users": [],
+            "mentions_everyone": false, "attachment_count": 2
+        });
+        let info: MessageInfo = serde_json::from_value(old).unwrap();
+        assert!(info.attachments.is_empty());
+        assert!(info.mentioned_roles.is_empty());
+        assert_eq!(info.created_at, 0);
+        assert_eq!(info.edited_at, None);
     }
 
     #[test]
