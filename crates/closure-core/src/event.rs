@@ -141,6 +141,110 @@ pub struct CommandInvocation {
     pub options: Vec<CommandOption>,
 }
 
+/// A click on a button or a choice in a select menu, on a message of the bot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentInvocation {
+    pub interaction_id: InteractionId,
+    pub application_id: ApplicationId,
+    pub token: InteractionToken,
+    pub guild_id: GuildId,
+    pub channel_id: ChannelId,
+    /// The message the component is on.
+    pub message_id: MessageId,
+    pub user: UserInfo,
+    pub roles: Vec<RoleId>,
+    pub invoker_permissions: Permissions,
+    pub locale: Option<Locale>,
+    /// The id the module gave the component; it starts with the id of the module (`module:..`).
+    pub custom_id: String,
+    /// What was chosen in a select menu; empty for a button.
+    pub values: Vec<String>,
+}
+
+/// A modal that the user filled in and sent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModalSubmission {
+    pub interaction_id: InteractionId,
+    pub application_id: ApplicationId,
+    pub token: InteractionToken,
+    pub guild_id: GuildId,
+    pub channel_id: ChannelId,
+    pub user: UserInfo,
+    pub roles: Vec<RoleId>,
+    pub invoker_permissions: Permissions,
+    pub locale: Option<Locale>,
+    /// The id the module gave the modal; it starts with the id of the module (`module:..`).
+    pub custom_id: String,
+    /// The text of each input, by the input's id, in the order of the modal.
+    pub fields: Vec<(String, String)>,
+}
+
+impl ModalSubmission {
+    /// What the user wrote in the input `custom_id`.
+    #[must_use]
+    pub fn field(&self, custom_id: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(id, _)| id == custom_id)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// What every interaction (a command, a click, a submitted modal) has in common: where it came
+/// from, who sent it, and what to answer it with.
+pub trait InteractionRef: Send + Sync {
+    fn interaction_id(&self) -> InteractionId;
+    fn token(&self) -> &InteractionToken;
+    fn guild_id(&self) -> GuildId;
+    fn channel_id(&self) -> ChannelId;
+    fn user(&self) -> &UserInfo;
+    fn roles(&self) -> &[RoleId];
+    fn invoker_permissions(&self) -> Permissions;
+    fn locale(&self) -> Option<Locale>;
+}
+
+macro_rules! interaction_ref {
+    ($ty:ty) => {
+        impl InteractionRef for $ty {
+            fn interaction_id(&self) -> InteractionId {
+                self.interaction_id
+            }
+
+            fn token(&self) -> &InteractionToken {
+                &self.token
+            }
+
+            fn guild_id(&self) -> GuildId {
+                self.guild_id
+            }
+
+            fn channel_id(&self) -> ChannelId {
+                self.channel_id
+            }
+
+            fn user(&self) -> &UserInfo {
+                &self.user
+            }
+
+            fn roles(&self) -> &[RoleId] {
+                &self.roles
+            }
+
+            fn invoker_permissions(&self) -> Permissions {
+                self.invoker_permissions
+            }
+
+            fn locale(&self) -> Option<Locale> {
+                self.locale
+            }
+        }
+    };
+}
+
+interaction_ref!(CommandInvocation);
+interaction_ref!(ComponentInvocation);
+interaction_ref!(ModalSubmission);
+
 impl CommandInvocation {
     #[must_use]
     pub fn option(&self, name: &str) -> Option<&CommandOptionValue> {
@@ -204,6 +308,10 @@ pub enum Event {
         role_id: RoleId,
     },
     Command(CommandInvocation),
+    /// A click or a choice on a component of one of the module's messages.
+    Component(ComponentInvocation),
+    /// A modal of the module that the user sent.
+    Modal(ModalSubmission),
 }
 
 /// Payload-free discriminant of [`Event`], used for subscriptions and metrics labels.
@@ -230,6 +338,8 @@ pub enum EventKind {
     RoleUpdated,
     RoleDeleted,
     Command,
+    Component,
+    Modal,
 }
 
 impl EventKind {
@@ -256,6 +366,8 @@ impl EventKind {
             Self::RoleUpdated => "role_updated",
             Self::RoleDeleted => "role_deleted",
             Self::Command => "command",
+            Self::Component => "component",
+            Self::Modal => "modal",
         }
     }
 }
@@ -284,6 +396,8 @@ impl Event {
             Self::RoleUpdated(_) => EventKind::RoleUpdated,
             Self::RoleDeleted { .. } => EventKind::RoleDeleted,
             Self::Command(_) => EventKind::Command,
+            Self::Component(_) => EventKind::Component,
+            Self::Modal(_) => EventKind::Modal,
         }
     }
 
@@ -303,6 +417,8 @@ impl Event {
             | Self::ChannelUpdated(channel)
             | Self::ChannelDeleted(channel) => Some(channel.id),
             Self::Command(invocation) => Some(invocation.channel_id),
+            Self::Component(click) => Some(click.channel_id),
+            Self::Modal(submission) => Some(submission.channel_id),
             _ => None,
         }
     }
@@ -318,6 +434,8 @@ impl Event {
             | Self::BanAdded { user, .. }
             | Self::BanRemoved { user, .. } => user.bot,
             Self::Command(invocation) => invocation.user.bot,
+            Self::Component(click) => click.user.bot,
+            Self::Modal(submission) => submission.user.bot,
             _ => false,
         }
     }
@@ -329,6 +447,8 @@ impl Event {
             Self::MessageCreated(message) | Self::MessageUpdated(message) => &message.author_roles,
             Self::MemberJoined(member) | Self::MemberUpdated(member) => &member.roles,
             Self::Command(invocation) => &invocation.roles,
+            Self::Component(click) => &click.roles,
+            Self::Modal(submission) => &submission.roles,
             _ => &[],
         }
     }
@@ -354,6 +474,20 @@ impl Event {
             | Self::ChannelDeleted(info) => info.guild_id,
             Self::RoleCreated(info) | Self::RoleUpdated(info) => info.guild_id,
             Self::Command(invocation) => invocation.guild_id,
+            Self::Component(click) => click.guild_id,
+            Self::Modal(submission) => submission.guild_id,
+        }
+    }
+
+    /// The token to answer the event with, if it is an interaction (a command, a click or a
+    /// submitted modal). Discord wants an answer within three seconds.
+    #[must_use]
+    pub fn interaction_token(&self) -> Option<&InteractionToken> {
+        match self {
+            Self::Command(invocation) => Some(&invocation.token),
+            Self::Component(click) => Some(&click.token),
+            Self::Modal(submission) => Some(&submission.token),
+            _ => None,
         }
     }
 }

@@ -13,6 +13,8 @@ error-command-failed = コマンドの実行中に問題が発生しました。
 
 # モジュールSDK (closure-sdk) の返信。
 sdk-done = 完了しました。
+sdk-not-yours = これはあなた向けではありません。
+sdk-gone = これはもう利用できません。
 sdk-permission-level = ここでそれを行う権限がありません。レベル { $required } が必要で、あなたはレベル { $actual } です。
 sdk-permission-denied = ここでそれを行う権限がありません。
 sdk-cooldown = あと { $seconds } 秒待ってから、もう一度お試しください。

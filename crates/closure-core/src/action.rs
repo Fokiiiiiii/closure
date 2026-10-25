@@ -10,7 +10,10 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::Channel;
-use twilight_model::channel::message::{Embed, Message};
+use twilight_model::channel::message::component::{
+    Button, ButtonStyle, SelectMenu, SelectMenuType,
+};
+use twilight_model::channel::message::{Component, Embed, Message};
 use twilight_model::guild::audit_log::AuditLog;
 use twilight_model::guild::auto_moderation::AutoModerationRule;
 use twilight_model::guild::{Ban, Guild, Member, Permissions, Role};
@@ -226,6 +229,19 @@ pub struct InteractionReply {
     pub content: Option<String>,
     pub embeds: Vec<Embed>,
     pub ephemeral: bool,
+    /// Buttons and select menus under the message, in rows (see [`check_components`] for what
+    /// Discord accepts). Their `custom_id`s have to start with the id of the module.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<Component>,
+}
+
+/// A form to show to the user: a title and rows of one text input each.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModalSpec {
+    /// Starts with the id of the module (`module:..`); the submission comes back under it.
+    pub custom_id: String,
+    pub title: String,
+    pub components: Vec<Component>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,6 +254,14 @@ pub enum InteractionResponse {
     Message {
         reply: InteractionReply,
     },
+    /// Answers a click by changing the message the component is on.
+    Update {
+        reply: InteractionReply,
+    },
+    /// Acknowledges a click without changing anything (for now).
+    DeferUpdate,
+    /// Answers with a form.
+    Modal(ModalSpec),
 }
 
 /// Every Discord operation available to modules.
@@ -453,6 +477,7 @@ fn check_message_body(content: Option<&str>, embeds: &[Embed]) -> Result<(), Dis
 
 fn check_reply(reply: &InteractionReply, require_body: bool) -> Result<(), DiscordError> {
     check_message_body(reply.content.as_deref(), &reply.embeds)?;
+    check_components(&reply.components)?;
     if require_body {
         ensure(
             reply.content.as_deref().is_some_and(|c| !c.is_empty()) || !reply.embeds.is_empty(),
@@ -460,6 +485,167 @@ fn check_reply(reply: &InteractionReply, require_body: bool) -> Result<(), Disco
         )?;
     }
     Ok(())
+}
+
+/// What Discord accepts under a message: up to five rows, each of up to five buttons or one
+/// select menu of text options.
+pub fn check_components(components: &[Component]) -> Result<(), DiscordError> {
+    ensure(components.len() <= 5, || {
+        "a message has at most 5 rows of components".into()
+    })?;
+    for row in components {
+        let Component::ActionRow(row) = row else {
+            return Err(DiscordError::Invalid(
+                "components belong in action rows".into(),
+            ));
+        };
+        match row.components.as_slice() {
+            [Component::SelectMenu(menu)] => check_select(menu)?,
+            buttons if !buttons.is_empty() && buttons.len() <= 5 => {
+                for button in buttons {
+                    let Component::Button(button) = button else {
+                        return Err(DiscordError::Invalid(
+                            "a row holds up to 5 buttons or one select menu".into(),
+                        ));
+                    };
+                    check_button(button)?;
+                }
+            }
+            _ => {
+                return Err(DiscordError::Invalid(
+                    "a row holds up to 5 buttons or one select menu".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_button(button: &Button) -> Result<(), DiscordError> {
+    if let Some(label) = &button.label {
+        check_len("button label", label, 1, 80)?;
+    }
+    match button.style {
+        ButtonStyle::Link => ensure(
+            button
+                .url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("https://")),
+            || "a link button needs an https:// url".into(),
+        ),
+        ButtonStyle::Primary
+        | ButtonStyle::Secondary
+        | ButtonStyle::Success
+        | ButtonStyle::Danger => {
+            check_len(
+                "button custom_id",
+                button.custom_id.as_deref().unwrap_or_default(),
+                1,
+                100,
+            )?;
+            ensure(button.label.is_some() || button.emoji.is_some(), || {
+                "a button needs a label or an emoji".into()
+            })
+        }
+        _ => Err(DiscordError::Invalid(
+            "this kind of button is not supported".into(),
+        )),
+    }
+}
+
+fn check_select(menu: &SelectMenu) -> Result<(), DiscordError> {
+    ensure(menu.kind == SelectMenuType::Text, || {
+        "only select menus of text options are supported".into()
+    })?;
+    check_len("select custom_id", &menu.custom_id, 1, 100)?;
+    if let Some(placeholder) = &menu.placeholder {
+        check_len("select placeholder", placeholder, 0, 150)?;
+    }
+    let options = menu.options.as_deref().unwrap_or_default();
+    ensure((1..=25).contains(&options.len()), || {
+        "a select menu has 1-25 options".into()
+    })?;
+    for option in options {
+        check_len("option label", &option.label, 1, 100)?;
+        check_len("option value", &option.value, 1, 100)?;
+        if let Some(description) = &option.description {
+            check_len("option description", description, 0, 100)?;
+        }
+    }
+    let (min, max) = (menu.min_values.unwrap_or(1), menu.max_values.unwrap_or(1));
+    ensure(
+        min <= max && usize::from(max) <= options.len() && max <= 25,
+        || "a select menu's min and max values do not fit its options".into(),
+    )
+}
+
+/// A modal has a title, an id, and 1-5 rows of one text input each.
+fn check_modal(spec: &ModalSpec) -> Result<(), DiscordError> {
+    check_len("modal custom_id", &spec.custom_id, 1, 100)?;
+    check_len("modal title", &spec.title, 1, 45)?;
+    ensure((1..=5).contains(&spec.components.len()), || {
+        "a modal has 1-5 inputs".into()
+    })?;
+    for row in &spec.components {
+        let [Component::ActionRow(row)] = std::slice::from_ref(row) else {
+            return Err(DiscordError::Invalid(
+                "modal inputs belong in action rows".into(),
+            ));
+        };
+        let [Component::TextInput(input)] = row.components.as_slice() else {
+            return Err(DiscordError::Invalid(
+                "a modal row holds one text input".into(),
+            ));
+        };
+        check_len("input custom_id", &input.custom_id, 1, 100)?;
+        #[allow(deprecated)]
+        if let Some(label) = &input.label {
+            check_len("input label", label, 1, 45)?;
+        }
+        if let Some(max) = input.max_length {
+            ensure((1..=4000).contains(&max), || {
+                "an input holds 1-4000 characters".into()
+            })?;
+        }
+    }
+    Ok(())
+}
+
+impl Action {
+    /// The `custom_id`s of the components and modal this action sends.
+    #[must_use]
+    pub fn custom_ids(&self) -> Vec<&str> {
+        fn of(components: &[Component]) -> Vec<&str> {
+            let mut found = Vec::new();
+            for component in components {
+                match component {
+                    Component::ActionRow(row) => found.extend(of(&row.components)),
+                    Component::Button(button) => found.extend(button.custom_id.as_deref()),
+                    Component::SelectMenu(menu) => found.push(menu.custom_id.as_str()),
+                    Component::TextInput(input) => found.push(input.custom_id.as_str()),
+                    _ => {}
+                }
+            }
+            found
+        }
+        match self {
+            Self::Respond { response, .. } => match response {
+                InteractionResponse::Message { reply } | InteractionResponse::Update { reply } => {
+                    of(&reply.components)
+                }
+                InteractionResponse::Modal(spec) => {
+                    let mut ids = vec![spec.custom_id.as_str()];
+                    ids.extend(of(&spec.components));
+                    ids
+                }
+                InteractionResponse::Defer { .. } | InteractionResponse::DeferUpdate => Vec::new(),
+            },
+            Self::Followup { reply, .. } | Self::EditResponse { reply, .. } => {
+                of(&reply.components)
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 fn check_timeout_seconds(seconds: u32) -> Result<(), DiscordError> {
@@ -815,8 +1001,10 @@ impl Action {
                 || "audit log limit must be 1-100".into(),
             ),
             Self::Respond { response, .. } => match response {
-                InteractionResponse::Defer { .. } => Ok(()),
+                InteractionResponse::Defer { .. } | InteractionResponse::DeferUpdate => Ok(()),
                 InteractionResponse::Message { reply } => check_reply(reply, true),
+                InteractionResponse::Update { reply } => check_reply(reply, false),
+                InteractionResponse::Modal(spec) => check_modal(spec),
             },
             Self::Followup { reply, .. } => check_reply(reply, true),
             Self::EditResponse { reply, .. } => check_reply(reply, false),
@@ -988,6 +1176,172 @@ mod tests {
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains("\"type\":\"unban\""));
         assert_eq!(serde_json::from_str::<Action>(&json).unwrap(), action);
+    }
+
+    fn button_with(custom_id: &str, label: &str) -> Component {
+        Component::Button(Button {
+            id: None,
+            custom_id: Some(custom_id.into()),
+            disabled: false,
+            emoji: None,
+            label: Some(label.into()),
+            style: ButtonStyle::Primary,
+            url: None,
+            sku_id: None,
+        })
+    }
+
+    fn row_of(components: Vec<Component>) -> Component {
+        Component::ActionRow(twilight_model::channel::message::component::ActionRow {
+            id: None,
+            components,
+        })
+    }
+
+    #[test]
+    fn components_must_fit_what_discord_accepts() {
+        let ok = vec![row_of(vec![
+            button_with("m:a", "A"),
+            button_with("m:b", "B"),
+        ])];
+        assert!(check_components(&ok).is_ok());
+        assert!(check_components(&[]).is_ok());
+
+        // Too many rows, too many buttons, nothing in a row, a button outside a row.
+        assert!(check_components(&vec![row_of(vec![button_with("m:a", "A")]); 6]).is_err());
+        let six = (0..6)
+            .map(|n| button_with(&format!("m:{n}"), "x"))
+            .collect();
+        assert!(check_components(&[row_of(six)]).is_err());
+        assert!(check_components(&[row_of(vec![])]).is_err());
+        assert!(check_components(&[button_with("m:a", "A")]).is_err());
+        // Ids and labels that are empty or too long, a link without https.
+        assert!(check_components(&[row_of(vec![button_with("", "A")])]).is_err());
+        assert!(check_components(&[row_of(vec![button_with(&"m".repeat(101), "A")])]).is_err());
+        assert!(check_components(&[row_of(vec![button_with("m:a", &"l".repeat(81))])]).is_err());
+        let link = |url: &str| {
+            Component::Button(Button {
+                id: None,
+                custom_id: None,
+                disabled: false,
+                emoji: None,
+                label: Some("site".into()),
+                style: ButtonStyle::Link,
+                url: Some(url.into()),
+                sku_id: None,
+            })
+        };
+        assert!(check_components(&[row_of(vec![link("https://example.org")])]).is_ok());
+        assert!(check_components(&[row_of(vec![link("http://example.org")])]).is_err());
+    }
+
+    #[test]
+    fn select_menus_and_modals_are_checked_too() {
+        use twilight_model::channel::message::component::{
+            SelectMenuOption, TextInput, TextInputStyle,
+        };
+
+        let option = |n: usize| SelectMenuOption {
+            default: false,
+            description: None,
+            emoji: None,
+            label: format!("o{n}"),
+            value: format!("v{n}"),
+        };
+        let menu = |options: usize, min: u8, max: u8| {
+            row_of(vec![Component::SelectMenu(SelectMenu {
+                id: None,
+                channel_types: None,
+                custom_id: "m:pick".into(),
+                default_values: None,
+                disabled: false,
+                kind: SelectMenuType::Text,
+                max_values: Some(max),
+                min_values: Some(min),
+                options: Some((0..options).map(option).collect()),
+                placeholder: None,
+                required: None,
+            })])
+        };
+        assert!(check_components(&[menu(3, 1, 2)]).is_ok());
+        assert!(check_components(&[menu(0, 1, 1)]).is_err());
+        assert!(check_components(&[menu(26, 1, 1)]).is_err());
+        assert!(check_components(&[menu(3, 2, 1)]).is_err());
+        assert!(check_components(&[menu(3, 1, 4)]).is_err());
+
+        #[allow(deprecated)]
+        let input = |id: &str, label: &str| {
+            row_of(vec![Component::TextInput(TextInput {
+                id: None,
+                custom_id: id.into(),
+                label: Some(label.into()),
+                max_length: Some(100),
+                min_length: None,
+                placeholder: None,
+                required: Some(true),
+                style: TextInputStyle::Short,
+                value: None,
+            })])
+        };
+        let modal = |title: &str, inputs: Vec<Component>| ModalSpec {
+            custom_id: "m:form".into(),
+            title: title.into(),
+            components: inputs,
+        };
+        assert!(check_modal(&modal("Report", vec![input("m:why", "Why")])).is_ok());
+        assert!(check_modal(&modal("", vec![input("m:why", "Why")])).is_err());
+        assert!(check_modal(&modal(&"t".repeat(46), vec![input("m:why", "Why")])).is_err());
+        assert!(check_modal(&modal("Report", vec![])).is_err());
+        assert!(check_modal(&modal("Report", vec![input("", "Why")])).is_err());
+        assert!(check_modal(&modal("Report", vec![button_with("m:a", "A")])).is_err());
+    }
+
+    #[test]
+    fn the_custom_ids_of_an_action_are_all_found() {
+        let respond = |response| Action::Respond {
+            interaction_id: Id::new(1),
+            token: InteractionToken::new("t"),
+            response,
+        };
+        let reply = InteractionReply {
+            components: vec![row_of(vec![
+                button_with("m:a", "A"),
+                button_with("m:b", "B"),
+            ])],
+            ..InteractionReply::default()
+        };
+        assert_eq!(
+            respond(InteractionResponse::Message {
+                reply: reply.clone()
+            })
+            .custom_ids(),
+            ["m:a", "m:b"]
+        );
+        assert_eq!(
+            respond(InteractionResponse::Update {
+                reply: reply.clone()
+            })
+            .custom_ids(),
+            ["m:a", "m:b"]
+        );
+        assert_eq!(
+            Action::Followup {
+                token: InteractionToken::new("t"),
+                reply
+            }
+            .custom_ids(),
+            ["m:a", "m:b"]
+        );
+        assert!(
+            respond(InteractionResponse::DeferUpdate)
+                .custom_ids()
+                .is_empty()
+        );
+        assert!(
+            respond(InteractionResponse::Defer { ephemeral: true })
+                .custom_ids()
+                .is_empty()
+        );
     }
 
     #[test]

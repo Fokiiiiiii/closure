@@ -17,6 +17,7 @@ fn response_data(reply: &InteractionReply) -> InteractionResponseData {
         allowed_mentions: Some(AllowedMentions::default()),
         content: reply.content.clone(),
         embeds: (!reply.embeds.is_empty()).then(|| reply.embeds.clone()),
+        components: (!reply.components.is_empty()).then(|| reply.components.clone()),
         flags: flags(reply.ephemeral),
         ..InteractionResponseData::default()
     }
@@ -34,6 +35,23 @@ fn twilight_response(response: &InteractionResponse) -> TwilightResponse {
         InteractionResponse::Message { reply } => TwilightResponse {
             kind: InteractionResponseType::ChannelMessageWithSource,
             data: Some(response_data(reply)),
+        },
+        InteractionResponse::Update { reply } => TwilightResponse {
+            kind: InteractionResponseType::UpdateMessage,
+            data: Some(response_data(reply)),
+        },
+        InteractionResponse::DeferUpdate => TwilightResponse {
+            kind: InteractionResponseType::DeferredUpdateMessage,
+            data: None,
+        },
+        InteractionResponse::Modal(spec) => TwilightResponse {
+            kind: InteractionResponseType::Modal,
+            data: Some(InteractionResponseData {
+                custom_id: Some(spec.custom_id.clone()),
+                title: Some(spec.title.clone()),
+                components: Some(spec.components.clone()),
+                ..InteractionResponseData::default()
+            }),
         },
     }
 }
@@ -66,6 +84,9 @@ impl TwilightApi {
         if !reply.embeds.is_empty() {
             request = request.embeds(&reply.embeds);
         }
+        if !reply.components.is_empty() {
+            request = request.components(&reply.components);
+        }
         if reply.ephemeral {
             request = request.flags(MessageFlags::EPHEMERAL);
         }
@@ -89,6 +110,9 @@ impl TwilightApi {
         if !reply.embeds.is_empty() {
             request = request.embeds(Some(&reply.embeds));
         }
+        if !reply.components.is_empty() {
+            request = request.components(Some(&reply.components));
+        }
         run(request).await
     }
 }
@@ -102,11 +126,63 @@ mod tests {
         let data = response_data(&InteractionReply {
             content: Some("hi".into()),
             embeds: vec![],
+            components: Vec::new(),
             ephemeral: true,
         });
         assert_eq!(data.flags, Some(MessageFlags::EPHEMERAL));
         assert_eq!(data.allowed_mentions, Some(AllowedMentions::default()));
         assert_eq!(data.embeds, None);
+    }
+
+    #[test]
+    fn updates_acknowledgements_and_modals_map_to_their_discord_types() {
+        let update = twilight_response(&InteractionResponse::Update {
+            reply: InteractionReply {
+                content: Some("changed".into()),
+                ..InteractionReply::default()
+            },
+        });
+        assert_eq!(update.kind, InteractionResponseType::UpdateMessage);
+        assert_eq!(
+            update.data.and_then(|d| d.content).as_deref(),
+            Some("changed")
+        );
+
+        let ack = twilight_response(&InteractionResponse::DeferUpdate);
+        assert_eq!(ack.kind, InteractionResponseType::DeferredUpdateMessage);
+        assert!(ack.data.is_none());
+
+        let form = twilight_response(&InteractionResponse::Modal(
+            closure_core::action::ModalSpec {
+                custom_id: "m:form".into(),
+                title: "Report".into(),
+                components: vec![],
+            },
+        ));
+        assert_eq!(form.kind, InteractionResponseType::Modal);
+        let data = form.data.unwrap();
+        assert_eq!(data.custom_id.as_deref(), Some("m:form"));
+        assert_eq!(data.title.as_deref(), Some("Report"));
+    }
+
+    #[test]
+    fn components_are_sent_with_the_reply() {
+        let data = response_data(&InteractionReply {
+            content: Some("hi".into()),
+            components: vec![twilight_model::channel::message::Component::ActionRow(
+                twilight_model::channel::message::component::ActionRow {
+                    id: None,
+                    components: vec![],
+                },
+            )],
+            ..InteractionReply::default()
+        });
+        assert_eq!(data.components.map(|c| c.len()), Some(1));
+        assert!(
+            response_data(&InteractionReply::default())
+                .components
+                .is_none()
+        );
     }
 
     #[test]

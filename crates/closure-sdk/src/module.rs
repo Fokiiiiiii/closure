@@ -9,7 +9,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use closure_core::capability::Capability;
 use closure_core::error::{CoreError, ModuleError};
-use closure_core::event::{Event, EventKind};
+use closure_core::event::{ComponentInvocation, Event, EventKind, InteractionRef, ModalSubmission};
 use closure_core::locale::{Args, Locale};
 use closure_core::module::{
     CommandSpec, EventContext, Module, ModuleId, ModuleManifest, SubcommandSpec,
@@ -22,8 +22,9 @@ use twilight_model::guild::Permissions;
 
 use crate::args::CommandArgs;
 use crate::cooldown::{Cooldown, Cooldowns};
-use crate::cx::CommandCx;
+use crate::cx::{CommandCx, ComponentCx, Cx, ModalCx};
 use crate::error::UserError;
+use crate::ui::CustomId;
 
 type Run = dyn Fn(CommandCx) -> BoxFuture<'static, Result<(), UserError>> + Send + Sync;
 
@@ -130,11 +131,16 @@ type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 type EventRun =
     dyn Fn(EventContext, Event) -> BoxFuture<'static, Result<Flow, ModuleError>> + Send + Sync;
 
+/// What runs when a component or a modal comes back.
+type UiRun<I> = dyn Fn(Cx<I>) -> BoxFuture<'static, Result<(), UserError>> + Send + Sync;
+
 /// Builds a module from its commands.
 pub struct ModuleBuilder {
     manifest: ModuleManifest,
     routes: HashMap<(String, Option<String>), Route>,
     handlers: HashMap<EventKind, Arc<EventRun>>,
+    components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
+    modals: HashMap<String, Arc<UiRun<ModalSubmission>>>,
     problem: Option<CoreError>,
     clock: Clock,
 }
@@ -162,6 +168,8 @@ impl ModuleBuilder {
             manifest,
             routes: HashMap::new(),
             handlers: HashMap::new(),
+            components: HashMap::new(),
+            modals: HashMap::new(),
             problem: None,
             clock: Arc::new(Instant::now),
         })
@@ -239,6 +247,38 @@ impl ModuleBuilder {
             ));
         }
         self.manifest = self.manifest.subscribe(subscription);
+        self
+    }
+
+    /// What happens when a button or select menu whose `custom_id` names `route` (see
+    /// [`CustomId`]) is used. Answer with `cx.update(..)`, `cx.reply_private(..)` or
+    /// `cx.show_modal(..)`; a handler that answers nothing just acknowledges the click.
+    #[must_use]
+    pub fn component<F, Fut>(mut self, route: &str, handler: F) -> Self
+    where
+        F: Fn(ComponentCx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), UserError>> + Send + 'static,
+    {
+        let run: Arc<UiRun<ComponentInvocation>> = Arc::new(move |cx| handler(cx).boxed());
+        if self.components.insert(route.to_owned(), run).is_some() {
+            self.problem
+                .get_or_insert(self.invalid(route, "has two component handlers".to_owned()));
+        }
+        self
+    }
+
+    /// What happens when the form whose `custom_id` names `route` is submitted.
+    #[must_use]
+    pub fn modal<F, Fut>(mut self, route: &str, handler: F) -> Self
+    where
+        F: Fn(ModalCx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), UserError>> + Send + 'static,
+    {
+        let run: Arc<UiRun<ModalSubmission>> = Arc::new(move |cx| handler(cx).boxed());
+        if self.modals.insert(route.to_owned(), run).is_some() {
+            self.problem
+                .get_or_insert(self.invalid(route, "has two modal handlers".to_owned()));
+        }
         self
     }
 
@@ -345,6 +385,8 @@ impl ModuleBuilder {
             manifest: self.manifest,
             routes: self.routes,
             handlers: self.handlers,
+            components: self.components,
+            modals: self.modals,
             cooldowns: Cooldowns::default(),
             clock: self.clock,
         })
@@ -358,6 +400,8 @@ pub struct SdkModule {
     manifest: ModuleManifest,
     routes: HashMap<(String, Option<String>), Route>,
     handlers: HashMap<EventKind, Arc<EventRun>>,
+    components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
+    modals: HashMap<String, Arc<UiRun<ModalSubmission>>>,
     cooldowns: Cooldowns,
     clock: Clock,
 }
@@ -383,8 +427,85 @@ impl SdkModule {
         (route.run)(cx.clone()).await
     }
 
+    /// A click or a choice: finds the handler named in the `custom_id`, checks that the user is
+    /// the one the component was made for, and runs it.
+    async fn on_component(
+        &self,
+        ctx: &EventContext,
+        click: &ComponentInvocation,
+    ) -> Result<Flow, ModuleError> {
+        let cx = ComponentCx::new(ctx, click);
+        let Some((_, id)) = self.own_custom_id(&click.custom_id) else {
+            return Ok(Flow::Continue);
+        };
+        let Some(run) = self.components.get(&id.route) else {
+            return Self::refuse(&cx, "sdk-gone").await;
+        };
+        if id.owner.is_some_and(|owner| owner != click.user.id) {
+            return Self::refuse(&cx, "sdk-not-yours").await;
+        }
+        match run(cx.clone()).await {
+            Ok(()) => {
+                if !cx.has_replied() {
+                    // A click nobody answers would show as failed in Discord.
+                    cx.defer_update().await.map_err(module_error)?;
+                }
+            }
+            Err(error) => Self::answer(&cx, error).await?,
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// A form that was sent.
+    async fn on_modal(
+        &self,
+        ctx: &EventContext,
+        submission: &ModalSubmission,
+    ) -> Result<Flow, ModuleError> {
+        let cx = ModalCx::new(ctx, submission);
+        let Some((_, id)) = self.own_custom_id(&submission.custom_id) else {
+            return Ok(Flow::Continue);
+        };
+        let Some(run) = self.modals.get(&id.route) else {
+            return Self::refuse(&cx, "sdk-gone").await;
+        };
+        if id.owner.is_some_and(|owner| owner != submission.user.id) {
+            return Self::refuse(&cx, "sdk-not-yours").await;
+        }
+        match run(cx.clone()).await {
+            Ok(()) => {
+                if !cx.has_replied() {
+                    let done = cx.core_message("sdk-done", &Args::new());
+                    cx.reply_private(done).await.map_err(module_error)?;
+                }
+            }
+            Err(error) => Self::answer(&cx, error).await?,
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// The `custom_id` if it is of this module and can be read.
+    fn own_custom_id(&self, custom_id: &str) -> Option<(ModuleId, CustomId)> {
+        let (module, id) = CustomId::parse(custom_id)?;
+        (module == self.manifest.id).then_some((module, id))
+    }
+
+    /// Tells the user, privately, that this is not for them or no longer there.
+    async fn refuse<I: InteractionRef + 'static>(
+        cx: &Cx<I>,
+        key: &str,
+    ) -> Result<Flow, ModuleError> {
+        cx.reply_private(cx.core_message(key, &Args::new()))
+            .await
+            .map_err(module_error)?;
+        Ok(Flow::Continue)
+    }
+
     /// Answers the user for an error that is theirs; anything else goes on to the dispatcher.
-    async fn answer(cx: &CommandCx, error: UserError) -> Result<(), ModuleError> {
+    async fn answer<I: InteractionRef + 'static>(
+        cx: &Cx<I>,
+        error: UserError,
+    ) -> Result<(), ModuleError> {
         let text = match error {
             UserError::Module(error) => return Err(error),
             UserError::Message { key, args } => cx.t(&key, &args),
@@ -429,11 +550,16 @@ impl Module for SdkModule {
     }
 
     async fn on_event_flow(&self, ctx: &EventContext, event: &Event) -> Result<Flow, ModuleError> {
-        let Event::Command(invocation) = event else {
-            return match self.handlers.get(&event.kind()) {
-                Some(handler) => handler(ctx.clone(), event.clone()).await,
-                None => Ok(Flow::Continue),
-            };
+        let invocation = match event {
+            Event::Command(invocation) => invocation,
+            Event::Component(click) => return self.on_component(ctx, click).await,
+            Event::Modal(submission) => return self.on_modal(ctx, submission).await,
+            other => {
+                return match self.handlers.get(&other.kind()) {
+                    Some(handler) => handler(ctx.clone(), other.clone()).await,
+                    None => Ok(Flow::Continue),
+                };
+            }
         };
         let key = (invocation.command.clone(), invocation.subcommand.clone());
         let Some(route) = self.routes.get(&key) else {

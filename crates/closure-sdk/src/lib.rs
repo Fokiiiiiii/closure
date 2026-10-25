@@ -41,6 +41,7 @@ mod cx;
 mod error;
 mod module;
 pub mod testing;
+pub mod ui;
 
 pub use args::{ArgError, ArgProblem, CommandArgs, OptionType};
 pub use closure_core::action::InteractionReply;
@@ -50,12 +51,13 @@ pub use closure_core::event::{ChannelId, CommandInvocation, GuildId, RoleId, Use
 pub use closure_core::event::{Event, EventKind};
 pub use closure_core::locale::{Args, Locale};
 pub use closure_core::module::EventContext;
-pub use closure_core::module::{ChoiceValue, OptionChoice, OptionKind, OptionSpec};
+pub use closure_core::module::{ChoiceValue, ModuleId, OptionChoice, OptionKind, OptionSpec};
 pub use closure_core::permission::{Level, PermissionKey, PermissionSpec};
 pub use closure_core::storage::{Entry, Expect, StorageError, Store};
 pub use closure_core::subscription::{EventFilter, Flow, Subscription};
 pub use closure_sdk_macros::CommandArgs;
 pub use cooldown::{Cooldown, CooldownScope};
-pub use cx::CommandCx;
+pub use cx::{CommandCx, ComponentCx, Cx, ModalCx};
 pub use error::UserError;
 pub use module::{BoundCommand, Command, ModuleBuilder, SdkModule};
+pub use ui::{CustomId, Pager};

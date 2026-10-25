@@ -13,12 +13,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use closure_core::action::{Action, InteractionResponse};
+use closure_core::action::{Action, InteractionReply, InteractionResponse};
 use closure_core::client::ApiClient;
 use closure_core::error::ModuleError;
 use closure_core::event::{
-    CommandInvocation, CommandOption, CommandOptionValue, Event, GuildId, InteractionToken,
-    UserInfo,
+    CommandInvocation, CommandOption, CommandOptionValue, ComponentInvocation, Event, GuildId,
+    InteractionToken, ModalSubmission, UserInfo,
 };
 use closure_core::interaction::InteractionGuilds;
 use closure_core::locale::{Locale, Translator};
@@ -30,6 +30,7 @@ use closure_core::storage::{MemoryStorage, StorageBackend, Store};
 use closure_core::subscription::Flow;
 use closure_core::testing::MockApi;
 use closure_i18n::TranslatorBuilder;
+use twilight_model::channel::message::Component;
 use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 
@@ -130,6 +131,12 @@ pub enum ReplyKind {
     /// The edit of the original response (after a deferral).
     Edit,
     Followup,
+    /// The message a click was on, changed.
+    Update,
+    /// A click acknowledged, the message left as it is.
+    Acknowledged,
+    /// A form shown to the user; `content` is its title.
+    Modal,
 }
 
 /// What the module sent back.
@@ -138,6 +145,110 @@ pub struct Reply {
     pub kind: ReplyKind,
     pub content: String,
     pub ephemeral: bool,
+    /// Buttons and menus (for a modal: its inputs).
+    pub components: Vec<Component>,
+}
+
+impl Reply {
+    /// The `custom_id` of every component of the reply, in order.
+    #[must_use]
+    pub fn custom_ids(&self) -> Vec<String> {
+        Action::Respond {
+            interaction_id: Id::new(1),
+            token: InteractionToken::new("t"),
+            response: InteractionResponse::Message {
+                reply: InteractionReply {
+                    components: self.components.clone(),
+                    ..InteractionReply::default()
+                },
+            },
+        }
+        .custom_ids()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+}
+
+/// A click on a button or a choice in a select menu, as a test describes it.
+#[derive(Debug, Clone)]
+pub struct Click {
+    custom_id: String,
+    values: Vec<String>,
+    user: u64,
+    roles: Vec<u64>,
+    administrator: bool,
+}
+
+impl Click {
+    /// A click on the component with this `custom_id` (see [`crate::CustomId`]).
+    #[must_use]
+    pub fn new(custom_id: impl Into<String>) -> Self {
+        Self {
+            custom_id: custom_id.into(),
+            values: Vec::new(),
+            user: 100,
+            roles: Vec::new(),
+            administrator: false,
+        }
+    }
+
+    /// What was chosen in a select menu.
+    #[must_use]
+    pub fn values(mut self, values: impl IntoIterator<Item = &'static str>) -> Self {
+        self.values = values.into_iter().map(str::to_owned).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn user(mut self, id: u64) -> Self {
+        self.user = id;
+        self
+    }
+
+    #[must_use]
+    pub fn roles(mut self, roles: impl IntoIterator<Item = u64>) -> Self {
+        self.roles = roles.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn administrator(mut self) -> Self {
+        self.administrator = true;
+        self
+    }
+}
+
+/// A form that was filled in and sent.
+#[derive(Debug, Clone)]
+pub struct Submit {
+    custom_id: String,
+    fields: Vec<(String, String)>,
+    user: u64,
+}
+
+impl Submit {
+    #[must_use]
+    pub fn new(custom_id: impl Into<String>) -> Self {
+        Self {
+            custom_id: custom_id.into(),
+            fields: Vec::new(),
+            user: 100,
+        }
+    }
+
+    /// The text written in the input `custom_id`.
+    #[must_use]
+    pub fn field(mut self, custom_id: &str, value: &str) -> Self {
+        self.fields.push((custom_id.to_owned(), value.to_owned()));
+        self
+    }
+
+    #[must_use]
+    pub fn user(mut self, id: u64) -> Self {
+        self.user = id;
+        self
+    }
 }
 
 /// A module, its guild and a pretend Discord.
@@ -303,52 +414,110 @@ impl Harness {
         self.module.on_event_flow(&ctx, &event).await.map(Some)
     }
 
-    /// Runs a command and returns what the module answered during this run.
-    pub async fn invoke(&self, invocation: Invocation) -> Result<Vec<Reply>, ModuleError> {
-        let number = self.next.fetch_add(1, Ordering::Relaxed);
+    /// Delivers a click on a component and returns what the module answered.
+    pub async fn click(&self, click: Click) -> Result<Vec<Reply>, ModuleError> {
         let guild: GuildId = Id::new(GUILD);
+        let (number, token) = self.new_interaction(guild, Id::new(click.user), false);
+        let event = ComponentInvocation {
+            interaction_id: Id::new(number),
+            application_id: Id::new(1),
+            token,
+            guild_id: guild,
+            channel_id: Id::new(5),
+            message_id: Id::new(900),
+            user: tester(click.user),
+            roles: click.roles.iter().map(|id| Id::new(*id)).collect(),
+            invoker_permissions: administrator_if(click.administrator),
+            locale: None,
+            custom_id: click.custom_id,
+            values: click.values,
+        };
+        self.deliver(guild, Event::Component(event)).await
+    }
+
+    /// Delivers a submitted form and returns what the module answered.
+    pub async fn submit(&self, submit: Submit) -> Result<Vec<Reply>, ModuleError> {
+        let guild: GuildId = Id::new(GUILD);
+        let (number, token) = self.new_interaction(guild, Id::new(submit.user), false);
+        let event = ModalSubmission {
+            interaction_id: Id::new(number),
+            application_id: Id::new(1),
+            token,
+            guild_id: guild,
+            channel_id: Id::new(5),
+            user: tester(submit.user),
+            roles: Vec::new(),
+            invoker_permissions: Permissions::empty(),
+            locale: None,
+            custom_id: submit.custom_id,
+            fields: submit.fields,
+        };
+        self.deliver(guild, Event::Modal(event)).await
+    }
+
+    /// A new interaction of `guild`: its number and its recorded token. Somebody owns the server
+    /// in every run; it is `user` only when `owner` says so.
+    fn new_interaction(
+        &self,
+        guild: GuildId,
+        user: closure_core::event::UserId,
+        owner: bool,
+    ) -> (u64, InteractionToken) {
+        let number = self.next.fetch_add(1, Ordering::Relaxed);
         let token = InteractionToken::new(format!("test-token-{number}"));
         let _ = self.interactions.register(&token, guild);
+        self.api
+            .set_owner(guild, if owner { user } else { Id::new(OTHER_OWNER) });
+        (number, token)
+    }
+
+    /// Hands the event to the module and returns what it answered meanwhile.
+    async fn deliver(&self, guild: GuildId, event: Event) -> Result<Vec<Reply>, ModuleError> {
+        let ctx = self.context(guild);
+        let before = self.api.actions().len();
+        self.module.on_event(&ctx, &event).await?;
+        Ok(self.api.actions()[before..]
+            .iter()
+            .filter_map(reply_of)
+            .collect())
+    }
+
+    /// Runs a command and returns what the module answered during this run.
+    pub async fn invoke(&self, invocation: Invocation) -> Result<Vec<Reply>, ModuleError> {
+        let guild: GuildId = Id::new(GUILD);
         let user = Id::new(invocation.user);
-        // Somebody owns the server in every run; it is the user only when the test says so.
-        self.api.set_owner(
-            guild,
-            if invocation.owner {
-                user
-            } else {
-                Id::new(OTHER_OWNER)
-            },
-        );
+        let (number, token) = self.new_interaction(guild, user, invocation.owner);
         let event = CommandInvocation {
             interaction_id: Id::new(number),
             application_id: Id::new(1),
             token,
             guild_id: guild,
             channel_id: Id::new(invocation.channel),
-            user: UserInfo {
-                id: user,
-                name: "tester".into(),
-                bot: false,
-            },
+            user: tester(invocation.user),
             roles: invocation.roles.iter().map(|id| Id::new(*id)).collect(),
-            invoker_permissions: if invocation.administrator {
-                Permissions::ADMINISTRATOR
-            } else {
-                Permissions::empty()
-            },
+            invoker_permissions: administrator_if(invocation.administrator),
             locale: invocation.locale,
             command: invocation.command,
             subcommand: invocation.subcommand,
             options: invocation.options,
         };
+        self.deliver(guild, Event::Command(event)).await
+    }
+}
 
-        let ctx = self.context(guild);
-        let before = self.api.actions().len();
-        self.module.on_event(&ctx, &Event::Command(event)).await?;
-        Ok(self.api.actions()[before..]
-            .iter()
-            .filter_map(reply_of)
-            .collect())
+fn tester(id: u64) -> UserInfo {
+    UserInfo {
+        id: Id::new(id),
+        name: "tester".into(),
+        bot: false,
+    }
+}
+
+fn administrator_if(administrator: bool) -> Permissions {
+    if administrator {
+        Permissions::ADMINISTRATOR
+    } else {
+        Permissions::empty()
     }
 }
 
@@ -359,6 +528,10 @@ fn reply_of(action: &Action) -> Option<Reply> {
             ..
         } => (ReplyKind::Response, reply),
         Action::Respond {
+            response: InteractionResponse::Update { reply },
+            ..
+        } => (ReplyKind::Update, reply),
+        Action::Respond {
             response: InteractionResponse::Defer { ephemeral },
             ..
         } => {
@@ -366,6 +539,29 @@ fn reply_of(action: &Action) -> Option<Reply> {
                 kind: ReplyKind::Deferred,
                 content: String::new(),
                 ephemeral: *ephemeral,
+                components: Vec::new(),
+            });
+        }
+        Action::Respond {
+            response: InteractionResponse::DeferUpdate,
+            ..
+        } => {
+            return Some(Reply {
+                kind: ReplyKind::Acknowledged,
+                content: String::new(),
+                ephemeral: false,
+                components: Vec::new(),
+            });
+        }
+        Action::Respond {
+            response: InteractionResponse::Modal(spec),
+            ..
+        } => {
+            return Some(Reply {
+                kind: ReplyKind::Modal,
+                content: spec.title.clone(),
+                ephemeral: false,
+                components: spec.components.clone(),
             });
         }
         Action::EditResponse { reply, .. } => (ReplyKind::Edit, reply),
@@ -376,5 +572,6 @@ fn reply_of(action: &Action) -> Option<Reply> {
         kind,
         content: reply.content.clone().unwrap_or_default(),
         ephemeral: reply.ephemeral,
+        components: reply.components.clone(),
     })
 }

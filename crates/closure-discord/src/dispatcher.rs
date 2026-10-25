@@ -18,7 +18,7 @@ use closure_core::action::InteractionReply;
 use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
-use closure_core::event::{CommandInvocation, Event, GuildId};
+use closure_core::event::{Event, GuildId, InteractionRef};
 use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{EventContext, Module, ModuleId};
@@ -170,7 +170,7 @@ struct GuildLanes {
 impl GuildLanes {
     fn sender_for(&self, event: &Event) -> &mpsc::Sender<Job> {
         let key = ordering_key(event);
-        let index = if matches!(event, Event::Command(_)) {
+        let index = if event.interaction_token().is_some() {
             self.event_lanes + lane_index(key, self.senders.len() - self.event_lanes)
         } else {
             lane_index(key, self.event_lanes)
@@ -236,6 +236,8 @@ fn ordering_key(event: &Event) -> u64 {
         Event::RoleCreated(role) | Event::RoleUpdated(role) => role.id.get(),
         Event::RoleDeleted { role_id, .. } => role_id.get(),
         Event::Command(invocation) => invocation.user.id.get(),
+        Event::Component(click) => click.user.id.get(),
+        Event::Modal(submission) => submission.user.id.get(),
         Event::GuildAvailable { .. } | Event::GuildRemoved { .. } => 0,
     }
 }
@@ -326,7 +328,9 @@ impl Dispatcher {
         };
 
         // The budget is the guild's, not a lane's: one busy channel may use all of it.
-        let command = matches!(event, Event::Command(_));
+        // Commands, clicks and forms are answered to a person who is waiting, within three
+        // seconds, so they have lanes and a budget of their own.
+        let command = event.interaction_token().is_some();
         let budget = lanes.state.budget(command);
         if budget.fetch_add(1, Ordering::AcqRel) >= limits.queue_capacity {
             budget.fetch_sub(1, Ordering::AcqRel);
@@ -339,8 +343,8 @@ impl Dispatcher {
 
         // Once the event is accepted and before any module can see it: the record decides whose
         // interaction a module may answer. Events dropped above never use up a record.
-        if let Event::Command(invocation) = &event {
-            let recorded = self.shared.interactions.register(&invocation.token, guild);
+        if let Some(token) = event.interaction_token() {
+            let recorded = self.shared.interactions.register(token, guild);
             if !recorded.is_recorded() {
                 // No module could answer it, so none is given it. Undo what was reserved above.
                 budget.fetch_sub(1, Ordering::AcqRel);
@@ -620,9 +624,23 @@ async fn handle_event(
     state: &Arc<GuildState>,
     event: &Arc<Event>,
 ) {
-    if let Event::Command(invocation) = &**event {
-        handle_command(shared, guild, state, event, invocation).await;
-        return;
+    match &**event {
+        Event::Command(invocation) => {
+            let owner = shared.registry.command_owner(&invocation.command);
+            handle_interaction(shared, guild, state, event, owner, invocation).await;
+            return;
+        }
+        Event::Component(click) => {
+            let owner = shared.registry.interaction_owner(&click.custom_id);
+            handle_interaction(shared, guild, state, event, owner, click).await;
+            return;
+        }
+        Event::Modal(submission) => {
+            let owner = shared.registry.interaction_owner(&submission.custom_id);
+            handle_interaction(shared, guild, state, event, owner, submission).await;
+            return;
+        }
+        _ => {}
     }
     // Modules with the same priority run together; the groups follow each other, highest first,
     // and a module that stops the event keeps it from the groups after its own.
@@ -792,17 +810,20 @@ fn record_verdict(
     });
 }
 
-async fn handle_command(
+/// A command, a click or a submitted form goes to the one module that owns it, and the person
+/// who sent it is told in their language if that module cannot answer.
+async fn handle_interaction(
     shared: &Arc<Shared>,
     guild: GuildId,
     state: &Arc<GuildState>,
     event: &Arc<Event>,
-    invocation: &CommandInvocation,
+    owner: Option<&Arc<dyn Module>>,
+    invocation: &dyn InteractionRef,
 ) {
     let locale = invocation
-        .locale
+        .locale()
         .unwrap_or_else(|| shared.settings.locale(guild));
-    let Some(module) = shared.registry.command_owner(&invocation.command) else {
+    let Some(module) = owner else {
         reply(
             shared,
             invocation,
@@ -847,12 +868,13 @@ fn text(shared: &Shared, locale: Locale, key: &str) -> String {
 
 /// Tells the invoker something went wrong. If the module already acknowledged the command, a
 /// follow-up is used instead; failures here are only logged because there is nobody left to tell.
-async fn reply(shared: &Shared, invocation: &CommandInvocation, message: String) {
+async fn reply(shared: &Shared, invocation: &dyn InteractionRef, message: String) {
     let granted: CapabilitySet = [Capability::RespondToInteractions].into_iter().collect();
     let client = ApiClient::new(Arc::clone(&shared.api), granted, ModuleId::system());
     let reply = InteractionReply {
         content: Some(message),
         embeds: Vec::new(),
+        components: Vec::new(),
         ephemeral: true,
     };
     let attempt = async {

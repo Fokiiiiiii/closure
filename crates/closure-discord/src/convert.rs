@@ -5,14 +5,16 @@
 
 use closure_core::action::Emoji;
 use closure_core::event::{
-    ChannelInfo, CommandInvocation, CommandOption, CommandOptionValue, Event, GuildId,
-    InteractionToken, MemberInfo, MessageInfo, ReactionInfo, RoleInfo, UserInfo,
+    ChannelInfo, CommandInvocation, CommandOption, CommandOptionValue, ComponentInvocation, Event,
+    GuildId, InteractionToken, MemberInfo, MessageInfo, ModalSubmission, ReactionInfo, RoleInfo,
+    UserInfo,
 };
 use closure_core::locale::Locale;
 use twilight_gateway::Event as Gateway;
 use twilight_model::application::interaction::application_command::{
     CommandDataOption, CommandOptionValue as TwilightValue,
 };
+use twilight_model::application::interaction::modal::ModalInteractionComponent;
 use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
 use twilight_model::channel::Channel;
 use twilight_model::channel::message::{EmojiReactionType, Message};
@@ -139,15 +141,21 @@ fn split_subcommand(raw: &[CommandDataOption]) -> Option<(Option<String>, Vec<Co
     }
 }
 
-fn command(interaction: &Interaction) -> Option<CommandInvocation> {
-    if interaction.kind != InteractionType::ApplicationCommand {
-        return None;
-    }
-    let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
-        return None;
-    };
-    let (subcommand, options) = split_subcommand(&data.options)?;
-    Some(CommandInvocation {
+/// What every interaction of a guild member says about who sent it and where.
+struct Origin {
+    interaction_id: closure_core::event::InteractionId,
+    application_id: closure_core::event::ApplicationId,
+    token: InteractionToken,
+    guild_id: GuildId,
+    channel_id: closure_core::event::ChannelId,
+    user: UserInfo,
+    roles: Vec<closure_core::event::RoleId>,
+    invoker_permissions: twilight_model::guild::Permissions,
+    locale: Option<Locale>,
+}
+
+fn origin(interaction: &Interaction) -> Option<Origin> {
+    Some(Origin {
         interaction_id: interaction.id,
         application_id: interaction.application_id,
         token: InteractionToken::new(interaction.token.clone()),
@@ -168,6 +176,96 @@ fn command(interaction: &Interaction) -> Option<CommandInvocation> {
             .locale
             .as_deref()
             .and_then(Locale::from_discord_tag),
+    })
+}
+
+fn interaction_event(interaction: &Interaction) -> Option<Event> {
+    match interaction.kind {
+        InteractionType::ApplicationCommand => command(interaction).map(Event::Command),
+        InteractionType::MessageComponent => component(interaction).map(Event::Component),
+        InteractionType::ModalSubmit => modal(interaction).map(Event::Modal),
+        _ => None,
+    }
+}
+
+fn component(interaction: &Interaction) -> Option<ComponentInvocation> {
+    let Some(InteractionData::MessageComponent(data)) = &interaction.data else {
+        return None;
+    };
+    let origin = origin(interaction)?;
+    Some(ComponentInvocation {
+        interaction_id: origin.interaction_id,
+        application_id: origin.application_id,
+        token: origin.token,
+        guild_id: origin.guild_id,
+        channel_id: origin.channel_id,
+        message_id: interaction.message.as_ref()?.id,
+        user: origin.user,
+        roles: origin.roles,
+        invoker_permissions: origin.invoker_permissions,
+        locale: origin.locale,
+        custom_id: data.custom_id.clone(),
+        values: data.values.clone(),
+    })
+}
+
+/// The text inputs of a submitted modal, in the order of the modal, wherever they are nested.
+fn modal_fields(components: &[ModalInteractionComponent], fields: &mut Vec<(String, String)>) {
+    for component in components {
+        match component {
+            ModalInteractionComponent::ActionRow(row) => modal_fields(&row.components, fields),
+            ModalInteractionComponent::Label(label) => {
+                modal_fields(std::slice::from_ref(&*label.component), fields);
+            }
+            ModalInteractionComponent::TextInput(input) => {
+                fields.push((input.custom_id.clone(), input.value.clone()));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn modal(interaction: &Interaction) -> Option<ModalSubmission> {
+    let Some(InteractionData::ModalSubmit(data)) = &interaction.data else {
+        return None;
+    };
+    let origin = origin(interaction)?;
+    let mut fields = Vec::new();
+    modal_fields(&data.components, &mut fields);
+    Some(ModalSubmission {
+        interaction_id: origin.interaction_id,
+        application_id: origin.application_id,
+        token: origin.token,
+        guild_id: origin.guild_id,
+        channel_id: origin.channel_id,
+        user: origin.user,
+        roles: origin.roles,
+        invoker_permissions: origin.invoker_permissions,
+        locale: origin.locale,
+        custom_id: data.custom_id.clone(),
+        fields,
+    })
+}
+
+fn command(interaction: &Interaction) -> Option<CommandInvocation> {
+    if interaction.kind != InteractionType::ApplicationCommand {
+        return None;
+    }
+    let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+        return None;
+    };
+    let (subcommand, options) = split_subcommand(&data.options)?;
+    let origin = origin(interaction)?;
+    Some(CommandInvocation {
+        interaction_id: origin.interaction_id,
+        application_id: origin.application_id,
+        token: origin.token,
+        guild_id: origin.guild_id,
+        channel_id: origin.channel_id,
+        user: origin.user,
+        roles: origin.roles,
+        invoker_permissions: origin.invoker_permissions,
+        locale: origin.locale,
         command: data.name.clone(),
         subcommand,
         options,
@@ -233,7 +331,7 @@ pub(crate) fn event(gateway: &Gateway) -> Option<Event> {
             guild_id: deleted.guild_id,
             role_id: deleted.role_id,
         },
-        Gateway::InteractionCreate(interaction) => Event::Command(command(&interaction.0)?),
+        Gateway::InteractionCreate(interaction) => interaction_event(&interaction.0)?,
         _ => return None,
     })
 }
@@ -396,6 +494,75 @@ mod tests {
         assert!(
             matches!(invocation.option("user"), Some(CommandOptionValue::User(id)) if id.get() == 9)
         );
+    }
+
+    fn user_interaction(kind: u8, data: &Value, extra: &Value) -> Gateway {
+        let mut json = json!({
+            "app_permissions": "0", "application_id": "60", "channel": { "id": "3", "type": 0 },
+            "data": data,
+            "guild_id": "1", "id": "51", "locale": "en-US", "guild_locale": "en-US",
+            "member": { "permissions": "0", "roles": ["10", "11"], "joined_at": "2026-10-24T00:00:00.000000+00:00",
+                        "deaf": false, "mute": false, "flags": 0, "user": user_json("7", false) },
+            "token": "tok2", "type": kind, "version": 1, "entitlements": [],
+            "authorizing_integration_owners": {}
+        });
+        if let (Some(map), Some(extra)) = (json.as_object_mut(), extra.as_object()) {
+            map.extend(extra.clone());
+        }
+        let interaction: Interaction = serde_json::from_value(json).unwrap();
+        Gateway::InteractionCreate(Box::new(InteractionCreate(interaction)))
+    }
+
+    #[test]
+    fn a_click_carries_its_id_values_message_and_who_clicked() {
+        let message = json!({
+            "id": "900", "channel_id": "3", "author": user_json("99", true), "content": "hi",
+            "timestamp": "2026-10-24T00:00:00.000000+00:00", "edited_timestamp": null,
+            "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+            "attachments": [], "embeds": [], "pinned": false, "type": 0
+        });
+        let gateway = user_interaction(
+            3,
+            &json!({ "custom_id": "warn:confirm:7", "component_type": 3, "values": ["a", "b"] }),
+            &json!({ "message": message }),
+        );
+        let Some(Event::Component(click)) = event(&gateway) else {
+            panic!("expected a click");
+        };
+        assert_eq!(click.custom_id, "warn:confirm:7");
+        assert_eq!(click.values, ["a", "b"]);
+        assert_eq!(click.message_id.get(), 900);
+        assert_eq!(click.user.id.get(), 7);
+        assert_eq!(
+            click.roles.iter().map(|r| r.get()).collect::<Vec<_>>(),
+            [10, 11]
+        );
+        assert_eq!(click.token.expose(), "tok2");
+        assert_eq!(click.locale, Some(Locale::En));
+    }
+
+    #[test]
+    fn a_submitted_modal_gives_the_text_of_every_input_wherever_it_is() {
+        let gateway = user_interaction(
+            5,
+            &json!({
+                "custom_id": "warn:reason",
+                "components": [
+                    { "type": 1, "id": 1, "components": [
+                        { "type": 4, "id": 2, "custom_id": "why", "value": "spam" } ] },
+                    { "type": 18, "id": 3, "component": { "type": 4, "id": 4, "custom_id": "note", "value": "twice" } }
+                ]
+            }),
+            &json!({}),
+        );
+        let Some(Event::Modal(form)) = event(&gateway) else {
+            panic!("expected a modal");
+        };
+        assert_eq!(form.custom_id, "warn:reason");
+        assert_eq!(form.field("why"), Some("spam"));
+        assert_eq!(form.field("note"), Some("twice"));
+        assert_eq!(form.field("other"), None);
+        assert_eq!(form.channel_id.get(), 3);
     }
 
     #[test]

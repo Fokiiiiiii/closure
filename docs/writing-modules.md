@@ -54,6 +54,22 @@ Options are typed fields: `String`, `i64`, `f64`, `bool`, `UserId`, `ChannelId`,
 `#[arg(name = "..", desc = "..", min = 1, max = 5, min_length = 2, max_length = 40,
 choices = ["a", "b"])]`. Required options must come before optional ones.
 
+Buttons, menus, forms and pages: an answer carries `components` (`ui::row([ui::button(..), ..])`,
+`ui::select(..)`), each with a `custom_id` that comes back when it is used. The SDK makes it
+`module:route:owner:data` (`CustomId::new("confirm").only_for(user).data("42").encode(cx.module())`);
+a handler for the route is `.component("confirm", |cx| async move { .. })`, where `cx.data()`
+and `cx.values()` say what was clicked or chosen. The user the component was made for (`only_for`)
+is the only one it works for; others are told so privately. A click that is not answered is
+acknowledged, so Discord does not show a failure. Answer with `cx.update(reply)` (change the
+message), `cx.reply_private(..)` or `cx.show_modal(ui::modal(..))`. A form is
+`ui::modal(CustomId::new("report").encode(cx.module()), "Report", [ui::text_input(cx.module(),
+"why", "Why", true, true, 200)])`, handled by `.modal("report", |cx| async move { cx.field("why") .. })`.
+`Pager::new("list", page, pages).row(cx.module())` makes the back/next buttons of a list; the route's
+handler reads `cx.page_requested()`. A `custom_id` has to start with your module's id, or the action is
+refused: a click goes to the module it names. Discord allows 100 characters in all, so keep large
+state in the module's storage and put only a key in `data`. Test with `Harness::click(Click::new(id))`
+and `Harness::submit(Submit::new(id).field("module:name", "text"))`.
+
 Reacting to events (not commands): `.on(Subscription::new(EventKind::MessageCreated).ignore_bots()
 .not_in_channels([log_channel]).priority(10), |ctx, event| async move { .. Ok(Flow::Continue) })`.
 The handler gets only the events that pass the filter (`in_channels`, `not_in_channels`,

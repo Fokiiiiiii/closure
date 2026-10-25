@@ -165,6 +165,14 @@ impl ModuleRegistry {
         self.permissions().find(|spec| spec.key == *key)
     }
 
+    /// The module whose component or modal carries `custom_id`: the one named by the part
+    /// before the first `:`.
+    #[must_use]
+    pub fn interaction_owner(&self, custom_id: &str) -> Option<&Arc<dyn Module>> {
+        let (owner, _) = custom_id.split_once(':')?;
+        self.get(&ModuleId::new(owner).ok()?)
+    }
+
     /// The module that owns the command named `name`.
     #[must_use]
     pub fn command_owner(&self, name: &str) -> Option<&Arc<dyn Module>> {
@@ -502,6 +510,21 @@ mod tests {
             ModuleRegistry::new(vec![with_permissions("warn", &["warn.add", "warn.add"])]),
             Err(CoreError::DuplicatePermission { .. })
         ));
+    }
+
+    #[test]
+    fn a_custom_id_belongs_to_the_module_it_starts_with() {
+        let registry = ModuleRegistry::new(vec![stub("warn", &[]), stub("mute", &[])]).unwrap();
+        let owner = |custom_id: &str| {
+            registry
+                .interaction_owner(custom_id)
+                .map(|module| module.manifest().id.to_string())
+        };
+        assert_eq!(owner("warn:confirm:*:42").as_deref(), Some("warn"));
+        assert_eq!(owner("mute:x").as_deref(), Some("mute"));
+        for unowned in ["nobody:x", "warn", "", ":x", "Warn:x"] {
+            assert_eq!(owner(unowned), None, "{unowned:?}");
+        }
     }
 
     #[test]

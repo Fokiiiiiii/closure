@@ -114,6 +114,7 @@ impl Module for DiagnosticsModule {
                 InteractionReply {
                     content: Some(content),
                     embeds: Vec::new(),
+                    components: Vec::new(),
                     ephemeral: config.ephemeral,
                 },
             )

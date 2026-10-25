@@ -7,11 +7,11 @@ use twilight_model::channel::message::Message;
 use twilight_model::guild::Member;
 
 use crate::action::{
-    Action, Emoji, InteractionReply, InteractionResponse, MentionPolicy, Outcome, Reason,
+    Action, Emoji, InteractionReply, InteractionResponse, MentionPolicy, ModalSpec, Outcome, Reason,
 };
 use crate::capability::CapabilitySet;
 use crate::error::DiscordError;
-use crate::event::{ChannelId, CommandInvocation, GuildId, MessageId, RoleId, UserId};
+use crate::event::{ChannelId, GuildId, InteractionRef, MessageId, RoleId, UserId};
 use crate::interaction::InteractionGuilds;
 use crate::module::ModuleId;
 
@@ -132,6 +132,19 @@ impl ApiClient {
             ));
         }
         action.validate()?;
+        // A click is delivered to the module whose id its `custom_id` starts with, so a module
+        // that could name another's id could make that module act on a click it never offered.
+        let own_prefix = format!("{}:", self.module);
+        if let Some(id) = action
+            .custom_ids()
+            .into_iter()
+            .find(|id| !id.starts_with(&own_prefix))
+        {
+            tracing::warn!(module = %self.module, action = name, custom_id = id, "custom_id outside the module's own");
+            return Err(DiscordError::Invalid(format!(
+                "a custom_id has to start with `{own_prefix}`"
+            )));
+        }
         if let Some(scope) = self.guild {
             self.check_scope(scope, &action).await?;
         }
@@ -357,13 +370,42 @@ impl ApiClient {
     /// Answers a slash command with a message.
     pub async fn respond(
         &self,
-        invocation: &CommandInvocation,
+        invocation: &(impl InteractionRef + ?Sized),
         reply: InteractionReply,
     ) -> Result<(), DiscordError> {
+        self.respond_with(invocation, InteractionResponse::Message { reply })
+            .await
+    }
+
+    /// Answers a click by changing the message the component is on.
+    pub async fn update(
+        &self,
+        click: &(impl InteractionRef + ?Sized),
+        reply: InteractionReply,
+    ) -> Result<(), DiscordError> {
+        self.respond_with(click, InteractionResponse::Update { reply })
+            .await
+    }
+
+    /// Answers with a form.
+    pub async fn modal(
+        &self,
+        interaction: &(impl InteractionRef + ?Sized),
+        spec: ModalSpec,
+    ) -> Result<(), DiscordError> {
+        self.respond_with(interaction, InteractionResponse::Modal(spec))
+            .await
+    }
+
+    async fn respond_with(
+        &self,
+        interaction: &(impl InteractionRef + ?Sized),
+        response: InteractionResponse,
+    ) -> Result<(), DiscordError> {
         self.execute(Action::Respond {
-            interaction_id: invocation.interaction_id,
-            token: invocation.token.clone(),
-            response: InteractionResponse::Message { reply },
+            interaction_id: interaction.interaction_id(),
+            token: interaction.token().clone(),
+            response,
         })
         .await
         .map(drop)
@@ -372,25 +414,43 @@ impl ApiClient {
     /// Acknowledges a slash command so the answer can follow after Discord's 3 second limit.
     pub async fn defer(
         &self,
-        invocation: &CommandInvocation,
+        invocation: &(impl InteractionRef + ?Sized),
         ephemeral: bool,
     ) -> Result<(), DiscordError> {
-        self.execute(Action::Respond {
-            interaction_id: invocation.interaction_id,
-            token: invocation.token.clone(),
-            response: InteractionResponse::Defer { ephemeral },
+        self.respond_with(invocation, InteractionResponse::Defer { ephemeral })
+            .await
+    }
+
+    /// Acknowledges a click; the message stays as it is until [`Self::edit_response`].
+    pub async fn defer_update(
+        &self,
+        click: &(impl InteractionRef + ?Sized),
+    ) -> Result<(), DiscordError> {
+        self.respond_with(click, InteractionResponse::DeferUpdate)
+            .await
+    }
+
+    pub async fn followup(
+        &self,
+        invocation: &(impl InteractionRef + ?Sized),
+        reply: InteractionReply,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::Followup {
+            token: invocation.token().clone(),
+            reply,
         })
         .await
         .map(drop)
     }
 
-    pub async fn followup(
+    /// Replaces the answer given before (or the message a click was on, after a deferral).
+    pub async fn edit_response(
         &self,
-        invocation: &CommandInvocation,
+        invocation: &(impl InteractionRef + ?Sized),
         reply: InteractionReply,
     ) -> Result<(), DiscordError> {
-        self.execute(Action::Followup {
-            token: invocation.token.clone(),
+        self.execute(Action::EditResponse {
+            token: invocation.token().clone(),
             reply,
         })
         .await
@@ -432,6 +492,46 @@ mod tests {
             Ok(Some(Id::new(8)))
         );
         assert_eq!(client(&api, &[]).guild_owner().await, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn a_module_cannot_name_a_component_after_another_module() {
+        use twilight_model::channel::message::Component;
+        use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
+
+        let api = Arc::new(MockApi::default());
+        let client = client(&api, &[Capability::RespondToInteractions]);
+        let invocation = |custom_id: &str| InteractionReply {
+            content: Some("hi".into()),
+            components: vec![Component::ActionRow(ActionRow {
+                id: None,
+                components: vec![Component::Button(Button {
+                    id: None,
+                    custom_id: Some(custom_id.into()),
+                    disabled: false,
+                    emoji: None,
+                    label: Some("go".into()),
+                    style: ButtonStyle::Primary,
+                    url: None,
+                    sku_id: None,
+                })],
+            })],
+            ..InteractionReply::default()
+        };
+        let action = |reply| Action::Followup {
+            token: InteractionToken::new("t"),
+            reply,
+        };
+        // The client of module `test` may name `test:..` and nothing else.
+        assert!(client.execute(action(invocation("test:go"))).await.is_ok());
+        for other in ["warn:go", "tes:go", "test", "Test:go", "testing:go"] {
+            let error = client.execute(action(invocation(other))).await.unwrap_err();
+            assert!(
+                matches!(error, DiscordError::Invalid(_)),
+                "{other}: {error:?}"
+            );
+        }
+        assert_eq!(api.actions().len(), 1);
     }
 
     fn reason() -> Reason {
@@ -680,6 +780,7 @@ mod tests {
             reply: InteractionReply {
                 content: Some("done".into()),
                 embeds: Vec::new(),
+                components: Vec::new(),
                 ephemeral: false,
             },
         }
@@ -691,6 +792,7 @@ mod tests {
             reply: InteractionReply {
                 content: Some("done".into()),
                 embeds: Vec::new(),
+                components: Vec::new(),
                 ephemeral: false,
             },
         }

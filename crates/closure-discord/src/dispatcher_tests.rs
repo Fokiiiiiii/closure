@@ -52,6 +52,8 @@ enum Behavior {
     ReadPolicy,
     /// Counts the events it sees in its own storage and logs the total.
     CountEvents,
+    /// Answers the click it got, then tries a token it was never given.
+    RespondToClick,
 }
 
 struct Probe {
@@ -156,6 +158,7 @@ impl Probe {
                 let reply = || InteractionReply {
                     content: Some("pong".into()),
                     embeds: vec![],
+                    components: Vec::new(),
                     ephemeral: true,
                 };
                 let plain = held.respond(invocation, reply()).await;
@@ -179,6 +182,34 @@ impl Probe {
             }
             _ => {}
         }
+    }
+
+    /// Answers the click it got, then tries a token it was never given.
+    async fn respond_to_click(&self, ctx: &EventContext, event: &Event) -> Result<(), ModuleError> {
+        let Event::Component(click) = event else {
+            return Ok(());
+        };
+        let reply = || InteractionReply {
+            content: Some("ok".into()),
+            ..InteractionReply::default()
+        };
+        let own = ctx.api.respond(click, reply()).await;
+        let forged = ctx
+            .api
+            .followup(
+                &closure_core::event::ComponentInvocation {
+                    token: InteractionToken::new("a-token-of-another-guild"),
+                    ..click.clone()
+                },
+                reply(),
+            )
+            .await;
+        self.log.lock().unwrap().push(format!(
+            "answered:{} forged:{}",
+            own.is_ok(),
+            matches!(forged, Err(DiscordError::Forbidden(_)))
+        ));
+        Ok(())
     }
 
     fn read_policy(&self, ctx: &EventContext) {
@@ -287,6 +318,7 @@ impl Module for Probe {
                 Ok(())
             }
             Behavior::CountEvents => self.count_events(ctx).await,
+            Behavior::RespondToClick => self.respond_to_click(ctx, event).await,
             Behavior::ReadPolicy => {
                 self.read_policy(ctx);
                 Ok(())
@@ -302,6 +334,7 @@ impl Module for Probe {
                 let reply = || InteractionReply {
                     content: Some("pong".into()),
                     embeds: vec![],
+                    components: Vec::new(),
                     ephemeral: true,
                 };
                 let own = ctx.api.respond(invocation, reply()).await;
@@ -1010,6 +1043,87 @@ async fn unknown_commands_are_answered_instead_of_ignored() {
     h.dispatcher.flush().await;
 
     assert_eq!(h.api.actions().len(), 1);
+}
+
+fn click(custom_id: &str) -> Event {
+    Event::Component(closure_core::event::ComponentInvocation {
+        interaction_id: Id::new(51),
+        application_id: Id::new(60),
+        token: InteractionToken::new("click-token"),
+        guild_id: Id::new(GUILD),
+        channel_id: Id::new(3),
+        message_id: Id::new(900),
+        user: user(7),
+        roles: vec![],
+        invoker_permissions: Permissions::empty(),
+        locale: Some(Locale::Ja),
+        custom_id: custom_id.into(),
+        values: vec![],
+    })
+}
+
+#[tokio::test]
+async fn a_click_goes_to_the_module_named_in_its_custom_id_and_to_nobody_else() {
+    let warn = Probe::new("warn", &[], &[]);
+    let mute = Probe::new("mute", &[], &[]);
+    let h = harness(
+        &[(&warn, true), (&mute, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(click("warn:confirm:*:42"));
+    h.dispatcher.flush().await;
+
+    assert_eq!(warn.log(), ["load", "component"]);
+    assert_eq!(mute.log(), ["load"]);
+    assert!(
+        h.api.actions().is_empty(),
+        "the module answered nothing, nothing was said"
+    );
+}
+
+#[tokio::test]
+async fn a_click_nobody_owns_or_whose_module_is_off_is_answered_in_the_users_language() {
+    let warn = Probe::new("warn", &[], &[]);
+    let off = Probe::new("off", &[], &[]);
+    let h = harness(
+        &[(&warn, true), (&off, false)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(click("ghost:x:*:"));
+    h.dispatcher.dispatch(click("off:x:*:"));
+    h.dispatcher.flush().await;
+
+    let actions = h.api.actions();
+    assert_eq!(actions.len(), 2);
+    for action in &actions {
+        let (_, ephemeral) = reply_text(action);
+        assert!(ephemeral);
+    }
+    assert_eq!(warn.log(), ["load"]);
+    assert_eq!(off.log(), ["load"]);
+}
+
+#[tokio::test]
+async fn a_module_can_answer_the_click_it_was_given_and_no_other() {
+    // The click is recorded under its guild before any module sees it, like a command.
+    let warn = Probe::new("warn", &[], &[Capability::RespondToInteractions]);
+    warn.set(Behavior::RespondToClick);
+    let h = harness(&[(&warn, true)], limits(64, 4), DispatcherConfig::default()).await;
+
+    h.dispatcher.dispatch(click("warn:confirm:*:"));
+    h.dispatcher.flush().await;
+
+    assert_eq!(
+        warn.log(),
+        ["load", "component", "answered:true forged:true"]
+    );
+    assert_eq!(h.api.actions().len(), 1, "only the genuine answer was sent");
 }
 
 #[tokio::test(start_paused = true)]

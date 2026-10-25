@@ -13,6 +13,8 @@ error-command-failed = Something went wrong while running that command. Please t
 
 # Replies of the module SDK (closure-sdk).
 sdk-done = Done.
+sdk-not-yours = That is not for you.
+sdk-gone = That is no longer available.
 sdk-permission-level = You are not allowed to do that here. It needs level { $required } and you are at level { $actual }.
 sdk-permission-denied = You are not allowed to do that here.
 sdk-cooldown = Please wait { $seconds } more second(s) before using that again.
