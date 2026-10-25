@@ -11,14 +11,15 @@ use closure_sdk::embed::{escape, truncate};
 use closure_sdk::modlog;
 use closure_sdk::{
     Args, Capability, Case, CaseError, CaseKind, Cases, Command, CommandArgs, CommandCx, Cooldown,
-    CoreError, DirectMessage, DiscordError, InteractionReply, JobCx, Level, Locale, ModuleBuilder,
-    ModuleError, NewCase, PermissionSpec, Reason, ScheduleError, SdkModule, Sent, UserError,
-    UserId,
+    CoreError, Cx, DirectMessage, DiscordError, InteractionRef, InteractionReply, JobCx, Level,
+    Locale, ModuleBuilder, ModuleError, NewCase, PermissionSpec, Reason, ScheduleError, SdkModule,
+    Sent, UserError, UserId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 mod restrict;
+mod templates;
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
@@ -65,6 +66,9 @@ pub(crate) struct Config {
     voice_mute_method: restrict::Method,
     /// The id of the role a voice mute gives, when `voice_mute_method` is `role`.
     voice_mute_role: Option<String>,
+    /// The templates a moderator picks from when a timeout, kick, ban or voice mute lacks a reason
+    /// or a duration.
+    templates: templates::Templates,
 }
 
 impl Default for Config {
@@ -79,6 +83,7 @@ impl Default for Config {
             timeout_role: None,
             voice_mute_method: restrict::Method::Discord,
             voice_mute_role: None,
+            templates: templates::Templates::default(),
         }
     }
 }
@@ -195,8 +200,8 @@ pub(crate) struct MemberReason {
 struct TimeoutArgs {
     /// Member to time out
     user: UserId,
-    /// How long, such as 1h or 7d; at most 28 days
-    duration: Duration,
+    /// How long, such as 1h or 7d; at most 28 days. A template may give it when left out.
+    duration: Option<Duration>,
     /// Why
     #[arg(max_length = 512)]
     reason: Option<String>,
@@ -324,7 +329,7 @@ fn punishment_reason(config: &Config, text: Option<String>) -> Result<Option<Str
 }
 
 /// The reason as a direct message says it, in the language of the server.
-fn dm_reason(cx: &CommandCx, reason: Option<&str>) -> String {
+fn dm_reason<I: InteractionRef + 'static>(cx: &Cx<I>, reason: Option<&str>) -> String {
     match reason {
         Some(text) => escape(text),
         None => cx.ctx().t_in(cx.ctx().locale, "reason-none", &Args::new()),
@@ -332,7 +337,7 @@ fn dm_reason(cx: &CommandCx, reason: Option<&str>) -> String {
 }
 
 /// The reason Discord's audit log keeps: who did it, then why.
-fn audit_reason(cx: &CommandCx, reason: Option<&str>) -> Reason {
+fn audit_reason<I: InteractionRef + 'static>(cx: &Cx<I>, reason: Option<&str>) -> Reason {
     let who = &cx.user().name;
     Reason::truncated(&match reason {
         Some(reason) => format!("{who}: {reason}"),
@@ -343,8 +348,8 @@ fn audit_reason(cx: &CommandCx, reason: Option<&str>) -> Reason {
 /// Messages the member about an action, when the server wants that, in the server language. Returns
 /// the note for the reply when the message did not arrive. A member who is not in the server is
 /// not messaged and gets no note.
-async fn notify(
-    cx: &CommandCx,
+async fn notify<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     key: &str,
@@ -370,15 +375,10 @@ fn with_notes(mut text: String, notes: &[String]) -> String {
     text
 }
 
-/// Answers the moderator in private, with the notes that apply.
-async fn answer(cx: &CommandCx, key: &str, args: &Args, notes: &[String]) -> Result<(), UserError> {
-    cx.reply_private(with_notes(cx.t(key, args), notes)).await
-}
-
 /// Records an action as a case and posts it to the log. A log that cannot take it does not undo
 /// the action.
-async fn record(
-    cx: &CommandCx,
+async fn record<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     kind: &str,
     target: UserId,
     reason: Option<String>,
@@ -417,8 +417,8 @@ fn unban_key(user: UserId) -> String {
 }
 
 /// Sets the timer that lifts the ban of `user` (case `case`) after `after`.
-async fn schedule_unban(
-    cx: &CommandCx,
+async fn schedule_unban<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     user: UserId,
     case: i64,
     after: Duration,
@@ -454,8 +454,8 @@ fn delete_seconds(days: i64) -> Result<u32, UserError> {
 
 /// Times a member out and records it, then messages the member: the member stays in the server,
 /// so the message comes after. Returns the case and the note of the message.
-async fn time_out(
-    cx: &CommandCx,
+pub(crate) async fn time_out<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     duration: Duration,
@@ -488,8 +488,8 @@ async fn time_out(
 
 /// Kicks a member and records it. The direct message comes first: a kicked member shares no server
 /// with the bot. Returns the case and the note of the message.
-async fn kick_member(
-    cx: &CommandCx,
+pub(crate) async fn kick_member<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     reason: Option<String>,
@@ -512,8 +512,8 @@ async fn kick_member(
 /// Bans a member for good or for `duration`, deleting `delete_message_seconds` of their messages.
 /// The direct message comes first, as with a kick. A timed ban gets a timer that lifts it. Returns
 /// the case and the notes: the message, and a note when the timer could not be set.
-async fn ban_member(
-    cx: &CommandCx,
+pub(crate) async fn ban_member<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     duration: Option<Duration>,
@@ -803,25 +803,21 @@ async fn case_revoke(cx: CommandCx, args: Revoke) -> Result<(), UserError> {
 }
 
 /// Times a member out. Discord's own timeout is 28 days at most, so a longer one is refused before
-/// anything is done; a timeout by role has no such limit. The member stays in the server, so the
-/// direct message comes after the timeout.
+/// anything is done; a timeout by role has no such limit. Without a reason or a duration, a
+/// template is asked for. The member stays in the server, so the direct message comes after the
+/// timeout.
 async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
+    cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     restrict::check_timeout(&config, args.duration)?;
-    cx.check_target(args.user).await?;
-    let reason = punishment_reason(&config, args.reason)?;
-    let (case, notes) = time_out(&cx, &config, args.user, args.duration, reason).await?;
-    let duration = cx.format_duration(args.duration);
-    answer(
-        &cx,
-        "timed-out",
-        &Args::new()
-            .with("user", mention(args.user))
-            .with("duration", duration)
-            .with("number", case.number),
-        &notes,
-    )
-    .await
+    let punishment = templates::Punishment::new(
+        templates::Kind::Timeout,
+        args.user,
+        reason_of(args.reason),
+        args.duration,
+        None,
+    );
+    templates::punish(&cx, &config, punishment).await
 }
 
 /// Lifts a timeout. The newest timeout that still stands is revoked with it.
@@ -848,52 +844,39 @@ async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 }
 
 /// Kicks a member. The direct message comes first: a kicked member shares no server with the bot.
+/// Without a reason, a template is asked for.
 async fn kick(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
-    let reason = punishment_reason(&config, args.reason)?;
-    let (case, notes) = kick_member(&cx, &config, args.user, reason).await?;
-    answer(
-        &cx,
-        "kicked",
-        &Args::new()
-            .with("user", mention(args.user))
-            .with("number", case.number),
-        &notes,
-    )
-    .await
+    let punishment = templates::Punishment::new(
+        templates::Kind::Kick,
+        args.user,
+        reason_of(args.reason),
+        None,
+        None,
+    );
+    templates::punish(&cx, &config, punishment).await
 }
 
 /// Bans a member, for good or for a while. A timed ban gets a timer that lifts it when its time is
-/// up. The direct message comes first, as with a kick.
+/// up. The direct message comes first, as with a kick. Without a reason, or a duration on a ban
+/// that a template may give, a template is asked for.
 async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
-    let reason = punishment_reason(&config, args.reason)?;
-    let days = args
-        .delete_days
-        .unwrap_or(i64::from(config.ban_delete_days));
-    let (case, notes) = ban_member(
-        &cx,
-        &config,
+    // Refused here, before a template is asked for: the ban would refuse the same days.
+    delete_seconds(
+        args.delete_days
+            .unwrap_or(i64::from(config.ban_delete_days)),
+    )?;
+    let punishment = templates::Punishment::new(
+        templates::Kind::Ban,
         args.user,
+        reason_of(args.reason),
         args.duration,
-        delete_seconds(days)?,
-        reason,
-    )
-    .await?;
-
-    let mut words = Args::new()
-        .with("user", mention(args.user))
-        .with("number", case.number);
-    let key = match args.duration {
-        Some(duration) => {
-            words = words.with("duration", cx.format_duration(duration));
-            "banned-for"
-        }
-        None => "banned",
-    };
-    answer(&cx, key, &words, &notes).await
+        args.delete_days,
+    );
+    templates::punish(&cx, &config, punishment).await
 }
 
 /// Lifts a ban. The timer of a timed ban goes, and the newest ban that still stands is revoked.
@@ -1013,7 +996,8 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "type": ["string", "null"],
                     "pattern": "^[0-9]{1,20}$",
                     "description": "The id of the role a voice mute gives, when voice_mute_method is role."
-                }
+                },
+                "templates": templates::schema()
             },
             "additionalProperties": false
         }),
@@ -1026,7 +1010,8 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "timeout_method": "discord",
             "timeout_role": null,
             "voice_mute_method": "discord",
-            "voice_mute_role": null
+            "voice_mute_role": null,
+            "templates": {}
         }),
     )
 }
@@ -1095,6 +1080,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .capability(Capability::TimeoutMembers)
         .capability(Capability::ManageRoles)
         .capability(Capability::MuteMembers)
+        .capability(Capability::Storage)
         .permission(PermissionSpec::new(
             "moderation.warn",
             Level::MODERATOR,
@@ -1136,6 +1122,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             "Mute members in voice channels and lift it",
         )?)
         .config(schema, defaults)
+        .component(templates::ROUTE, templates::pick)
         .command(
             Command::<Warn>::new("warn", "Warn a member")
                 .requires("moderation.warn")

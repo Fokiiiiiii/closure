@@ -7,14 +7,15 @@
 use std::time::Duration;
 
 use closure_sdk::{
-    Args, Case, CommandArgs, CommandCx, DiscordError, JobCx, ModuleError, Reason, RoleId,
-    ScheduleError, UserError, UserId,
+    Args, Case, CommandArgs, CommandCx, Cx, DiscordError, InteractionRef, JobCx, ModuleError,
+    Reason, RoleId, ScheduleError, UserError, UserId,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::templates;
 use crate::{
-    Config, DAY, MemberReason, answer, audit_reason, dm_reason, mention, notify, punishment_reason,
-    reason_of, record, revoke_latest, secs, timeout_seconds,
+    Config, DAY, MemberReason, audit_reason, dm_reason, mention, notify, reason_of, record,
+    revoke_latest, secs, timeout_seconds,
 };
 
 /// How a timeout or a voice mute is given.
@@ -88,17 +89,18 @@ fn voice_role(config: &Config) -> Result<RoleId, UserError> {
 }
 
 /// Refuses a timeout that the configured method cannot give, before anything is done. Discord's
-/// own timeout lasts 28 days at most; a role has no such limit.
-pub(crate) fn check_timeout(config: &Config, duration: Duration) -> Result<(), UserError> {
+/// own timeout lasts 28 days at most; a role has no such limit. A timeout whose duration is not
+/// known yet is checked for its role only.
+pub(crate) fn check_timeout(config: &Config, duration: Option<Duration>) -> Result<(), UserError> {
     match config.timeout_method {
-        Method::Discord => timeout_seconds(duration).map(drop),
+        Method::Discord => duration.map_or(Ok(()), |duration| timeout_seconds(duration).map(drop)),
         Method::Role => timeout_role(config).map(drop),
     }
 }
 
 /// Gives `user` a timeout for `duration`. Returns the role when a timer has to take it off.
-pub(crate) async fn give_timeout(
-    cx: &CommandCx,
+pub(crate) async fn give_timeout<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     duration: Duration,
@@ -124,8 +126,8 @@ pub(crate) async fn give_timeout(
 
 /// Sets the timer that takes the timeout role off `user` after `after`. A timer set earlier for
 /// the member is replaced, since it would take the role off too early.
-pub(crate) async fn schedule_timeout_lift(
-    cx: &CommandCx,
+pub(crate) async fn schedule_timeout_lift<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     user: UserId,
     case: i64,
     role: RoleId,
@@ -190,8 +192,8 @@ pub(crate) async fn end_timeout(cx: JobCx) -> Result<(), ModuleError> {
 }
 
 /// Mutes `user` in voice, by Discord's or by the voice role. Returns the role a timer takes off.
-async fn mute_in_voice(
-    cx: &CommandCx,
+async fn mute_in_voice<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     reason: Option<&str>,
@@ -240,8 +242,8 @@ async fn unmute_in_voice(
 
 /// Sets the timer that lifts the voice mute of `user` (case `case`) after `duration`. The caller
 /// cancels an earlier timer of the member first.
-async fn schedule_voice_lift(
-    cx: &CommandCx,
+async fn schedule_voice_lift<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     case: i64,
@@ -263,8 +265,8 @@ async fn schedule_voice_lift(
 }
 
 /// Mutes `user` in voice and records it. With a `duration` a timer lifts the mute when it is up.
-async fn mute(
-    cx: &CommandCx,
+pub(crate) async fn mute<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     duration: Option<Duration>,
@@ -311,23 +313,19 @@ async fn mute(
     Ok((case, [note, timer_note].into_iter().flatten().collect()))
 }
 
-/// `/vcmute`: mutes a member in voice, for `duration` or until `/vcunmute`.
+/// `/vcmute`: mutes a member in voice, for `duration` or until `/vcunmute`. Without a reason, a
+/// template is asked for.
 pub(crate) async fn voice_mute(cx: CommandCx, args: VoiceMute) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
-    let reason = punishment_reason(&config, args.reason)?;
-    let (case, notes) = mute(&cx, &config, args.user, args.duration, reason).await?;
-    let mut words = Args::new()
-        .with("user", mention(args.user))
-        .with("number", case.number);
-    let key = match args.duration {
-        Some(duration) => {
-            words = words.with("duration", cx.format_duration(duration));
-            "voice-muted-for"
-        }
-        None => "voice-muted",
-    };
-    answer(&cx, key, &words, &notes).await
+    let punishment = templates::Punishment::new(
+        templates::Kind::Vcmute,
+        args.user,
+        reason_of(args.reason),
+        args.duration,
+        None,
+    );
+    templates::punish(&cx, &config, punishment).await
 }
 
 /// `/vcunmute`: lifts the voice mute of a member and revokes the newest mute that stands.

@@ -53,7 +53,7 @@ pub use closure_core::capability::Capability;
 pub use closure_core::cases::{Case, CaseError, CaseKind, Cases, NewCase, Revoked};
 pub use closure_core::error::{CoreError, DiscordError, ModuleError};
 pub use closure_core::event::{ChannelId, CommandInvocation, GuildId, RoleId, UserId, UserInfo};
-pub use closure_core::event::{Event, EventKind};
+pub use closure_core::event::{Event, EventKind, InteractionRef};
 pub use closure_core::locale::{Args, Locale};
 pub use closure_core::module::EventContext;
 pub use closure_core::module::{ChoiceValue, ModuleId, OptionChoice, OptionKind, OptionSpec};

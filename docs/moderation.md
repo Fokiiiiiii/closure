@@ -15,7 +15,7 @@ them, keeps notes, and records every one of these as a case. The code is in
 | `/case view number` | Shows a case as the log shows it. | `moderation.cases` (moderator) |
 | `/case list user [before]` | Lists the cases of a member, newest first, 10 at a time. | `moderation.cases` (moderator) |
 | `/case revoke number [reason]` | Revokes a case, once. The log shows it grey. | `moderation.revoke` (moderator) |
-| `/timeout user duration [reason]` | Times a member out. `duration` such as `1h` or `7d`; at most 28 days with Discord's timeout (see [timeouts and voice mutes](#timeouts-and-voice-mutes)). | `moderation.timeout` (moderator) |
+| `/timeout user [duration] [reason]` | Times a member out. `duration` such as `1h` or `7d`; at most 28 days with Discord's timeout (see [timeouts and voice mutes](#timeouts-and-voice-mutes)). Without a reason or a duration, a [template](#templates) is picked. | `moderation.timeout` (moderator) |
 | `/untimeout user [reason]` | Lifts the timeout of a member. | `moderation.timeout` (moderator) |
 | `/kick user [reason]` | Kicks a member from the server. | `moderation.kick` (moderator) |
 | `/ban user [reason] [duration] [delete_days]` | Bans a member, for good or for `duration`. `delete_days` (0 to 7) is how many days of their messages are deleted. | `moderation.ban` (admin) |
@@ -37,13 +37,14 @@ modules:
     config:
       warn_expire_days: 30   # 1 to 365; after how many days a warning expires
       dm_on_action: true     # whether the member is sent a direct message about the action
-      require_reason: false  # whether warn, timeout, kick, ban and vcmute need a reason
+      require_reason: false  # whether warn needs a reason; the other punishments use templates
       ban_delete_days: 0     # 0 to 7; the days of messages a ban deletes unless the command says otherwise
       escalation: []         # rules: what a warning brings about at a number of active warnings
       timeout_method: discord    # discord or role: how a timeout is given
       timeout_role: null         # the id of the role a timeout gives, needed for timeout_method role
       voice_mute_method: discord # discord or role: how a voice mute is given
       voice_mute_role: null      # the id of the role a voice mute gives, needed for voice_mute_method role
+      templates: {}              # the templates a moderator picks from when a reason or duration is missing
 ```
 
 Every key is optional; the values above are the defaults. Unknown keys and out-of-range values are
@@ -107,6 +108,58 @@ active warnings (the new one included), the rule's action follows, once:
   The number in the reason is the case of the warning.
 - If Discord refuses the action, the warning stays, no case of the action is recorded, and the reply
   says that the escalation failed.
+
+## Templates
+
+`/timeout`, `/kick`, `/ban` and `/vcmute` need a reason, and `/timeout` a duration. When the command
+leaves one out, the bot does not act yet: it shows the moderator a menu of the **templates** of that
+punishment. The pick carries the punishment out as the command would have, and replaces the menu with
+its result.
+
+```yaml
+    config:
+      templates:
+        timeout:
+          - { id: spam-1h, label: Spam, reason: Spam in several channels, duration: 1h }
+        kick:
+          - { id: rude, label: Rude, reason: Rude to other members }
+        ban:
+          - { id: raid, label: Raid, reason: Raid of the server, duration: 7d }
+          - { id: scam, label: Scam, reason: Scam links }
+        vcmute:
+          - { id: noisy, label: Noisy, reason: Shouting in voice channels, duration: 1h }
+```
+
+Each list holds up to 25 templates. `id` is 1 to 32 characters of `a-z`, `0-9`, `_` and `-`, and it
+is unique within its list. `label` is 1 to 100 characters, `reason` 1 to 512. `duration` is optional,
+such as `1h` or `7d`.
+
+- **Values in the command win.** A template's reason fills in a missing reason, and its duration fills
+  in a missing duration. A timeout with a reason and no duration takes the duration of the template; a
+  ban with a duration keeps it.
+- **A timeout needs a duration**, from the command or from its template. A ban or a voice mute without
+  one lasts for good, or until `/vcunmute`.
+- **No usable template, no action.** When the command has no reason (or, for a timeout, no duration) and
+  the server has no usable template for it, the command is refused with a message that asks for a reason
+  and a duration, or for templates to be set up. Nothing is done.
+- **Only the moderator who ran the command may pick**, and the pick checks the permission of the
+  punishment again. A pick waits for ten minutes and takes an entry of the module's storage while it
+  waits. A second pick, or one after the ten minutes, says that the selection expired; a template that
+  was removed from the settings in the meantime says that it is gone. Neither does anything, and the
+  command has to be run again.
+- The menu shows each template's label, and under it its reason and duration, cut to fit Discord's
+  100 characters.
+
+Templates that cannot be used are not offered, and they do not refuse the rest of the settings:
+
+- a `duration` that cannot be read;
+- a timeout without a duration, or with one above 28 days while `timeout_method` is `discord`;
+- an `id` that an earlier template of the same list already has. The earlier one is used, even when it
+  is skipped itself.
+
+A kick takes no duration, so a duration on a kick template is not used.
+
+`require_reason` now concerns only `/warn`. The four punishment commands use templates instead.
 
 ## Cases and the log
 

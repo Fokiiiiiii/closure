@@ -12,9 +12,11 @@ use closure_core::module::Module;
 use closure_core::registry::ModuleRegistry;
 use closure_i18n::missing_keys;
 use closure_mod_moderation::{builder, module};
-use closure_sdk::testing::{Harness, Invocation, Reply};
+use closure_sdk::testing::{Click, Harness, Invocation, Reply, ReplyKind};
 use closure_sdk::{Level, Locale, ModuleError};
 use serde_json::json;
+use twilight_model::channel::message::Component;
+use twilight_model::channel::message::component::SelectMenu;
 use twilight_model::guild::{Member, Role};
 use twilight_model::id::Id;
 
@@ -563,7 +565,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_and_no_required_reason()
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "require_reason": false, "ban_delete_days": 0, "escalation": [], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "require_reason": false, "ban_delete_days": 0, "escalation": [], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "templates": {} })
     );
 }
 
@@ -624,12 +626,19 @@ fn with_reason(invocation: Invocation, reason: Option<&str>) -> Invocation {
 }
 
 fn timeout(target: u64, duration: &str, reason: Option<&str>) -> Invocation {
-    by_moderator(with_reason(
-        Invocation::new("timeout")
-            .option("user", user(target))
-            .option("duration", CommandOptionValue::String(duration.to_owned())),
-        reason,
-    ))
+    timeout_of(target, Some(duration), reason)
+}
+
+/// A `/timeout` whose duration may be left out.
+fn timeout_of(target: u64, duration: Option<&str>, reason: Option<&str>) -> Invocation {
+    let invocation = Invocation::new("timeout").option("user", user(target));
+    let invocation = match duration {
+        Some(duration) => {
+            invocation.option("duration", CommandOptionValue::String(duration.to_owned()))
+        }
+        None => invocation,
+    };
+    by_moderator(with_reason(invocation, reason))
 }
 
 fn untimeout(target: u64, reason: Option<&str>) -> Invocation {
@@ -746,7 +755,10 @@ async fn a_timeout_is_applied_before_the_direct_message_and_expires_with_its_cas
 #[tokio::test]
 async fn a_timeout_lasts_at_most_twenty_eight_days() {
     let harness = harness();
-    harness.invoke(timeout(MEMBER, "28d", None)).await.unwrap();
+    harness
+        .invoke(timeout(MEMBER, "28d", Some("spam")))
+        .await
+        .unwrap();
     assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
 
     harness.advance(Duration::from_secs(3));
@@ -815,7 +827,10 @@ async fn a_timeout_needs_the_timeout_permission() {
 #[tokio::test]
 async fn an_untimeout_lifts_the_timeout_and_revokes_the_one_it_lifts() {
     let harness = harness();
-    harness.invoke(timeout(MEMBER, "1h", None)).await.unwrap();
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
     harness.advance(Duration::from_secs(3));
     let replies = harness
         .invoke(untimeout(MEMBER, Some("sorry")))
@@ -861,7 +876,7 @@ async fn a_kick_is_messaged_first_then_kicked_and_recorded() {
 async fn a_kick_without_direct_messages_is_only_the_kick() {
     let harness = harness();
     harness.set_config(json!({ "dm_on_action": false }));
-    harness.invoke(kick(MEMBER, None)).await.unwrap();
+    harness.invoke(kick(MEMBER, Some("rude"))).await.unwrap();
     assert_eq!(sequence(&harness), ["kick"]);
 }
 
@@ -873,7 +888,7 @@ async fn a_kick_the_discord_refuses_leaves_no_case_and_no_log() {
     harness
         .api()
         .fail_nth(3, DiscordError::Forbidden("missing permission".to_owned()));
-    assert!(harness.invoke(kick(MEMBER, None)).await.is_err());
+    assert!(harness.invoke(kick(MEMBER, Some("rude"))).await.is_err());
     assert!(cases_of(&harness, MEMBER).await.is_empty());
     assert!(harness.sent_embeds().is_empty());
 }
@@ -909,10 +924,13 @@ async fn a_permanent_ban_deletes_no_messages_by_default_and_schedules_nothing() 
 async fn a_ban_deletes_the_days_of_the_server_setting_or_the_ones_given() {
     let harness = harness();
     harness.set_config(json!({ "ban_delete_days": 2 }));
-    harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    harness
+        .invoke(ban(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
     harness.advance(Duration::from_secs(3));
     harness
-        .invoke(ban(FREE, None, None, Some(1)))
+        .invoke(ban(FREE, Some("raid"), None, Some(1)))
         .await
         .unwrap();
     assert_eq!(ban_deletions(&harness), [172_800, 86_400]);
@@ -960,7 +978,7 @@ async fn only_an_admin_bans_or_unbans() {
 async fn a_timed_ban_is_lifted_when_its_time_is_up() {
     let harness = harness();
     let replies = harness
-        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
         .await
         .unwrap();
     assert!(text(&replies).contains("1 day"), "{replies:?}");
@@ -986,7 +1004,7 @@ async fn a_timed_ban_is_lifted_when_its_time_is_up() {
 async fn a_timed_ban_lifted_by_hand_is_not_an_error_for_its_lift() {
     let harness = harness();
     harness
-        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
         .await
         .unwrap();
     harness.advance(Duration::from_secs(DAY));
@@ -1001,7 +1019,7 @@ async fn a_timed_ban_lifted_by_hand_is_not_an_error_for_its_lift() {
 async fn a_lift_that_fails_otherwise_is_left_to_run_again() {
     let harness = harness();
     harness
-        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
         .await
         .unwrap();
     harness.advance(Duration::from_secs(DAY));
@@ -1023,7 +1041,7 @@ async fn a_ban_the_discord_refuses_leaves_no_case_and_no_timer() {
         .fail_nth(3, DiscordError::Forbidden("missing permission".to_owned()));
     assert!(
         harness
-            .invoke(ban(MEMBER, None, Some("1d"), None))
+            .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
             .await
             .is_err()
     );
@@ -1046,7 +1064,7 @@ async fn a_timed_ban_holds_even_when_its_timer_cannot_be_set() {
             .unwrap();
     }
     let replies = harness
-        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
         .await
         .unwrap();
     assert!(text(&replies).contains("case #1"), "{replies:?}");
@@ -1060,11 +1078,14 @@ async fn a_timed_ban_holds_even_when_its_timer_cannot_be_set() {
 async fn a_ban_for_good_that_replaces_a_timed_one_drops_its_timer() {
     let harness = harness();
     harness
-        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
         .await
         .unwrap();
     harness.advance(Duration::from_secs(3));
-    harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    harness
+        .invoke(ban(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
     // The old timer would lift the new ban when its time is up.
     assert_eq!(harness.jobs(), 0);
 }
@@ -1073,7 +1094,7 @@ async fn a_ban_for_good_that_replaces_a_timed_one_drops_its_timer() {
 async fn an_unban_lifts_the_ban_cancels_its_timer_and_revokes_the_ban() {
     let harness = harness();
     harness
-        .invoke(ban(MEMBER, None, Some("1d"), None))
+        .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
         .await
         .unwrap();
     assert_eq!(harness.jobs(), 1);
@@ -1102,13 +1123,19 @@ async fn an_unban_without_a_ban_still_succeeds() {
 async fn every_action_is_posted_to_the_log_under_its_kind() {
     let harness = harness();
     harness.set_log_channel(50);
-    harness.invoke(timeout(MEMBER, "1h", None)).await.unwrap();
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
     harness.advance(Duration::from_secs(3));
     harness.invoke(untimeout(MEMBER, None)).await.unwrap();
     harness.advance(Duration::from_secs(3));
-    harness.invoke(kick(MEMBER, None)).await.unwrap();
+    harness.invoke(kick(MEMBER, Some("rude"))).await.unwrap();
     harness.advance(Duration::from_secs(3));
-    harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    harness
+        .invoke(ban(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
     harness.advance(Duration::from_secs(3));
     harness.invoke(unban(MEMBER, None)).await.unwrap();
 
@@ -1133,8 +1160,11 @@ async fn every_action_is_posted_to_the_log_under_its_kind() {
 #[tokio::test]
 async fn the_actions_work_without_a_log_channel() {
     let harness = harness();
-    harness.invoke(kick(MEMBER, None)).await.unwrap();
-    harness.invoke(ban(FREE, None, None, None)).await.unwrap();
+    harness.invoke(kick(MEMBER, Some("rude"))).await.unwrap();
+    harness
+        .invoke(ban(FREE, Some("raid"), None, None))
+        .await
+        .unwrap();
     assert!(harness.sent_embeds().is_empty());
     assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
     assert_eq!(cases_of(&harness, FREE).await.len(), 1);
@@ -1163,7 +1193,10 @@ async fn a_closed_direct_message_does_not_fail_a_ban() {
     harness
         .api()
         .fail_nth(2, DiscordError::DirectMessagesClosed);
-    let replies = harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    let replies = harness
+        .invoke(ban(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
     assert!(text(&replies).contains("case #1"), "{replies:?}");
     assert!(
         text(&replies).contains("could not be delivered"),
@@ -1177,7 +1210,7 @@ async fn the_message_to_the_member_names_the_time_in_the_language_of_the_server(
     let harness = harness();
     // The server speaks English; the moderator reads Japanese.
     let replies = harness
-        .invoke(ban(MEMBER, None, Some("1h"), None).locale(Locale::Ja))
+        .invoke(ban(MEMBER, Some("raid"), Some("1h"), None).locale(Locale::Ja))
         .await
         .unwrap();
     assert!(text(&replies).contains("1時間"), "{replies:?}");
@@ -1188,7 +1221,7 @@ async fn the_message_to_the_member_names_the_time_in_the_language_of_the_server(
 
     harness.advance(Duration::from_secs(5));
     harness
-        .invoke(by_admin(timeout(MEMBER, "2h", None)).locale(Locale::Ja))
+        .invoke(by_admin(timeout(MEMBER, "2h", Some("spam"))).locale(Locale::Ja))
         .await
         .unwrap();
     let direct = dm_contents(&harness);
@@ -1626,7 +1659,10 @@ async fn a_timeout_by_role_does_nothing_without_a_usable_role() {
     ] {
         harness.set_config(config);
         harness.advance(Duration::from_secs(3));
-        let replies = harness.invoke(timeout(MEMBER, "1h", None)).await.unwrap();
+        let replies = harness
+            .invoke(timeout(MEMBER, "1h", Some("spam")))
+            .await
+            .unwrap();
         assert!(text(&replies).contains("timeout_role"), "{replies:?}");
     }
     assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
@@ -1638,7 +1674,10 @@ async fn a_timeout_by_role_does_nothing_without_a_usable_role() {
 async fn a_timeout_by_role_may_last_longer_than_discord_allows() {
     let harness = harness();
     harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
-    let replies = harness.invoke(timeout(MEMBER, "29d", None)).await.unwrap();
+    let replies = harness
+        .invoke(timeout(MEMBER, "29d", Some("spam")))
+        .await
+        .unwrap();
     assert!(text(&replies).contains("case #1"), "{replies:?}");
     assert_eq!(sequence(&harness), ["role+", "dm"]);
     assert_eq!(harness.jobs(), 1);
@@ -1649,7 +1688,10 @@ async fn a_timeout_by_role_holds_when_its_timer_cannot_be_set() {
     let harness = harness();
     harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
     fill_scheduler(&harness).await;
-    let replies = harness.invoke(timeout(MEMBER, "1h", None)).await.unwrap();
+    let replies = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
     assert!(text(&replies).contains("case #1"), "{replies:?}");
     assert!(text(&replies).contains("timer"), "{replies:?}");
     assert_eq!(sequence(&harness), ["role+", "dm"]);
@@ -1660,7 +1702,10 @@ async fn a_timeout_by_role_holds_when_its_timer_cannot_be_set() {
 async fn an_untimeout_by_role_removes_the_role_and_cancels_the_timer() {
     let harness = harness();
     harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
-    harness.invoke(timeout(MEMBER, "1h", None)).await.unwrap();
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
     harness.advance(Duration::from_secs(3));
     let replies = harness
         .invoke(untimeout(MEMBER, Some("sorry")))
@@ -1691,7 +1736,10 @@ async fn an_untimeout_by_role_needs_the_role_too() {
 async fn a_timed_out_role_is_the_one_the_timeout_gave_even_after_a_config_change() {
     let harness = harness();
     harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
-    harness.invoke(timeout(MEMBER, "1h", None)).await.unwrap();
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
     harness.set_config(json!({ "timeout_method": "role", "timeout_role": "32" }));
 
     harness.advance(Duration::from_secs(3_600));
@@ -1743,7 +1791,7 @@ async fn a_voice_mute_in_discord_is_recorded_and_messaged_after_it() {
 async fn a_voice_mute_with_a_duration_is_lifted_when_its_time_is_up() {
     let harness = harness();
     let replies = harness
-        .invoke(voice_mute(MEMBER, Some("1h"), None))
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
     assert!(text(&replies).contains("1 hour"), "{replies:?}");
@@ -1766,7 +1814,9 @@ async fn a_voice_mute_the_discord_refuses_for_a_member_out_of_voice_leaves_no_ca
     harness.set_log_channel(50);
     // The lookup of the member is the first call, the mute the second.
     harness.api().fail_nth(2, DiscordError::NotInVoice);
-    let result = harness.invoke(voice_mute(MEMBER, Some("1h"), None)).await;
+    let result = harness
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
+        .await;
     assert!(
         matches!(result, Err(ModuleError::Discord(DiscordError::NotInVoice))),
         "{result:?}"
@@ -1782,7 +1832,7 @@ async fn a_voice_mute_by_role_adds_the_voice_role_and_lifts_it_when_due() {
     let harness = harness();
     harness.set_config(json!({ "voice_mute_method": "role", "voice_mute_role": "31" }));
     harness
-        .invoke(voice_mute(MEMBER, Some("1h"), None))
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
     assert_eq!(sequence(&harness), ["role+", "dm"]);
@@ -1802,7 +1852,7 @@ async fn a_voice_mute_by_role_needs_its_role() {
     let harness = harness();
     harness.set_config(json!({ "voice_mute_method": "role" }));
     let replies = harness
-        .invoke(voice_mute(MEMBER, Some("1h"), None))
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
     assert!(text(&replies).contains("voice_mute_role"), "{replies:?}");
@@ -1815,7 +1865,7 @@ async fn a_voice_mute_by_role_needs_its_role() {
 async fn a_voice_unmute_lifts_the_mute_cancels_its_timer_and_revokes_it() {
     let harness = harness();
     harness
-        .invoke(voice_mute(MEMBER, Some("1h"), None))
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
     harness.advance(Duration::from_secs(3));
@@ -1838,7 +1888,7 @@ async fn a_voice_unmute_lifts_the_mute_cancels_its_timer_and_revokes_it() {
 async fn a_voice_unmute_the_discord_refuses_leaves_the_mute_standing() {
     let harness = harness();
     harness
-        .invoke(voice_mute(MEMBER, None, None))
+        .invoke(voice_mute(MEMBER, None, Some("noisy")))
         .await
         .unwrap();
     harness.advance(Duration::from_secs(3));
@@ -1858,7 +1908,7 @@ async fn a_voice_unmute_by_role_removes_the_role_and_needs_it() {
     let harness = harness();
     harness.set_config(json!({ "voice_mute_method": "role", "voice_mute_role": "31" }));
     harness
-        .invoke(voice_mute(MEMBER, None, None))
+        .invoke(voice_mute(MEMBER, None, Some("noisy")))
         .await
         .unwrap();
     harness.advance(Duration::from_secs(3));
@@ -1876,7 +1926,7 @@ async fn a_voice_unmute_by_role_removes_the_role_and_needs_it() {
 async fn a_voice_lift_the_discord_refuses_for_now_is_tried_ten_minutes_later() {
     let harness = harness();
     harness
-        .invoke(voice_mute(MEMBER, Some("1h"), None))
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
     harness.advance(Duration::from_secs(3_600));
@@ -1900,7 +1950,7 @@ async fn a_voice_lift_the_discord_refuses_for_now_is_tried_ten_minutes_later() {
 async fn a_voice_lift_gives_up_a_day_after_it_fell_due() {
     let harness = harness();
     harness
-        .invoke(voice_mute(MEMBER, Some("1h"), None))
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
     harness.advance(Duration::from_secs(3_600));
@@ -1930,7 +1980,7 @@ async fn a_voice_lift_by_role_is_done_when_the_member_or_role_is_gone() {
     let harness = harness();
     harness.set_config(json!({ "voice_mute_method": "role", "voice_mute_role": "31" }));
     harness
-        .invoke(voice_mute(MEMBER, Some("1h"), None))
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
     harness.advance(Duration::from_secs(3_600));
@@ -1993,4 +2043,485 @@ fn the_restriction_settings_are_checked_against_their_schema() {
         json!({ "voice_mute_role": "123456789012345678901" })
     ));
     assert!(!accepted(json!({ "timeout_role": 123 })));
+}
+
+// ---- templates ----
+
+/// The settings with the templates of one punishment.
+fn templates_for(kind: &str, templates: serde_json::Value) -> serde_json::Value {
+    let mut section = serde_json::Map::new();
+    section.insert(kind.to_owned(), templates);
+    json!({ "templates": section })
+}
+
+/// The select menu of a reply, if it has one.
+fn menu_of(reply: &Reply) -> Option<SelectMenu> {
+    reply
+        .components
+        .iter()
+        .find_map(|component| match component {
+            Component::ActionRow(row) => row.components.iter().find_map(|inner| match inner {
+                Component::SelectMenu(menu) => Some(menu.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+}
+
+/// The options of the picker as `(label, value, description)`.
+fn options_of(reply: &Reply) -> Vec<(String, String, Option<String>)> {
+    menu_of(reply)
+        .expect("a select menu")
+        .options
+        .unwrap_or_default()
+        .into_iter()
+        .map(|option| (option.label, option.value, option.description))
+        .collect()
+}
+
+/// The reply that replaced the picker, if the pick changed it.
+fn edit_of(replies: &[Reply]) -> Option<&Reply> {
+    replies.iter().find(|reply| reply.kind == ReplyKind::Edit)
+}
+
+/// The custom id of the picker that the command answered with.
+fn picker_id(replies: &[Reply]) -> String {
+    replies[0].custom_ids()[0].clone()
+}
+
+/// Picks `template` in the picker `custom_id` as `user`, who has `roles`.
+async fn pick_as(
+    harness: &Harness,
+    custom_id: &str,
+    template: &'static str,
+    user: u64,
+    roles: &[u64],
+) -> Vec<Reply> {
+    harness
+        .click(
+            Click::new(custom_id)
+                .values([template])
+                .user(user)
+                .roles(roles.iter().copied()),
+        )
+        .await
+        .unwrap()
+}
+
+/// Picks `template` as the moderator, who has the moderator role.
+async fn pick(harness: &Harness, custom_id: &str, template: &'static str) -> Vec<Reply> {
+    pick_as(harness, custom_id, template, MODERATOR, &[MODERATOR_ROLE]).await
+}
+
+/// Whether the settings are accepted by the module's schema.
+fn accepted_settings(config: serde_json::Value) -> bool {
+    let registry = Arc::new(
+        ModuleRegistry::new(vec![Arc::new(module().unwrap()) as Arc<dyn Module>]).unwrap(),
+    );
+    let compiler = ConfigCompiler::new(registry).unwrap();
+    let mut moderation = serde_json::Map::new();
+    moderation.insert("config".to_owned(), config);
+    // JSON is YAML, so the settings go in as one flow mapping.
+    let yaml = format!(
+        "modules:\n  moderation: {}\n",
+        serde_json::Value::Object(moderation)
+    );
+    compiler.compile(&parse_overrides(&yaml).unwrap()).is_ok()
+}
+
+#[tokio::test]
+async fn a_punishment_without_a_reason_asks_for_a_template_and_does_nothing_yet() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "kick",
+        json!([{ "id": "spam", "label": "Spam", "reason": "Spam in the server" }]),
+    ));
+    let replies = harness.invoke(kick(MEMBER, None)).await.unwrap();
+
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0].kind, ReplyKind::Response);
+    assert!(replies[0].ephemeral, "the picker is private by default");
+    assert_eq!(replies[0].embeds.len(), 1, "{replies:?}");
+    assert!(replies[0].content.contains("<@7>"), "{replies:?}");
+    let menu = menu_of(&replies[0]).expect("a select menu");
+    assert_eq!(menu.placeholder.as_deref(), Some("Template"));
+    let ids = replies[0].custom_ids();
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    let owned_by_moderator = format!("moderation:tpl:{MODERATOR}:");
+    assert!(ids[0].starts_with(&owned_by_moderator), "{ids:?}");
+    assert_eq!(
+        options_of(&replies[0]),
+        [(
+            "Spam".to_owned(),
+            "spam".to_owned(),
+            Some("Spam in the server".to_owned())
+        )]
+    );
+
+    assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_picked_template_runs_the_punishment_and_replaces_the_picker() {
+    let harness = harness();
+    harness.set_log_channel(50);
+    harness.set_config(templates_for(
+        "kick",
+        json!([{ "id": "spam", "label": "Spam", "reason": "Spam in the general channel" }]),
+    ));
+    let replies = harness.invoke(kick(MEMBER, None)).await.unwrap();
+    let picked = pick(&harness, &picker_id(&replies), "spam").await;
+
+    let edit = edit_of(&picked).expect("the picker is replaced");
+    assert!(edit.content.contains("case #1"), "{picked:?}");
+    assert!(edit.components.is_empty(), "{picked:?}");
+    assert_eq!(sequence(&harness), ["dm", "kick"]);
+
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.kind.as_str(), "kick");
+    assert_eq!(case.target, Id::new(MEMBER));
+    assert_eq!(case.moderator, Id::new(MODERATOR));
+    assert_eq!(case.reason.as_deref(), Some("Spam in the general channel"));
+    assert!(dm_contents(&harness)[0].contains("Spam in the general channel"));
+    let embeds = harness.sent_embeds();
+    assert_eq!(embeds.len(), 1, "{embeds:?}");
+    assert_eq!(embeds[0].title.as_deref(), Some("Case #1 · Kick"));
+}
+
+#[tokio::test]
+async fn a_timeout_without_a_duration_takes_the_template_duration_and_keeps_the_given_reason() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "timeout",
+        json!([{ "id": "short", "label": "Short", "reason": "Template reason", "duration": "2h" }]),
+    ));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, Some("spam")))
+        .await
+        .unwrap();
+    assert!(menu_of(&replies[0]).is_some(), "{replies:?}");
+
+    let picked = pick(&harness, &picker_id(&replies), "short").await;
+    assert!(
+        edit_of(&picked)
+            .expect("the picker is replaced")
+            .content
+            .contains("2 hours"),
+        "{picked:?}"
+    );
+    assert_eq!(sequence(&harness), ["timeout", "dm"]);
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(
+        case.reason.as_deref(),
+        Some("spam"),
+        "the given reason is kept"
+    );
+    assert_eq!(case.expires_at, Some(case.created_at + 7_200));
+}
+
+#[tokio::test]
+async fn a_ban_without_a_reason_takes_the_template_reason_and_a_given_duration_wins() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "ban",
+        json!([{ "id": "raid", "label": "Raid", "reason": "Raid", "duration": "7d" }]),
+    ));
+    let replies = harness
+        .invoke(ban(MEMBER, None, Some("2h"), None))
+        .await
+        .unwrap();
+    let picked = pick_as(
+        &harness,
+        &picker_id(&replies),
+        "raid",
+        MODERATOR,
+        &[ADMIN_ROLE],
+    )
+    .await;
+    assert!(edit_of(&picked).is_some(), "{picked:?}");
+
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.reason.as_deref(), Some("Raid"));
+    assert_eq!(case.expires_at, Some(case.created_at + 7_200));
+    assert_eq!(harness.jobs(), 1, "the timer of the two hour ban");
+    assert_eq!(sequence(&harness), ["dm", "ban"]);
+    assert!(dm_contents(&harness)[0].contains("2 hours"));
+}
+
+#[tokio::test]
+async fn a_ban_without_a_duration_is_for_good_and_a_ban_with_a_reason_asks_nothing() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "ban",
+        json!([{ "id": "raid", "label": "Raid", "reason": "Raid" }]),
+    ));
+    let given = harness
+        .invoke(ban(MEMBER, Some("spam"), None, None))
+        .await
+        .unwrap();
+    assert!(menu_of(&given[0]).is_none(), "{given:?}");
+    assert_eq!(sequence(&harness), ["dm", "ban"]);
+    assert_eq!(harness.jobs(), 0);
+
+    harness.advance(Duration::from_secs(3));
+    let replies = harness.invoke(ban(FREE, None, None, None)).await.unwrap();
+    let picked = pick_as(
+        &harness,
+        &picker_id(&replies),
+        "raid",
+        MODERATOR,
+        &[ADMIN_ROLE],
+    )
+    .await;
+    assert!(edit_of(&picked).is_some(), "{picked:?}");
+    let case = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(case.reason.as_deref(), Some("Raid"));
+    assert_eq!(case.expires_at, None, "no duration, no timer");
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_voice_mute_template_with_a_duration_is_lifted_when_it_is_due() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "vcmute",
+        json!([{ "id": "noisy", "label": "Noisy", "reason": "Noisy", "duration": "1h" }]),
+    ));
+    let replies = harness
+        .invoke(voice_mute(MEMBER, None, None))
+        .await
+        .unwrap();
+    let picked = pick(&harness, &picker_id(&replies), "noisy").await;
+    assert!(edit_of(&picked).is_some(), "{picked:?}");
+
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.kind.as_str(), "vcmute");
+    assert_eq!(case.reason.as_deref(), Some("Noisy"));
+    assert_eq!(case.expires_at, Some(case.created_at + 3_600));
+    assert_eq!(harness.jobs(), 1);
+
+    harness.advance(Duration::from_secs(3_600));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert_eq!(sequence(&harness), ["vcmute", "dm", "vcunmute"]);
+}
+
+#[tokio::test]
+async fn a_timeout_with_a_reason_and_a_duration_asks_nothing() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "timeout",
+        json!([{ "id": "short", "label": "Short", "reason": "Template", "duration": "2h" }]),
+    ));
+    let replies = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert!(menu_of(&replies[0]).is_none(), "{replies:?}");
+    assert_eq!(sequence(&harness), ["timeout", "dm"]);
+    let cases = cases_of(&harness, MEMBER).await;
+    assert_eq!(cases[0].reason.as_deref(), Some("spam"));
+    assert_eq!(cases[0].expires_at, Some(cases[0].created_at + 3_600));
+}
+
+#[tokio::test]
+async fn without_a_usable_template_each_punishment_is_refused_and_nothing_is_done() {
+    let configs = [
+        json!({}),
+        json!({ "templates": { "timeout": [], "kick": [], "ban": [], "vcmute": [] } }),
+        json!({ "templates": {
+            "timeout": [{ "id": "a", "label": "A", "reason": "r" }],
+            "kick": [{ "id": "a", "label": "A", "reason": "r", "duration": "banana" }],
+            "ban": [{ "id": "a", "label": "A", "reason": "r", "duration": "banana" }],
+            "vcmute": [{ "id": "a", "label": "A", "reason": "r", "duration": "banana" }]
+        } }),
+    ];
+    let harness = harness();
+    for config in configs {
+        harness.set_config(config);
+        for invocation in [
+            timeout_of(MEMBER, Some("1h"), None),
+            kick(MEMBER, None),
+            ban(MEMBER, None, None, None),
+            voice_mute(MEMBER, None, None),
+        ] {
+            harness.advance(Duration::from_secs(3));
+            let replies = harness.invoke(invocation).await.unwrap();
+            assert!(text(&replies).contains("Give a reason"), "{replies:?}");
+            assert!(menu_of(&replies[0]).is_none(), "{replies:?}");
+        }
+    }
+    assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_template_that_cannot_be_used_is_not_offered() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "timeout",
+        json!([
+            { "id": "bad", "label": "Bad", "reason": "r", "duration": "banana" },
+            { "id": "open", "label": "Open", "reason": "r" },
+            { "id": "long", "label": "Long", "reason": "r", "duration": "29d" },
+            { "id": "ok", "label": "Ok", "reason": "r", "duration": "1h" },
+            { "id": "ok", "label": "Again", "reason": "r", "duration": "2h" }
+        ]),
+    ));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(
+        options_of(&replies[0]),
+        [(
+            "Ok".to_owned(),
+            "ok".to_owned(),
+            Some("r (1 hour)".to_owned())
+        )]
+    );
+
+    // Discord's limit of 28 days is for its own timeout only.
+    harness.set_config(json!({
+        "timeout_method": "role",
+        "timeout_role": "30",
+        "templates": { "timeout": [{ "id": "long", "label": "Long", "reason": "r", "duration": "29d" }] }
+    }));
+    harness.advance(Duration::from_secs(3));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(options_of(&replies[0]).len(), 1, "{replies:?}");
+}
+
+#[tokio::test]
+async fn an_option_description_keeps_the_duration_within_discord_s_limit() {
+    let harness = harness();
+    let long_reason = "a".repeat(300);
+    harness.set_config(templates_for(
+        "ban",
+        json!([{ "id": "long", "label": "Long", "reason": long_reason, "duration": "1h" }]),
+    ));
+    let replies = harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    let description = options_of(&replies[0])[0].2.clone().expect("a description");
+    assert!(description.chars().count() <= 100, "{description}");
+    assert!(description.ends_with(" (1 hour)"), "{description}");
+}
+
+#[tokio::test]
+async fn a_picker_is_only_for_the_moderator_who_ran_the_command() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "kick",
+        json!([{ "id": "spam", "label": "Spam", "reason": "Spam" }]),
+    ));
+    let replies = harness.invoke(kick(MEMBER, None)).await.unwrap();
+    let id = picker_id(&replies);
+
+    let stranger = pick_as(&harness, &id, "spam", UNPRIVILEGED, &[]).await;
+    assert!(stranger[0].content.contains("not for you"), "{stranger:?}");
+    assert!(sequence(&harness).is_empty());
+
+    let owner = pick(&harness, &id, "spam").await;
+    assert!(edit_of(&owner).is_some(), "{owner:?}");
+    assert_eq!(sequence(&harness), ["dm", "kick"]);
+}
+
+#[tokio::test]
+async fn a_second_pick_and_a_pick_after_ten_minutes_say_the_selection_expired() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "kick",
+        json!([{ "id": "spam", "label": "Spam", "reason": "Spam" }]),
+    ));
+    let replies = harness.invoke(kick(MEMBER, None)).await.unwrap();
+    let id = picker_id(&replies);
+    assert!(edit_of(&pick(&harness, &id, "spam").await).is_some());
+    let again = pick(&harness, &id, "spam").await;
+    assert!(again[0].content.contains("expired"), "{again:?}");
+    assert_eq!(sequence(&harness), ["dm", "kick"], "the kick happened once");
+
+    let late = crate::harness();
+    late.set_config(templates_for(
+        "kick",
+        json!([{ "id": "spam", "label": "Spam", "reason": "Spam" }]),
+    ));
+    let replies = late.invoke(kick(MEMBER, None)).await.unwrap();
+    late.advance(Duration::from_secs(601));
+    let expired = pick(&late, &picker_id(&replies), "spam").await;
+    assert!(expired[0].content.contains("expired"), "{expired:?}");
+    assert!(sequence(&late).is_empty());
+    assert!(cases_of(&late, MEMBER).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_template_removed_before_the_pick_is_gone_and_nothing_is_done() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "kick",
+        json!([{ "id": "spam", "label": "Spam", "reason": "Spam" }]),
+    ));
+    let replies = harness.invoke(kick(MEMBER, None)).await.unwrap();
+    harness.set_config(json!({}));
+    let gone = pick(&harness, &picker_id(&replies), "spam").await;
+    assert!(gone[0].content.contains("no longer set up"), "{gone:?}");
+    assert!(sequence(&harness).is_empty());
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_pick_by_someone_who_lost_the_permission_is_refused_and_the_admin_can_still_pick() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "ban",
+        json!([{ "id": "raid", "label": "Raid", "reason": "Raid" }]),
+    ));
+    let replies = harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
+    let id = picker_id(&replies);
+
+    let denied = pick_as(&harness, &id, "raid", MODERATOR, &[MODERATOR_ROLE]).await;
+    assert!(denied[0].content.contains("level"), "{denied:?}");
+    assert!(sequence(&harness).is_empty());
+
+    let done = pick_as(&harness, &id, "raid", MODERATOR, &[ADMIN_ROLE]).await;
+    assert!(edit_of(&done).is_some(), "{done:?}");
+    assert_eq!(sequence(&harness), ["dm", "ban"]);
+}
+
+#[test]
+fn the_templates_are_checked_against_their_schema() {
+    let ban_templates = |entries: serde_json::Value| json!({ "templates": { "ban": entries } });
+    assert!(accepted_settings(json!({ "templates": {
+        "timeout": [{ "id": "short-1_x", "label": "Short", "reason": "Spam", "duration": "1h 30m" }],
+        "kick": [{ "id": "a", "label": "A", "reason": "r" }],
+        "ban": [],
+        "vcmute": []
+    } })));
+    assert!(!accepted_settings(ban_templates(json!([
+        { "id": "a b", "label": "A", "reason": "r" }
+    ]))));
+    assert!(!accepted_settings(ban_templates(json!([
+        { "id": "a", "label": "", "reason": "r" }
+    ]))));
+    assert!(!accepted_settings(ban_templates(json!([
+        { "id": "a", "label": "A" }
+    ]))));
+    assert!(!accepted_settings(ban_templates(json!([
+        { "id": "a", "label": "A", "reason": "r", "colour": "red" }
+    ]))));
+    assert!(!accepted_settings(ban_templates(json!([
+        { "id": "a", "label": "A", "reason": "r", "duration": "banana" }
+    ]))));
+    assert!(!accepted_settings(json!({ "templates": { "warn": [] } })));
+    let template = json!({ "id": "a", "label": "A", "reason": "r" });
+    assert!(accepted_settings(ban_templates(json!(vec![
+        template
+            .clone();
+        25
+    ]))));
+    assert!(!accepted_settings(ban_templates(json!(vec![template; 26]))));
 }

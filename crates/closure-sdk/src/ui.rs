@@ -122,6 +122,27 @@ pub fn select(
     min: u8,
     max: u8,
 ) -> Component {
+    select_described(
+        custom_id,
+        placeholder,
+        options
+            .into_iter()
+            .map(|(label, value)| (label, value, None)),
+        min,
+        max,
+    )
+}
+
+/// [`select`] whose options also have a description under the label: `(label, value,
+/// description)`. Discord shows at most 100 characters of a description.
+#[must_use]
+pub fn select_described(
+    custom_id: String,
+    placeholder: Option<&str>,
+    options: impl IntoIterator<Item = (String, String, Option<String>)>,
+    min: u8,
+    max: u8,
+) -> Component {
     Component::SelectMenu(SelectMenu {
         id: None,
         channel_types: None,
@@ -134,9 +155,9 @@ pub fn select(
         options: Some(
             options
                 .into_iter()
-                .map(|(label, value)| SelectMenuOption {
+                .map(|(label, value, description)| SelectMenuOption {
                     default: false,
-                    description: None,
+                    description,
                     emoji: None,
                     label,
                     value,
