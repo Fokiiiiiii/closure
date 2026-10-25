@@ -6,9 +6,9 @@
 //!
 //! A user's warnings are one entry of the module's storage (`user:{id}`), changed with
 //! compare-and-set so two moderators warning at once do not lose each other's warning. Each
-//! warning has an id that the entry hands out with the write that stores it, and a job that
-//! removes it after `expire_days`; removing a
-//! warning by id does nothing when it is already gone, so the job may safely run twice.
+//! warning has a number that the entry hands out with the write that stores it, and a job, keyed
+//! by the interaction that gave it, that removes it after `expire_days`; removing a
+//! warning by its uid does nothing when it is already gone, so the job may safely run twice.
 
 use std::time::Duration;
 
@@ -55,7 +55,12 @@ impl Default for Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Warning {
+    /// The number shown to people; it can be handed out again once the entry is gone.
     id: i64,
+    /// The interaction that gave the warning. Unlike `id` it identifies the warning, so its
+    /// expiry only ever removes this one. Zero for warnings from before it was kept.
+    #[serde(default)]
+    uid: u64,
     reason: Option<String>,
     by: u64,
 }
@@ -102,7 +107,7 @@ impl From<Saved> for Stored {
 #[derive(Debug, Serialize, Deserialize)]
 struct Expire {
     user: u64,
-    id: i64,
+    uid: u64,
 }
 
 #[derive(CommandArgs)]
@@ -132,8 +137,8 @@ fn entry_key(user: u64) -> String {
     format!("user:{user}")
 }
 
-fn expire_key(user: u64, id: i64) -> String {
-    format!("expire:{user}:{id}")
+fn expire_key(user: u64, uid: u64) -> String {
+    format!("expire:{user}:{uid}")
 }
 
 fn module_error(error: UserError) -> ModuleError {
@@ -180,7 +185,13 @@ async fn change(
 /// Gives the next number to a new warning unless the member is full. Runs on the entry that is
 /// being replaced, so a warning given at the same moment as another gets a number of its own
 /// and cannot take the member over the limit.
-fn push(saved: &mut Stored, user: u64, reason: Option<&str>, by: u64) -> Result<i64, UserError> {
+fn push(
+    saved: &mut Stored,
+    user: u64,
+    uid: u64,
+    reason: Option<&str>,
+    by: u64,
+) -> Result<i64, UserError> {
     if saved.warnings.len() >= MAX_ACTIVE {
         return Err(full(user));
     }
@@ -188,6 +199,7 @@ fn push(saved: &mut Stored, user: u64, reason: Option<&str>, by: u64) -> Result<
     saved.next += 1;
     saved.warnings.push(Warning {
         id,
+        uid,
         reason: reason.map(str::to_owned),
         by,
     });
@@ -198,12 +210,13 @@ fn push(saved: &mut Stored, user: u64, reason: Option<&str>, by: u64) -> Result<
 async fn give(
     store: &Store,
     user: u64,
+    uid: u64,
     reason: Option<&str>,
     by: u64,
 ) -> Result<(i64, Stored), UserError> {
     let mut id = 0;
     let stored = change(store, user, |saved| {
-        id = push(saved, user, reason, by)?;
+        id = push(saved, user, uid, reason, by)?;
         Ok(())
     })
     .await?;
@@ -237,29 +250,33 @@ async fn add(cx: closure_sdk::CommandCx, args: Add) -> Result<(), UserError> {
         return Err(full(user));
     }
 
-    let (id, stored) = give(cx.store(), user, args.reason.as_deref(), moderator.get()).await?;
-    // Booked after the warning is stored. If that fails, the warning is taken back, so that none
-    // is kept without its expiry; its number stays used.
+    // The interaction identifies the warning: no two share one, and a number handed out again
+    // cannot take an earlier warning's expiry with it.
+    let uid = cx.invocation().interaction_id.get();
+    // Booked before the warning is stored: a warning stored without its expiry would stay for
+    // good if the handler stopped in between, while an expiry without its warning does nothing.
     let days = u64::from(config.expire_days);
-    let booked: Result<(), UserError> = async {
-        cx.scheduler()
-            .job("expire", &Expire { user, id })?
-            .key(&expire_key(user, id))
-            .after(Duration::from_secs(days * 86_400))
-            .await?;
-        Ok(())
-    }
-    .await;
-    if let Err(error) = booked {
-        // If taking it back fails too, the warning stays without its expiry; the booking error is
-        // still the one reported.
-        let _ = change(cx.store(), user, |saved| {
-            saved.warnings.retain(|warning| warning.id != id);
-            Ok(())
-        })
-        .await;
-        return Err(error);
-    }
+    cx.scheduler()
+        .job("expire", &Expire { user, uid })?
+        .key(&expire_key(user, uid))
+        .after(Duration::from_secs(days * 86_400))
+        .await?;
+    let stored = match give(
+        cx.store(),
+        user,
+        uid,
+        args.reason.as_deref(),
+        moderator.get(),
+    )
+    .await
+    {
+        Ok((_, stored)) => stored,
+        Err(error) => {
+            // Best effort: the expiry left behind finds no warning with its uid and does nothing.
+            let _ = cx.scheduler().cancel(&expire_key(user, uid)).await;
+            return Err(error);
+        }
+    };
     // Only a statistic: a warning that is stored must not turn into an error because the count
     // could not be kept.
     let _ = cx.store().counter_add(ISSUED, user, 1).await;
@@ -366,8 +383,10 @@ async fn confirm_clear(cx: ComponentCx) -> Result<(), UserError> {
         Ok(())
     })
     .await?;
-    for warning in &removed {
-        cx.scheduler().cancel(&expire_key(user, warning.id)).await?;
+    for warning in removed.iter().filter(|warning| warning.uid != 0) {
+        cx.scheduler()
+            .cancel(&expire_key(user, warning.uid))
+            .await?;
     }
     cx.update(InteractionReply {
         content: Some(
@@ -446,9 +465,9 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .component("clear", confirm_clear)
             .component("keep", keep)
             .job("expire", |cx| async move {
-                let Expire { user, id } = cx.payload()?;
+                let Expire { user, uid } = cx.payload()?;
                 change(cx.store(), user, |saved| {
-                    saved.warnings.retain(|warning| warning.id != id);
+                    saved.warnings.retain(|warning| warning.uid != uid);
                     Ok(())
                 })
                 .await
@@ -478,6 +497,7 @@ mod tests {
     fn warning(id: i64) -> Warning {
         Warning {
             id,
+            uid: 0,
             reason: None,
             by: 1,
         }
@@ -530,6 +550,7 @@ mod tests {
                 saved.next += 1;
                 saved.warnings.push(Warning {
                     id,
+                    uid: 0,
                     reason: Some(self.reason.to_owned()),
                     by: 2,
                 });
@@ -633,7 +654,7 @@ mod tests {
 
         backend.armed.store(true, Ordering::SeqCst);
         // This one saw 24 and goes on; the rival's write makes 25 before it is stored.
-        let result = give(&store, user, Some("the 26th"), 1).await;
+        let result = give(&store, user, 26, Some("the 26th"), 1).await;
 
         assert!(result.is_err(), "the 26th is refused");
         let (saved, _) = read(&store, user).await.unwrap();
@@ -648,7 +669,7 @@ mod tests {
 
         backend.armed.store(true, Ordering::SeqCst);
         // Both saw no warning; the rival's write lands first, so the first try of this one fails.
-        let (number, _) = give(&store, user, Some("ours"), 1).await.unwrap();
+        let (number, _) = give(&store, user, 1, Some("ours"), 1).await.unwrap();
 
         let (saved, _) = read(&store, user).await.unwrap();
         assert_eq!(saved.warnings.len(), 2, "{saved:?}");

@@ -303,8 +303,8 @@ async fn a_warning_that_could_not_be_given_is_not_counted_as_given() {
         .unwrap();
     assert!(text(&list).contains("1 active, 1 given in all"), "{list:?}");
     assert!(
-        text(&list).contains("#2 now there is"),
-        "the number was used up: {list:?}"
+        text(&list).contains("#1 now there is"),
+        "the failed attempt did not use a number: {list:?}"
     );
 }
 
@@ -357,4 +357,61 @@ async fn a_failed_warning_does_not_take_the_expiry_of_another_one_with_it() {
         .unwrap();
     assert!(text(&list).contains("1 active"), "{list:?}");
     assert!(text(&list).contains("#1 first"), "{list:?}");
+}
+
+#[tokio::test]
+async fn an_old_expiry_job_cannot_remove_a_newer_warning_with_the_same_number() {
+    let harness = harness();
+    harness.set_config(json!({ "expire_days": 2 }));
+    harness.invoke(add(MEMBER, "first")).await.unwrap();
+    // The entry is gone (its time ran out with no warning left); the number 1 is handed out again.
+    harness.store().delete("user:7").await.unwrap();
+    harness.advance(Duration::from_secs(5));
+    harness.invoke(add(MEMBER, "second")).await.unwrap();
+    assert_eq!(harness.jobs(), 2, "both expiries are booked");
+
+    // The first expiry comes due: it is for another warning, so it removes nothing.
+    harness.advance(Duration::from_secs(2 * 86_400 - 5));
+    let ended = harness.run_due_jobs().await;
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert!(ended[0].is_ok());
+    let list = harness
+        .invoke(sub("list", MEMBER).roles([MODERATOR_ROLE]))
+        .await
+        .unwrap();
+    assert!(text(&list).contains("#1 second"), "{list:?}");
+    assert!(text(&list).contains("1 active"), "{list:?}");
+
+    // Its own expiry comes due a few seconds later, and then it goes.
+    harness.advance(Duration::from_secs(5));
+    assert!(harness.run_due_jobs().await.iter().all(Result::is_ok));
+    let list = harness
+        .invoke(sub("list", MEMBER).roles([MODERATOR_ROLE]))
+        .await
+        .unwrap();
+    assert!(text(&list).contains("no active warnings"), "{list:?}");
+}
+
+#[tokio::test]
+async fn an_expiry_booked_for_a_warning_that_was_never_stored_does_nothing() {
+    let harness = harness();
+    harness.invoke(add(MEMBER, "first")).await.unwrap();
+    harness
+        .scheduler()
+        .job("expire", &json!({ "user": MEMBER, "uid": 99_999 }))
+        .unwrap()
+        .key("expire:7:99999")
+        .after(Duration::ZERO)
+        .await
+        .unwrap();
+
+    let ended = harness.run_due_jobs().await;
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert!(ended[0].is_ok(), "{ended:?}");
+    let list = harness
+        .invoke(sub("list", MEMBER).roles([MODERATOR_ROLE]))
+        .await
+        .unwrap();
+    assert!(text(&list).contains("#1 first"), "{list:?}");
+    assert!(text(&list).contains("1 active"), "{list:?}");
 }
