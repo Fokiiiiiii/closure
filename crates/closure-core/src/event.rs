@@ -11,6 +11,7 @@ use twilight_model::id::marker::{
 
 use crate::action::Emoji;
 use crate::locale::Locale;
+use crate::schedule::ScheduledJob;
 
 pub type GuildId = Id<GuildMarker>;
 pub type ChannelId = Id<ChannelMarker>;
@@ -312,6 +313,8 @@ pub enum Event {
     Component(ComponentInvocation),
     /// A modal of the module that the user sent.
     Modal(ModalSubmission),
+    /// A job the module scheduled is due (see [`crate::schedule`]). Only that module gets it.
+    Scheduled(ScheduledJob),
 }
 
 /// Payload-free discriminant of [`Event`], used for subscriptions and metrics labels.
@@ -340,6 +343,7 @@ pub enum EventKind {
     Command,
     Component,
     Modal,
+    Scheduled,
 }
 
 impl EventKind {
@@ -368,6 +372,7 @@ impl EventKind {
             Self::Command => "command",
             Self::Component => "component",
             Self::Modal => "modal",
+            Self::Scheduled => "scheduled",
         }
     }
 }
@@ -398,6 +403,7 @@ impl Event {
             Self::Command(_) => EventKind::Command,
             Self::Component(_) => EventKind::Component,
             Self::Modal(_) => EventKind::Modal,
+            Self::Scheduled(_) => EventKind::Scheduled,
         }
     }
 
@@ -476,6 +482,7 @@ impl Event {
             Self::Command(invocation) => invocation.guild_id,
             Self::Component(click) => click.guild_id,
             Self::Modal(submission) => submission.guild_id,
+            Self::Scheduled(job) => job.guild_id,
         }
     }
 

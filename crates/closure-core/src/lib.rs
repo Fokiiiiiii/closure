@@ -16,6 +16,7 @@ pub mod locale;
 pub mod module;
 pub mod permission;
 pub mod registry;
+pub mod schedule;
 pub mod settings;
 pub mod storage;
 pub mod subscription;

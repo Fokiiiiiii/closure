@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod guilds;
 mod ids;
+mod scheduler;
 mod storage;
 
 use std::str::FromStr;
@@ -143,7 +144,8 @@ mod tests {
                 "guild_config_history",
                 "guilds",
                 "module_counters",
-                "module_kv"
+                "module_kv",
+                "scheduled_jobs"
             ]
         );
     }

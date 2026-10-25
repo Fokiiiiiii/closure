@@ -25,6 +25,7 @@ use closure_core::locale::{Locale, Translator};
 use closure_core::module::{EventContext, Module};
 use closure_core::permission::GuildPermissions;
 use closure_core::registry::ModuleRegistry;
+use closure_core::schedule::{MemoryScheduler, Scheduler, SchedulerBackend, backoff};
 use closure_core::settings::GuildPolicy;
 use closure_core::storage::{MemoryStorage, StorageBackend, Store};
 use closure_core::subscription::Flow;
@@ -260,6 +261,7 @@ pub struct Harness {
     permissions: Mutex<GuildPermissions>,
     config: Mutex<serde_json::Value>,
     storage: Arc<MemoryStorage>,
+    scheduler: Arc<MemoryScheduler>,
     elapsed: Arc<Mutex<Duration>>,
     next: AtomicU64,
 }
@@ -292,14 +294,18 @@ impl Harness {
         );
         // What the module keeps lives in memory, and time passes for it as for the cooldowns.
         let unix_start = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let storage_elapsed = Arc::clone(&elapsed);
-        let storage = Arc::new(MemoryStorage::with_clock(move || {
-            let passed = storage_elapsed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_secs();
-            i64::try_from(unix_start + passed).unwrap_or(i64::MAX)
-        }));
+        let unix_now = {
+            let elapsed = Arc::clone(&elapsed);
+            move || {
+                let passed = elapsed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_secs();
+                i64::try_from(unix_start + passed).unwrap_or(i64::MAX)
+            }
+        };
+        let storage = Arc::new(MemoryStorage::with_clock(unix_now.clone()));
+        let scheduler = Arc::new(MemoryScheduler::with_clock(unix_now));
         let registry = ModuleRegistry::new(vec![Arc::clone(&module) as Arc<dyn Module>])?;
         let mut catalogs = TranslatorBuilder::new()?;
         catalogs.add_registry(&registry)?;
@@ -318,6 +324,7 @@ impl Harness {
             permissions: Mutex::new(permissions),
             config: Mutex::new(manifest.default_config.clone()),
             storage,
+            scheduler,
             elapsed,
             next: AtomicU64::new(1),
             module,
@@ -356,6 +363,56 @@ impl Harness {
         )
     }
 
+    /// The module's scheduler in the guild of the invocations, to set up jobs a test starts from.
+    #[must_use]
+    pub fn scheduler(&self) -> Scheduler {
+        let manifest = self.module.manifest();
+        Scheduler::new(
+            Arc::clone(&self.scheduler) as Arc<dyn SchedulerBackend>,
+            &manifest.capabilities,
+            manifest.id.clone(),
+            Id::new(GUILD),
+        )
+    }
+
+    /// How many jobs are waiting (or were given up on).
+    #[must_use]
+    pub fn jobs(&self) -> usize {
+        self.scheduler.len()
+    }
+
+    /// Runs the jobs that are due now, the way the host does: a job that succeeds is done (a
+    /// repeating one is set for its next time), one that fails comes again after its pause.
+    /// Returns how each job ended, in the order they were due.
+    pub async fn run_due_jobs(&self) -> Vec<Result<(), ModuleError>> {
+        let due = self
+            .scheduler
+            .claim_due(1000, Duration::from_secs(300))
+            .await
+            .unwrap_or_default();
+        let mut ended = Vec::new();
+        for job in due {
+            let (id, attempt) = (job.id, job.attempt);
+            let ctx = self.context(job.guild_id);
+            let result = self
+                .module
+                .on_event_flow(&ctx, &Event::Scheduled(job))
+                .await
+                .map(drop);
+            let recorded = match &result {
+                Ok(()) => self.scheduler.complete(id).await,
+                Err(error) => {
+                    self.scheduler
+                        .retry(id, backoff(attempt), &error.to_string())
+                        .await
+                }
+            };
+            drop(recorded);
+            ended.push(result);
+        }
+        ended
+    }
+
     /// The pretend Discord, to look at what else the module did.
     #[must_use]
     pub fn api(&self) -> &Arc<MockApi> {
@@ -392,6 +449,12 @@ impl Harness {
             Arc::clone(&self.translator),
         )
         .with_permissions(Arc::new(permissions))
+        .with_scheduler(Scheduler::new(
+            Arc::clone(&self.scheduler) as Arc<dyn SchedulerBackend>,
+            &manifest.capabilities,
+            manifest.id.clone(),
+            guild,
+        ))
         .with_store(Store::new(
             Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
             &manifest.capabilities,

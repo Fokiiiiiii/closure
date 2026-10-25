@@ -14,6 +14,7 @@ use crate::error::{CoreError, ModuleError};
 use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId};
 use crate::locale::{Args, Catalog, Locale, Translator};
 use crate::permission::{GuildPermissions, PermissionSpec};
+use crate::schedule::Scheduler;
 use crate::settings::GuildPolicy;
 use crate::storage::Store;
 use crate::subscription::{Flow, Subscription};
@@ -470,6 +471,7 @@ pub struct EventContext {
     policy: Arc<GuildPolicy>,
     permissions: Arc<GuildPermissions>,
     store: Store,
+    scheduler: Scheduler,
     config: Arc<serde_json::Value>,
     translator: Arc<dyn Translator>,
 }
@@ -497,6 +499,7 @@ impl EventContext {
     ) -> Self {
         Self {
             store: Store::unavailable(module.clone(), guild_id),
+            scheduler: Scheduler::unavailable(module.clone(), guild_id),
             module,
             guild_id,
             api,
@@ -519,6 +522,19 @@ impl EventContext {
     #[must_use]
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Gives the context the module's scheduler in this guild; without it every call fails.
+    #[must_use]
+    pub fn with_scheduler(mut self, scheduler: Scheduler) -> Self {
+        self.scheduler = scheduler;
+        self
+    }
+
+    /// Work the module has done later: one time or again and again.
+    #[must_use]
+    pub fn scheduler(&self) -> &Scheduler {
+        &self.scheduler
     }
 
     /// Gives the context the guild's permissions; without them nobody but the owner has any key.

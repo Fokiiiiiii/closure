@@ -97,9 +97,30 @@ error (`StorageError`), never silent loss. Data is kept while the guild's config
 entries and old minute counts are removed hourly. There is no separate cache: an entry with a time
 to live is one.
 
+Work for later: `.job("unmute", |cx| async move { let who: Unmute = cx.payload()?; .. Ok(()) })`
+handles a job, and `cx.scheduler().job("unmute", &Unmute { user })?.key("unmute:7")
+.after(Duration::from_secs(600)).await?` sets one (`cx.ctx().scheduler()` in a job or a plain
+module). Declaring a job handler grants the module the capability `schedule`. A job is a name the
+module knows and a JSON payload (at most 16 KiB), run once at `.after(delay)` or `.at(unix_seconds)`,
+or again and again with `.every(period, first)` (at least 10 seconds; if the bot was down, the
+runs it missed are skipped, not made up for). A job with a `.key(..)` is replaced when the same
+key is scheduled again and `scheduler().cancel(key)` removes it; keys belong to the module and
+the guild. Jobs are kept in PostgreSQL and survive a restart; at most 10 000 wait per module and
+guild, and nothing is set more than 10 years ahead.
+
+Delivery is *at least once*: if the handler returns an error, panics or times out, or the bot
+stops while it runs, the job comes again (after 5 s, 10 s, 20 s, ... at most an hour), up to 8
+tries, then it is kept as failed for two weeks and no longer handed out. So a handler has to be
+safe to run twice; `cx.attempt()` says which try this is. A job whose name has no handler (a leftover
+of an older version) is dropped with a warning, not failed. A job for a module that is switched
+off in the guild, or while the guild's queue is full, waits (30 s at a time) and its tries are not
+counted. The handler is called like an event handler: same timeout, same panic isolation, same
+circuit breaker. Test with `Harness::run_due_jobs()` after `Harness::advance(..)`, and set up a
+job with `Harness::scheduler()`.
+
 Test with `closure_sdk::testing::Harness`: it runs a command with a given user, roles and
 language against a pretend Discord, lets you change the guild's permissions and move the clock for
-cooldowns, and returns what the module answered. See
+cooldowns and jobs, and returns what the module answered. See
 [`crates/closure-sdk/tests/commands.rs`](../crates/closure-sdk/tests/commands.rs).
 
 The sections below describe what is under the SDK, and what a module that is not only commands

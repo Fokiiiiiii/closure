@@ -15,6 +15,7 @@ use closure_core::module::{
     CommandSpec, EventContext, Module, ModuleId, ModuleManifest, SubcommandSpec,
 };
 use closure_core::permission::{PermissionKey, PermissionSpec};
+use closure_core::schedule::ScheduledJob;
 use closure_core::subscription::{Flow, Subscription};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
@@ -22,7 +23,7 @@ use twilight_model::guild::Permissions;
 
 use crate::args::CommandArgs;
 use crate::cooldown::{Cooldown, Cooldowns};
-use crate::cx::{CommandCx, ComponentCx, Cx, ModalCx};
+use crate::cx::{CommandCx, ComponentCx, Cx, JobCx, ModalCx};
 use crate::error::UserError;
 use crate::ui::CustomId;
 
@@ -134,6 +135,9 @@ type EventRun =
 /// What runs when a component or a modal comes back.
 type UiRun<I> = dyn Fn(Cx<I>) -> BoxFuture<'static, Result<(), UserError>> + Send + Sync;
 
+/// What runs when a job of the module is due.
+type JobRun = dyn Fn(JobCx) -> BoxFuture<'static, Result<(), ModuleError>> + Send + Sync;
+
 /// Builds a module from its commands.
 pub struct ModuleBuilder {
     manifest: ModuleManifest,
@@ -141,6 +145,7 @@ pub struct ModuleBuilder {
     handlers: HashMap<EventKind, Arc<EventRun>>,
     components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
     modals: HashMap<String, Arc<UiRun<ModalSubmission>>>,
+    jobs: HashMap<String, Arc<JobRun>>,
     problem: Option<CoreError>,
     clock: Clock,
 }
@@ -170,6 +175,7 @@ impl ModuleBuilder {
             handlers: HashMap::new(),
             components: HashMap::new(),
             modals: HashMap::new(),
+            jobs: HashMap::new(),
             problem: None,
             clock: Arc::new(Instant::now),
         })
@@ -239,6 +245,12 @@ impl ModuleBuilder {
                 "commands are declared with `command`, not subscribed to".to_owned(),
             ));
         }
+        if kind == EventKind::Scheduled {
+            self.problem.get_or_insert(self.invalid(
+                "",
+                "jobs are declared with `job`, not subscribed to".to_owned(),
+            ));
+        }
         let run: Arc<EventRun> = Arc::new(move |ctx, event| handler(ctx, event).boxed());
         if self.handlers.insert(kind, run).is_some() {
             self.problem.get_or_insert(self.invalid(
@@ -279,6 +291,25 @@ impl ModuleBuilder {
             self.problem
                 .get_or_insert(self.invalid(route, "has two modal handlers".to_owned()));
         }
+        self
+    }
+
+    /// What happens when a job scheduled under `name` (`cx.scheduler().job(name, ..)`) is due.
+    /// The module gets the capability to schedule. A handler that fails is run again after a
+    /// growing pause, and when the bot stops while it runs it is run again too, so it has to be
+    /// safe to run twice. A job whose name has no handler (an old one) is dropped with a warning.
+    #[must_use]
+    pub fn job<F, Fut>(mut self, name: &str, handler: F) -> Self
+    where
+        F: Fn(JobCx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), ModuleError>> + Send + 'static,
+    {
+        let run: Arc<JobRun> = Arc::new(move |cx| handler(cx).boxed());
+        if self.jobs.insert(name.to_owned(), run).is_some() {
+            self.problem
+                .get_or_insert(self.invalid(name, "has two job handlers".to_owned()));
+        }
+        self.manifest.capabilities.insert(Capability::Schedule);
         self
     }
 
@@ -387,6 +418,7 @@ impl ModuleBuilder {
             handlers: self.handlers,
             components: self.components,
             modals: self.modals,
+            jobs: self.jobs,
             cooldowns: Cooldowns::default(),
             clock: self.clock,
         })
@@ -402,6 +434,7 @@ pub struct SdkModule {
     handlers: HashMap<EventKind, Arc<EventRun>>,
     components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
     modals: HashMap<String, Arc<UiRun<ModalSubmission>>>,
+    jobs: HashMap<String, Arc<JobRun>>,
     cooldowns: Cooldowns,
     clock: Clock,
 }
@@ -484,6 +517,21 @@ impl SdkModule {
         Ok(Flow::Continue)
     }
 
+    /// A job that is due. One without a handler is a leftover of an older version of the module:
+    /// failing it would only fill the log and trip the breaker, so it is dropped.
+    async fn on_job(&self, ctx: &EventContext, job: &ScheduledJob) -> Result<Flow, ModuleError> {
+        if let Some(run) = self.jobs.get(&job.name) {
+            run(JobCx::new(ctx, job)).await?;
+        } else {
+            tracing::warn!(
+                module = %self.manifest.id,
+                job = %job.name,
+                "a scheduled job has no handler and is dropped"
+            );
+        }
+        Ok(Flow::Continue)
+    }
+
     /// The `custom_id` if it is of this module and can be read.
     fn own_custom_id(&self, custom_id: &str) -> Option<(ModuleId, CustomId)> {
         let (module, id) = CustomId::parse(custom_id)?;
@@ -554,6 +602,7 @@ impl Module for SdkModule {
             Event::Command(invocation) => invocation,
             Event::Component(click) => return self.on_component(ctx, click).await,
             Event::Modal(submission) => return self.on_modal(ctx, submission).await,
+            Event::Scheduled(job) => return self.on_job(ctx, job).await,
             other => {
                 return match self.handlers.get(&other.kind()) {
                     Some(handler) => handler(ctx.clone(), other.clone()).await,

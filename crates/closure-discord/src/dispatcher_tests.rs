@@ -54,6 +54,8 @@ enum Behavior {
     CountEvents,
     /// Answers the click it got, then tries a token it was never given.
     RespondToClick,
+    /// Schedules another job from the job it got.
+    ScheduleAnother,
 }
 
 struct Probe {
@@ -221,6 +223,16 @@ impl Probe {
         ));
     }
 
+    /// Schedules another job, a minute from now.
+    async fn schedule_another(&self, ctx: &EventContext) -> Result<(), ModuleError> {
+        ctx.scheduler()
+            .job("again", &1)
+            .map_err(|error| ModuleError::other(error.to_string()))?
+            .after(Duration::from_secs(60))
+            .await
+            .map_err(|error| ModuleError::other(error.to_string()))
+    }
+
     /// Counts the events in the module's own storage and logs the total.
     async fn count_events(&self, ctx: &EventContext) -> Result<(), ModuleError> {
         let total = ctx
@@ -319,6 +331,7 @@ impl Module for Probe {
             }
             Behavior::CountEvents => self.count_events(ctx).await,
             Behavior::RespondToClick => self.respond_to_click(ctx, event).await,
+            Behavior::ScheduleAnother => self.schedule_another(ctx).await,
             Behavior::ReadPolicy => {
                 self.read_policy(ctx);
                 Ok(())
@@ -1795,4 +1808,225 @@ async fn a_command_whose_interaction_cannot_be_recorded_is_not_handed_to_a_modul
             "guild {guild}"
         );
     }
+}
+
+fn due_job(module: &str) -> ScheduledJob {
+    ScheduledJob {
+        id: 1,
+        guild_id: Id::new(GUILD),
+        module: ModuleId::new(module).unwrap(),
+        name: "expire".into(),
+        payload: json!({}),
+        attempt: 1,
+    }
+}
+
+#[tokio::test]
+async fn a_due_job_goes_to_its_module_and_to_nobody_else() {
+    let warn = Probe::new("warn", &[], &[Capability::Schedule]);
+    // Subscribing to the kind does not get a module other modules' jobs.
+    let spy = Probe::new("spy", &[EventKind::Scheduled], &[]);
+    let h = harness(
+        &[(&warn, true), (&spy, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    assert_eq!(
+        h.dispatcher.run_job(due_job("warn")).await,
+        JobOutcome::Done
+    );
+
+    assert_eq!(warn.log(), ["load", "scheduled"]);
+    assert_eq!(spy.log(), ["load"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn how_a_job_went_is_told_to_whoever_keeps_it() {
+    let warn = Probe::new("warn", &[], &[]);
+    let off = Probe::new("off", &[], &[]);
+    let h = harness(
+        &[(&warn, true), (&off, false)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    warn.set(Behavior::Fail);
+    assert_eq!(
+        h.dispatcher.run_job(due_job("warn")).await,
+        JobOutcome::Failed("boom".into())
+    );
+    warn.set(Behavior::Panic);
+    assert!(matches!(
+        h.dispatcher.run_job(due_job("warn")).await,
+        JobOutcome::Failed(_)
+    ));
+    warn.set(Behavior::Hang);
+    assert!(matches!(
+        h.dispatcher.run_job(due_job("warn")).await,
+        JobOutcome::Failed(_)
+    ));
+    // Not the job's fault: switched off, or no module of that name.
+    assert_eq!(
+        h.dispatcher.run_job(due_job("off")).await,
+        JobOutcome::Postponed
+    );
+    assert_eq!(
+        h.dispatcher.run_job(due_job("ghost")).await,
+        JobOutcome::Gone
+    );
+    assert_eq!(off.log(), ["load"]);
+}
+
+#[tokio::test]
+async fn a_job_is_postponed_when_the_guild_is_full_or_the_bot_is_stopping() {
+    let warn = Probe::new("warn", &[], &[]);
+    let h = harness(&[(&warn, true)], limits(0, 1), DispatcherConfig::default()).await;
+    assert_eq!(
+        h.dispatcher.run_job(due_job("warn")).await,
+        JobOutcome::Postponed
+    );
+
+    let calm = harness(&[(&warn, true)], limits(8, 1), DispatcherConfig::default()).await;
+    calm.dispatcher.shutdown(Duration::from_secs(1)).await;
+    assert_eq!(
+        calm.dispatcher.run_job(due_job("warn")).await,
+        JobOutcome::Postponed
+    );
+    assert_eq!(warn.log().iter().filter(|e| *e == "scheduled").count(), 0);
+}
+
+/// A dispatcher on a scheduler the test can look into.
+async fn with_scheduler(probes: &[(&Arc<Probe>, bool)]) -> (Dispatcher, Arc<MemoryScheduler>) {
+    let registry = Arc::new(
+        ModuleRegistry::new(
+            probes
+                .iter()
+                .map(|(probe, _)| Arc::clone(*probe) as Arc<dyn Module>)
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let mut settings = StaticSettings::new(probes.iter().map(|(probe, enabled)| {
+        (
+            probe.manifest.id.clone(),
+            ModuleSettings {
+                enabled: *enabled,
+                config: Arc::new(json!({})),
+                granted: probe.manifest.capabilities.clone(),
+            },
+        )
+    }));
+    settings.limits = limits(64, 4);
+    let scheduler = Arc::new(MemoryScheduler::default());
+    let dispatcher = Dispatcher::start_with_services(
+        registry,
+        Arc::new(settings),
+        Arc::new(MockApi::default()) as Arc<dyn DiscordApi>,
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+        DispatcherConfig::default(),
+        Arc::new(closure_core::storage::MemoryStorage::default()),
+        Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
+    )
+    .await
+    .unwrap();
+    (dispatcher, scheduler)
+}
+
+async fn schedule_now(scheduler: &Arc<MemoryScheduler>, module: &str, name: &str) {
+    let granted: CapabilitySet = [Capability::Schedule].into_iter().collect();
+    Scheduler::new(
+        Arc::clone(scheduler) as Arc<dyn SchedulerBackend>,
+        &granted,
+        ModuleId::new(module).unwrap(),
+        Id::new(GUILD),
+    )
+    .job(name, &json!({}))
+    .unwrap()
+    .after(Duration::ZERO)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_runner_removes_what_is_done_and_the_module_can_schedule_more() {
+    let warn = Probe::new("warn", &[], &[Capability::Schedule]);
+    warn.set(Behavior::ScheduleAnother);
+    let (dispatcher, scheduler) = with_scheduler(&[(&warn, true)]).await;
+    schedule_now(&scheduler, "warn", "expire").await;
+
+    assert_eq!(
+        crate::jobs::run_due(scheduler.as_ref(), &dispatcher).await,
+        1
+    );
+
+    assert_eq!(warn.log(), ["load", "scheduled"]);
+    // The job that ran is gone; the one it scheduled waits for its time.
+    assert_eq!(scheduler.len(), 1);
+    assert_eq!(
+        crate::jobs::run_due(scheduler.as_ref(), &dispatcher).await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn the_runner_retries_a_failed_job_later_and_drops_one_of_a_module_that_is_gone() {
+    let warn = Probe::new("warn", &[], &[Capability::Schedule]);
+    warn.set(Behavior::Fail);
+    let (dispatcher, scheduler) = with_scheduler(&[(&warn, true)]).await;
+    schedule_now(&scheduler, "warn", "expire").await;
+    schedule_now(&scheduler, "ghost", "expire").await;
+
+    assert_eq!(
+        crate::jobs::run_due(scheduler.as_ref(), &dispatcher).await,
+        2
+    );
+
+    // The failed job is kept and waits; the ghost's is gone.
+    assert_eq!(scheduler.len(), 1);
+    assert_eq!(
+        crate::jobs::run_due(scheduler.as_ref(), &dispatcher).await,
+        0
+    );
+    assert!(scheduler.failed().is_empty());
+}
+
+#[tokio::test]
+async fn the_runner_keeps_the_job_of_a_module_that_is_switched_off() {
+    let off = Probe::new("off", &[], &[Capability::Schedule]);
+    let (dispatcher, scheduler) = with_scheduler(&[(&off, false)]).await;
+    schedule_now(&scheduler, "off", "expire").await;
+
+    assert_eq!(
+        crate::jobs::run_due(scheduler.as_ref(), &dispatcher).await,
+        1
+    );
+
+    assert_eq!(scheduler.len(), 1);
+    assert_eq!(off.log(), ["load"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_runner_loop_runs_jobs_until_it_is_told_to_stop() {
+    let warn = Probe::new("warn", &[], &[Capability::Schedule]);
+    let (dispatcher, scheduler) = with_scheduler(&[(&warn, true)]).await;
+    let stop = CancellationToken::new();
+    let runner = tokio::spawn(crate::jobs::run_jobs(
+        Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
+        dispatcher,
+        stop.clone(),
+    ));
+
+    schedule_now(&scheduler, "warn", "expire").await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(warn.log(), ["load", "scheduled"]);
+    assert!(scheduler.is_empty());
+
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(1), runner)
+        .await
+        .expect("the runner stops")
+        .unwrap();
 }

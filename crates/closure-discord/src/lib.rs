@@ -15,12 +15,14 @@ mod dispatcher;
 mod error;
 mod gateway;
 pub mod hierarchy;
+mod jobs;
 
 pub use api::{RetryPolicy, TwilightApi, joined_guilds};
 pub use breaker::BreakerConfig;
 pub use commands::{CommandBuildError, CommandScope, build_commands, register_commands};
-pub use dispatcher::{DispatchError, Dispatcher, DispatcherConfig};
+pub use dispatcher::{DispatchError, Dispatcher, DispatcherConfig, JobOutcome};
 pub use gateway::{
     GatewayConfig, GatewayError, GatewayHandle, GatewayHealth, GuildHooks, NoHooks,
     gateway_intents, new_cache, start_gateway,
 };
+pub use jobs::{run_due, run_jobs};

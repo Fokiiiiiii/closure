@@ -23,6 +23,7 @@ use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
+use closure_core::schedule::{MemoryScheduler, ScheduledJob, Scheduler, SchedulerBackend};
 use closure_core::settings::{ModuleSettings, SettingsProvider};
 use closure_core::storage::{MemoryStorage, StorageBackend, Store};
 use closure_core::subscription::Flow;
@@ -31,7 +32,7 @@ use closure_i18n::{CORE_NAMESPACE, user_message};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use futures_util::FutureExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -89,6 +90,22 @@ struct Job {
     enqueued: Instant,
     /// Commands have their own lanes and their own share of the queue budget.
     command: bool,
+    /// Where to say how a scheduled job went; dropped unsent if the job was lost on the way.
+    outcome: Option<oneshot::Sender<JobOutcome>>,
+}
+
+/// How a scheduled job went, for whoever keeps the jobs (see [`Dispatcher::run_job`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobOutcome {
+    /// The module handled it.
+    Done,
+    /// The module failed, panicked or timed out: try again later.
+    Failed(String),
+    /// Nobody could run it for a reason that is not the job's (the module is switched off or
+    /// paused, the queue is full, the bot is stopping): try again later, without counting.
+    Postponed,
+    /// The module does not exist any more: the job can never run.
+    Gone,
 }
 
 /// Lanes a long queue of ordinary events can never occupy, so that slash commands are answered
@@ -185,6 +202,7 @@ struct Shared {
     api: Arc<dyn DiscordApi>,
     translator: Arc<dyn Translator>,
     storage: Arc<dyn StorageBackend>,
+    scheduler: Arc<dyn SchedulerBackend>,
     config: DispatcherConfig,
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
     /// The guild of every live interaction, so a module cannot answer another guild's.
@@ -238,6 +256,7 @@ fn ordering_key(event: &Event) -> u64 {
         Event::Command(invocation) => invocation.user.id.get(),
         Event::Component(click) => click.user.id.get(),
         Event::Modal(submission) => submission.user.id.get(),
+        Event::Scheduled(job) => u64::try_from(job.id).unwrap_or(0),
         Event::GuildAvailable { .. } | Event::GuildRemoved { .. } => 0,
     }
 }
@@ -280,6 +299,29 @@ impl Dispatcher {
         config: DispatcherConfig,
         storage: Arc<dyn StorageBackend>,
     ) -> Result<Self, DispatchError> {
+        Self::start_with_services(
+            registry,
+            settings,
+            api,
+            translator,
+            config,
+            storage,
+            Arc::new(MemoryScheduler::default()),
+        )
+        .await
+    }
+
+    /// [`Self::start_with_storage`] with the place scheduled jobs are kept as well. Whoever
+    /// keeps them runs them with [`Self::run_job`].
+    pub async fn start_with_services(
+        registry: Arc<ModuleRegistry>,
+        settings: Arc<dyn SettingsProvider>,
+        api: Arc<dyn DiscordApi>,
+        translator: Arc<dyn Translator>,
+        config: DispatcherConfig,
+        storage: Arc<dyn StorageBackend>,
+        scheduler: Arc<dyn SchedulerBackend>,
+    ) -> Result<Self, DispatchError> {
         for module in registry.iter() {
             module
                 .on_load()
@@ -296,6 +338,7 @@ impl Dispatcher {
             api,
             translator,
             storage,
+            scheduler,
             config,
             guilds: DashMap::new(),
             interactions: Arc::new(InteractionGuilds::with_limits(config.interaction_limits)),
@@ -313,10 +356,25 @@ impl Dispatcher {
     /// Queues an event. Never blocks: when the guild already has `queue_capacity` events
     /// waiting or running, the event is dropped and counted.
     pub fn dispatch(&self, event: Event) {
+        self.enqueue(event, None);
+    }
+
+    /// Hands a due job to its module and says how it went. The job takes the same way an event
+    /// does (the guild's lane and queue, the module's timeout and breaker).
+    pub async fn run_job(&self, job: ScheduledJob) -> JobOutcome {
+        let (sender, receiver) = oneshot::channel();
+        if !self.enqueue(Event::Scheduled(job), Some(sender)) {
+            return JobOutcome::Postponed;
+        }
+        receiver.await.unwrap_or(JobOutcome::Postponed)
+    }
+
+    /// Whether the event was accepted.
+    fn enqueue(&self, event: Event, outcome: Option<oneshot::Sender<JobOutcome>>) -> bool {
         let kind = event.kind().as_str();
         if self.shared.closing.load(Ordering::Acquire) {
             metrics::counter!("closure_events_dropped_total", "reason" => "shutdown").increment(1);
-            return;
+            return false;
         }
         metrics::counter!("closure_events_total", "kind" => kind).increment(1);
 
@@ -324,7 +382,7 @@ impl Dispatcher {
         let limits = self.shared.settings.limits(guild);
         let Some(lanes) = self.lanes_for(guild, limits.concurrency) else {
             metrics::counter!("closure_events_dropped_total", "reason" => "shutdown").increment(1);
-            return;
+            return false;
         };
 
         // The budget is the guild's, not a lane's: one busy channel may use all of it.
@@ -338,7 +396,7 @@ impl Dispatcher {
             metrics::counter!("closure_events_dropped_total", "reason" => "queue_full")
                 .increment(1);
             log_queue_full(&lanes.state, guild, kind);
-            return;
+            return false;
         }
 
         // Once the event is accepted and before any module can see it: the record decides whose
@@ -356,7 +414,7 @@ impl Dispatcher {
                     }
                 };
                 metrics::counter!("closure_events_dropped_total", "reason" => reason).increment(1);
-                return;
+                return false;
             }
         }
 
@@ -365,6 +423,7 @@ impl Dispatcher {
             event: Arc::new(event),
             enqueued: Instant::now(),
             command,
+            outcome,
         };
         self.shared.pending_total.fetch_add(1, Ordering::AcqRel);
         if sender.try_send(job).is_err() {
@@ -372,7 +431,9 @@ impl Dispatcher {
             self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
             metrics::counter!("closure_events_dropped_total", "reason" => "closed").increment(1);
             tracing::warn!(%guild, kind, "event dropped: the lane is closed");
+            return false;
         }
+        true
     }
 
     /// The lanes of `guild`, created on first use and rebuilt when the configured number of
@@ -528,16 +589,24 @@ async fn lane_worker(
             () = shared.abort.cancelled() => break,
             job = receiver.recv() => job,
         };
-        let Some(job) = job else { break };
+        let Some(mut job) = job else { break };
         metrics::histogram!("closure_event_queue_seconds")
             .record(job.enqueued.elapsed().as_secs_f64());
         let handled = AssertUnwindSafe(handle_event(&shared, guild, &state, &job.event))
             .catch_unwind()
             .await;
-        if handled.is_err() {
-            // handle_event isolates module panics itself; reaching this is a dispatcher bug,
-            // and the lane must survive it.
-            tracing::error!(%guild, kind = job.event.kind().as_str(), "dispatcher panicked while handling an event");
+        match handled {
+            Ok(outcome) => {
+                if let (Some(sender), Some(outcome)) = (job.outcome.take(), outcome) {
+                    // Nobody waiting any more is fine: the job is then handed out again.
+                    let _ = sender.send(outcome);
+                }
+            }
+            Err(_) => {
+                // handle_event isolates module panics itself; reaching this is a dispatcher bug,
+                // and the lane must survive it.
+                tracing::error!(%guild, kind = job.event.kind().as_str(), "dispatcher panicked while handling an event");
+            }
         }
         settle(&shared, &state, &job);
     }
@@ -623,22 +692,25 @@ async fn handle_event(
     guild: GuildId,
     state: &Arc<GuildState>,
     event: &Arc<Event>,
-) {
+) -> Option<JobOutcome> {
     match &**event {
         Event::Command(invocation) => {
             let owner = shared.registry.command_owner(&invocation.command);
             handle_interaction(shared, guild, state, event, owner, invocation).await;
-            return;
+            return None;
         }
         Event::Component(click) => {
             let owner = shared.registry.interaction_owner(&click.custom_id);
             handle_interaction(shared, guild, state, event, owner, click).await;
-            return;
+            return None;
         }
         Event::Modal(submission) => {
             let owner = shared.registry.interaction_owner(&submission.custom_id);
             handle_interaction(shared, guild, state, event, owner, submission).await;
-            return;
+            return None;
+        }
+        Event::Scheduled(job) => {
+            return Some(handle_job(shared, guild, state, event, job).await);
         }
         _ => {}
     }
@@ -662,6 +734,27 @@ async fn handle_event(
         {
             break;
         }
+    }
+    None
+}
+
+/// A due job goes to the module that scheduled it, whatever the subscriptions say.
+async fn handle_job(
+    shared: &Arc<Shared>,
+    guild: GuildId,
+    state: &Arc<GuildState>,
+    event: &Arc<Event>,
+    job: &ScheduledJob,
+) -> JobOutcome {
+    let Some(module) = shared.registry.get(&job.module) else {
+        return JobOutcome::Gone;
+    };
+    match call_module(shared, guild, state, Arc::clone(module), event).await {
+        Verdict::Done(_) => JobOutcome::Done,
+        Verdict::Failed(error) => JobOutcome::Failed(error.to_string()),
+        Verdict::Panicked => JobOutcome::Failed("the handler panicked".to_owned()),
+        Verdict::TimedOut => JobOutcome::Failed("the handler timed out".to_owned()),
+        Verdict::Skipped => JobOutcome::Postponed,
     }
 }
 
@@ -763,6 +856,12 @@ fn context_for(
         Arc::clone(&shared.translator),
     )
     .with_permissions(shared.settings.permissions(guild))
+    .with_scheduler(Scheduler::new(
+        Arc::clone(&shared.scheduler),
+        &settings.granted,
+        id.clone(),
+        guild,
+    ))
     .with_store(Store::new(
         Arc::clone(&shared.storage),
         &settings.granted,

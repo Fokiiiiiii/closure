@@ -13,6 +13,7 @@ use closure_core::event::{
 use closure_core::locale::{Args, Locale};
 use closure_core::module::EventContext;
 use closure_core::permission::{Actor, Level, PermissionKey};
+use closure_core::schedule::ScheduledJob;
 use serde::de::DeserializeOwned;
 use twilight_model::guild::Permissions;
 
@@ -154,6 +155,12 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.ctx.store()
     }
 
+    /// Work the module has done later (`ModuleBuilder::job` handles it when it is due).
+    #[must_use]
+    pub fn scheduler(&self) -> &closure_core::schedule::Scheduler {
+        self.ctx.scheduler()
+    }
+
     /// A message of the module's catalog in the language of the answer.
     #[must_use]
     pub fn t(&self, key: &str, args: &Args) -> String {
@@ -275,6 +282,91 @@ impl<I: InteractionRef + 'static> Cx<I> {
         } else {
             Err(UserError::PermissionDenied(decision))
         }
+    }
+}
+
+/// A job the module scheduled, now due.
+#[derive(Clone)]
+pub struct JobCx {
+    ctx: EventContext,
+    job: ScheduledJob,
+}
+
+impl std::fmt::Debug for JobCx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JobCx")
+            .field("module", &self.ctx.module)
+            .field("job", &self.job.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl JobCx {
+    pub(crate) fn new(ctx: &EventContext, job: &ScheduledJob) -> Self {
+        Self {
+            ctx: ctx.clone(),
+            job: job.clone(),
+        }
+    }
+
+    /// The name the job was scheduled under.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.job.name
+    }
+
+    /// Which try this is: 1 the first time. A job runs again if the handler fails (or the bot
+    /// stopped meanwhile), so a handler has to be safe to run twice.
+    #[must_use]
+    pub fn attempt(&self) -> u32 {
+        self.job.attempt
+    }
+
+    /// The data the job was scheduled with, as its own type.
+    pub fn payload<T: DeserializeOwned>(&self) -> Result<T, ModuleError> {
+        serde_json::from_value(self.job.payload.clone()).map_err(|error| {
+            ModuleError::other(format!("the payload of job `{}`: {error}", self.job.name))
+        })
+    }
+
+    #[must_use]
+    pub fn guild_id(&self) -> GuildId {
+        self.ctx.guild_id
+    }
+
+    /// The context of the event, for everything this type does not cover.
+    #[must_use]
+    pub fn ctx(&self) -> &EventContext {
+        &self.ctx
+    }
+
+    /// The module's Discord client, bound to this guild.
+    #[must_use]
+    pub fn api(&self) -> &ApiClient {
+        &self.ctx.api
+    }
+
+    /// The module's own data in this guild.
+    #[must_use]
+    pub fn store(&self) -> &closure_core::storage::Store {
+        self.ctx.store()
+    }
+
+    /// Schedules more work, in this guild.
+    #[must_use]
+    pub fn scheduler(&self) -> &closure_core::schedule::Scheduler {
+        self.ctx.scheduler()
+    }
+
+    /// The module's configuration in this guild, as its own type.
+    pub fn config<T: DeserializeOwned>(&self) -> Result<T, ModuleError> {
+        self.ctx.parse_config()
+    }
+
+    /// A message of the module's catalog in the guild's language.
+    #[must_use]
+    pub fn t(&self, key: &str, args: &Args) -> String {
+        self.ctx.t_in(self.ctx.locale, key, args)
     }
 }
 

@@ -9,13 +9,15 @@ use closure_config::{ConfigCompiler, SettingsStore, parse_overrides};
 use closure_core::locale::Translator;
 use closure_core::module::Module;
 use closure_core::registry::ModuleRegistry;
+use closure_core::schedule::SchedulerBackend;
 use closure_core::settings::SettingsProvider;
+use closure_core::storage::StorageBackend;
 use closure_db::{Db, DbOptions};
 use closure_discord::hierarchy::InMemoryCacheView;
 use closure_discord::{
     CommandScope, Dispatcher, DispatcherConfig, GatewayConfig, GatewayHandle, GatewayHealth,
     TwilightApi, build_commands, gateway_intents, joined_guilds, new_cache, register_commands,
-    start_gateway,
+    run_jobs, start_gateway,
 };
 use closure_i18n::TranslatorBuilder;
 use closure_mod_diagnostics::DiagnosticsModule;
@@ -189,6 +191,13 @@ fn start_storage_upkeep(db: Db, shutdown: CancellationToken) -> JoinHandle<()> {
                 Ok(_) => {}
                 Err(error) => tracing::warn!(%error, "could not remove expired module data"),
             }
+            match db.purge_scheduled_jobs().await {
+                Ok(jobs) if jobs > 0 => {
+                    tracing::info!(jobs, "removed scheduled jobs that were given up on");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not remove old scheduled jobs"),
+            }
             tokio::select! {
                 () = shutdown.cancelled() => return,
                 () = tokio::time::sleep(STORAGE_PURGE_EVERY) => {}
@@ -203,6 +212,7 @@ struct Started {
     dispatcher: Option<Dispatcher>,
     gateway: Option<GatewayHandle>,
     api_task: Option<JoinHandle<()>>,
+    jobs_task: Option<JoinHandle<()>>,
 }
 
 /// Starts everything that talks to Discord and waits until the process is asked to stop.
@@ -226,18 +236,24 @@ async fn serve(
     let dispatcher = started
         .dispatcher
         .insert(
-            Dispatcher::start_with_storage(
+            Dispatcher::start_with_services(
                 Arc::clone(&core.registry),
                 Arc::clone(&core.store) as Arc<dyn SettingsProvider>,
                 api,
                 Arc::clone(&core.translator),
                 DispatcherConfig::default(),
-                Arc::new(db.clone()),
+                Arc::new(db.clone()) as Arc<dyn StorageBackend>,
+                Arc::new(db.clone()) as Arc<dyn SchedulerBackend>,
             )
             .await
             .context("a module failed to load")?,
         )
         .clone();
+    started.jobs_task = Some(tokio::spawn(run_jobs(
+        Arc::new(db.clone()),
+        dispatcher.clone(),
+        shutdown.clone(),
+    )));
 
     publish_commands(args, &http, application_id, core).await?;
 
@@ -336,6 +352,10 @@ pub async fn run(args: Args) -> Result<()> {
             .is_err()
     {
         tracing::warn!("the gateway did not stop in time");
+    }
+    // The jobs go first: the dispatcher must not be asked to run any once it is shutting down.
+    if let Some(task) = started.jobs_task {
+        stop_task(task, "scheduled jobs").await;
     }
     if let Some(dispatcher) = &started.dispatcher {
         dispatcher.shutdown(DISPATCHER_DRAIN_TIMEOUT).await;

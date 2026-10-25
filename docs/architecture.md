@@ -69,7 +69,13 @@ gateway shard ─► cache.update ─► convert ─► guild hooks ─► Dispa
 A module never receives an HTTP client, a token or a database handle. What it keeps (entries and
 counters, with quotas) goes through a `Store` bound to its id and the guild of the event and
 guarded by the capability `storage`: PostgreSQL holds the data, and the module cannot name another
-module's or another guild's. Its `ApiClient` is bound to
+module's or another guild's. Work it wants done later goes through a `Scheduler` bound the same
+way and guarded by the capability `schedule`: the host keeps the jobs in PostgreSQL
+(`scheduled_jobs`), a runner takes the ones that are due (`FOR UPDATE SKIP LOCKED`, with a lease so
+a job of a stopped bot is handed out again) and gives each to the dispatcher as an
+`Event::Scheduled`, which goes to the module that scheduled it and to nobody else, through the same
+lane, timeout, panic isolation and breaker as any event. Delivery is at least once; a failure
+is retried after a growing pause, a module that is switched off or a full queue only postpones. Its `ApiClient` is bound to
 the guild of the event: an action that targets another guild is refused, whatever capabilities
 the module holds. An action that names a guild is compared directly. One that identifies only a
 channel or a message (send, edit, delete, react, channel edits and permission overwrites) is
@@ -159,7 +165,11 @@ returned actions into `ApiClient::execute` calls. Nothing else in the system wou
   It has no TLS and `/readyz` queries the database on every call. Behind a reverse proxy every
   client has the proxy's address and they share one login allowance; put it behind a proxy that
   limits clients if it is reachable by anyone untrusted.
-- Command events go only to the module that owns the command, not to other subscribers.
+- Command events go only to the module that owns the command, not to other subscribers; clicks,
+  forms and due jobs likewise go only to the module they belong to.
+- Jobs of a guild the bot has left stay in the table; they fail (Discord refuses the module) and
+  are removed two weeks after they were given up on. Nothing yet shows the jobs of a guild to its
+  administrators.
 - Subcommand *groups* (two levels of nesting) are not supported; one level is.
 - A stored document that fails to parse makes `GET /v1/guilds/{id}/config` return 500 for that
   guild, and a replacement needs the revision from the database.

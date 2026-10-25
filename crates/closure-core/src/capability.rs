@@ -26,10 +26,12 @@ pub enum Capability {
     RespondToInteractions,
     /// Keep data of its own: entries and counters (see [`crate::storage`]).
     Storage,
+    /// Have work done later, once or again and again (see [`crate::schedule`]).
+    Schedule,
 }
 
 impl Capability {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::SendMessages,
         Self::AddReactions,
         Self::ManageMessages,
@@ -45,6 +47,7 @@ impl Capability {
         Self::ReadAuditLog,
         Self::RespondToInteractions,
         Self::Storage,
+        Self::Schedule,
     ];
 
     #[must_use]
@@ -65,6 +68,7 @@ impl Capability {
             Self::ReadAuditLog => "read_audit_log",
             Self::RespondToInteractions => "respond_to_interactions",
             Self::Storage => "storage",
+            Self::Schedule => "schedule",
         }
     }
 }
