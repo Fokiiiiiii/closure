@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use closure_core::capability::CapabilitySet;
@@ -89,6 +89,7 @@ impl ConfigCompiler {
             &registry,
             &validators,
             &GuildOverrides::default(),
+            None,
         )?);
         Ok(Self {
             registry,
@@ -103,9 +104,10 @@ impl ConfigCompiler {
     /// on their own.
     pub fn with_bot_defaults(mut self, defaults: &GuildOverrides) -> Result<Self, ConfigError> {
         self.bot_defaults = None;
-        let value = serde_json::to_value(defaults)
+        let mut value = serde_json::to_value(defaults)
             .map_err(|error| ConfigError::Serialize(error.to_string()))?;
-        compile_with(&self.registry, &self.validators, defaults)?;
+        compile_with(&self.registry, &self.validators, defaults, None)?;
+        canonical_ids(&mut value);
         self.bot_defaults = Some(value);
         self.defaults = Arc::new(self.compile(&GuildOverrides::default())?);
         Ok(self)
@@ -124,13 +126,54 @@ impl ConfigCompiler {
 
     pub fn compile(&self, overrides: &GuildOverrides) -> Result<GuildSettings, ConfigError> {
         let Some(bot) = &self.bot_defaults else {
-            return compile_with(&self.registry, &self.validators, overrides);
+            return compile_with(&self.registry, &self.validators, overrides, None);
         };
-        let own = serde_json::to_value(overrides)
+        // What one document cannot be, it cannot be in the merge either: its own mistakes are
+        // looked for before the merge makes them disappear.
+        let mut issues = Vec::new();
+        duplicate_ids(overrides, &mut issues);
+        if !issues.is_empty() {
+            return Err(ConfigError::Invalid(issues));
+        }
+        let mut own = serde_json::to_value(overrides)
             .map_err(|error| ConfigError::Serialize(error.to_string()))?;
+        canonical_ids(&mut own);
         let layered: GuildOverrides = serde_json::from_value(merge(bot, &own))
             .map_err(|error| ConfigError::Serialize(error.to_string()))?;
-        compile_with(&self.registry, &self.validators, &layered)
+        compile_with(
+            &self.registry,
+            &self.validators,
+            &layered,
+            Some(Layers {
+                bot,
+                own: overrides,
+            }),
+        )
+    }
+}
+
+/// The documents a layered configuration was made of. A module's configuration is built from
+/// them one layer after the other (the module's defaults, the bot's, the guild's), which merging
+/// the two documents first would not give when a layer changes the shape of a value.
+#[derive(Clone, Copy)]
+struct Layers<'a> {
+    bot: &'a Value,
+    own: &'a GuildOverrides,
+}
+
+impl<'a> Layers<'a> {
+    /// The configuration of `module` in each layer, bottom first.
+    fn module_configs(self, module: &str) -> [Option<&'a Value>; 2] {
+        [
+            self.bot
+                .get("modules")
+                .and_then(|modules| modules.get(module))
+                .and_then(|module| module.get("config")),
+            self.own
+                .modules
+                .get(module)
+                .and_then(|module| module.config.as_ref()),
+        ]
     }
 }
 
@@ -138,6 +181,7 @@ fn compile_with(
     registry: &ModuleRegistry,
     validators: &HashMap<ModuleId, Validator>,
     overrides: &GuildOverrides,
+    layers: Option<Layers<'_>>,
 ) -> Result<GuildSettings, ConfigError> {
     if let Some(found) = overrides.version
         && found != CURRENT_VERSION
@@ -179,9 +223,15 @@ fn compile_with(
     let mut module_settings = HashMap::new();
     for module in registry.iter() {
         let manifest = module.manifest();
+        let module_override = overrides.modules.get(manifest.id.as_str());
+        let configs = match layers {
+            Some(layers) => layers.module_configs(manifest.id.as_str()),
+            None => [module_override.and_then(|m| m.config.as_ref()), None],
+        };
         let effective = compile_module(
             manifest,
-            overrides.modules.get(manifest.id.as_str()),
+            module_override,
+            &configs,
             validators.get(&manifest.id),
             &mut issues,
         );
@@ -246,6 +296,7 @@ fn compile_permissions(
     {
         permissions.administrator_level = level;
     }
+    duplicate_ids(overrides, issues);
     for (id, setting) in &settings.roles {
         let path = format!("permissions.roles.{id}");
         if let Some(role) = snowflake(id, &path, issues)
@@ -278,6 +329,51 @@ fn compile_permissions(
         too_many(path, len, issues);
     }
     permissions
+}
+
+/// Ids written as map keys that are the same id in two ways (`5` and `05`).
+fn duplicate_ids(overrides: &GuildOverrides, issues: &mut Vec<Issue>) {
+    let Some(settings) = &overrides.permissions else {
+        return;
+    };
+    for (section, ids) in [
+        ("roles", settings.roles.keys().collect::<Vec<_>>()),
+        ("users", settings.users.keys().collect::<Vec<_>>()),
+    ] {
+        let mut seen = HashSet::new();
+        for id in ids {
+            if !seen.insert(canonical_id(id)) {
+                issues.push(Issue::new(
+                    format!("permissions.{section}.{id}"),
+                    "duplicate_id",
+                    "this id is written twice (`5` and `05` are the same id)",
+                ));
+            }
+        }
+    }
+}
+
+/// The way an id is written when it is a number, so the same id written two ways is one key.
+fn canonical_id(id: &str) -> String {
+    id.parse::<u64>()
+        .map_or_else(|_| id.to_owned(), |number| number.to_string())
+}
+
+/// Rewrites the ids of the permission maps of a document in their canonical form.
+fn canonical_ids(document: &mut Value) {
+    for section in ["roles", "users"] {
+        let Some(Value::Object(map)) = document
+            .get_mut("permissions")
+            .and_then(|permissions| permissions.get_mut(section))
+        else {
+            continue;
+        };
+        let rewritten: serde_json::Map<String, Value> = std::mem::take(map)
+            .into_iter()
+            .map(|(id, level)| (canonical_id(&id), level))
+            .collect();
+        *map = rewritten;
+    }
 }
 
 fn too_many(path: &str, len: usize, issues: &mut Vec<Issue>) {
@@ -391,6 +487,7 @@ fn check_known_modules(
 fn compile_module(
     manifest: &ModuleManifest,
     module_override: Option<&ModuleOverride>,
+    configs: &[Option<&Value>; 2],
     validator: Option<&Validator>,
     issues: &mut Vec<Issue>,
 ) -> ModuleEffective {
@@ -416,14 +513,15 @@ fn compile_module(
         None => CapabilitySet::new(),
     };
 
-    let config = merge_config(
-        &manifest.default_config,
-        module_override.and_then(|m| m.config.as_ref()),
-    );
-    // The raw override too: a null-valued key is dropped by the merge, yet is still stored.
-    let raw_has_nul = module_override
-        .and_then(|m| m.config.as_ref())
-        .is_some_and(contains_nul);
+    let config = configs
+        .iter()
+        .flatten()
+        .fold(manifest.default_config.clone(), |config, layer| {
+            merge(&config, layer)
+        });
+    // The documents as they were written too: a null-valued key is dropped by the merge, yet is
+    // still stored.
+    let raw_has_nul = configs.iter().flatten().any(|layer| contains_nul(layer));
     if raw_has_nul || contains_nul(&config) {
         // PostgreSQL cannot store U+0000 in JSON text; refuse it here as a clear 422.
         issues.push(Issue::new(
@@ -473,10 +571,6 @@ fn pointer_to_path(pointer: &str) -> String {
             path.push_str(part);
             path
         })
-}
-
-fn merge_config(defaults: &Value, over: Option<&Value>) -> Value {
-    over.map_or_else(|| defaults.clone(), |over| merge(defaults, over))
 }
 
 /// Deep-merges `over` onto `base`.
@@ -1057,5 +1151,78 @@ modules:
             let once = merge(&base, &over);
             prop_assert_eq!(merge(&once, &over), once);
         }
+    }
+    fn cfg_module() -> Arc<dyn Module> {
+        module("cfg", |mut manifest| {
+            manifest.config_schema = json!({
+                "type": "object",
+                "properties": { "x": { "type": ["integer", "object"] } },
+                "additionalProperties": false
+            });
+            manifest.default_config = json!({ "x": { "a": 1, "b": 2 } });
+            manifest.default_enabled = true;
+            manifest
+        })
+    }
+
+    fn with_bot(bot: &str) -> ConfigCompiler {
+        let registry =
+            ModuleRegistry::new(vec![warn_module(), cfg_module(), module("tools", |m| m)]).unwrap();
+        ConfigCompiler::new(Arc::new(registry))
+            .unwrap()
+            .with_bot_defaults(&crate::yaml::parse_overrides(bot).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn the_layers_apply_one_after_the_other_not_the_top_two_first() {
+        // defaults {x:{a:1,b:2}}, then the bot's x: 0 replaces it, then the guild's {a: 3} replaces
+        // that: nothing of the default's `b` is left to come back.
+        let compiler = with_bot("modules: { cfg: { config: { x: 0 } } }");
+        let own =
+            crate::yaml::parse_overrides("modules: { cfg: { config: { x: { a: 3 } } } }").unwrap();
+        let settings = compiler.compile(&own).unwrap();
+        let cfg = ModuleId::new("cfg").unwrap();
+        assert_eq!(
+            *settings.module(&cfg).unwrap().config,
+            json!({ "x": { "a": 3 } })
+        );
+        // What the guild leaves alone is the bot's.
+        let nothing = compiler.compile(&GuildOverrides::default()).unwrap();
+        assert_eq!(*nothing.module(&cfg).unwrap().config, json!({ "x": 0 }));
+    }
+
+    #[test]
+    fn the_same_discord_id_written_two_ways_is_one_id_in_every_layer() {
+        let compiler = with_bot("permissions: { users: { '5': admin }, roles: { '8': admin } }");
+        let own = crate::yaml::parse_overrides(
+            "permissions: { users: { '05': general }, roles: { '008': general } }",
+        )
+        .unwrap();
+        let settings = compiler.compile(&own).unwrap();
+        let level = settings.permissions.level_of(&actor(5, &[8]));
+        assert_eq!(level, Level::GENERAL, "the guild lowers what the bot gave");
+    }
+
+    #[test]
+    fn two_ways_of_writing_one_id_in_one_document_are_refused() {
+        let issues = issues_of("permissions: { users: { '5': admin, '05': general } }");
+        assert!(
+            issues.iter().any(|(_, code)| *code == "duplicate_id"),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_nul_key_the_merge_would_drop_is_still_refused_with_bot_wide_defaults() {
+        let own = warn_override(json!({ "bad\u{0}key": null }));
+        let Err(ConfigError::Invalid(issues)) = compiler().compile(&own) else {
+            panic!("without bot defaults it is refused");
+        };
+        assert!(issues.iter().any(|issue| issue.message.contains("NUL")));
+        let Err(ConfigError::Invalid(issues)) = with_bot("{}").compile(&own) else {
+            panic!("and with them too");
+        };
+        assert!(issues.iter().any(|issue| issue.message.contains("NUL")));
     }
 }
