@@ -5,6 +5,7 @@ use crate::capability::CapabilitySet;
 use crate::event::{ChannelId, GuildId, RoleId};
 use crate::locale::Locale;
 use crate::module::ModuleId;
+use crate::permission::GuildPermissions;
 
 /// The effective settings of one module in one guild.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +70,9 @@ pub trait SettingsProvider: Send + Sync {
     fn limits(&self, guild: GuildId) -> RuntimeLimits;
 
     fn policy(&self, guild: GuildId) -> Arc<GuildPolicy>;
+
+    /// Who may do what in the guild.
+    fn permissions(&self, guild: GuildId) -> Arc<GuildPermissions>;
 
     /// `None` when the guild has no entry for the module (treated as the module's defaults by
     /// the caller, never as an error).

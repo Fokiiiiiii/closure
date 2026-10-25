@@ -3,18 +3,23 @@ use std::sync::Arc;
 
 use closure_core::capability::CapabilitySet;
 use closure_core::module::{ModuleId, ModuleManifest, ModuleRuntime};
+use closure_core::permission::{GuildPermissions, KeyRule, Level, PermissionKey};
 use closure_core::registry::ModuleRegistry;
 use closure_core::settings::{GuildPolicy, ModuleSettings};
 use jsonschema::Validator;
 use serde_json::Value;
+use twilight_model::id::Id;
 
 use crate::error::{ConfigError, Issue};
 use crate::model::{
-    CURRENT_VERSION, EffectiveConfig, GuildOverrides, GuildSettings, ModuleEffective,
-    ModuleOverride,
+    CURRENT_VERSION, EffectiveConfig, GuildOverrides, GuildSettings, KeyOverride, LevelSetting,
+    ModuleEffective, ModuleOverride, Principals,
 };
 
 const MAX_MODERATOR_ROLES: usize = 100;
+
+/// How many entries each list of the `permissions` section may hold.
+const MAX_PERMISSION_ENTRIES: usize = 200;
 
 /// A document may not grow beyond this once parsed. The YAML text is capped much lower, but
 /// aliases can expand a small text into a large value, and the result is stored twice (current
@@ -28,6 +33,9 @@ pub(crate) const MAX_DOCUMENT_BYTES: usize = 128 * 1024;
 pub struct ConfigCompiler {
     registry: Arc<ModuleRegistry>,
     validators: HashMap<ModuleId, Validator>,
+    /// What every guild starts from, in the form of a document: the operator's choices for the
+    /// whole bot. A guild's own document is merged over it.
+    bot_defaults: Option<Value>,
     defaults: Arc<GuildSettings>,
 }
 
@@ -85,8 +93,22 @@ impl ConfigCompiler {
         Ok(Self {
             registry,
             validators,
+            bot_defaults: None,
             defaults,
         })
+    }
+
+    /// Makes `defaults` the bottom layer of every guild's configuration: preset, then these
+    /// bot-wide defaults, then the guild's own document. They must make a valid configuration
+    /// on their own.
+    pub fn with_bot_defaults(mut self, defaults: &GuildOverrides) -> Result<Self, ConfigError> {
+        self.bot_defaults = None;
+        let value = serde_json::to_value(defaults)
+            .map_err(|error| ConfigError::Serialize(error.to_string()))?;
+        compile_with(&self.registry, &self.validators, defaults)?;
+        self.bot_defaults = Some(value);
+        self.defaults = Arc::new(self.compile(&GuildOverrides::default())?);
+        Ok(self)
     }
 
     #[must_use]
@@ -101,7 +123,14 @@ impl ConfigCompiler {
     }
 
     pub fn compile(&self, overrides: &GuildOverrides) -> Result<GuildSettings, ConfigError> {
-        compile_with(&self.registry, &self.validators, overrides)
+        let Some(bot) = &self.bot_defaults else {
+            return compile_with(&self.registry, &self.validators, overrides);
+        };
+        let own = serde_json::to_value(overrides)
+            .map_err(|error| ConfigError::Serialize(error.to_string()))?;
+        let layered: GuildOverrides = serde_json::from_value(merge(bot, &own))
+            .map_err(|error| ConfigError::Serialize(error.to_string()))?;
+        compile_with(&self.registry, &self.validators, &layered)
     }
 }
 
@@ -143,6 +172,7 @@ fn compile_with(
         ));
     }
 
+    let permissions = compile_permissions(registry, overrides, &mut issues);
     check_known_modules(registry, overrides, &mut issues);
 
     let mut effective_modules = BTreeMap::new();
@@ -182,11 +212,157 @@ fn compile_with(
             log_channel: overrides.log_channel,
             moderator_roles,
             limits,
+            permissions: overrides.permissions.clone().unwrap_or_default(),
             modules: effective_modules,
         },
         modules: module_settings,
         policy,
+        permissions: Arc::new(permissions),
     })
+}
+
+/// The guild's decisions about levels and permission keys, with what every module declared as
+/// the starting point. `moderator_roles` is the older way to say "these roles are moderators".
+fn compile_permissions(
+    registry: &ModuleRegistry,
+    overrides: &GuildOverrides,
+    issues: &mut Vec<Issue>,
+) -> GuildPermissions {
+    let mut permissions = GuildPermissions::default();
+    for spec in registry.permissions() {
+        permissions
+            .defaults
+            .insert(spec.key.clone(), spec.default_level);
+    }
+    for role in overrides.moderator_roles.iter().flatten() {
+        permissions.role_levels.insert(*role, Level::MODERATOR);
+    }
+    let Some(settings) = &overrides.permissions else {
+        return permissions;
+    };
+
+    if let Some(setting) = &settings.administrator_level
+        && let Some(level) = level_of(setting, "permissions.administrator_level", issues)
+    {
+        permissions.administrator_level = level;
+    }
+    for (id, setting) in &settings.roles {
+        let path = format!("permissions.roles.{id}");
+        if let Some(role) = snowflake(id, &path, issues)
+            && let Some(level) = level_of(setting, &path, issues)
+        {
+            permissions.role_levels.insert(role, level);
+        }
+    }
+    for (id, setting) in &settings.users {
+        let path = format!("permissions.users.{id}");
+        if let Some(user) = snowflake(id, &path, issues)
+            && let Some(level) = level_of(setting, &path, issues)
+        {
+            permissions.user_levels.insert(user, level);
+        }
+    }
+    for (name, key_override) in &settings.keys {
+        let path = format!("permissions.keys.{name}");
+        let Some(key) = known_key(registry, name, &path, issues) else {
+            continue;
+        };
+        let rule = compile_key_rule(key_override, &path, issues);
+        permissions.keys.insert(key, rule);
+    }
+    for (path, len) in [
+        ("permissions.roles", settings.roles.len()),
+        ("permissions.users", settings.users.len()),
+        ("permissions.keys", settings.keys.len()),
+    ] {
+        too_many(path, len, issues);
+    }
+    permissions
+}
+
+fn too_many(path: &str, len: usize, issues: &mut Vec<Issue>) {
+    if len > MAX_PERMISSION_ENTRIES {
+        issues.push(Issue::new(
+            path,
+            "too_many",
+            format!("at most {MAX_PERMISSION_ENTRIES} entries are allowed"),
+        ));
+    }
+}
+
+fn level_of(setting: &LevelSetting, path: &str, issues: &mut Vec<Issue>) -> Option<Level> {
+    setting
+        .resolve()
+        .map_err(|message| issues.push(Issue::new(path, "invalid_level", message)))
+        .ok()
+}
+
+/// An id written as a map key.
+fn snowflake<M>(text: &str, path: &str, issues: &mut Vec<Issue>) -> Option<Id<M>> {
+    let id = text.parse::<u64>().ok().and_then(Id::new_checked);
+    if id.is_none() {
+        issues.push(Issue::new(
+            path,
+            "invalid_id",
+            "expected a Discord id: a positive number",
+        ));
+    }
+    id
+}
+
+fn known_key(
+    registry: &ModuleRegistry,
+    name: &str,
+    path: &str,
+    issues: &mut Vec<Issue>,
+) -> Option<PermissionKey> {
+    let key = match PermissionKey::new(name) {
+        Ok(key) => key,
+        Err(error) => {
+            issues.push(Issue::new(
+                path,
+                "invalid_permission_key",
+                error.to_string(),
+            ));
+            return None;
+        }
+    };
+    if registry.permission(&key).is_none() {
+        let available: Vec<&str> = registry
+            .permissions()
+            .map(|spec| spec.key.as_str())
+            .collect();
+        issues.push(Issue::new(
+            path,
+            "unknown_permission",
+            format!("no module declares it; available: {}", available.join(", ")),
+        ));
+        return None;
+    }
+    Some(key)
+}
+
+fn compile_key_rule(rule: &KeyOverride, path: &str, issues: &mut Vec<Issue>) -> KeyRule {
+    let min_level = rule
+        .min_level
+        .as_ref()
+        .and_then(|setting| level_of(setting, &format!("{path}.min_level"), issues));
+    let mut principals = |side: &str, principals: Option<&Principals>| {
+        let roles = principals.and_then(|p| p.roles.clone()).unwrap_or_default();
+        let users = principals.and_then(|p| p.users.clone()).unwrap_or_default();
+        too_many(&format!("{path}.{side}.roles"), roles.len(), issues);
+        too_many(&format!("{path}.{side}.users"), users.len(), issues);
+        (roles, users)
+    };
+    let (allow_roles, allow_users) = principals("allow", rule.allow.as_ref());
+    let (deny_roles, deny_users) = principals("deny", rule.deny.as_ref());
+    KeyRule {
+        min_level,
+        allow_roles,
+        allow_users,
+        deny_roles,
+        deny_users,
+    }
 }
 
 /// Rejects configuration for modules that do not exist; a typo must not silently do nothing.
@@ -344,12 +520,13 @@ fn strip_nulls(value: &Value) -> Value {
 mod tests {
     use closure_core::capability::Capability;
     use closure_core::module::{Module, ModuleManifest};
+    use closure_core::permission::{Actor, PermissionSpec, Reason};
     use closure_core::testing::StubModule;
     use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
-    use crate::model::{LimitsOverride, ModuleOverride, Preset};
+    use crate::model::{LimitsOverride, ModuleOverride, PermissionsOverride, Preset};
 
     fn module(id: &str, build: impl FnOnce(ModuleManifest) -> ModuleManifest) -> Arc<dyn Module> {
         let manifest = ModuleManifest::new(ModuleId::new(id).unwrap(), id, "0.1.0");
@@ -388,6 +565,10 @@ mod tests {
                 .into_iter()
                 .collect();
             manifest.default_enabled = true;
+            manifest.permissions = vec![
+                PermissionSpec::new("warn.add", Level::MODERATOR, "give a warning").unwrap(),
+                PermissionSpec::new("warn.clear", Level::ADMIN, "remove warnings").unwrap(),
+            ];
             manifest
         })
     }
@@ -407,6 +588,242 @@ mod tests {
             },
         );
         overrides
+    }
+
+    fn compiled(yaml: &str) -> Result<GuildSettings, ConfigError> {
+        compiler().compile(&crate::yaml::parse_overrides(yaml).unwrap())
+    }
+
+    fn issues_of(yaml: &str) -> Vec<(String, &'static str)> {
+        let Err(ConfigError::Invalid(issues)) = compiled(yaml) else {
+            panic!("the document must be refused: {yaml}");
+        };
+        issues
+            .into_iter()
+            .map(|issue| (issue.path, issue.code))
+            .collect()
+    }
+
+    fn actor(user: u64, roles: &[u64]) -> Actor {
+        Actor {
+            user: Id::new(user),
+            roles: roles.iter().map(|id| Id::new(*id)).collect(),
+            administrator: false,
+            owner: false,
+        }
+    }
+
+    fn key(text: &str) -> PermissionKey {
+        PermissionKey::new(text).unwrap()
+    }
+
+    #[test]
+    fn what_modules_declare_is_the_default_of_every_guild() {
+        let settings = compiler().compile(&GuildOverrides::default()).unwrap();
+        let permissions = &settings.permissions;
+        assert_eq!(permissions.defaults.len(), 2);
+        assert!(!permissions.check(&actor(1, &[]), &key("warn.add")).allowed);
+        let mut admin = actor(1, &[]);
+        admin.administrator = true;
+        assert!(permissions.check(&admin, &key("warn.add")).allowed);
+        assert!(permissions.check(&admin, &key("warn.clear")).allowed);
+        assert_eq!(
+            settings.effective.permissions,
+            PermissionsOverride::default()
+        );
+    }
+
+    #[test]
+    fn the_permissions_section_sets_levels_and_decides_single_keys() {
+        let settings = compiled(
+            "
+moderator_roles: [5]
+permissions:
+  administrator_level: moderator
+  roles: { 10: trusted, 11: 60 }
+  users: { 20: admin }
+  keys:
+    warn.add:
+      min_level: trusted
+      allow: { users: [30] }
+      deny: { roles: [12] }
+",
+        )
+        .unwrap();
+        let permissions = &settings.permissions;
+        assert_eq!(permissions.administrator_level, Level::MODERATOR);
+        // The older `moderator_roles` still makes moderators.
+        assert!(permissions.check(&actor(1, &[5]), &key("warn.add")).allowed);
+        assert!(
+            permissions
+                .check(&actor(1, &[10]), &key("warn.add"))
+                .allowed
+        );
+        assert!(!permissions.check(&actor(1, &[]), &key("warn.add")).allowed);
+        // Levels from roles and from a member's own entry; `warn.clear` stays at the default.
+        assert_eq!(
+            permissions.level_of(&actor(1, &[11])),
+            Level::new(60).unwrap()
+        );
+        assert!(
+            permissions
+                .check(&actor(20, &[]), &key("warn.clear"))
+                .allowed
+        );
+        assert!(
+            !permissions
+                .check(&actor(1, &[11]), &key("warn.clear"))
+                .allowed
+        );
+        // An allowance beats the level, a refusal beats both.
+        assert_eq!(
+            permissions.check(&actor(30, &[]), &key("warn.add")).reason,
+            Reason::AllowedUser
+        );
+        assert_eq!(
+            permissions
+                .check(&actor(20, &[12]), &key("warn.add"))
+                .reason,
+            Reason::DeniedRole(Id::new(12))
+        );
+        // What was written is shown back.
+        assert!(settings.effective.permissions.keys.contains_key("warn.add"));
+    }
+
+    #[test]
+    fn a_role_in_the_permissions_section_beats_moderator_roles() {
+        let settings =
+            compiled("moderator_roles: [5]\npermissions:\n  roles: { 5: general }\n").unwrap();
+        assert!(
+            !settings
+                .permissions
+                .check(&actor(1, &[5]), &key("warn.add"))
+                .allowed
+        );
+    }
+
+    #[test]
+    fn mistakes_in_the_permissions_section_are_reported_with_their_place() {
+        let issues = issues_of(
+            "
+permissions:
+  administrator_level: 101
+  roles: { abc: moderator, 0: moderator, 7: boss, 8: 0 }
+  users: { 9: nobody }
+  keys:
+    warn.unheard: { min_level: admin }
+    Not-A-Key: {}
+    warn.add: { min_level: 200 }
+",
+        );
+        for expected in [
+            ("permissions.administrator_level", "invalid_level"),
+            ("permissions.roles.abc", "invalid_id"),
+            ("permissions.roles.0", "invalid_id"),
+            ("permissions.roles.7", "invalid_level"),
+            ("permissions.roles.8", "invalid_level"),
+            ("permissions.users.9", "invalid_level"),
+            ("permissions.keys.warn.unheard", "unknown_permission"),
+            ("permissions.keys.Not-A-Key", "invalid_permission_key"),
+            ("permissions.keys.warn.add.min_level", "invalid_level"),
+        ] {
+            assert!(
+                issues
+                    .iter()
+                    .any(|(path, code)| (path.as_str(), *code) == expected),
+                "{expected:?} missing from {issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lists_of_the_permissions_section_are_bounded() {
+        let many: Vec<String> = (1..=201).map(|id| format!("{id}: trusted")).collect();
+        let issues = issues_of(&format!(
+            "permissions:\n  roles: {{ {} }}\n",
+            many.join(", ")
+        ));
+        assert_eq!(issues, [("permissions.roles".to_owned(), "too_many")]);
+        let roles: Vec<String> = (1..=201).map(|id| id.to_string()).collect();
+        let issues = issues_of(&format!(
+            "permissions:\n  keys:\n    warn.add:\n      deny: {{ roles: [{}] }}\n",
+            roles.join(", ")
+        ));
+        assert_eq!(
+            issues,
+            [(
+                "permissions.keys.warn.add.deny.roles".to_owned(),
+                "too_many"
+            )]
+        );
+    }
+
+    #[test]
+    fn bot_wide_defaults_sit_between_the_preset_and_the_guild() {
+        let bot = crate::yaml::parse_overrides(
+            "
+language: ja
+moderator_roles: [5]
+limits: { concurrency: 12 }
+modules:
+  warn:
+    config: { limit: 6, notify: false }
+",
+        )
+        .unwrap();
+        let compiler = compiler().with_bot_defaults(&bot).unwrap();
+        let warn = ModuleId::new("warn").unwrap();
+
+        // A guild that configured nothing gets them.
+        let defaults = compiler.defaults();
+        assert_eq!(
+            defaults.effective.language.0,
+            Some(closure_core::locale::Locale::Ja)
+        );
+        assert_eq!(defaults.effective.limits.concurrency, 12);
+        assert_eq!(
+            *defaults.module(&warn).unwrap().config,
+            json!({ "limit": 6, "notify": false })
+        );
+
+        // A guild's own document wins, key by key; what it leaves out comes from the bot.
+        let own = crate::yaml::parse_overrides(
+            "
+language: en
+modules:
+  warn:
+    config: { limit: 8, notify: null }
+",
+        )
+        .unwrap();
+        let settings = compiler.compile(&own).unwrap();
+        assert_eq!(
+            settings.effective.language.0,
+            Some(closure_core::locale::Locale::En)
+        );
+        assert_eq!(settings.effective.limits.concurrency, 12);
+        assert_eq!(
+            *settings.module(&warn).unwrap().config,
+            json!({ "limit": 8, "notify": false })
+        );
+        assert!(
+            settings
+                .permissions
+                .check(&actor(1, &[5]), &key("warn.add"))
+                .allowed
+        );
+    }
+
+    #[test]
+    fn bot_wide_defaults_that_are_not_a_valid_configuration_stop_startup() {
+        for yaml in [
+            "modules: { warn: { config: { limit: 99 } } }",
+            "modules: { nope: {} }",
+            "permissions: { keys: { warn.unheard: {} } }",
+        ] {
+            let bot = crate::yaml::parse_overrides(yaml).unwrap();
+            assert!(compiler().with_bot_defaults(&bot).is_err(), "{yaml}");
+        }
     }
 
     #[test]

@@ -323,6 +323,7 @@ fn command(name: &str, locale: Option<Locale>) -> Event {
         guild_id: Id::new(GUILD),
         channel_id: Id::new(3),
         user: user(7),
+        roles: vec![],
         invoker_permissions: Permissions::empty(),
         locale,
         command: name.into(),
@@ -607,6 +608,13 @@ impl SettingsProvider for Tunable {
 
     fn policy(&self, guild: closure_core::event::GuildId) -> Arc<GuildPolicy> {
         self.inner.policy(guild)
+    }
+
+    fn permissions(
+        &self,
+        guild: closure_core::event::GuildId,
+    ) -> Arc<closure_core::permission::GuildPermissions> {
+        self.inner.permissions(guild)
     }
 
     fn module(

@@ -130,6 +130,8 @@ pub struct CommandInvocation {
     pub guild_id: GuildId,
     pub channel_id: ChannelId,
     pub user: UserInfo,
+    /// The roles the invoker holds in the guild.
+    pub roles: Vec<RoleId>,
     /// Permissions of the invoker in the channel, as computed by Discord.
     pub invoker_permissions: Permissions,
     /// Locale of the invoking user, when Discord reports one this bot supports.

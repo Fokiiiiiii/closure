@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use tracing::Subscriber;
@@ -47,6 +48,11 @@ pub struct Args {
     /// started and only the bot runs.
     #[arg(long, env = "API_ADMIN_TOKEN", hide_env_values = true)]
     pub api_admin_token: Option<String>,
+
+    /// A configuration document (YAML, the same as a server's) that every server starts from:
+    /// the preset, then this, then the server's own document. Read once at start-up.
+    #[arg(long, env = "BOT_CONFIG")]
+    pub bot_config: Option<PathBuf>,
 
     /// Publish slash commands to this server only (they appear at once) instead of globally
     /// (which can take up to an hour). Use it while developing.
@@ -157,8 +163,14 @@ mod tests {
             "--skip-command-registration",
             "--log-format",
             "json",
+            "--bot-config",
+            "/etc/closure/bot.yaml",
         ])
         .unwrap();
+        assert_eq!(
+            args.bot_config,
+            Some(PathBuf::from("/etc/closure/bot.yaml"))
+        );
         assert_eq!(args.api_bind.port(), 9000);
         assert_eq!(args.command_guild.map(NonZeroU64::get), Some(7));
         assert!(args.skip_command_registration);

@@ -154,6 +154,11 @@ fn command(interaction: &Interaction) -> Option<CommandInvocation> {
         guild_id: interaction.guild_id?,
         channel_id: interaction.channel.as_ref()?.id,
         user: user(interaction.author()?),
+        roles: interaction
+            .member
+            .as_ref()
+            .map(|member| member.roles.clone())
+            .unwrap_or_default(),
         invoker_permissions: interaction
             .member
             .as_ref()

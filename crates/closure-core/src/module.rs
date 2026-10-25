@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use crate::client::ApiClient;
 use crate::error::{CoreError, ModuleError};
 use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId};
 use crate::locale::{Args, Catalog, Locale, Translator};
+use crate::permission::{GuildPermissions, PermissionSpec};
 use crate::settings::GuildPolicy;
 
 /// Stable identifier of a module, used in configuration keys, metrics and translation
@@ -196,6 +198,9 @@ pub struct ModuleManifest {
     pub capabilities: CapabilitySet,
     pub dependencies: Vec<ModuleId>,
     pub commands: Vec<CommandSpec>,
+    /// What the module lets a guild decide who may do; every key starts with the module's id.
+    #[serde(default)]
+    pub permissions: Vec<PermissionSpec>,
     /// JSON Schema for the module's section of the guild configuration.
     pub config_schema: serde_json::Value,
     pub default_config: serde_json::Value,
@@ -217,6 +222,7 @@ impl ModuleManifest {
             capabilities: CapabilitySet::new(),
             dependencies: Vec::new(),
             commands: Vec::new(),
+            permissions: Vec::new(),
             config_schema: serde_json::json!({ "type": "object" }),
             default_config: serde_json::json!({}),
             default_enabled: false,
@@ -269,6 +275,12 @@ impl ModuleManifest {
     }
 
     #[must_use]
+    pub fn permission(mut self, permission: PermissionSpec) -> Self {
+        self.permissions.push(permission);
+        self
+    }
+
+    #[must_use]
     pub fn catalog(mut self, locale: Locale, source: impl Into<String>) -> Self {
         self.catalogs.push(Catalog {
             locale,
@@ -287,6 +299,22 @@ impl ModuleManifest {
         for command in &self.commands {
             command.validate(&self.id)?;
         }
+        let mut seen = BTreeSet::new();
+        for permission in &self.permissions {
+            let key = permission.key.as_str();
+            if permission.key.module() != self.id.as_str() {
+                return Err(CoreError::PermissionOutsideModule {
+                    module: self.id.clone(),
+                    key: key.to_owned(),
+                });
+            }
+            if !seen.insert(key) {
+                return Err(CoreError::DuplicatePermission {
+                    module: self.id.clone(),
+                    key: key.to_owned(),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -299,6 +327,7 @@ pub struct EventContext {
     /// The guild's language.
     pub locale: Locale,
     policy: Arc<GuildPolicy>,
+    permissions: Arc<GuildPermissions>,
     config: Arc<serde_json::Value>,
     translator: Arc<dyn Translator>,
 }
@@ -330,9 +359,23 @@ impl EventContext {
             api,
             locale,
             policy,
+            permissions: Arc::default(),
             config,
             translator,
         }
+    }
+
+    /// Gives the context the guild's permissions; without them nobody but the owner has any key.
+    #[must_use]
+    pub fn with_permissions(mut self, permissions: Arc<GuildPermissions>) -> Self {
+        self.permissions = permissions;
+        self
+    }
+
+    /// Who may do what in this guild.
+    #[must_use]
+    pub fn permissions(&self) -> &GuildPermissions {
+        &self.permissions
     }
 
     /// The guild-wide settings: log channel and moderator roles.

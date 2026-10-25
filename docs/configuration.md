@@ -21,6 +21,11 @@ moderator_roles: [111111111111111111, 222222222222222222]
 limits:                    # override single values of the preset
   handler_timeout_secs: 20
 
+permissions:               # who may do what; see below
+  roles: { 111111111111111111: moderator, 333333333333333333: trusted }
+  keys:
+    moderation.ban: { min_level: admin, deny: { users: [444444444444444444] } }
+
 modules:
   diagnostics:
     enabled: true
@@ -37,10 +42,36 @@ modules:
 | `log_channel` | Where modules post moderation logs. |
 | `moderator_roles` | Roles whose members may use moderation features (at most 100). |
 | `limits` | Per-server resource limits; see below. |
+| `permissions` | Levels of roles and members, and what is decided about single permission keys; see below. |
 | `modules.<id>` | `enabled`, an optional `capabilities` list, and `config` — validated against the module's own JSON Schema. |
 
 Unknown keys are errors, so a typo is reported instead of silently ignored. In a module's `config`,
 `null` means "use the default".
+
+### Permissions
+
+A member has a **level** from 1 to 100, and a module's actions are guarded by **permission keys**
+such as `moderation.ban`. A module declares its keys with the level each needs by default; the key
+always starts with the id of the module that declares it. A level is written as a number or as a
+name: `general` (1), `trusted` (25), `moderator` (50), `admin` (75), `owner` (100).
+
+A member's level is the highest that any of these gives: each of their roles (`permissions.roles`),
+their own entry (`permissions.users`), Discord's Administrator permission
+(`permissions.administrator_level`, `admin` unless changed; `general` makes it count for nothing),
+and, for the owner of the server, always 100. `moderator_roles` still works and gives those roles
+level `moderator`; an entry in `permissions.roles` for the same role wins.
+
+For one key, `permissions.keys.<key>` may set `min_level` (instead of the module's default),
+`allow` (roles and users who may use it whatever their level) and `deny` (who may never use it).
+`deny` beats `allow` and `allow` beats the level; the owner of the server is never refused. A key
+no module declares is an error, so a typo is reported. Each list holds at most 200 entries.
+
+### Bot-wide defaults
+
+`--bot-config <file>` (or `BOT_CONFIG`) names a document of this same form that every server
+starts from: the preset, then this file, then the server's own document, key by key (`null` in the
+server's document means "use the bot's value"). The file is read once at start-up and must be a
+valid configuration on its own, or the bot does not start.
 
 ### Presets and limits
 

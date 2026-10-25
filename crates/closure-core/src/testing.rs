@@ -11,6 +11,7 @@ use crate::error::{DiscordError, ModuleError};
 use crate::event::{ChannelId, Event, GuildId};
 use crate::locale::Locale;
 use crate::module::{EventContext, Module, ModuleId, ModuleManifest};
+use crate::permission::GuildPermissions;
 use crate::settings::{GuildPolicy, ModuleSettings, RuntimeLimits, SettingsProvider};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -94,6 +95,7 @@ pub struct StaticSettings {
     pub locale: Locale,
     pub limits: RuntimeLimits,
     pub policy: Arc<GuildPolicy>,
+    pub permissions: Arc<GuildPermissions>,
     pub modules: Arc<HashMap<ModuleId, ModuleSettings>>,
 }
 
@@ -104,6 +106,7 @@ impl StaticSettings {
             locale: Locale::DEFAULT,
             limits: RuntimeLimits::default(),
             policy: Arc::new(GuildPolicy::default()),
+            permissions: Arc::new(GuildPermissions::default()),
             modules: Arc::new(modules.into_iter().collect()),
         }
     }
@@ -120,6 +123,10 @@ impl SettingsProvider for StaticSettings {
 
     fn policy(&self, _guild: GuildId) -> Arc<GuildPolicy> {
         Arc::clone(&self.policy)
+    }
+
+    fn permissions(&self, _guild: GuildId) -> Arc<GuildPermissions> {
+        Arc::clone(&self.permissions)
     }
 
     fn module(&self, _guild: GuildId, module: &ModuleId) -> Option<ModuleSettings> {

@@ -1,10 +1,11 @@
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use closure_api::{ApiState, GatewayStatus, Readiness, ServerLimits, router};
-use closure_config::{ConfigCompiler, SettingsStore};
+use closure_config::{ConfigCompiler, SettingsStore, parse_overrides};
 use closure_core::locale::Translator;
 use closure_core::module::Module;
 use closure_core::registry::ModuleRegistry;
@@ -94,15 +95,23 @@ struct Core {
     store: Arc<SettingsStore>,
 }
 
-fn build_core() -> Result<Core> {
+fn build_core(bot_config: Option<&Path>) -> Result<Core> {
     let registry =
         Arc::new(ModuleRegistry::new(modules()?).context("the set of modules is inconsistent")?);
     let mut catalogs = TranslatorBuilder::new()?;
     catalogs.add_registry(&registry)?;
-    let store = Arc::new(SettingsStore::new(
-        ConfigCompiler::new(Arc::clone(&registry))
-            .context("a module's configuration schema is unusable")?,
-    ));
+    let mut compiler = ConfigCompiler::new(Arc::clone(&registry))
+        .context("a module's configuration schema is unusable")?;
+    if let Some(path) = bot_config {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read the bot configuration {}", path.display()))?;
+        let defaults = parse_overrides(&text)
+            .with_context(|| format!("{} is not a configuration document", path.display()))?;
+        compiler = compiler
+            .with_bot_defaults(&defaults)
+            .with_context(|| format!("{} is not a valid configuration", path.display()))?;
+    }
+    let store = Arc::new(SettingsStore::new(compiler));
     Ok(Core {
         registry,
         translator: Arc::new(catalogs.build()),
@@ -272,7 +281,7 @@ pub async fn run(args: Args) -> Result<()> {
         "starting closure"
     );
 
-    let core = build_core()?;
+    let core = build_core(args.bot_config.as_deref())?;
     let db = Db::connect(&args.database_url, &DbOptions::default())
         .await
         .context("could not connect to the database")?;
@@ -333,6 +342,36 @@ mod tests {
         let mut catalogs = TranslatorBuilder::new().unwrap();
         catalogs.add_registry(&registry).unwrap();
         ConfigCompiler::new(registry).unwrap();
+    }
+
+    #[test]
+    fn the_bot_configuration_file_is_the_bottom_layer_of_every_server() {
+        let write = |name: &str, text: &str| {
+            let path =
+                std::env::temp_dir().join(format!("closure-test-{}-{name}", std::process::id()));
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let good = write("good.yaml", "language: ja\nlimits: { concurrency: 12 }\n");
+        let core = build_core(Some(&good)).unwrap();
+        let defaults = core.store.settings(Id::new(1));
+        assert_eq!(defaults.effective.limits.concurrency, 12);
+        assert!(defaults.effective.language.0.is_some());
+
+        // What is wrong stops start-up, with the file named.
+        let missing = std::env::temp_dir().join("closure-test-no-such-file.yaml");
+        let broken = write("broken.yaml", "limits: [");
+        let invalid = write("invalid.yaml", "limits: { concurrency: 0 }\n");
+        for path in [&missing, &broken, &invalid] {
+            let error = build_core(Some(path)).err().expect("start-up is refused");
+            assert!(
+                format!("{error:#}").contains(&*path.to_string_lossy()),
+                "{error:#}"
+            );
+        }
+        for path in [good, broken, invalid] {
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ use twilight_model::gateway::Intents;
 use crate::error::CoreError;
 use crate::event::EventKind;
 use crate::module::{CommandSpec, Module, ModuleId};
+use crate::permission::{PermissionKey, PermissionSpec};
 
 /// The validated, dependency-ordered set of modules the bot runs.
 ///
@@ -135,6 +136,19 @@ impl ModuleRegistry {
                 .iter()
                 .map(move |command| (&manifest.id, command))
         })
+    }
+
+    /// Every permission key a module declares.
+    pub fn permissions(&self) -> impl Iterator<Item = &PermissionSpec> {
+        self.modules
+            .iter()
+            .flat_map(|module| module.manifest().permissions.iter())
+    }
+
+    /// The declaration of the permission `key`.
+    #[must_use]
+    pub fn permission(&self, key: &PermissionKey) -> Option<&PermissionSpec> {
+        self.permissions().find(|spec| spec.key == *key)
     }
 
     /// The module that owns the command named `name`.
@@ -378,5 +392,45 @@ mod tests {
             Some("b".to_string())
         );
         let _ = EventKinds::new();
+    }
+
+    fn with_permissions(name: &str, keys: &[&str]) -> Arc<dyn Module> {
+        let mut manifest = ModuleManifest::new(id(name), name, "0.1.0");
+        for key in keys {
+            manifest = manifest.permission(
+                PermissionSpec::new(*key, crate::permission::Level::MODERATOR, "d").unwrap(),
+            );
+        }
+        Arc::new(Stub(manifest))
+    }
+
+    #[test]
+    fn permission_keys_belong_to_the_module_that_declares_them() {
+        let registry = ModuleRegistry::new(vec![
+            with_permissions("warn", &["warn.add", "warn.clear"]),
+            with_permissions("mute", &["mute.add"]),
+        ])
+        .unwrap();
+        assert_eq!(registry.permissions().count(), 3);
+        let add = PermissionKey::new("mute.add").unwrap();
+        assert_eq!(
+            registry.permission(&add).map(|spec| spec.key.as_str()),
+            Some("mute.add")
+        );
+        assert!(
+            registry
+                .permission(&PermissionKey::new("mute.clear").unwrap())
+                .is_none()
+        );
+
+        // Another module's namespace, and a key twice.
+        assert!(matches!(
+            ModuleRegistry::new(vec![with_permissions("warn", &["mute.add"])]),
+            Err(CoreError::PermissionOutsideModule { .. })
+        ));
+        assert!(matches!(
+            ModuleRegistry::new(vec![with_permissions("warn", &["warn.add", "warn.add"])]),
+            Err(CoreError::DuplicatePermission { .. })
+        ));
     }
 }

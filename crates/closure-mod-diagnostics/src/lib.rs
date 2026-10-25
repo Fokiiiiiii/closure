@@ -151,6 +151,7 @@ mod tests {
                 name: "user".into(),
                 bot: false,
             },
+            roles: vec![],
             invoker_permissions: Permissions::empty(),
             locale,
             command: command.into(),

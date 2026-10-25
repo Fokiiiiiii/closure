@@ -4,6 +4,7 @@ use std::time::Duration;
 use closure_core::event::GuildId;
 use closure_core::locale::Locale;
 use closure_core::module::ModuleId;
+use closure_core::permission::GuildPermissions;
 use closure_core::settings::{GuildPolicy, ModuleSettings, RuntimeLimits, SettingsProvider};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -161,6 +162,10 @@ impl SettingsProvider for SettingsStore {
 
     fn policy(&self, guild: GuildId) -> Arc<GuildPolicy> {
         Arc::clone(&self.settings(guild).policy)
+    }
+
+    fn permissions(&self, guild: GuildId) -> Arc<GuildPermissions> {
+        Arc::clone(&self.settings(guild).permissions)
     }
 
     fn module(&self, guild: GuildId, module: &ModuleId) -> Option<ModuleSettings> {

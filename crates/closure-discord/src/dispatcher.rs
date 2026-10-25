@@ -696,6 +696,7 @@ fn context_for(
         Arc::clone(&settings.config),
         Arc::clone(&shared.translator),
     )
+    .with_permissions(shared.settings.permissions(guild))
 }
 
 /// Updates the breaker and logs. An error from Discord (forbidden, not found, ...) means the

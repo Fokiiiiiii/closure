@@ -15,6 +15,7 @@ let manifest = ModuleManifest::new(ModuleId::new("warn")?, "Warnings", env!("CAR
     .events([EventKind::Command, EventKind::MemberLeft])
     .capabilities([Capability::SendMessages, Capability::TimeoutMembers])
     .command(/* CommandSpec */)
+    .permission(PermissionSpec::new("warn.add", Level::MODERATOR, "Give a warning")?)
     .config(schema_json, default_json)              // your section of the guild configuration
     .catalog(Locale::En, EN).catalog(Locale::Ja, JA)
     .enabled_by_default();
@@ -29,6 +30,9 @@ let manifest = ModuleManifest::new(ModuleId::new("warn")?, "Warnings", env!("CAR
   not need to subscribe to `EventKind::Command` to receive its own commands.
 - Commands are data (`CommandSpec`): name, English description, options or subcommands (one level),
   default member permissions. Required options come before optional ones.
+- Permissions are keys (`warn.add`: two to four dot-separated parts, the first being your module's
+  id) with the level a member needs by default. Servers change levels and allow or deny single
+  roles and users in their configuration (see `configuration.md`); you only declare the keys.
 - The registry refuses duplicate ids, unknown or cyclic dependencies and colliding commands at
   start-up.
 
@@ -72,8 +76,9 @@ Things to know:
   not know it. Do not keep a client from one event for use with another guild's data.
 - **Order**: events about one channel, user or role arrive in order; unrelated events may be handled
   at the same time, so share state through `Arc` and locks, not assumptions.
-- Check `ctx.policy().is_moderator(&roles)` (and the invoker's Discord permissions) before
-  moderation commands.
+- Check `ctx.permissions().check(&actor, &key)` before moderation commands. The `Actor` is the
+  invoker (`CommandInvocation` carries their `roles`; `administrator` comes from
+  `invoker_permissions`). The decision says why it was refused, which is worth telling the user.
 
 ## 3. Add messages in every language
 

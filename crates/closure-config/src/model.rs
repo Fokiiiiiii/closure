@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use closure_core::capability::CapabilitySet;
-use closure_core::event::{ChannelId, RoleId};
+use closure_core::event::{ChannelId, RoleId, UserId};
 use closure_core::locale::Locale;
 use closure_core::module::ModuleId;
+use closure_core::permission::{GuildPermissions, Level};
 use closure_core::settings::{GuildPolicy, ModuleSettings};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,73 @@ pub struct ModuleOverride {
     pub config: Option<serde_json::Value>,
 }
 
+/// A level written as its name (`moderator`) or as a number from 1 to 100.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum LevelSetting {
+    Number(u8),
+    Name(String),
+}
+
+impl LevelSetting {
+    pub(crate) fn resolve(&self) -> Result<Level, String> {
+        match self {
+            Self::Number(number) => Level::new(*number).map_err(|error| error.to_string()),
+            Self::Name(name) => Level::named(name).ok_or_else(|| {
+                format!(
+                    "`{name}` is not a level; use a number from 1 to 100 or one of general, trusted, moderator, admin, owner"
+                )
+            }),
+        }
+    }
+}
+
+/// Roles and members, by id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Principals {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_snowflakes_schema")]
+    pub roles: Option<Vec<RoleId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_snowflakes_schema")]
+    pub users: Option<Vec<UserId>>,
+}
+
+/// What a guild decided about one permission key (`moderation.ban`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct KeyOverride {
+    /// The level a member needs, instead of the one the module declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_level: Option<LevelSetting>,
+    /// Always allowed, whatever their level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Principals>,
+    /// Never allowed (except the owner of the server); wins over `allow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny: Option<Principals>,
+}
+
+/// Who may do what. A member's level is the highest that any of their roles, their own entry
+/// or Discord's Administrator permission gives; the owner of the server is always at 100.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsOverride {
+    /// The level of a member who holds Discord's Administrator permission (default `admin`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub administrator_level: Option<LevelSetting>,
+    /// Role id to level.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<String, LevelSetting>,
+    /// User id to level.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub users: BTreeMap<String, LevelSetting>,
+    /// Permission key (`moderation.ban`) to what is decided about it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, KeyOverride>,
+}
+
 /// The sparse document an administrator writes: only what differs from the defaults. This is
 /// what is stored, edited by the dashboard form and exchanged as YAML.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -194,6 +262,8 @@ pub struct GuildOverrides {
     pub moderator_roles: Option<Vec<RoleId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<LimitsOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionsOverride>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub modules: BTreeMap<String, ModuleOverride>,
 }
@@ -216,6 +286,7 @@ pub struct EffectiveConfig {
     pub log_channel: Option<ChannelId>,
     pub moderator_roles: Vec<RoleId>,
     pub limits: Limits,
+    pub permissions: PermissionsOverride,
     pub modules: BTreeMap<String, ModuleEffective>,
 }
 
@@ -225,6 +296,7 @@ pub struct GuildSettings {
     pub effective: EffectiveConfig,
     pub(crate) modules: HashMap<ModuleId, ModuleSettings>,
     pub(crate) policy: Arc<GuildPolicy>,
+    pub(crate) permissions: Arc<GuildPermissions>,
 }
 
 impl GuildSettings {

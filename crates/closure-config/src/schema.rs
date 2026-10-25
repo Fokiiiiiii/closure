@@ -30,6 +30,21 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
     if let Some(preset) = schema.pointer_mut("/$defs/Preset") {
         also_as_unit_variant_map(preset);
     }
+    // The parser takes `null` for a map as an empty one, and for the settings of a key as none.
+    if let Some(settings) =
+        schema.pointer_mut("/$defs/PermissionsOverride/properties/keys/additionalProperties")
+    {
+        *settings = or_null(settings.take());
+    }
+    for map in [
+        "/$defs/PermissionsOverride/properties/roles",
+        "/$defs/PermissionsOverride/properties/users",
+        "/$defs/PermissionsOverride/properties/keys",
+    ] {
+        if let Some(map) = schema.pointer_mut(map) {
+            *map = or_null(map.take());
+        }
+    }
 
     let mut languages = vec![json!("auto")];
     languages.extend(Locale::ALL.iter().map(|locale| json!(locale.tag())));
@@ -632,6 +647,7 @@ mod tests {
 
     use closure_core::capability::Capability;
     use closure_core::module::{Module, ModuleId, ModuleManifest};
+    use closure_core::permission::{Level, PermissionSpec};
     use closure_core::testing::StubModule;
 
     use super::*;
@@ -656,6 +672,8 @@ mod tests {
         manifest.config_schema = config_schema;
         manifest.default_config = default_config;
         manifest.capabilities = [Capability::SendMessages].into_iter().collect();
+        manifest.permissions =
+            vec![PermissionSpec::new("warn.add", Level::MODERATOR, "add warnings").unwrap()];
         let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
         ModuleRegistry::new(vec![module]).unwrap()
     }
@@ -1343,6 +1361,21 @@ mod tests {
             json!({ "modules": { "warn": { "enabled": " false " } } }),
             json!({ "preset": { "small": null } }),
             json!({ "modules": { "warn": { "capabilities": [{ "send_messages": null }] } } }),
+            // The permissions section, in the forms the parser reads.
+            json!({ "permissions": null }),
+            json!({ "permissions": {} }),
+            json!({ "permissions": { "administrator_level": "admin" } }),
+            json!({ "permissions": { "administrator_level": 60, "roles": { "1": "moderator", "2": 30 } } }),
+            json!({ "permissions": { "users": { "3": "owner" }, "roles": null } }),
+            json!({ "permissions": { "users": null, "keys": null } }),
+            json!({ "permissions": { "keys": { "warn.add": null } } }),
+            json!({ "permissions": { "keys": { "warn.add": {
+                "min_level": "trusted",
+                "allow": { "roles": [1, "2"], "users": [3] },
+                "deny": { "users": ["9"] }
+            } } } }),
+            json!({ "permissions": { "keys": { "warn.add": { "min_level": null, "allow": null, "deny": { "roles": null } } } } }),
+            json!({ "moderator_roles": [5], "permissions": { "roles": { "5": 10 } } }),
         ] {
             let overrides = parse_overrides(&document.to_string()).unwrap_or_else(|error| {
                 panic!("test setup: the parser refuses {document}: {error}")
@@ -1365,6 +1398,10 @@ mod tests {
             json!({ "log_channel": -1 }),
             json!({ "log_channel": "abc" }),
             json!({ "moderator_roles": ["abc"] }),
+            json!({ "permissions": 5 }),
+            json!({ "permissions": { "keys": 5 } }),
+            json!({ "permissions": { "roles": { "1": true } } }),
+            json!({ "permissions": { "unheard": 1 } }),
         ] {
             assert!(!validator.is_valid(&wrong), "{wrong}");
         }

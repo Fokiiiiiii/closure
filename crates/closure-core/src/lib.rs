@@ -14,6 +14,7 @@ pub mod event;
 pub mod interaction;
 pub mod locale;
 pub mod module;
+pub mod permission;
 pub mod registry;
 pub mod settings;
 pub mod testing;

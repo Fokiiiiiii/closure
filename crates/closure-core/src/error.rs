@@ -22,6 +22,16 @@ pub enum CoreError {
     },
     #[error("dependency cycle involving module `{0}`")]
     DependencyCycle(ModuleId),
+    #[error("invalid level {0}: expected a number from 1 to 100")]
+    InvalidLevel(u8),
+    #[error(
+        "invalid permission key `{0}`: expected 2-4 dot-separated parts of [a-z][a-z0-9_-]*, 64 chars at most"
+    )]
+    InvalidPermissionKey(String),
+    #[error("module `{module}` declares the permission `{key}`, which does not start with its id")]
+    PermissionOutsideModule { module: ModuleId, key: String },
+    #[error("module `{module}` declares the permission `{key}` twice")]
+    DuplicatePermission { module: ModuleId, key: String },
     #[error("command `{command}` is declared by both `{first}` and `{second}`")]
     CommandCollision {
         command: String,
