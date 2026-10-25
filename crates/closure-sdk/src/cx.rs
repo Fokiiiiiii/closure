@@ -2,11 +2,11 @@
 //! ways to answer it.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use closure_core::action::{Action, InteractionReply, ModalSpec};
 use closure_core::client::ApiClient;
-use closure_core::error::ModuleError;
+use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{
     CommandInvocation, ComponentInvocation, GuildId, InteractionRef, ModalSubmission, UserInfo,
 };
@@ -20,9 +20,53 @@ use twilight_model::guild::Permissions;
 use crate::error::UserError;
 use crate::ui::CustomId;
 
-const FRESH: u8 = 0;
-const DEFERRED: u8 = 1;
-const REPLIED: u8 = 2;
+/// Where the answer to one interaction stands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Nothing was answered.
+    Fresh,
+    /// Acknowledged with a "thinking" message that the next answer fills in; `private` says whether
+    /// only the user sees it (Discord cannot change that afterwards).
+    Deferred { private: bool },
+    /// A click was acknowledged and the message left as it is; the next answer edits it.
+    DeferredUpdate,
+    /// The interaction has its answer; more are follow-ups.
+    Replied,
+}
+
+/// The answers given to one interaction. They take their turns: one is sent and acknowledged by
+/// Discord before the next is started, whoever of the clones of a [`Cx`] makes it.
+struct Answers {
+    phase: futures_util::lock::Mutex<Phase>,
+    /// Whether anything was answered; readable without waiting for a send in progress.
+    answered: AtomicBool,
+}
+
+impl Answers {
+    fn new() -> Self {
+        Self {
+            phase: futures_util::lock::Mutex::new(Phase::Fresh),
+            answered: AtomicBool::new(false),
+        }
+    }
+
+    /// Records how a send went. A send that was refused before any request was made (the content
+    /// is too long, ...) changes nothing: the interaction is as unanswered as it was.
+    fn settle(
+        &self,
+        phase: &mut Phase,
+        before: Phase,
+        after: Phase,
+        result: &Result<(), DiscordError>,
+    ) {
+        *phase = match result {
+            Err(DiscordError::Invalid(_)) => before,
+            _ => after,
+        };
+        self.answered
+            .store(*phase != Phase::Fresh, Ordering::Release);
+    }
+}
 
 /// One interaction being handled: a command ([`CommandCx`]), a click ([`ComponentCx`]) or a
 /// submitted modal ([`ModalCx`]).
@@ -32,7 +76,7 @@ const REPLIED: u8 = 2;
 pub struct Cx<I> {
     ctx: EventContext,
     interaction: Arc<I>,
-    state: Arc<AtomicU8>,
+    answers: Arc<Answers>,
 }
 
 impl<I> Clone for Cx<I> {
@@ -40,7 +84,7 @@ impl<I> Clone for Cx<I> {
         Self {
             ctx: self.ctx.clone(),
             interaction: Arc::clone(&self.interaction),
-            state: Arc::clone(&self.state),
+            answers: Arc::clone(&self.answers),
         }
     }
 }
@@ -104,7 +148,7 @@ impl<I: InteractionRef + 'static> Cx<I> {
         Self {
             ctx: ctx.clone(),
             interaction: Arc::new(interaction.clone()),
-            state: Arc::new(AtomicU8::new(FRESH)),
+            answers: Arc::new(Answers::new()),
         }
     }
 
@@ -174,7 +218,7 @@ impl<I: InteractionRef + 'static> Cx<I> {
     /// Whether anything was answered yet (a deferral counts).
     #[must_use]
     pub fn has_replied(&self) -> bool {
-        self.state.load(Ordering::Acquire) != FRESH
+        self.answers.answered.load(Ordering::Acquire)
     }
 
     /// Answers where everyone in the channel sees it.
@@ -207,46 +251,77 @@ impl<I: InteractionRef + 'static> Cx<I> {
     }
 
     /// The first answer is the response to the interaction (or, after [`Self::defer`], the
-    /// edit of the "thinking" message); every later one is a follow-up.
+    /// edit of the "thinking" message); every later one is a follow-up. An answer for the user
+    /// alone after a public [`Self::defer`] finishes the public message with a plain "Done." and
+    /// goes to the user as a follow-up, because a public message cannot be made private.
     pub async fn reply_with(&self, reply: InteractionReply) -> Result<(), UserError> {
-        let api = &self.ctx.api;
-        match self.state.swap(REPLIED, Ordering::AcqRel) {
-            FRESH => api.respond(&*self.interaction, reply).await?,
-            DEFERRED => {
-                api.execute(Action::EditResponse {
-                    token: self.interaction.token().clone(),
-                    reply,
-                })
-                .await?;
+        let mut phase = self.answers.phase.lock().await;
+        // What the interaction is back to if nothing could be sent.
+        let mut back_to = *phase;
+        let result = match back_to {
+            Phase::Fresh => self.ctx.api.respond(&*self.interaction, reply).await,
+            Phase::Deferred { private: false } if reply.ephemeral => {
+                let done = InteractionReply {
+                    content: Some(self.core_message("sdk-done", &Args::new())),
+                    ..InteractionReply::default()
+                };
+                match self.edit_original(done).await {
+                    Ok(()) => {
+                        back_to = Phase::Replied;
+                        self.ctx.api.followup(&*self.interaction, reply).await
+                    }
+                    Err(error) => Err(error),
+                }
             }
-            _ => api.followup(&*self.interaction, reply).await?,
-        }
-        Ok(())
+            Phase::Deferred { .. } | Phase::DeferredUpdate => self.edit_original(reply).await,
+            Phase::Replied => self.ctx.api.followup(&*self.interaction, reply).await,
+        };
+        self.answers
+            .settle(&mut phase, back_to, Phase::Replied, &result);
+        Ok(result?)
+    }
+
+    async fn edit_original(&self, reply: InteractionReply) -> Result<(), DiscordError> {
+        self.ctx
+            .api
+            .execute(Action::EditResponse {
+                token: self.interaction.token().clone(),
+                reply,
+            })
+            .await
+            .map(drop)
     }
 
     /// Acknowledges the interaction, for work that takes more than Discord's three seconds. The
     /// next answer replaces the "thinking" message. Does nothing after an answer.
     pub async fn defer(&self, ephemeral: bool) -> Result<(), UserError> {
-        if self
-            .state
-            .compare_exchange(FRESH, DEFERRED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            self.ctx.api.defer(&*self.interaction, ephemeral).await?;
+        let mut phase = self.answers.phase.lock().await;
+        if *phase != Phase::Fresh {
+            return Ok(());
         }
-        Ok(())
+        let result = self.ctx.api.defer(&*self.interaction, ephemeral).await;
+        self.answers.settle(
+            &mut phase,
+            Phase::Fresh,
+            Phase::Deferred { private: ephemeral },
+            &result,
+        );
+        Ok(result?)
     }
 
     /// Shows the user a form; it comes back as a [`ModalCx`] under the modal's `custom_id`.
     /// Counts as the answer to the interaction.
     pub async fn show_modal(&self, spec: ModalSpec) -> Result<(), UserError> {
-        if self.state.swap(REPLIED, Ordering::AcqRel) != FRESH {
+        let mut phase = self.answers.phase.lock().await;
+        if *phase != Phase::Fresh {
             return Err(UserError::Module(ModuleError::other(
                 "a modal can only be the first answer",
             )));
         }
-        self.ctx.api.modal(&*self.interaction, spec).await?;
-        Ok(())
+        let result = self.ctx.api.modal(&*self.interaction, spec).await;
+        self.answers
+            .settle(&mut phase, Phase::Fresh, Phase::Replied, &result);
+        Ok(result?)
     }
 
     /// The user as the permission system sees them.
@@ -389,23 +464,36 @@ impl ComponentCx {
         self.data().parse().ok()
     }
 
-    /// Acknowledges the click and leaves the message as it is. Counts as the answer.
+    /// Acknowledges the click and leaves the message as it is. Counts as the answer; the next
+    /// one ([`Self::update`] or a reply) changes the message afterwards.
     pub async fn defer_update(&self) -> Result<(), UserError> {
-        if self.state.swap(REPLIED, Ordering::AcqRel) == FRESH {
-            self.ctx.api.defer_update(&*self.interaction).await?;
+        let mut phase = self.answers.phase.lock().await;
+        if *phase != Phase::Fresh {
+            return Ok(());
         }
-        Ok(())
+        let result = self.ctx.api.defer_update(&*self.interaction).await;
+        self.answers
+            .settle(&mut phase, Phase::Fresh, Phase::DeferredUpdate, &result);
+        Ok(result?)
     }
 
     /// Answers the click by changing the message the component is on: its text, embeds and
-    /// components. Counts as the answer to the interaction.
+    /// components (those the reply does not have are taken off). Works as the first answer, or
+    /// after [`Self::defer_update`].
     pub async fn update(&self, reply: InteractionReply) -> Result<(), UserError> {
-        if self.state.swap(REPLIED, Ordering::AcqRel) != FRESH {
-            return Err(UserError::Module(ModuleError::other(
-                "the message can only be updated as the first answer",
-            )));
-        }
-        self.ctx.api.update(&*self.interaction, reply).await?;
-        Ok(())
+        let mut phase = self.answers.phase.lock().await;
+        let before = *phase;
+        let result = match before {
+            Phase::Fresh => self.ctx.api.update(&*self.interaction, reply).await,
+            Phase::DeferredUpdate => self.edit_original(reply).await,
+            Phase::Deferred { .. } | Phase::Replied => {
+                return Err(UserError::Module(ModuleError::other(
+                    "the message can only be updated as the first answer or after defer_update",
+                )));
+            }
+        };
+        self.answers
+            .settle(&mut phase, before, Phase::Replied, &result);
+        Ok(result?)
     }
 }

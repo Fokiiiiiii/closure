@@ -5,7 +5,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use closure_core::action::{Action, InteractionResponse, MentionPolicy, Outcome, Reason};
+use closure_core::action::{
+    Action, InteractionReply, InteractionResponse, MentionPolicy, Outcome, Reason,
+};
 use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
 use closure_core::event::InteractionToken;
@@ -282,6 +284,44 @@ async fn deferring_an_interaction_privately_sets_the_ephemeral_flag() {
     let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(body["type"], 5);
     assert_eq!(body["data"]["flags"], 64);
+}
+
+#[tokio::test]
+async fn an_update_or_an_edit_without_components_takes_the_old_ones_off() {
+    let discord = FakeDiscord::start(vec![(204, ""), (200, "{}")]).await;
+    let api = discord.api();
+    api.execute(Action::Respond {
+        interaction_id: Id::new(40),
+        token: InteractionToken::new("tok"),
+        response: InteractionResponse::Update {
+            reply: InteractionReply {
+                content: Some("done".into()),
+                ..InteractionReply::default()
+            },
+        },
+    })
+    .await
+    .unwrap();
+    api.execute(Action::EditResponse {
+        token: InteractionToken::new("tok"),
+        reply: InteractionReply {
+            content: Some("done".into()),
+            ..InteractionReply::default()
+        },
+    })
+    .await
+    .unwrap();
+    let requests = discord.requests();
+    let update: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(
+        update["data"]["components"],
+        serde_json::json!([]),
+        "{update}"
+    );
+    assert_eq!(update["data"]["embeds"], serde_json::json!([]), "{update}");
+    let edit: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(edit["components"], serde_json::json!([]), "{edit}");
+    assert_eq!(edit["embeds"], serde_json::json!([]), "{edit}");
 }
 
 #[tokio::test]

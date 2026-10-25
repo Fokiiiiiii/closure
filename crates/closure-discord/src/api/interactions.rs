@@ -23,6 +23,17 @@ fn response_data(reply: &InteractionReply) -> InteractionResponseData {
     }
 }
 
+/// What an update says about the message it changes: its embeds and components are exactly
+/// those of the reply, so none means "take the old ones off". (A new message has none to take
+/// off, and leaves them out.)
+fn update_data(reply: &InteractionReply) -> InteractionResponseData {
+    InteractionResponseData {
+        embeds: Some(reply.embeds.clone()),
+        components: Some(reply.components.clone()),
+        ..response_data(reply)
+    }
+}
+
 fn twilight_response(response: &InteractionResponse) -> TwilightResponse {
     match response {
         InteractionResponse::Defer { ephemeral } => TwilightResponse {
@@ -38,7 +49,7 @@ fn twilight_response(response: &InteractionResponse) -> TwilightResponse {
         },
         InteractionResponse::Update { reply } => TwilightResponse {
             kind: InteractionResponseType::UpdateMessage,
-            data: Some(response_data(reply)),
+            data: Some(update_data(reply)),
         },
         InteractionResponse::DeferUpdate => TwilightResponse {
             kind: InteractionResponseType::DeferredUpdateMessage,
@@ -93,7 +104,8 @@ impl TwilightApi {
         run(request).await
     }
 
-    /// Replaces the deferred or original response; unset fields are left unchanged.
+    /// Replaces the deferred or original response: the text if the reply has any (else it is left
+    /// as it is), the embeds and components exactly as the reply has them.
     pub(super) async fn edit_response(
         &self,
         token: &InteractionToken,
@@ -107,12 +119,9 @@ impl TwilightApi {
         if let Some(content) = &reply.content {
             request = request.content(Some(content));
         }
-        if !reply.embeds.is_empty() {
-            request = request.embeds(Some(&reply.embeds));
-        }
-        if !reply.components.is_empty() {
-            request = request.components(Some(&reply.components));
-        }
+        request = request
+            .embeds(Some(&reply.embeds))
+            .components(Some(&reply.components));
         run(request).await
     }
 }
