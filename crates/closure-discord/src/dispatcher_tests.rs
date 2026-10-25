@@ -1818,6 +1818,7 @@ fn due_job(module: &str) -> ScheduledJob {
         name: "expire".into(),
         payload: json!({}),
         attempt: 1,
+        token: 1,
     }
 }
 
@@ -2029,4 +2030,33 @@ async fn the_runner_loop_runs_jobs_until_it_is_told_to_stop() {
         .await
         .expect("the runner stops")
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_job_the_module_cannot_handle_is_dropped_even_when_it_repeats() {
+    let warn = Probe::new("warn", &[], &[Capability::Schedule]);
+    warn.stop_events();
+    let (dispatcher, scheduler) = with_scheduler(&[(&warn, true)]).await;
+    assert_eq!(
+        dispatcher.run_job(due_job("warn")).await,
+        JobOutcome::Dropped
+    );
+
+    let granted: CapabilitySet = [Capability::Schedule].into_iter().collect();
+    Scheduler::new(
+        Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
+        &granted,
+        ModuleId::new("warn").unwrap(),
+        Id::new(GUILD),
+    )
+    .job("old", &json!({}))
+    .unwrap()
+    .every(Duration::from_secs(60), Duration::ZERO)
+    .await
+    .unwrap();
+    assert_eq!(
+        crate::jobs::run_due(scheduler.as_ref(), &dispatcher).await,
+        1
+    );
+    assert!(scheduler.is_empty(), "a repeating job does not live on");
 }

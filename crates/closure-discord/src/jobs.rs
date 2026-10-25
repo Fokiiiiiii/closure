@@ -61,25 +61,31 @@ pub async fn run_due(backend: &dyn SchedulerBackend, dispatcher: &Dispatcher) ->
 }
 
 async fn run_one(backend: &dyn SchedulerBackend, dispatcher: &Dispatcher, job: ScheduledJob) {
-    let (id, attempt, module, name) = (job.id, job.attempt, job.module.clone(), job.name.clone());
+    let (id, token, attempt) = (job.id, job.token, job.attempt);
+    let (module, name) = (job.module.clone(), job.name.clone());
     let outcome = dispatcher.run_job(job).await;
     metrics::counter!("closure_jobs_total", "module" => module.to_string(), "result" => match &outcome {
         JobOutcome::Done => "done",
         JobOutcome::Failed(_) => "failed",
         JobOutcome::Postponed => "postponed",
         JobOutcome::Gone => "gone",
+        JobOutcome::Dropped => "dropped",
     })
     .increment(1);
     let recorded = match outcome {
-        JobOutcome::Done => backend.complete(id).await,
+        JobOutcome::Done => backend.complete(id, token).await,
         JobOutcome::Failed(error) => {
             tracing::warn!(%module, job = %name, attempt, %error, "a scheduled job failed");
-            backend.retry(id, backoff(attempt), &error).await
+            backend.retry(id, token, backoff(attempt), &error).await
         }
-        JobOutcome::Postponed => backend.postpone(id, POSTPONE).await,
+        JobOutcome::Postponed => backend.postpone(id, token, POSTPONE).await,
         JobOutcome::Gone => {
             tracing::warn!(%module, job = %name, "a scheduled job belongs to a module that is gone; it is dropped");
-            backend.discard(id).await
+            backend.discard(id, token).await
+        }
+        JobOutcome::Dropped => {
+            tracing::warn!(%module, job = %name, "the module cannot handle a scheduled job; it is dropped");
+            backend.discard(id, token).await
         }
     };
     if let Err(error) = recorded {

@@ -106,6 +106,9 @@ pub enum JobOutcome {
     Postponed,
     /// The module does not exist any more: the job can never run.
     Gone,
+    /// The module said it cannot handle this job (`Flow::Stop`), for example because a newer
+    /// version no longer has the handler: it is not tried again, and a repeating one stops.
+    Dropped,
 }
 
 /// Lanes a long queue of ordinary events can never occupy, so that slash commands are answered
@@ -750,6 +753,7 @@ async fn handle_job(
         return JobOutcome::Gone;
     };
     match call_module(shared, guild, state, Arc::clone(module), event).await {
+        Verdict::Done(Flow::Stop) => JobOutcome::Dropped,
         Verdict::Done(_) => JobOutcome::Done,
         Verdict::Failed(error) => JobOutcome::Failed(error.to_string()),
         Verdict::Panicked => JobOutcome::Failed("the handler panicked".to_owned()),

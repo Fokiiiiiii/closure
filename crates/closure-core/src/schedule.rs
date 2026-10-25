@@ -86,6 +86,10 @@ pub struct ScheduledJob {
     pub payload: serde_json::Value,
     /// Which try this is: 1 the first time.
     pub attempt: u32,
+    /// Tells this hand-out from every other one. What the host reports back about the job only
+    /// counts while the job is still held under this token: if the job was replaced (same key)
+    /// or handed out again meanwhile, the report is about something that is gone.
+    pub token: i64,
 }
 
 /// Where jobs are kept and handed out.
@@ -109,19 +113,27 @@ pub trait SchedulerBackend: Send + Sync {
         lease: Duration,
     ) -> Result<Vec<ScheduledJob>, ScheduleError>;
 
-    /// The job ran: a repeating one is set for its next time, any other is removed.
-    async fn complete(&self, id: i64) -> Result<(), ScheduleError>;
+    /// The job ran: a repeating one is set for its next time, any other is removed. Does nothing
+    /// unless the job is still held under `token` (see [`ScheduledJob::token`]); so do the
+    /// other calls that report on a handed-out job.
+    async fn complete(&self, id: i64, token: i64) -> Result<(), ScheduleError>;
 
     /// The job could not be run for a reason that is not its fault (its module is switched off,
     /// the bot is busy): hand it out again after `after`, without counting the try.
-    async fn postpone(&self, id: i64, after: Duration) -> Result<(), ScheduleError>;
+    async fn postpone(&self, id: i64, token: i64, after: Duration) -> Result<(), ScheduleError>;
 
     /// The job failed: try again after `after`, or, if it has been tried [`MAX_ATTEMPTS`] times,
     /// keep it as failed and no longer hand it out.
-    async fn retry(&self, id: i64, after: Duration, error: &str) -> Result<(), ScheduleError>;
+    async fn retry(
+        &self,
+        id: i64,
+        token: i64,
+        after: Duration,
+        error: &str,
+    ) -> Result<(), ScheduleError>;
 
     /// Removes a job that can never run (its module is gone).
-    async fn discard(&self, id: i64) -> Result<(), ScheduleError>;
+    async fn discard(&self, id: i64, token: i64) -> Result<(), ScheduleError>;
 }
 
 /// The wait before the next try of a job that has been tried `attempt` times.
@@ -165,19 +177,19 @@ impl SchedulerBackend for NoScheduler {
         Err(ScheduleError::Unavailable)
     }
 
-    async fn complete(&self, _: i64) -> Result<(), ScheduleError> {
+    async fn complete(&self, _: i64, _: i64) -> Result<(), ScheduleError> {
         Err(ScheduleError::Unavailable)
     }
 
-    async fn postpone(&self, _: i64, _: Duration) -> Result<(), ScheduleError> {
+    async fn postpone(&self, _: i64, _: i64, _: Duration) -> Result<(), ScheduleError> {
         Err(ScheduleError::Unavailable)
     }
 
-    async fn retry(&self, _: i64, _: Duration, _: &str) -> Result<(), ScheduleError> {
+    async fn retry(&self, _: i64, _: i64, _: Duration, _: &str) -> Result<(), ScheduleError> {
         Err(ScheduleError::Unavailable)
     }
 
-    async fn discard(&self, _: i64) -> Result<(), ScheduleError> {
+    async fn discard(&self, _: i64, _: i64) -> Result<(), ScheduleError> {
         Err(ScheduleError::Unavailable)
     }
 }
@@ -225,6 +237,11 @@ impl Scheduler {
         })?;
         let payload = serde_json::to_value(payload)
             .map_err(|error| ScheduleError::Payload(error.to_string()))?;
+        if has_nul(&payload) {
+            return Err(ScheduleError::Payload(
+                "a text or a key of the payload holds a NUL character".into(),
+            ));
+        }
         let size = serde_json::to_vec(&payload).map_or(usize::MAX, |bytes| bytes.len());
         if size > MAX_PAYLOAD_BYTES {
             return Err(ScheduleError::TooLarge {
@@ -320,8 +337,13 @@ impl JobBuilder<'_> {
 #[derive(Debug, Clone)]
 struct Stored {
     job: NewJob,
-    /// Unix seconds.
+    /// When it is handed out next, in unix seconds: a retry or a postponement moves this.
     due: i64,
+    /// When it was planned to run; a repeating job counts its period from here, so a retry does
+    /// not shift the period.
+    planned: i64,
+    /// Which hand-out holds it (0: none).
+    token: i64,
     attempts: u32,
     leased_until: i64,
     failed: bool,
@@ -330,6 +352,7 @@ struct Stored {
 #[derive(Debug, Default)]
 struct Jobs {
     next_id: i64,
+    next_token: i64,
     by_id: BTreeMap<i64, Stored>,
 }
 
@@ -396,6 +419,19 @@ impl MemoryScheduler {
     }
 }
 
+/// PostgreSQL cannot keep a NUL character in JSON; the memory scheduler refuses it as well, so a
+/// test does not pass with what the real one would reject.
+fn has_nul(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.contains('\0'),
+        serde_json::Value::Array(items) => items.iter().any(has_nul),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(key, item)| key.contains('\0') || has_nul(item)),
+        _ => false,
+    }
+}
+
 /// The first planned time of a repeating job after `due` that is still ahead of `now`: runs
 /// missed while the bot was down are skipped, not made up for.
 #[must_use]
@@ -431,6 +467,8 @@ impl SchedulerBackend for MemoryScheduler {
         let fresh = Stored {
             job: job.clone(),
             due,
+            planned: due,
+            token: 0,
             attempts: 0,
             leased_until: 0,
             failed: false,
@@ -489,15 +527,23 @@ impl SchedulerBackend for MemoryScheduler {
         let mut due: Vec<(i64, i64)> = jobs
             .by_id
             .iter()
-            .filter(|(_, stored)| !stored.failed && stored.due <= now && stored.leased_until <= now)
+            .filter(|(_, stored)| {
+                !stored.failed
+                    && stored.attempts < MAX_ATTEMPTS
+                    && stored.due <= now
+                    && stored.leased_until <= now
+            })
             .map(|(id, stored)| (stored.due, *id))
             .collect();
         due.sort_unstable();
         due.truncate(limit);
         let mut claimed = Vec::new();
         for (_, id) in due {
+            jobs.next_token += 1;
+            let token = jobs.next_token;
             if let Some(stored) = jobs.by_id.get_mut(&id) {
                 stored.attempts += 1;
+                stored.token = token;
                 stored.leased_until = now.saturating_add(seconds(lease));
                 claimed.push(ScheduledJob {
                     id,
@@ -506,50 +552,82 @@ impl SchedulerBackend for MemoryScheduler {
                     name: stored.job.name.clone(),
                     payload: stored.job.payload.clone(),
                     attempt: stored.attempts,
+                    token,
                 });
             }
         }
         Ok(claimed)
     }
 
-    async fn complete(&self, id: i64) -> Result<(), ScheduleError> {
+    async fn complete(&self, id: i64, token: i64) -> Result<(), ScheduleError> {
         let now = (self.clock)();
         let mut jobs = self.lock();
-        let Some(stored) = jobs.by_id.get_mut(&id) else {
+        let Some(stored) = jobs
+            .by_id
+            .get_mut(&id)
+            .filter(|stored| stored.token == token)
+        else {
             return Ok(());
         };
         if let Some(every) = stored.job.every {
-            stored.due = next_run(stored.due, seconds(every), now);
+            stored.planned = next_run(stored.planned, seconds(every), now);
+            stored.due = stored.planned;
             stored.attempts = 0;
             stored.leased_until = 0;
+            stored.token = 0;
         } else {
             jobs.by_id.remove(&id);
         }
         Ok(())
     }
 
-    async fn postpone(&self, id: i64, after: Duration) -> Result<(), ScheduleError> {
+    async fn postpone(&self, id: i64, token: i64, after: Duration) -> Result<(), ScheduleError> {
         let now = (self.clock)();
-        if let Some(stored) = self.lock().by_id.get_mut(&id) {
+        if let Some(stored) = self
+            .lock()
+            .by_id
+            .get_mut(&id)
+            .filter(|stored| stored.token == token)
+        {
             stored.attempts = stored.attempts.saturating_sub(1);
             stored.due = now.saturating_add(seconds(after));
             stored.leased_until = 0;
+            stored.token = 0;
         }
         Ok(())
     }
 
-    async fn retry(&self, id: i64, after: Duration, _error: &str) -> Result<(), ScheduleError> {
+    async fn retry(
+        &self,
+        id: i64,
+        token: i64,
+        after: Duration,
+        _error: &str,
+    ) -> Result<(), ScheduleError> {
         let now = (self.clock)();
-        if let Some(stored) = self.lock().by_id.get_mut(&id) {
+        if let Some(stored) = self
+            .lock()
+            .by_id
+            .get_mut(&id)
+            .filter(|stored| stored.token == token)
+        {
             stored.failed = stored.attempts >= MAX_ATTEMPTS;
             stored.due = now.saturating_add(seconds(after));
             stored.leased_until = 0;
+            stored.token = 0;
         }
         Ok(())
     }
 
-    async fn discard(&self, id: i64) -> Result<(), ScheduleError> {
-        self.lock().by_id.remove(&id);
+    async fn discard(&self, id: i64, token: i64) -> Result<(), ScheduleError> {
+        let mut jobs = self.lock();
+        if jobs
+            .by_id
+            .get(&id)
+            .is_some_and(|stored| stored.token == token)
+        {
+            jobs.by_id.remove(&id);
+        }
         Ok(())
     }
 }
@@ -633,8 +711,12 @@ mod tests {
         // Being run: not handed out again, until the lease is over (the bot died meanwhile).
         assert!(f.due().await.is_empty());
         f.advance(61);
-        assert_eq!(f.due().await[0].attempt, 2);
-        f.backend.complete(jobs[0].id).await.unwrap();
+        let again = f.due().await.remove(0);
+        assert_eq!(again.attempt, 2);
+        // The first hand-out is over; only the second can say how it went.
+        f.backend.complete(jobs[0].id, jobs[0].token).await.unwrap();
+        assert!(!f.backend.is_empty());
+        f.backend.complete(again.id, again.token).await.unwrap();
         assert!(f.backend.is_empty());
     }
 
@@ -653,7 +735,7 @@ mod tests {
             let Some(job) = jobs.first() else { break };
             attempt = job.attempt;
             f.backend
-                .retry(job.id, backoff(job.attempt), "boom")
+                .retry(job.id, job.token, backoff(job.attempt), "boom")
                 .await
                 .unwrap();
             f.advance(3601);
@@ -674,7 +756,7 @@ mod tests {
             .unwrap();
         f.advance(10);
         let job = f.due().await.remove(0);
-        f.backend.complete(job.id).await.unwrap();
+        f.backend.complete(job.id, job.token).await.unwrap();
         assert!(f.due().await.is_empty());
         f.advance(59);
         assert!(f.due().await.is_empty());
@@ -687,7 +769,7 @@ mod tests {
         // A long stop does not make it catch up with every run it missed.
         f.advance(10_000);
         let job = f.due().await.remove(0);
-        f.backend.complete(job.id).await.unwrap();
+        f.backend.complete(job.id, job.token).await.unwrap();
         assert!(f.due().await.is_empty());
     }
 
@@ -729,7 +811,7 @@ mod tests {
             .unwrap();
         let job = f.due().await.remove(0);
         f.backend
-            .postpone(job.id, Duration::from_secs(30))
+            .postpone(job.id, job.token, Duration::from_secs(30))
             .await
             .unwrap();
         assert!(f.due().await.is_empty());
@@ -875,5 +957,98 @@ mod tests {
             .after(Duration::ZERO)
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn a_report_about_a_job_that_was_replaced_or_handed_out_again_changes_nothing() {
+        let f = fixture();
+        let warn = f.scheduler("warn", 1);
+        warn.job("cleanup", &1)
+            .unwrap()
+            .key("c")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        let old = f.due().await.remove(0);
+        // The handler sets the next one under the same key, then the old run is reported done.
+        warn.job("cleanup", &2)
+            .unwrap()
+            .key("c")
+            .after(Duration::from_secs(600))
+            .await
+            .unwrap();
+        f.backend.complete(old.id, old.token).await.unwrap();
+        f.backend
+            .retry(old.id, old.token, Duration::ZERO, "x")
+            .await
+            .unwrap();
+        f.backend.discard(old.id, old.token).await.unwrap();
+        assert_eq!(f.backend.len(), 1, "the new one is still there");
+        f.advance(600);
+        assert_eq!(
+            f.due().await[0].payload,
+            json!(2),
+            "and still due at its time"
+        );
+
+        // Handed out again after the lease: the first hand-out can no longer report.
+        let first = f.due().await;
+        assert!(first.is_empty());
+        f.advance(61);
+        let second = f.due().await.remove(0);
+        f.advance(1);
+        f.backend
+            .complete(second.id, second.token - 1)
+            .await
+            .unwrap();
+        assert_eq!(f.backend.len(), 1);
+        f.backend.complete(second.id, second.token).await.unwrap();
+        assert!(f.backend.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_retry_does_not_move_the_period_of_a_repeating_job() {
+        let f = fixture();
+        f.scheduler("warn", 1)
+            .job("tick", &())
+            .unwrap()
+            .every(Duration::from_secs(60), Duration::ZERO)
+            .await
+            .unwrap();
+        let job = f.due().await.remove(0);
+        // It fails and is tried again five seconds later; the next run is still a minute after
+        // the planned time, not after the retry.
+        f.backend
+            .retry(job.id, job.token, backoff(1), "boom")
+            .await
+            .unwrap();
+        f.advance(5);
+        let again = f.due().await.remove(0);
+        f.backend.complete(again.id, again.token).await.unwrap();
+        f.advance(54);
+        assert!(f.due().await.is_empty());
+        f.advance(1);
+        assert_eq!(
+            f.due().await.len(),
+            1,
+            "a minute after the first planned time"
+        );
+    }
+
+    #[test]
+    fn a_nul_character_in_a_payload_is_refused_as_the_database_would() {
+        let f = fixture();
+        let warn = f.scheduler("warn", 1);
+        assert!(matches!(
+            warn.job("x", &"a\0b"),
+            Err(ScheduleError::Payload(_))
+        ));
+        assert!(matches!(
+            warn.job("x", &json!({ "k\0": 1 })),
+            Err(ScheduleError::Payload(_))
+        ));
+        assert!(
+            warn.job("x", &"a\\u0000b").is_ok(),
+            "backslash and text only"
+        );
     }
 }

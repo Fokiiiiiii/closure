@@ -25,10 +25,10 @@ fn seconds(duration: Duration) -> f64 {
     duration.as_secs_f64()
 }
 
-type Claimed = (i64, i64, String, String, serde_json::Value, i32);
+type Claimed = (i64, i64, String, String, serde_json::Value, i32, i64);
 
 fn job_of(
-    (id, guild, module, name, payload, attempts): Claimed,
+    (id, guild, module, name, payload, attempts, token): Claimed,
 ) -> Result<ScheduledJob, ScheduleError> {
     Ok(ScheduledJob {
         id,
@@ -37,6 +37,7 @@ fn job_of(
         name,
         payload,
         attempt: u32::try_from(attempts).unwrap_or(u32::MAX),
+        token,
     })
 }
 
@@ -81,7 +82,9 @@ impl SchedulerBackend for Db {
                 "UPDATE scheduled_jobs
                  SET name = $2, payload = $3, every_seconds = $4, attempts = 0,
                      leased_until = NULL, state = 'pending', last_error = NULL, updated_at = now(),
-                     run_at = COALESCE(to_timestamp($5), now() + $6 * interval '1 second')
+                     claim_token = 0,
+                     run_at = COALESCE(to_timestamp($5), now() + $6 * interval '1 second'),
+                     planned_at = COALESCE(to_timestamp($5), now() + $6 * interval '1 second')
                  WHERE id = $1",
             )
             .bind(id)
@@ -108,8 +111,9 @@ impl SchedulerBackend for Db {
             }
             sqlx::query_scalar(
                 "INSERT INTO scheduled_jobs
-                     (module, guild_id, name, payload, every_seconds, dedupe_key, run_at)
+                     (module, guild_id, name, payload, every_seconds, dedupe_key, run_at, planned_at)
                  VALUES ($1, $2, $3, $4, $5, $6,
+                         COALESCE(to_timestamp($7), now() + $8 * interval '1 second'),
                          COALESCE(to_timestamp($7), now() + $8 * interval '1 second'))
                  RETURNING id",
             )
@@ -167,7 +171,7 @@ impl SchedulerBackend for Db {
         let rows: Vec<Claimed> = sqlx::query_as(
             "WITH due AS (
                  SELECT id FROM scheduled_jobs
-                 WHERE state = 'pending' AND run_at <= now()
+                 WHERE state = 'pending' AND run_at <= now() AND attempts < $3
                    AND (leased_until IS NULL OR leased_until <= now())
                  ORDER BY run_at, id
                  LIMIT $1
@@ -176,12 +180,15 @@ impl SchedulerBackend for Db {
              UPDATE scheduled_jobs AS job
              SET attempts = job.attempts + 1,
                  leased_until = now() + $2 * interval '1 second',
+                 claim_token = nextval('scheduled_job_claims'),
                  updated_at = now()
              FROM due WHERE job.id = due.id
-             RETURNING job.id, job.guild_id, job.module, job.name, job.payload, job.attempts",
+             RETURNING job.id, job.guild_id, job.module, job.name, job.payload, job.attempts,
+                       job.claim_token",
         )
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .bind(seconds(lease))
+        .bind(i32::try_from(MAX_ATTEMPTS).unwrap_or(i32::MAX))
         .fetch_all(&self.pool)
         .await
         .map_err(backend)?;
@@ -193,35 +200,43 @@ impl SchedulerBackend for Db {
         Ok(jobs)
     }
 
-    async fn complete(&self, id: i64) -> Result<(), ScheduleError> {
+    async fn complete(&self, id: i64, token: i64) -> Result<(), ScheduleError> {
         // A job that repeats is set for its next planned time that is still ahead; the runs missed
-        // while the bot was down are not made up for.
+        // while the bot was down are not made up for. Only the hand-out that holds the job can
+        // say it is done.
         sqlx::query(
             "WITH removed AS (
-                 DELETE FROM scheduled_jobs WHERE id = $1 AND every_seconds IS NULL
+                 DELETE FROM scheduled_jobs
+                 WHERE id = $1 AND claim_token = $2 AND every_seconds IS NULL
              )
              UPDATE scheduled_jobs
-             SET run_at = run_at + (every_seconds::double precision
-                     * (GREATEST(floor(extract(epoch FROM now() - run_at) / every_seconds), 0) + 1))
+             SET planned_at = planned_at + (every_seconds::double precision
+                     * (GREATEST(floor(extract(epoch FROM now() - planned_at) / every_seconds), 0) + 1))
                      * interval '1 second',
-                 attempts = 0, leased_until = NULL, last_error = NULL, updated_at = now()
-             WHERE id = $1 AND every_seconds IS NOT NULL",
+                 run_at = planned_at + (every_seconds::double precision
+                     * (GREATEST(floor(extract(epoch FROM now() - planned_at) / every_seconds), 0) + 1))
+                     * interval '1 second',
+                 attempts = 0, leased_until = NULL, claim_token = 0, last_error = NULL,
+                 updated_at = now()
+             WHERE id = $1 AND claim_token = $2 AND every_seconds IS NOT NULL",
         )
         .bind(id)
+        .bind(token)
         .execute(&self.pool)
         .await
         .map_err(backend)?;
         Ok(())
     }
 
-    async fn postpone(&self, id: i64, after: Duration) -> Result<(), ScheduleError> {
+    async fn postpone(&self, id: i64, token: i64, after: Duration) -> Result<(), ScheduleError> {
         sqlx::query(
             "UPDATE scheduled_jobs
-             SET attempts = GREATEST(attempts - 1, 0), leased_until = NULL,
-                 run_at = now() + $2 * interval '1 second', updated_at = now()
-             WHERE id = $1",
+             SET attempts = GREATEST(attempts - 1, 0), leased_until = NULL, claim_token = 0,
+                 run_at = now() + $3 * interval '1 second', updated_at = now()
+             WHERE id = $1 AND claim_token = $2",
         )
         .bind(id)
+        .bind(token)
         .bind(seconds(after))
         .execute(&self.pool)
         .await
@@ -229,15 +244,22 @@ impl SchedulerBackend for Db {
         Ok(())
     }
 
-    async fn retry(&self, id: i64, after: Duration, error: &str) -> Result<(), ScheduleError> {
+    async fn retry(
+        &self,
+        id: i64,
+        token: i64,
+        after: Duration,
+        error: &str,
+    ) -> Result<(), ScheduleError> {
         sqlx::query(
             "UPDATE scheduled_jobs
-             SET state = CASE WHEN attempts >= $3 THEN 'failed' ELSE 'pending' END,
-                 leased_until = NULL, last_error = left($4, 1000), updated_at = now(),
-                 run_at = now() + $2 * interval '1 second'
-             WHERE id = $1",
+             SET state = CASE WHEN attempts >= $4 THEN 'failed' ELSE 'pending' END,
+                 leased_until = NULL, claim_token = 0, last_error = left($5, 1000),
+                 updated_at = now(), run_at = now() + $3 * interval '1 second'
+             WHERE id = $1 AND claim_token = $2",
         )
         .bind(id)
+        .bind(token)
         .bind(seconds(after))
         .bind(i32::try_from(MAX_ATTEMPTS).unwrap_or(i32::MAX))
         .bind(error)
@@ -247,9 +269,10 @@ impl SchedulerBackend for Db {
         Ok(())
     }
 
-    async fn discard(&self, id: i64) -> Result<(), ScheduleError> {
-        sqlx::query("DELETE FROM scheduled_jobs WHERE id = $1")
+    async fn discard(&self, id: i64, token: i64) -> Result<(), ScheduleError> {
+        sqlx::query("DELETE FROM scheduled_jobs WHERE id = $1 AND claim_token = $2")
             .bind(id)
+            .bind(token)
             .execute(&self.pool)
             .await
             .map_err(backend)?;
@@ -305,6 +328,7 @@ mod tests {
         sqlx::query(
             "UPDATE scheduled_jobs SET
                  run_at = run_at - $1 * interval '1 second',
+                 planned_at = planned_at - $1 * interval '1 second',
                  leased_until = leased_until - $1 * interval '1 second'",
         )
         .bind(seconds)
@@ -345,7 +369,7 @@ mod tests {
         age(&db, 120).await;
         let again = db.claim_due(10, LEASE).await.unwrap();
         assert_eq!(again[0].attempt, 2);
-        db.complete(again[0].id).await.unwrap();
+        db.complete(again[0].id, again[0].token).await.unwrap();
         assert_eq!(count(&db).await, 1, "only the job that is not due is left");
 
         age(&db, 3600).await;
@@ -363,7 +387,7 @@ mod tests {
             .await
             .unwrap();
         let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
-        db.complete(job.id).await.unwrap();
+        db.complete(job.id, job.token).await.unwrap();
         assert!(db.claim_due(1, LEASE).await.unwrap().is_empty());
         age(&db, 61).await;
         let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
@@ -371,7 +395,7 @@ mod tests {
 
         // Down for a long time: one run, not one for every minute missed.
         age(&db, 10_000).await;
-        db.complete(job.id).await.unwrap();
+        db.complete(job.id, job.token).await.unwrap();
         assert!(db.claim_due(1, LEASE).await.unwrap().is_empty());
         let next: f64 = sqlx::query_scalar(
             "SELECT extract(epoch FROM run_at - now())::float8 FROM scheduled_jobs",
@@ -435,7 +459,7 @@ mod tests {
             let jobs = db.claim_due(1, LEASE).await.unwrap();
             let Some(job) = jobs.first() else { break };
             last = job.attempt;
-            db.retry(job.id, backoff(job.attempt), "boom")
+            db.retry(job.id, job.token, backoff(job.attempt), "boom")
                 .await
                 .unwrap();
             assert!(db.claim_due(1, LEASE).await.unwrap().is_empty(), "it waits");
@@ -488,12 +512,14 @@ mod tests {
             .await
             .unwrap();
         let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
-        db.postpone(job.id, Duration::from_secs(30)).await.unwrap();
+        db.postpone(job.id, job.token, Duration::from_secs(30))
+            .await
+            .unwrap();
         assert!(db.claim_due(1, LEASE).await.unwrap().is_empty());
         age(&db, 31).await;
         let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
         assert_eq!(job.attempt, 1);
-        db.discard(job.id).await.unwrap();
+        db.discard(job.id, job.token).await.unwrap();
         assert_eq!(count(&db).await, 0);
     }
 
@@ -527,8 +553,8 @@ mod tests {
         let db = database(pool).await;
         let module = ModuleId::new("warn").unwrap();
         sqlx::query(
-            "INSERT INTO scheduled_jobs (module, guild_id, name, payload, run_at)
-             SELECT 'warn', 1, 'x', '1', now() + interval '1 day'
+            "INSERT INTO scheduled_jobs (module, guild_id, name, payload, run_at, planned_at)
+             SELECT 'warn', 1, 'x', '1', now() + interval '1 day', now() + interval '1 day'
              FROM generate_series(1, $1)",
         )
         .bind(i64::try_from(MAX_JOBS - 5).unwrap())
@@ -570,5 +596,72 @@ mod tests {
         assert_eq!(at, 1_900_000_000);
         assert!(other.cancel("k").await.unwrap());
         assert!(!db.cancel(&module, Id::new(2), "k").await.unwrap());
+    }
+    #[sqlx::test]
+    async fn a_report_about_a_job_that_was_replaced_or_handed_out_again_changes_nothing(
+        pool: PgPool,
+    ) {
+        let db = database(pool).await;
+        let warn = scheduler(&db, "warn", 1);
+        warn.job("cleanup", &1)
+            .unwrap()
+            .key("c")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        let old = db.claim_due(1, LEASE).await.unwrap().remove(0);
+        // The handler sets the next one under the same key; then the old run reports.
+        warn.job("cleanup", &2)
+            .unwrap()
+            .key("c")
+            .after(Duration::from_secs(600))
+            .await
+            .unwrap();
+        db.complete(old.id, old.token).await.unwrap();
+        db.retry(old.id, old.token, Duration::ZERO, "x")
+            .await
+            .unwrap();
+        db.postpone(old.id, old.token, Duration::ZERO)
+            .await
+            .unwrap();
+        db.discard(old.id, old.token).await.unwrap();
+        assert_eq!(count(&db).await, 1);
+        age(&db, 601).await;
+        assert_eq!(db.claim_due(1, LEASE).await.unwrap()[0].payload, json!(2));
+
+        // Handed out again after the lease: only the newest hand-out can report.
+        age(&db, 120).await;
+        let newer = db.claim_due(1, LEASE).await.unwrap().remove(0);
+        db.complete(newer.id, newer.token - 1).await.unwrap();
+        assert_eq!(count(&db).await, 1);
+        db.complete(newer.id, newer.token).await.unwrap();
+        assert_eq!(count(&db).await, 0);
+    }
+
+    #[sqlx::test]
+    async fn a_retry_does_not_move_the_period_of_a_repeating_job(pool: PgPool) {
+        let db = database(pool).await;
+        scheduler(&db, "warn", 1)
+            .job("tick", &())
+            .unwrap()
+            .every(Duration::from_secs(60), Duration::ZERO)
+            .await
+            .unwrap();
+        let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
+        db.retry(job.id, job.token, Duration::from_secs(5), "boom")
+            .await
+            .unwrap();
+        // Tried again 5 seconds after the planned time, and done.
+        age(&db, 5).await;
+        let again = db.claim_due(1, LEASE).await.unwrap().remove(0);
+        db.complete(again.id, again.token).await.unwrap();
+        // The next run is 60 seconds after the *planned* time, so 55 seconds from now.
+        let ahead: f64 = sqlx::query_scalar(
+            "SELECT extract(epoch FROM run_at - now())::float8 FROM scheduled_jobs",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!((50.0..=56.0).contains(&ahead), "{ahead}");
     }
 }

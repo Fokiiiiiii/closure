@@ -213,6 +213,21 @@ async fn a_job_nobody_handles_any_more_is_dropped_and_the_payload_must_fit() {
 }
 
 #[tokio::test]
+async fn a_repeating_job_nobody_handles_any_more_stops() {
+    let harness = Harness::new(module()).unwrap();
+    harness
+        .scheduler()
+        .job("removed-in-this-version", &())
+        .unwrap()
+        .every(Duration::from_secs(60), Duration::ZERO)
+        .await
+        .unwrap();
+    let ended = harness.run_due_jobs().await;
+    assert!(ended[0].is_ok());
+    assert_eq!(harness.jobs(), 0, "it is not set for its next time");
+}
+
+#[tokio::test]
 async fn a_module_without_a_job_handler_cannot_schedule() {
     let harness = Harness::new(ModuleBuilder::new("plain", "Plain", "0.1.0").unwrap()).unwrap();
     assert!(matches!(

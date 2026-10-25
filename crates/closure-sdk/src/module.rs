@@ -518,17 +518,18 @@ impl SdkModule {
     }
 
     /// A job that is due. One without a handler is a leftover of an older version of the module:
-    /// failing it would only fill the log and trip the breaker, so it is dropped.
+    /// failing it would only fill the log and trip the breaker, and finishing it would keep a
+    /// repeating one alive for ever, so the host is told to drop it (`Flow::Stop`).
     async fn on_job(&self, ctx: &EventContext, job: &ScheduledJob) -> Result<Flow, ModuleError> {
-        if let Some(run) = self.jobs.get(&job.name) {
-            run(JobCx::new(ctx, job)).await?;
-        } else {
+        let Some(run) = self.jobs.get(&job.name) else {
             tracing::warn!(
                 module = %self.manifest.id,
                 job = %job.name,
                 "a scheduled job has no handler and is dropped"
             );
-        }
+            return Ok(Flow::Stop);
+        };
+        run(JobCx::new(ctx, job)).await?;
         Ok(Flow::Continue)
     }
 

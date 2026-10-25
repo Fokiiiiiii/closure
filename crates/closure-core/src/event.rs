@@ -314,6 +314,8 @@ pub enum Event {
     /// A modal of the module that the user sent.
     Modal(ModalSubmission),
     /// A job the module scheduled is due (see [`crate::schedule`]). Only that module gets it.
+    /// Answering [`crate::subscription::Flow::Stop`] says the module cannot handle it and never
+    /// will: the job is dropped (a repeating one stops) instead of being finished.
     Scheduled(ScheduledJob),
 }
 

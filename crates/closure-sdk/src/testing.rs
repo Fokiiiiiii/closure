@@ -392,23 +392,23 @@ impl Harness {
             .unwrap_or_default();
         let mut ended = Vec::new();
         for job in due {
-            let (id, attempt) = (job.id, job.attempt);
+            let (id, token, attempt) = (job.id, job.token, job.attempt);
             let ctx = self.context(job.guild_id);
             let result = self
                 .module
                 .on_event_flow(&ctx, &Event::Scheduled(job))
-                .await
-                .map(drop);
+                .await;
             let recorded = match &result {
-                Ok(()) => self.scheduler.complete(id).await,
+                Ok(Flow::Stop) => self.scheduler.discard(id, token).await,
+                Ok(Flow::Continue) => self.scheduler.complete(id, token).await,
                 Err(error) => {
                     self.scheduler
-                        .retry(id, backoff(attempt), &error.to_string())
+                        .retry(id, token, backoff(attempt), &error.to_string())
                         .await
                 }
             };
             drop(recorded);
-            ended.push(result);
+            ended.push(result.map(drop));
         }
         ended
     }
