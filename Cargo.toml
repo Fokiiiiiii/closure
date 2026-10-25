@@ -85,6 +85,12 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
+# macOS keeps every object file of a debug build for the debugger ("unpacked"), which grew
+# target/ to tens of GB. Line tables are enough for backtraces.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "off"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
