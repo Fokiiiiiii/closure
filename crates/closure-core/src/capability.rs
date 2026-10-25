@@ -18,6 +18,7 @@ pub enum Capability {
     KickMembers,
     BanMembers,
     TimeoutMembers,
+    MuteMembers,
     ManageNicknames,
     ManageRoles,
     ManageChannels,
@@ -36,7 +37,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::SendMessages,
         Self::AddReactions,
         Self::ManageMessages,
@@ -45,6 +46,7 @@ impl Capability {
         Self::KickMembers,
         Self::BanMembers,
         Self::TimeoutMembers,
+        Self::MuteMembers,
         Self::ManageNicknames,
         Self::ManageRoles,
         Self::ManageChannels,
@@ -68,6 +70,7 @@ impl Capability {
             Self::KickMembers => "kick_members",
             Self::BanMembers => "ban_members",
             Self::TimeoutMembers => "timeout_members",
+            Self::MuteMembers => "mute_members",
             Self::ManageNicknames => "manage_nicknames",
             Self::ManageRoles => "manage_roles",
             Self::ManageChannels => "manage_channels",
@@ -160,6 +163,12 @@ mod tests {
             let json = serde_json::to_string(&capability).unwrap();
             assert_eq!(json, format!("\"{}\"", capability.as_str()));
         }
+    }
+
+    #[test]
+    fn mute_members_is_listed_and_named() {
+        assert!(Capability::ALL.contains(&Capability::MuteMembers));
+        assert_eq!(Capability::MuteMembers.as_str(), "mute_members");
     }
 
     #[test]

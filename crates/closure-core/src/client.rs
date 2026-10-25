@@ -358,6 +358,24 @@ impl ApiClient {
         .map(drop)
     }
 
+    /// Server-mutes or unmutes a member in voice channels.
+    pub async fn set_voice_mute(
+        &self,
+        guild_id: GuildId,
+        user_id: UserId,
+        mute: bool,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::SetVoiceMute {
+            guild_id,
+            user_id,
+            mute,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
     pub async fn add_role(
         &self,
         guild_id: GuildId,

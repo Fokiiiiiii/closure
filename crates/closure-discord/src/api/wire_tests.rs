@@ -198,6 +198,38 @@ async fn kick_removes_the_member() {
 }
 
 #[tokio::test]
+async fn voice_mutes_are_patched_and_a_member_outside_voice_is_reported() {
+    const NOT_IN_VOICE: &str =
+        r#"{"message":"Target user is not connected to voice","code":40032}"#;
+    let discord = FakeDiscord::start(vec![(200, "{}"), (400, NOT_IN_VOICE)]).await;
+    let mute = |mute| Action::SetVoiceMute {
+        guild_id: Id::new(10),
+        user_id: Id::new(20),
+        mute,
+        reason: reason("noisy"),
+    };
+    let api = discord.api();
+    assert_eq!(api.execute(mute(false)).await.map(drop), Ok(()));
+    assert_eq!(
+        api.execute(mute(true)).await.map(drop),
+        Err(DiscordError::NotInVoice)
+    );
+
+    let requests = discord.requests();
+    assert_eq!(requests[0].method, "PATCH");
+    assert!(
+        requests[0].body.contains("\"mute\":false"),
+        "{}",
+        requests[0].body
+    );
+    assert!(
+        requests[1].body.contains("\"mute\":true"),
+        "{}",
+        requests[1].body
+    );
+}
+
+#[tokio::test]
 async fn timeouts_are_sent_as_an_absolute_deadline_and_none_lifts_them() {
     let discord = FakeDiscord::start(vec![(200, "{}")]).await;
     let timeout = |duration_seconds| Action::Timeout {

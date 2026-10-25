@@ -191,6 +191,7 @@ fn error_label(error: &DiscordError) -> &'static str {
         DiscordError::HierarchyViolation(_) => "hierarchy",
         DiscordError::NotFound => "not_found",
         DiscordError::DirectMessagesClosed => "direct_messages_closed",
+        DiscordError::NotInVoice => "not_in_voice",
         DiscordError::RateLimited { .. } => "rate_limited",
         DiscordError::Transient(_) => "transient",
         DiscordError::Fatal(_) => "fatal",
@@ -466,6 +467,15 @@ impl TwilightApi {
                 reason,
             } => {
                 self.timeout(*guild_id, *user_id, *duration_seconds, reason)
+                    .await
+            }
+            Action::SetVoiceMute {
+                guild_id,
+                user_id,
+                mute,
+                reason,
+            } => {
+                self.set_voice_mute(*guild_id, *user_id, *mute, reason)
                     .await
             }
             Action::SetNickname {

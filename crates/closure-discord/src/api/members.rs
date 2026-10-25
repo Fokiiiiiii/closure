@@ -82,6 +82,21 @@ impl TwilightApi {
         .await
     }
 
+    pub(super) async fn set_voice_mute(
+        &self,
+        guild: GuildId,
+        user: UserId,
+        mute: bool,
+        reason: &Reason,
+    ) -> Result<Outcome, DiscordError> {
+        run(self
+            .http
+            .update_guild_member(guild, user)
+            .mute(mute)
+            .reason(reason.as_str()))
+        .await
+    }
+
     /// `None` resets the nickname.
     pub(super) async fn set_nickname(
         &self,

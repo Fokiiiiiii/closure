@@ -209,6 +209,7 @@ pub fn error_key(error: &DiscordError) -> &'static str {
         DiscordError::HierarchyViolation(_) => "error-hierarchy",
         DiscordError::NotFound => "error-not-found",
         DiscordError::DirectMessagesClosed => "error-dm-closed",
+        DiscordError::NotInVoice => "error-not-in-voice",
         DiscordError::RateLimited { .. } => "error-rate-limited",
         DiscordError::Transient(_) => "error-transient",
         DiscordError::Fatal(_) => "error-fatal",
@@ -388,6 +389,7 @@ mod tests {
             DiscordError::HierarchyViolation("secret detail".into()),
             DiscordError::NotFound,
             DiscordError::DirectMessagesClosed,
+            DiscordError::NotInVoice,
             DiscordError::RateLimited {
                 retry_after: Some(Duration::from_secs(1)),
             },

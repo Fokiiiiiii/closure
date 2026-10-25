@@ -199,6 +199,7 @@ pub fn preflight(view: &dyn CacheView, action: &Action) -> Preflight {
         | Action::DeleteRole {
             guild_id, role_id, ..
         } => check_role_target(view, *guild_id, *role_id),
+        // Discord does not apply the role hierarchy to voice mutes, so SetVoiceMute passes here.
         _ => Preflight::Pass,
     }
 }

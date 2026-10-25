@@ -12,6 +12,9 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
 /// from the bot or shares no server with it.
 const CANNOT_SEND_TO_USER: u64 = 50_007;
 
+/// Discord's error code for "Target user is not connected to voice".
+const TARGET_NOT_IN_VOICE: u64 = 40_032;
+
 /// Maps an HTTP status and Discord error body onto [`DiscordError`].
 ///
 /// Kept free of Twilight types so every branch can be tested with plain values.
@@ -49,6 +52,11 @@ pub(crate) fn map_http_error(error: &Error) -> DiscordError {
                 && general.code == CANNOT_SEND_TO_USER
             {
                 return DiscordError::DirectMessagesClosed;
+            }
+            if let ApiError::General(general) = api_error
+                && general.code == TARGET_NOT_IN_VOICE
+            {
+                return DiscordError::NotInVoice;
             }
             let retry_after = match api_error {
                 ApiError::Ratelimited(limited) => Some(limited.retry_after),

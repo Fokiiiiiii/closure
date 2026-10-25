@@ -335,6 +335,14 @@ pub enum Action {
         duration_seconds: Option<u32>,
         reason: Reason,
     },
+    /// Server-mutes or unmutes the member in voice channels. Discord refuses it while the
+    /// member is not connected to voice.
+    SetVoiceMute {
+        guild_id: GuildId,
+        user_id: UserId,
+        mute: bool,
+        reason: Reason,
+    },
     SetNickname {
         guild_id: GuildId,
         user_id: UserId,
@@ -745,6 +753,7 @@ impl Action {
             Self::Kick { .. } => Capability::KickMembers,
             Self::Ban { .. } | Self::Unban { .. } => Capability::BanMembers,
             Self::Timeout { .. } => Capability::TimeoutMembers,
+            Self::SetVoiceMute { .. } => Capability::MuteMembers,
             Self::SetNickname { .. } => Capability::ManageNicknames,
             Self::AddRole { .. }
             | Self::RemoveRole { .. }
@@ -779,6 +788,7 @@ impl Action {
             | Self::Ban { guild_id, .. }
             | Self::Unban { guild_id, .. }
             | Self::Timeout { guild_id, .. }
+            | Self::SetVoiceMute { guild_id, .. }
             | Self::SetNickname { guild_id, .. }
             | Self::AddRole { guild_id, .. }
             | Self::RemoveRole { guild_id, .. }
@@ -846,6 +856,7 @@ impl Action {
             | Self::Ban { .. }
             | Self::Unban { .. }
             | Self::Timeout { .. }
+            | Self::SetVoiceMute { .. }
             | Self::SetNickname { .. }
             | Self::AddRole { .. }
             | Self::RemoveRole { .. }
@@ -884,6 +895,7 @@ impl Action {
             | Self::Ban { .. }
             | Self::Unban { .. }
             | Self::Timeout { .. }
+            | Self::SetVoiceMute { .. }
             | Self::SetNickname { .. }
             | Self::AddRole { .. }
             | Self::RemoveRole { .. }
@@ -922,6 +934,7 @@ impl Action {
             Self::Ban { .. } => "ban",
             Self::Unban { .. } => "unban",
             Self::Timeout { .. } => "timeout",
+            Self::SetVoiceMute { .. } => "set_voice_mute",
             Self::SetNickname { .. } => "set_nickname",
             Self::AddRole { .. } => "add_role",
             Self::RemoveRole { .. } => "remove_role",
@@ -1032,6 +1045,7 @@ impl Action {
             | Self::GetMember { .. }
             | Self::Kick { .. }
             | Self::Unban { .. }
+            | Self::SetVoiceMute { .. }
             | Self::AddRole { .. }
             | Self::RemoveRole { .. }
             | Self::GetChannel { .. }
@@ -1115,6 +1129,34 @@ mod tests {
         assert!(make(Some(MAX_TIMEOUT_SECONDS)).validate().is_ok());
         assert!(make(Some(0)).validate().is_err());
         assert!(make(Some(MAX_TIMEOUT_SECONDS + 1)).validate().is_err());
+    }
+
+    #[test]
+    fn voice_mute_needs_mute_members_and_names_its_guild() {
+        let action = Action::SetVoiceMute {
+            guild_id: id::<7, _>(),
+            user_id: id::<2, _>(),
+            mute: true,
+            reason: reason(),
+        };
+        assert_eq!(action.capability(), Capability::MuteMembers);
+        assert_eq!(action.guild_id(), Some(id::<7, _>()));
+        assert_eq!(action.name(), "set_voice_mute");
+        assert!(action.channels().is_empty());
+        assert!(action.validate().is_ok());
+    }
+
+    #[test]
+    fn voice_mute_round_trips_through_json() {
+        let action = Action::SetVoiceMute {
+            guild_id: id::<1, _>(),
+            user_id: id::<2, _>(),
+            mute: false,
+            reason: reason(),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains("\"type\":\"set_voice_mute\""));
+        assert_eq!(serde_json::from_str::<Action>(&json).unwrap(), action);
     }
 
     #[test]

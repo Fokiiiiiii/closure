@@ -92,6 +92,10 @@ pub enum DiscordError {
     /// cannot change that, and it is no fault of the module.
     #[error("the user does not accept direct messages from this bot")]
     DirectMessagesClosed,
+    /// The member is not connected to a voice channel, so Discord cannot mute it there (error
+    /// 40032). Retrying cannot change that until the member joins voice.
+    #[error("the member is not connected to voice")]
+    NotInVoice,
     #[error("rate limited{}", .retry_after.map(|d| format!(" (retry after {d:?})")).unwrap_or_default())]
     RateLimited { retry_after: Option<Duration> },
     /// A failure that may succeed on retry: 5xx, network or timeout.
@@ -117,5 +121,10 @@ mod tests {
     #[test]
     fn a_closed_direct_message_is_not_worth_repeating() {
         assert!(!DiscordError::DirectMessagesClosed.is_retryable());
+    }
+
+    #[test]
+    fn a_member_outside_voice_is_not_worth_repeating() {
+        assert!(!DiscordError::NotInVoice.is_retryable());
     }
 }
