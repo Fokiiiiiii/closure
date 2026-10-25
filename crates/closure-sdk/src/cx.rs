@@ -195,6 +195,12 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.ctx.guild_id
     }
 
+    /// The time now, in Unix seconds.
+    #[must_use]
+    pub fn now(&self) -> i64 {
+        self.ctx.now()
+    }
+
     /// The module's Discord client, bound to this guild.
     #[must_use]
     pub fn api(&self) -> &ApiClient {
@@ -546,6 +552,12 @@ impl JobCx {
     #[must_use]
     pub fn api(&self) -> &ApiClient {
         &self.ctx.api
+    }
+
+    /// The time now, in Unix seconds.
+    #[must_use]
+    pub fn now(&self) -> i64 {
+        self.ctx.now()
     }
 
     /// The module's own data in this guild.

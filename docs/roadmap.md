@@ -8,7 +8,7 @@ as the rest.
 State at the time of writing: the SDK has commands (derive macro, subcommands, cooldown,
 permission levels), configuration in three layers, storage and counters, event subscriptions,
 buttons, menus, forms and pages, jobs, durations, a check of who a moderation may act on, and
-the reference module `closure-mod-warn`.
+the reference module `closure-mod-moderation`.
 
 ## Order of work
 
@@ -18,7 +18,7 @@ the reference module `closure-mod-warn`.
 | M9b | Cases: records of moderation, numbered per guild, shared by modules (host service, capability `cases`) | moderation and automod share them |
 | M9c | ModLog: posts a case to the log channel in the guild's language | uses M9a and M9b |
 | M9d | Direct messages to a user (`Action::SendDirectMessage`), with the refusals Discord gives | warn/ban notices |
-| — | **`moderation` module**: ban, kick, timeout, warn, cases, log (absorbs `closure-mod-warn`) | first real module |
+| — | **`moderation` module**: ban, kick, timeout, warn, cases, log (warn, note, cases and the log are done; ban, kick and timeout come next) | first real module |
 | M10 | Message kit: richer `MessageInfo`, message history, optional bounded cache, text matching helpers, the content intent | automod and logging |
 | M11 | Interaction surface (below) | convenience for every module |
 | M12 | Events and actions that Discord has and we do not (below) | breadth |

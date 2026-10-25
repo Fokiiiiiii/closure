@@ -1,6 +1,6 @@
 [package]
-name = "closure-mod-warn"
-description = "The warn module for closure: /warn add, list and clear, written with the SDK only"
+name = "closure-mod-moderation"
+description = "The moderation module for closure: warnings, notes and cases, written with the SDK only"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,13 @@ repository.workspace = true
 closure-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-twilight-model.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
+closure-config.workspace = true
 closure-core.workspace = true
 closure-i18n.workspace = true
 tokio.workspace = true
+twilight-model.workspace = true
 
 [lints]
 workspace = true

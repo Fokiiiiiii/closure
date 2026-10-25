@@ -25,13 +25,13 @@ pub async fn post(ctx: &EventContext, case: &Case) -> Result<Option<MessageId>, 
     let Some(channel) = ctx.policy().log_channel else {
         return Ok(None);
     };
-    let embed = case_embed(ctx, case).build()?;
+    let message = embed(ctx, case).build()?;
     let outcome = ctx
         .api
         .execute(Action::SendMessage {
             channel_id: channel,
             content: None,
-            embeds: vec![embed],
+            embeds: vec![message],
             reply_to: None,
             mentions: MentionPolicy::None,
         })
@@ -42,7 +42,9 @@ pub async fn post(ctx: &EventContext, case: &Case) -> Result<Option<MessageId>, 
     }
 }
 
-fn case_embed(ctx: &EventContext, case: &Case) -> EmbedBuilder {
+/// The case as the log shows it, in the server's language. A reply that shows a case uses it too.
+#[must_use]
+pub fn embed(ctx: &EventContext, case: &Case) -> EmbedBuilder {
     let locale = ctx.locale;
     let label = |key: &str| ctx.t_core(locale, key, &Args::new());
     let kind = kind_name(ctx, case.kind.as_str());

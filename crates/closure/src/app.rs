@@ -42,7 +42,7 @@ const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 fn modules() -> Result<Vec<Arc<dyn Module>>> {
     Ok(vec![
         Arc::new(DiagnosticsModule::new()?),
-        Arc::new(closure_mod_warn::module()?),
+        Arc::new(closure_mod_moderation::module()?),
     ])
 }
 
@@ -430,7 +430,7 @@ mod tests {
         let mut catalogs = TranslatorBuilder::new().unwrap();
         catalogs.add_registry(&registry).unwrap();
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
-        assert_eq!(commands.len(), 3);
+        assert_eq!(commands.len(), 6);
         for command in commands {
             assert!(
                 command

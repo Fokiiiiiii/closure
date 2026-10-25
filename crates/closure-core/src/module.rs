@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -476,6 +477,7 @@ pub struct EventContext {
     cases: Cases,
     config: Arc<serde_json::Value>,
     translator: Arc<dyn Translator>,
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
 impl fmt::Debug for EventContext {
@@ -511,7 +513,21 @@ impl EventContext {
             permissions: Arc::default(),
             config,
             translator,
+            clock: Arc::new(system_unix_now),
         }
+    }
+
+    /// Replaces the clock the module reads with [`Self::now`]; for tests.
+    #[must_use]
+    pub fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.clock = Arc::new(clock);
+        self
+    }
+
+    /// The time now, in Unix seconds: when a warning was given, when it expires.
+    #[must_use]
+    pub fn now(&self) -> i64 {
+        (self.clock)()
     }
 
     /// Gives the context the module's storage in this guild; without it every call fails.
@@ -618,6 +634,15 @@ impl EventContext {
     pub fn reply_locale(&self, invocation: &CommandInvocation) -> Locale {
         invocation.locale.unwrap_or(self.locale)
     }
+}
+
+/// The wall clock in Unix seconds, the default of [`EventContext::now`].
+fn system_unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 /// A unit of bot functionality.

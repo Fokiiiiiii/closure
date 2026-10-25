@@ -266,6 +266,7 @@ pub struct Harness {
     storage: Arc<MemoryStorage>,
     scheduler: Arc<MemoryScheduler>,
     cases: Arc<MemoryCases>,
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     elapsed: Arc<Mutex<Duration>>,
     policy: Mutex<GuildPolicy>,
     locale: Mutex<Locale>,
@@ -310,6 +311,7 @@ impl Harness {
                 i64::try_from(unix_start + passed).unwrap_or(i64::MAX)
             }
         };
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(unix_now.clone());
         let storage = Arc::new(MemoryStorage::with_clock(unix_now.clone()));
         let cases = Arc::new(MemoryCases::with_clock(unix_now.clone()));
         let scheduler = Arc::new(MemoryScheduler::with_clock(unix_now));
@@ -333,6 +335,7 @@ impl Harness {
             storage,
             scheduler,
             cases,
+            clock,
             elapsed,
             policy: Mutex::new(GuildPolicy::default()),
             locale: Mutex::new(Locale::DEFAULT),
@@ -522,6 +525,10 @@ impl Harness {
             manifest.id.clone(),
             guild,
         ))
+        .with_clock({
+            let clock = Arc::clone(&self.clock);
+            move || clock()
+        })
     }
 
     /// Delivers an event the way the dispatcher would: only if the module subscribed to its kind
