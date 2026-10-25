@@ -16,10 +16,12 @@ closure (binary)
 | `closure-core` | The contract: `Module`, manifests, the stable `Event` model, `Capability`, the serialisable `Action`/`Outcome` boundary, `ApiClient`, `ModuleRegistry`, locales. Depends on `twilight-model` for ids and payloads only. |
 | `closure-i18n` | Fluent-backed `Translator` with English and Japanese catalogs and a fallback chain. |
 | `closure-config` | The configuration document, YAML in and out, validation, JSON Schema, and `SettingsStore` (the per-guild settings the bot acts on). |
-| `closure-db` | PostgreSQL: configuration with revisions and history, change notifications, audit trail. |
+| `closure-db` | PostgreSQL: configuration with revisions and history, change notifications, audit trail, the data modules keep, and the jobs they schedule. |
 | `closure-discord` | Twilight: REST (`TwilightApi`), gateway shards, event conversion, the event `Dispatcher`, slash command publishing. |
 | `closure-api` | The HTTP API (Axum). |
-| `closure-mod-diagnostics` | `/ping` and `/about`; the reference module. |
+| `closure-sdk`, `closure-sdk-macros` | What a module author uses: declare commands (`#[derive(CommandArgs)]`), permissions, buttons and forms, jobs; the SDK checks, parses, answers and tests (`testing::Harness`). |
+| `closure-mod-diagnostics` | `/ping` and `/about`; the smallest module. |
+| `closure-mod-warn` | `/warn add`, `list` and `clear`; the reference module written with the SDK only. |
 | `closure` | The composition root: reads settings, wires everything, shuts it down in order. |
 
 ## From a Discord event to a Discord action

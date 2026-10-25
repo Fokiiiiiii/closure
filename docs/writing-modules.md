@@ -1,8 +1,10 @@
 # Writing a module
 
 A module is a Rust crate that implements `closure_core::module::Module`. The smallest complete
-example is [`crates/closure-mod-diagnostics`](../crates/closure-mod-diagnostics/src/lib.rs); read
-it alongside this page.
+example is [`crates/closure-mod-diagnostics`](../crates/closure-mod-diagnostics/src/lib.rs); the
+example that uses the SDK in full (permissions, a cooldown, storage, a confirmation button, jobs
+that expire things, two languages) is [`crates/closure-mod-warn`](../crates/closure-mod-warn/src/lib.rs)
+with its [tests](../crates/closure-mod-warn/tests/warn.rs). Read them alongside this page.
 
 ## The short way: the SDK
 

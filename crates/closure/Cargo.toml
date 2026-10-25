@@ -20,6 +20,7 @@ closure-db.workspace = true
 closure-discord.workspace = true
 closure-i18n.workspace = true
 closure-mod-diagnostics.workspace = true
+closure-mod-warn.workspace = true
 dotenvy.workspace = true
 metrics-exporter-prometheus.workspace = true
 secrecy.workspace = true

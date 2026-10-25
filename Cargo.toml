@@ -21,6 +21,7 @@ closure-i18n = { path = "crates/closure-i18n" }
 closure-sdk = { path = "crates/closure-sdk" }
 closure-sdk-macros = { path = "crates/closure-sdk-macros" }
 closure-mod-diagnostics = { path = "crates/closure-mod-diagnostics" }
+closure-mod-warn = { path = "crates/closure-mod-warn" }
 
 anyhow = "1"
 async-trait = "0.1"

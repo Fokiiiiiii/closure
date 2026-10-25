@@ -1,0 +1,23 @@
+[package]
+name = "closure-mod-warn"
+description = "The warn module for closure: /warn add, list and clear, written with the SDK only"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+closure-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+twilight-model.workspace = true
+
+[dev-dependencies]
+closure-core.workspace = true
+closure-i18n.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -39,7 +39,10 @@ const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every module this build ships. Adding a module means adding it here.
 fn modules() -> Result<Vec<Arc<dyn Module>>> {
-    Ok(vec![Arc::new(DiagnosticsModule::new()?)])
+    Ok(vec![
+        Arc::new(DiagnosticsModule::new()?),
+        Arc::new(closure_mod_warn::module()?),
+    ])
 }
 
 struct GatewayReadiness(Arc<GatewayHealth>);
@@ -425,7 +428,7 @@ mod tests {
         let mut catalogs = TranslatorBuilder::new().unwrap();
         catalogs.add_registry(&registry).unwrap();
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 3);
         for command in commands {
             assert!(
                 command
