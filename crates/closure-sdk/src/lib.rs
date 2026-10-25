@@ -63,7 +63,7 @@ pub use closure_core::storage::{Entry, Expect, StorageError, Store};
 pub use closure_core::subscription::{EventFilter, Flow, Subscription};
 pub use closure_sdk_macros::CommandArgs;
 pub use cooldown::{Cooldown, CooldownScope};
-pub use cx::{CommandCx, ComponentCx, Cx, JobCx, ModalCx};
+pub use cx::{CommandCx, ComponentCx, Cx, JobCx, ModalCx, parse_module_config};
 pub use dm::{DirectMessage, Sent};
 pub use duration::{DurationError, TimeStyle};
 pub use embed::{Color, EmbedBuilder, EmbedError, Tone};

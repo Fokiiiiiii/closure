@@ -70,8 +70,7 @@ mute was due. A new voice mute or timeout replaces the timer of an earlier one f
 
 Known limits:
 
-- With `role`, a member who leaves the server loses the role, so a member who rejoins is not muted or
-  timed out any more.
+- A member who leaves and rejoins gets a standing punishment again; see [rejoining members](#rejoining-members).
 - A timer always lifts its punishment with the method and role it was made with. `/untimeout` and
   `/vcunmute` use the **current** method, so after a change of `timeout_method` or `voice_mute_method`
   they may not reach a punishment made with the other method. To lift such a punishment by command,
@@ -79,6 +78,21 @@ Known limits:
   taken off by its timer; a voice mute's timer is cancelled by `/vcunmute` under `discord`, so only
   the command under `role` lifts its role.
 - A voice mute by Discord needs the member in voice, both when it is made and when it is lifted.
+
+## Rejoining members
+
+Leaving the server takes a role off and ends a Discord timeout, so a member who leaves and rejoins
+gets what still stands again when they join:
+
+- A timeout that stands is given again: with `role` its role, with `discord` Discord's timeout for
+  the time left, at most 28 days.
+- A voice mute with `role` gets its role again. A voice mute with `discord` is not given again:
+  Discord refuses a server mute of a member who is not in voice.
+- A case that was revoked, lifted or has run out is not given again. Bans and kicks are not repeated,
+  and bots are skipped.
+- No case is recorded and nothing is posted to the log or sent as a direct message for it.
+
+This needs the **Server Members** intent, see [what the bot needs from Discord](#what-the-bot-needs-from-discord).
 
 ## Escalation
 
@@ -233,6 +247,9 @@ lift it with `/unban` or ban it again with a duration.
 - Permissions: **Kick Members**, **Ban Members**, **Moderate Members** (for timeouts), **Mute Members**
   (for voice mutes), **Manage Roles** (for the `role` methods), and **Send Messages** in the log
   channel. The module does not need View Audit Log.
+- Gateway intent: **Server Members**, a privileged intent for the [rejoining members](#rejoining-members).
+  Switch it on for the bot under *Bot* → *Privileged Gateway Intents* in the developer portal. The
+  bot asks Discord for it at every start, so without it Discord refuses the connection.
 - Role order: the bot's highest role must be above the highest role of the member it acts on, as
   Discord requires, and above the role that a `role` method gives. The bot refuses, with a message, to act on the server owner, on a bot, on itself,
   on the moderator who ran the command, or on someone whose highest role is not below the moderator's.

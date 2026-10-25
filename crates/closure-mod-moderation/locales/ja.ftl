@@ -150,3 +150,5 @@ history-warnings = 有効な警告 { $count } 件
 history-cases = ケース { $count } 件
 history-cases-more = ケース { $count }+ 件
 this-server = このサーバー
+rejoin-timeout = ケース #{ $number } のタイムアウトが有効な間に再参加
+rejoin-voice = ケース #{ $number } のボイスミュートが有効な間に再参加

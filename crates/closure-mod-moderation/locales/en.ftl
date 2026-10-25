@@ -159,3 +159,5 @@ history-cases = { $count ->
 }
 history-cases-more = { $count }+ cases
 this-server = this server
+rejoin-timeout = Rejoined while the timeout of case #{ $number } stood
+rejoin-voice = Rejoined while the voice mute of case #{ $number } stood

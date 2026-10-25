@@ -38,8 +38,9 @@ fn replies_private(ctx: &EventContext) -> Option<bool> {
 }
 
 /// The module's configuration as its own type. The `replies` key is taken out first, so a
-/// module that denies unknown fields still reads its configuration.
-fn parse_module_config<T: DeserializeOwned>(ctx: &EventContext) -> Result<T, ModuleError> {
+/// module that denies unknown fields still reads its configuration. For handlers that get an
+/// event rather than an interaction.
+pub fn parse_module_config<T: DeserializeOwned>(ctx: &EventContext) -> Result<T, ModuleError> {
     let mut config = ctx.config().clone();
     if let Some(object) = config.as_object_mut() {
         object.remove(REPLIES);

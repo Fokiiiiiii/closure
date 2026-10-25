@@ -84,7 +84,7 @@ pub(crate) fn timeout_role(config: &Config) -> Result<RoleId, UserError> {
 }
 
 /// The role a voice mute gives.
-fn voice_role(config: &Config) -> Result<RoleId, UserError> {
+pub(crate) fn voice_role(config: &Config) -> Result<RoleId, UserError> {
     role_of(config.voice_mute_role.as_deref())
         .ok_or_else(|| UserError::message("voice-role-missing"))
 }

@@ -7,16 +7,17 @@ use std::time::Duration;
 use closure_config::{ConfigCompiler, parse_overrides};
 use closure_core::action::Action;
 use closure_core::error::DiscordError;
-use closure_core::event::CommandOptionValue;
+use closure_core::event::{CommandOptionValue, MemberInfo, UserInfo};
 use closure_core::module::Module;
 use closure_core::registry::ModuleRegistry;
 use closure_i18n::missing_keys;
 use closure_mod_moderation::{builder, module};
 use closure_sdk::testing::{Click, Harness, Invocation, Reply, ReplyKind};
-use closure_sdk::{Level, Locale, ModuleError};
+use closure_sdk::{CaseKind, Event, EventKind, Level, Locale, ModuleError, NewCase};
 use serde_json::json;
 use twilight_model::channel::message::Component;
 use twilight_model::channel::message::component::SelectMenu;
+use twilight_model::gateway::Intents;
 use twilight_model::guild::{Member, Role};
 use twilight_model::id::Id;
 
@@ -3214,4 +3215,298 @@ async fn an_expanded_reason_is_cut_to_the_length_a_case_keeps() {
         .unwrap_or_default();
     assert_eq!(reason.chars().count(), 512);
     assert!(reason.ends_with('…'));
+}
+
+// ---- members who rejoin while a punishment stands ----
+
+fn joined(user: u64, bot: bool) -> Event {
+    Event::MemberJoined(MemberInfo {
+        guild_id: Id::new(GUILD),
+        user: UserInfo {
+            id: Id::new(user),
+            name: "member".to_owned(),
+            bot,
+        },
+        roles: Vec::new(),
+        nick: None,
+        joined_at: None,
+        timed_out_until: None,
+    })
+}
+
+/// The member is back in the server, as the gateway announces it.
+async fn rejoin(harness: &Harness, user: u64) -> Result<(), ModuleError> {
+    harness.emit(joined(user, false)).await.map(drop)
+}
+
+/// The roles the module gave, in order.
+fn roles_added(harness: &Harness) -> Vec<u64> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::AddRole { role_id, .. } => Some(role_id.get()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The timeouts the module gave, in order: their seconds, or `None` for a lift.
+fn timeouts_sent(harness: &Harness) -> Vec<Option<u32>> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::Timeout {
+                duration_seconds, ..
+            } => Some(*duration_seconds),
+            _ => None,
+        })
+        .collect()
+}
+
+fn voice_mutes_sent(harness: &Harness) -> usize {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter(|action| matches!(action, Action::SetVoiceMute { mute: true, .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn a_member_who_rejoins_gets_the_timeout_role_back_while_the_timeout_stands() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(roles_added(&harness), [TIMEOUT_ROLE, TIMEOUT_ROLE]);
+    assert!(
+        format!("{:?}", harness.api().actions().last().unwrap())
+            .contains("Rejoined while the timeout of case #1 stood")
+    );
+}
+
+#[tokio::test]
+async fn an_untimeout_before_the_rejoin_means_no_timeout_role_again() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    harness.invoke(untimeout(MEMBER, None)).await.unwrap();
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(roles_added(&harness), [TIMEOUT_ROLE]);
+}
+
+#[tokio::test]
+async fn a_timeout_that_ran_out_before_the_rejoin_is_not_given_again() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3_600));
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(roles_added(&harness), [TIMEOUT_ROLE]);
+}
+
+#[tokio::test]
+async fn a_member_who_rejoins_gets_the_voice_role_back_while_the_mute_stands() {
+    let harness = harness();
+    harness.set_config(json!({ "voice_mute_method": "role", "voice_mute_role": "31" }));
+    harness
+        .invoke(voice_mute(MEMBER, None, Some("noise")))
+        .await
+        .unwrap();
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(roles_added(&harness), [VOICE_ROLE, VOICE_ROLE]);
+}
+
+#[tokio::test]
+async fn a_voice_mute_by_discord_is_not_repeated_on_rejoin() {
+    let harness = harness();
+    harness
+        .invoke(voice_mute(MEMBER, None, Some("noise")))
+        .await
+        .unwrap();
+    let before = harness.api().actions().len();
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(harness.api().actions().len(), before);
+    assert_eq!(voice_mutes_sent(&harness), 1);
+}
+
+#[tokio::test]
+async fn a_timeout_by_discord_is_given_again_for_the_time_left() {
+    let harness = harness();
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(1_200));
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(timeouts_sent(&harness), [Some(3_600), Some(2_400)]);
+}
+
+#[tokio::test]
+async fn a_timeout_by_discord_that_ran_out_is_not_given_again() {
+    let harness = harness();
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3_600));
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(timeouts_sent(&harness), [Some(3_600)]);
+}
+
+#[tokio::test]
+async fn a_timeout_by_discord_is_capped_at_twenty_eight_days() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
+    harness
+        .invoke(timeout(MEMBER, "40d", Some("spam")))
+        .await
+        .unwrap();
+    harness.set_config(json!({ "timeout_method": "discord" }));
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(timeouts_sent(&harness), [Some(28 * 86_400_u32)]);
+}
+
+#[tokio::test]
+async fn a_revoked_timeout_is_not_given_again() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    harness
+        .invoke(case_revoke(1, Some("mistake")))
+        .await
+        .unwrap();
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(roles_added(&harness), [TIMEOUT_ROLE]);
+}
+
+#[tokio::test]
+async fn a_kick_or_a_ban_is_not_given_again() {
+    let harness = harness();
+    harness.invoke(kick(MEMBER, Some("spam"))).await.unwrap();
+    let before = harness.api().actions().len();
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(harness.api().actions().len(), before);
+
+    harness
+        .invoke(ban(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
+    let before = harness.api().actions().len();
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(harness.api().actions().len(), before);
+}
+
+#[tokio::test]
+async fn a_member_without_cases_causes_no_action_and_no_case() {
+    let harness = harness();
+    harness.set_config(json!({
+        "timeout_method": "role",
+        "timeout_role": "30",
+        "voice_mute_method": "role",
+        "voice_mute_role": "31"
+    }));
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert!(harness.api().actions().is_empty());
+    assert!(harness.cases().get(1).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_bot_is_not_given_anything_again() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
+    harness
+        .cases()
+        .create(NewCase {
+            kind: CaseKind::new("timeout").unwrap(),
+            target: Id::new(BOT),
+            moderator: Id::new(MODERATOR),
+            reason: None,
+            expires_at: Some(i64::MAX),
+        })
+        .await
+        .unwrap();
+    harness.emit(joined(BOT, true)).await.unwrap();
+    assert!(harness.api().actions().is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_or_invalid_role_gives_nothing_and_no_error() {
+    let harness = harness();
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    harness
+        .invoke(voice_mute(MEMBER, None, Some("noise")))
+        .await
+        .unwrap();
+    for config in [
+        json!({ "timeout_method": "role", "voice_mute_method": "role" }),
+        json!({
+            "timeout_method": "role",
+            "timeout_role": "0",
+            "voice_mute_method": "role",
+            "voice_mute_role": "nope"
+        }),
+    ] {
+        harness.set_config(config);
+        let before = harness.api().actions().len();
+        rejoin(&harness, MEMBER).await.unwrap();
+        assert_eq!(harness.api().actions().len(), before);
+    }
+}
+
+#[tokio::test]
+async fn a_failing_role_does_not_stop_the_voice_role_from_being_given_again() {
+    let harness = harness();
+    harness.set_config(json!({
+        "timeout_method": "role",
+        "timeout_role": "30",
+        "voice_mute_method": "role",
+        "voice_mute_role": "31"
+    }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    harness
+        .invoke(voice_mute(MEMBER, None, Some("noise")))
+        .await
+        .unwrap();
+    harness
+        .api()
+        .fail_nth(1, DiscordError::Forbidden("missing permission".to_owned()));
+    let error = rejoin(&harness, MEMBER).await.unwrap_err();
+    assert!(
+        matches!(error, ModuleError::Discord(DiscordError::Forbidden(_))),
+        "{error:?}"
+    );
+    assert_eq!(
+        roles_added(&harness),
+        [TIMEOUT_ROLE, VOICE_ROLE, VOICE_ROLE]
+    );
+}
+
+#[test]
+fn the_module_listens_for_joins_with_the_members_intent() {
+    let manifest = module().unwrap().manifest().clone();
+    assert!(manifest.intents.contains(Intents::GUILD_MEMBERS));
+    assert!(manifest.subscription(EventKind::MemberJoined).is_some());
 }

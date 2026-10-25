@@ -35,7 +35,8 @@ How the pieces fit: [docs/architecture.md](docs/architecture.md).
 You need a recent stable Rust toolchain and PostgreSQL 14 or newer.
 
 1. Create an application and a bot in the [Discord developer portal](https://discord.com/developers/applications).
-   Invite it with the `bot` and `applications.commands` scopes.
+   Invite it with the `bot` and `applications.commands` scopes. Under *Bot*, switch on the **Server
+   Members Intent** (a privileged intent; the moderation module needs it for rejoining members).
 2. Create an empty database, e.g. `createdb closure`.
 3. Provide the settings as environment variables (a `.env` file in the working directory is read
    too; keep it out of version control):

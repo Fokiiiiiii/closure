@@ -34,7 +34,8 @@ closure は、小さく厳格な「核」を中心に作られたモデレーシ
 最近の stable な Rust と PostgreSQL 14 以降が必要です。
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリケーションと Bot を
-   作り、`bot` と `applications.commands` のスコープで招待します。
+   作り、`bot` と `applications.commands` のスコープで招待します。Bot の設定で **Server Members Intent**
+   （特権 Intent。モデレーションモジュールが再参加したメンバーに使います）を有効にします。
 2. 空のデータベースを作ります（例: `createdb closure`）。
 3. 設定を環境変数で渡します（作業ディレクトリの `.env` も読まれます。バージョン管理には入れないで
    ください）。

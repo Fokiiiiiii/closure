@@ -11,14 +11,16 @@ use closure_sdk::embed::{escape, truncate};
 use closure_sdk::modlog;
 use closure_sdk::{
     Args, Capability, Case, CaseError, CaseKind, Cases, Command, CommandArgs, CommandCx, Cooldown,
-    CoreError, Cx, DirectMessage, DiscordError, InteractionRef, InteractionReply, JobCx, Level,
-    Locale, ModuleBuilder, ModuleError, NewCase, PermissionSpec, Reason, ScheduleError, SdkModule,
-    Sent, UserError, UserId,
+    CoreError, Cx, DirectMessage, DiscordError, EventKind, InteractionRef, InteractionReply, JobCx,
+    Level, Locale, ModuleBuilder, ModuleError, NewCase, PermissionSpec, Reason, ScheduleError,
+    SdkModule, Sent, Subscription, UserError, UserId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use twilight_model::gateway::Intents;
 
 mod history;
+mod rejoin;
 mod restrict;
 mod templates;
 mod undo;
@@ -1081,6 +1083,10 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .capability(Capability::ManageRoles)
         .capability(Capability::MuteMembers)
         .capability(Capability::Storage)
+        // A privileged intent: it must be switched on for the bot in the Discord developer portal,
+        // or Discord refuses the gateway connection altogether.
+        .intents(Intents::GUILD_MEMBERS)
+        .on(Subscription::new(EventKind::MemberJoined), rejoin::on_join)
         .permission(PermissionSpec::new(
             "moderation.warn",
             Level::MODERATOR,
