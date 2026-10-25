@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use closure_core::action::InteractionReply;
 use closure_core::capability::{Capability, CapabilitySet};
+use closure_core::cases::{CaseBackend, Cases, MemoryCases};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
 use closure_core::event::{Event, GuildId, InteractionRef};
@@ -206,6 +207,7 @@ struct Shared {
     translator: Arc<dyn Translator>,
     storage: Arc<dyn StorageBackend>,
     scheduler: Arc<dyn SchedulerBackend>,
+    cases: Arc<dyn CaseBackend>,
     config: DispatcherConfig,
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
     /// The guild of every live interaction, so a module cannot answer another guild's.
@@ -310,12 +312,15 @@ impl Dispatcher {
             config,
             storage,
             Arc::new(MemoryScheduler::default()),
+            Arc::new(MemoryCases::default()),
         )
         .await
     }
 
-    /// [`Self::start_with_storage`] with the place scheduled jobs are kept as well. Whoever
-    /// keeps them runs them with [`Self::run_job`].
+    /// [`Self::start_with_storage`] with the place scheduled jobs and moderation cases are kept
+    /// as well. Whoever keeps the jobs runs them with [`Self::run_job`].
+    // Each service is its own argument: one struct for them would change every caller.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_with_services(
         registry: Arc<ModuleRegistry>,
         settings: Arc<dyn SettingsProvider>,
@@ -324,6 +329,7 @@ impl Dispatcher {
         config: DispatcherConfig,
         storage: Arc<dyn StorageBackend>,
         scheduler: Arc<dyn SchedulerBackend>,
+        cases: Arc<dyn CaseBackend>,
     ) -> Result<Self, DispatchError> {
         for module in registry.iter() {
             module
@@ -342,6 +348,7 @@ impl Dispatcher {
             translator,
             storage,
             scheduler,
+            cases,
             config,
             guilds: DashMap::new(),
             interactions: Arc::new(InteractionGuilds::with_limits(config.interaction_limits)),
@@ -868,6 +875,12 @@ fn context_for(
     ))
     .with_store(Store::new(
         Arc::clone(&shared.storage),
+        &settings.granted,
+        id.clone(),
+        guild,
+    ))
+    .with_cases(Cases::new(
+        Arc::clone(&shared.cases),
         &settings.granted,
         id.clone(),
         guild,

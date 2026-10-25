@@ -224,6 +224,13 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.ctx.scheduler()
     }
 
+    /// The moderation cases of this guild, numbered here and shared with the other modules. The
+    /// module needs the capability `cases` (`ModuleBuilder::capability(Capability::Cases)`).
+    #[must_use]
+    pub fn cases(&self) -> &closure_core::cases::Cases {
+        self.ctx.cases()
+    }
+
     /// A message of the module's catalog in the language of the answer.
     #[must_use]
     pub fn t(&self, key: &str, args: &Args) -> String {
@@ -531,6 +538,12 @@ impl JobCx {
     #[must_use]
     pub fn scheduler(&self) -> &closure_core::schedule::Scheduler {
         self.ctx.scheduler()
+    }
+
+    /// The moderation cases of this guild.
+    #[must_use]
+    pub fn cases(&self) -> &closure_core::cases::Cases {
+        self.ctx.cases()
     }
 
     /// The module's configuration in this guild, as its own type.

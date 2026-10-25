@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use closure_api::{ApiState, GatewayStatus, Readiness, ServerLimits, router};
 use closure_config::{ConfigCompiler, SettingsStore, parse_overrides};
+use closure_core::cases::CaseBackend;
 use closure_core::locale::Translator;
 use closure_core::module::Module;
 use closure_core::registry::ModuleRegistry;
@@ -247,6 +248,7 @@ async fn serve(
                 DispatcherConfig::default(),
                 Arc::new(db.clone()) as Arc<dyn StorageBackend>,
                 Arc::new(db.clone()) as Arc<dyn SchedulerBackend>,
+                Arc::new(db.clone()) as Arc<dyn CaseBackend>,
             )
             .await
             .context("a module failed to load")?,

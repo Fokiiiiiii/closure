@@ -6,6 +6,7 @@
 //! parameterised and exercised against a real database in the tests.
 
 mod audit;
+mod cases;
 mod config;
 mod error;
 mod guilds;
@@ -140,6 +141,8 @@ mod tests {
             tables,
             [
                 "audit_events",
+                "cases",
+                "guild_case_numbers",
                 "guild_config",
                 "guild_config_history",
                 "guilds",

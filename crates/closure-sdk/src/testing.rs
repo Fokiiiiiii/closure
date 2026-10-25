@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use closure_core::action::{Action, InteractionReply, InteractionResponse};
+use closure_core::cases::{CaseBackend, Cases, MemoryCases};
 use closure_core::client::ApiClient;
 use closure_core::error::ModuleError;
 use closure_core::event::{
@@ -264,6 +265,7 @@ pub struct Harness {
     config: Mutex<serde_json::Value>,
     storage: Arc<MemoryStorage>,
     scheduler: Arc<MemoryScheduler>,
+    cases: Arc<MemoryCases>,
     elapsed: Arc<Mutex<Duration>>,
     next: AtomicU64,
 }
@@ -307,6 +309,7 @@ impl Harness {
             }
         };
         let storage = Arc::new(MemoryStorage::with_clock(unix_now.clone()));
+        let cases = Arc::new(MemoryCases::with_clock(unix_now.clone()));
         let scheduler = Arc::new(MemoryScheduler::with_clock(unix_now));
         let registry = ModuleRegistry::new(vec![Arc::clone(&module) as Arc<dyn Module>])?;
         let mut catalogs = TranslatorBuilder::new()?;
@@ -327,6 +330,7 @@ impl Harness {
             config: Mutex::new(manifest.default_config.clone()),
             storage,
             scheduler,
+            cases,
             elapsed,
             next: AtomicU64::new(1),
             module,
@@ -359,6 +363,18 @@ impl Harness {
         let manifest = self.module.manifest();
         Store::new(
             Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
+            &manifest.capabilities,
+            manifest.id.clone(),
+            Id::new(GUILD),
+        )
+    }
+
+    /// The module's moderation cases in the guild of the invocations.
+    #[must_use]
+    pub fn cases(&self) -> Cases {
+        let manifest = self.module.manifest();
+        Cases::new(
+            Arc::clone(&self.cases) as Arc<dyn CaseBackend>,
             &manifest.capabilities,
             manifest.id.clone(),
             Id::new(GUILD),
@@ -459,6 +475,12 @@ impl Harness {
         ))
         .with_store(Store::new(
             Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
+            &manifest.capabilities,
+            manifest.id.clone(),
+            guild,
+        ))
+        .with_cases(Cases::new(
+            Arc::clone(&self.cases) as Arc<dyn CaseBackend>,
             &manifest.capabilities,
             manifest.id.clone(),
             guild,

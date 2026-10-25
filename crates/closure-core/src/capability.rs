@@ -28,10 +28,12 @@ pub enum Capability {
     Storage,
     /// Have work done later, once or again and again (see [`crate::schedule`]).
     Schedule,
+    /// Record moderation cases, numbered per guild and shared by modules (see [`crate::cases`]).
+    Cases,
 }
 
 impl Capability {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::SendMessages,
         Self::AddReactions,
         Self::ManageMessages,
@@ -48,6 +50,7 @@ impl Capability {
         Self::RespondToInteractions,
         Self::Storage,
         Self::Schedule,
+        Self::Cases,
     ];
 
     #[must_use]
@@ -69,6 +72,7 @@ impl Capability {
             Self::RespondToInteractions => "respond_to_interactions",
             Self::Storage => "storage",
             Self::Schedule => "schedule",
+            Self::Cases => "cases",
         }
     }
 }

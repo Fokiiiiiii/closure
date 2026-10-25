@@ -8,6 +8,7 @@
 
 pub mod action;
 pub mod capability;
+pub mod cases;
 pub mod client;
 pub mod error;
 pub mod event;

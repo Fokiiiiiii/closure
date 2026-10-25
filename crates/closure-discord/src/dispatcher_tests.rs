@@ -56,6 +56,8 @@ enum Behavior {
     RespondToClick,
     /// Schedules another job from the job it got.
     ScheduleAnother,
+    /// Records a case for the message it got and logs the guild and the case's number.
+    RecordCase,
 }
 
 struct Probe {
@@ -233,6 +235,26 @@ impl Probe {
             .map_err(|error| ModuleError::other(error.to_string()))
     }
 
+    /// Records a case against the author of the message and logs its number.
+    async fn record_case(&self, ctx: &EventContext) -> Result<(), ModuleError> {
+        let case = ctx
+            .cases()
+            .create(closure_core::cases::NewCase {
+                kind: closure_core::cases::CaseKind::new("warn").unwrap(),
+                target: Id::new(9),
+                moderator: Id::new(8),
+                reason: None,
+                expires_at: None,
+            })
+            .await
+            .map_err(|error| ModuleError::other(error.to_string()))?;
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("case:{}:{}", ctx.guild_id, case.number));
+        Ok(())
+    }
+
     /// Counts the events in the module's own storage and logs the total.
     async fn count_events(&self, ctx: &EventContext) -> Result<(), ModuleError> {
         let total = ctx
@@ -332,6 +354,7 @@ impl Module for Probe {
             Behavior::CountEvents => self.count_events(ctx).await,
             Behavior::RespondToClick => self.respond_to_click(ctx, event).await,
             Behavior::ScheduleAnother => self.schedule_another(ctx).await,
+            Behavior::RecordCase => self.record_case(ctx).await,
             Behavior::ReadPolicy => {
                 self.read_policy(ctx);
                 Ok(())
@@ -1348,6 +1371,47 @@ async fn modules_keep_data_through_the_dispatcher_and_only_with_the_capability()
     assert_eq!(without.log(), ["load", "msg:1", "msg:2"]);
 }
 
+#[tokio::test]
+async fn modules_record_cases_numbered_per_guild_and_only_with_the_capability() {
+    let recorder = Probe::new(
+        "recorder",
+        &[EventKind::MessageCreated],
+        &[Capability::Cases],
+    );
+    recorder.set(Behavior::RecordCase);
+    let without = messages_only("without");
+    without.set(Behavior::RecordCase);
+    let h = harness(
+        &[(&recorder, true), (&without, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.dispatch(message(3, 2));
+    h.dispatcher.dispatch(message_in(4, 3, 3));
+    h.dispatcher.flush().await;
+
+    // Each guild numbers its own cases from 1; the order across guilds is not fixed.
+    let log = recorder.log();
+    let cases_of = |guild: u64| -> Vec<String> {
+        log.iter()
+            .filter(|line| line.starts_with(&format!("case:{guild}:")))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(
+        cases_of(GUILD),
+        [format!("case:{GUILD}:1"), format!("case:{GUILD}:2")]
+    );
+    assert_eq!(cases_of(4), ["case:4:1"]);
+    // Not granted `cases`: the call fails and nothing is logged.
+    let without_log = without.log();
+    assert_eq!(without_log.len(), 4);
+    assert!(without_log.iter().all(|line| !line.starts_with("case:")));
+}
+
 fn shared_log() -> Arc<Mutex<Vec<String>>> {
     Arc::new(Mutex::new(Vec::new()))
 }
@@ -1930,6 +1994,7 @@ async fn with_scheduler(probes: &[(&Arc<Probe>, bool)]) -> (Dispatcher, Arc<Memo
         DispatcherConfig::default(),
         Arc::new(closure_core::storage::MemoryStorage::default()),
         Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
+        Arc::new(closure_core::cases::MemoryCases::default()),
     )
     .await
     .unwrap();

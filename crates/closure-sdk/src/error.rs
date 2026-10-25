@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use closure_core::cases::CaseError;
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::locale::{ArgValue, Args};
 use closure_core::permission::Decision;
@@ -88,6 +89,12 @@ impl From<DiscordError> for UserError {
 
 impl From<StorageError> for UserError {
     fn from(error: StorageError) -> Self {
+        Self::Module(ModuleError::other(error.to_string()))
+    }
+}
+
+impl From<CaseError> for UserError {
+    fn from(error: CaseError) -> Self {
         Self::Module(ModuleError::other(error.to_string()))
     }
 }

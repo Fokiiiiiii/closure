@@ -9,6 +9,7 @@ use twilight_model::gateway::Intents;
 use twilight_model::guild::Permissions;
 
 use crate::capability::{Capability, CapabilitySet};
+use crate::cases::Cases;
 use crate::client::ApiClient;
 use crate::error::{CoreError, ModuleError};
 use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId};
@@ -472,6 +473,7 @@ pub struct EventContext {
     permissions: Arc<GuildPermissions>,
     store: Store,
     scheduler: Scheduler,
+    cases: Cases,
     config: Arc<serde_json::Value>,
     translator: Arc<dyn Translator>,
 }
@@ -500,6 +502,7 @@ impl EventContext {
         Self {
             store: Store::unavailable(module.clone(), guild_id),
             scheduler: Scheduler::unavailable(module.clone(), guild_id),
+            cases: Cases::unavailable(module.clone(), guild_id),
             module,
             guild_id,
             api,
@@ -535,6 +538,19 @@ impl EventContext {
     #[must_use]
     pub fn scheduler(&self) -> &Scheduler {
         &self.scheduler
+    }
+
+    /// Gives the context the module's cases in this guild; without it every call fails.
+    #[must_use]
+    pub fn with_cases(mut self, cases: Cases) -> Self {
+        self.cases = cases;
+        self
+    }
+
+    /// The moderation cases of this guild, numbered here and shared by the modules.
+    #[must_use]
+    pub fn cases(&self) -> &Cases {
+        &self.cases
     }
 
     /// Gives the context the guild's permissions; without them nobody but the owner has any key.

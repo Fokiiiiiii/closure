@@ -79,7 +79,7 @@ way and guarded by the capability `schedule`: the host keeps the jobs in Postgre
 a job of a stopped bot is handed out again) and gives each to the dispatcher as an
 `Event::Scheduled`, which goes to the module that scheduled it and to nobody else, through the same
 lane, timeout, panic isolation and breaker as any event. Delivery is at least once; a failure
-is retried after a growing pause, a module that is switched off or a full queue only postpones. Its `ApiClient` is bound to
+is retried after a growing pause, a module that is switched off or a full queue only postpones. Moderation cases go through a `Cases` handle bound the same way and guarded by the capability `cases`: the host numbers each guild's cases in PostgreSQL, and every module that holds the capability shares that sequence. A case is read and revoked (once) only within its own guild. Its `ApiClient` is bound to
 the guild of the event: an action that targets another guild is refused, whatever capabilities
 the module holds. An action that names a guild is compared directly. One that identifies only a
 channel or a message (send, edit, delete, react, channel edits and permission overwrites) is
