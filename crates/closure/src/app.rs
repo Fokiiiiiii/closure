@@ -175,6 +175,28 @@ async fn start_api(
     )))
 }
 
+/// How often expired entries and old minute counts of modules are removed.
+const STORAGE_PURGE_EVERY: Duration = Duration::from_secs(3600);
+
+/// Removes what modules no longer need from the database, now and then, until `shutdown`.
+fn start_storage_upkeep(db: Db, shutdown: CancellationToken) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match db.purge_module_storage().await {
+                Ok((entries, minutes)) if entries + minutes > 0 => {
+                    tracing::info!(entries, minutes, "removed what modules no longer need");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not remove expired module data"),
+            }
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(STORAGE_PURGE_EVERY) => {}
+            }
+        }
+    })
+}
+
 /// What has been started and has to be stopped again, however the run ends.
 #[derive(Default)]
 struct Started {
@@ -204,12 +226,13 @@ async fn serve(
     let dispatcher = started
         .dispatcher
         .insert(
-            Dispatcher::start(
+            Dispatcher::start_with_storage(
                 Arc::clone(&core.registry),
                 Arc::clone(&core.store) as Arc<dyn SettingsProvider>,
                 api,
                 Arc::clone(&core.translator),
                 DispatcherConfig::default(),
+                Arc::new(db.clone()),
             )
             .await
             .context("a module failed to load")?,
@@ -294,6 +317,7 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("could not load guild configurations")?;
 
+    let upkeep_task = start_storage_upkeep(db.clone(), shutdown.clone());
     let mut started = Started::default();
     let outcome = serve(&args, &core, &db, metrics, &shutdown, &mut started).await;
     match &outcome {
@@ -320,6 +344,7 @@ pub async fn run(args: Args) -> Result<()> {
         stop_task(task, "HTTP API").await;
     }
     stop_task(sync_task, "configuration sync").await;
+    stop_task(upkeep_task, "storage upkeep").await;
     db.close().await;
     tracing::info!("stopped");
 

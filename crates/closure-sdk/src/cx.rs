@@ -81,6 +81,13 @@ impl CommandCx {
         self.ctx.reply_locale(&self.invocation)
     }
 
+    /// The module's own data in this guild: entries and counters. The module needs the
+    /// capability `storage` (`ModuleBuilder::capability(Capability::Storage)`).
+    #[must_use]
+    pub fn store(&self) -> &closure_core::storage::Store {
+        self.ctx.store()
+    }
+
     /// The module's configuration in this guild, as its own type.
     pub fn config<T: DeserializeOwned>(&self) -> Result<T, UserError> {
         Ok(self.ctx.parse_config()?)

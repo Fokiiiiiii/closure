@@ -49,6 +49,8 @@ enum Behavior {
     HoldThenReplay,
     /// Logs the guild policy the module was given.
     ReadPolicy,
+    /// Counts the events it sees in its own storage and logs the total.
+    CountEvents,
 }
 
 struct Probe {
@@ -137,6 +139,26 @@ impl Probe {
         }
     }
 
+    fn read_policy(&self, ctx: &EventContext) {
+        let policy = ctx.policy();
+        self.log.lock().unwrap().push(format!(
+            "policy:{:?}:{}",
+            policy.log_channel.map(Id::get),
+            policy.is_moderator(&[Id::new(5)])
+        ));
+    }
+
+    /// Counts the events in the module's own storage and logs the total.
+    async fn count_events(&self, ctx: &EventContext) -> Result<(), ModuleError> {
+        let total = ctx
+            .store()
+            .counter_add("seen", 1_u64, 1)
+            .await
+            .map_err(|error| ModuleError::other(error.to_string()))?;
+        self.log.lock().unwrap().push(format!("count:{total}"));
+        Ok(())
+    }
+
     fn log(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
     }
@@ -222,13 +244,9 @@ impl Module for Probe {
                 tokio::time::sleep(Duration::from_millis(message.id.get() % 3)).await;
                 Ok(())
             }
+            Behavior::CountEvents => self.count_events(ctx).await,
             Behavior::ReadPolicy => {
-                let policy = ctx.policy();
-                self.log.lock().unwrap().push(format!(
-                    "policy:{:?}:{}",
-                    policy.log_channel.map(Id::get),
-                    policy.is_moderator(&[Id::new(5)])
-                ));
+                self.read_policy(ctx);
                 Ok(())
             }
             Behavior::HoldThenReplay => {
@@ -1153,6 +1171,35 @@ async fn a_full_queue_is_one_line_of_log_however_many_events_it_drops() {
     assert_eq!(lines, 1, "{log}");
     gate.add_permits(10_000);
     h.dispatcher.flush().await;
+}
+
+#[tokio::test]
+async fn modules_keep_data_through_the_dispatcher_and_only_with_the_capability() {
+    let keeper = Probe::new(
+        "keeper",
+        &[EventKind::MessageCreated],
+        &[Capability::Storage],
+    );
+    keeper.set(Behavior::CountEvents);
+    let without = messages_only("without");
+    without.set(Behavior::CountEvents);
+    let h = harness(
+        &[(&keeper, true), (&without, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.dispatch(message(3, 2));
+    h.dispatcher.flush().await;
+
+    assert_eq!(
+        keeper.log(),
+        ["load", "msg:1", "count:1", "msg:2", "count:2"]
+    );
+    // Not granted `storage`: the call fails and nothing is logged.
+    assert_eq!(without.log(), ["load", "msg:1", "msg:2"]);
 }
 
 /// A module that only counts, for measuring the dispatcher itself.

@@ -24,10 +24,12 @@ pub enum Capability {
     ManageAutoMod,
     ReadAuditLog,
     RespondToInteractions,
+    /// Keep data of its own: entries and counters (see [`crate::storage`]).
+    Storage,
 }
 
 impl Capability {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::SendMessages,
         Self::AddReactions,
         Self::ManageMessages,
@@ -42,6 +44,7 @@ impl Capability {
         Self::ManageAutoMod,
         Self::ReadAuditLog,
         Self::RespondToInteractions,
+        Self::Storage,
     ];
 
     #[must_use]
@@ -61,6 +64,7 @@ impl Capability {
             Self::ManageAutoMod => "manage_auto_mod",
             Self::ReadAuditLog => "read_audit_log",
             Self::RespondToInteractions => "respond_to_interactions",
+            Self::Storage => "storage",
         }
     }
 }

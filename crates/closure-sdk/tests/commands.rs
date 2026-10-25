@@ -6,7 +6,7 @@ use std::time::Duration;
 use closure_core::event::CommandOptionValue;
 use closure_sdk::testing::{Harness, Invocation, Reply, ReplyKind};
 use closure_sdk::{
-    Args, Command, CommandArgs, Cooldown, Level, Locale, ModuleBuilder, PermissionKey,
+    Args, Capability, Command, CommandArgs, Cooldown, Level, Locale, ModuleBuilder, PermissionKey,
     PermissionSpec, UserError, UserId,
 };
 use twilight_model::id::Id;
@@ -289,4 +289,80 @@ fn a_declaration_that_cannot_work_is_refused_when_the_module_is_built() {
         .command(Command::<()>::new("a", "d").handler(|_cx, ()| async { Ok(()) }))
         .command(Command::<()>::new("a", "d").handler(|_cx, ()| async { Ok(()) }));
     assert!(twice.build().is_err());
+}
+
+/// A module that keeps a count of warnings per user, as the SDK is meant to be used.
+fn counting_module() -> ModuleBuilder {
+    ModuleBuilder::new("count", "Counting", "0.1.0")
+        .unwrap()
+        .capability(Capability::Storage)
+        .command(
+            Command::<Warn>::new("count", "Count a warning").handler(|cx, args| async move {
+                let total = cx.store().counter_add("warns", args.user, 1).await?;
+                let recent = cx
+                    .store()
+                    .counter_recent("warns", args.user, Duration::from_secs(600))
+                    .await?;
+                cx.store().set("last", &args.user.get()).await?;
+                cx.reply(format!("total {total}, recent {recent}")).await
+            }),
+        )
+        .command(
+            Command::<()>::new("last", "Who was counted last").handler(|cx, ()| async move {
+                let last: Option<u64> = cx.store().get("last").await?;
+                cx.reply(format!("{last:?}")).await
+            }),
+        )
+}
+
+#[tokio::test]
+async fn a_handler_keeps_counters_and_entries_that_follow_the_clock_of_the_test() {
+    let harness = Harness::new(counting_module()).unwrap();
+    let count =
+        |user| Invocation::new("count").option("user", CommandOptionValue::User(Id::new(user)));
+
+    assert_eq!(
+        texts(&harness.invoke(count(7)).await.unwrap()),
+        ["total 1, recent 1"]
+    );
+    harness.advance(Duration::from_secs(300));
+    assert_eq!(
+        texts(&harness.invoke(count(7)).await.unwrap()),
+        ["total 2, recent 2"]
+    );
+    // After the window the warnings still count in total, no longer as recent.
+    harness.advance(Duration::from_secs(900));
+    assert_eq!(
+        texts(&harness.invoke(count(7)).await.unwrap()),
+        ["total 3, recent 1"]
+    );
+    assert_eq!(
+        texts(&harness.invoke(count(8)).await.unwrap()),
+        ["total 1, recent 1"]
+    );
+    assert_eq!(
+        texts(&harness.invoke(Invocation::new("last")).await.unwrap()),
+        ["Some(8)"]
+    );
+    // The test can look at the same data.
+    assert_eq!(
+        harness.store().counter_total("warns", 7_u64).await.unwrap(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn a_module_without_the_capability_cannot_keep_data() {
+    // The same module, but it did not declare `storage`.
+    let module = ModuleBuilder::new("count", "Counting", "0.1.0")
+        .unwrap()
+        .command(
+            Command::<()>::new("last", "Who was counted last").handler(|cx, ()| async move {
+                cx.store().set("k", &1).await?;
+                Ok(())
+            }),
+        );
+    let harness = Harness::new(module).unwrap();
+    let error = harness.invoke(Invocation::new("last")).await.unwrap_err();
+    assert!(error.to_string().contains("storage"), "{error}");
 }

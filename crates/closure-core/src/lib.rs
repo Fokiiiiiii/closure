@@ -17,6 +17,7 @@ pub mod module;
 pub mod permission;
 pub mod registry;
 pub mod settings;
+pub mod storage;
 pub mod testing;
 pub mod throttle;
 

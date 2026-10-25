@@ -50,6 +50,7 @@ pub use closure_core::event::{ChannelId, CommandInvocation, GuildId, RoleId, Use
 pub use closure_core::locale::{Args, Locale};
 pub use closure_core::module::{ChoiceValue, OptionChoice, OptionKind, OptionSpec};
 pub use closure_core::permission::{Level, PermissionKey, PermissionSpec};
+pub use closure_core::storage::{Entry, Expect, StorageError, Store};
 pub use closure_sdk_macros::CommandArgs;
 pub use cooldown::{Cooldown, CooldownScope};
 pub use cx::CommandCx;

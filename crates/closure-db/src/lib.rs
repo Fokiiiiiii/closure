@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod guilds;
 mod ids;
+mod storage;
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -140,7 +141,9 @@ mod tests {
                 "audit_events",
                 "guild_config",
                 "guild_config_history",
-                "guilds"
+                "guilds",
+                "module_counters",
+                "module_kv"
             ]
         );
     }

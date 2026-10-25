@@ -24,6 +24,7 @@ use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
 use closure_core::settings::{ModuleSettings, SettingsProvider};
+use closure_core::storage::{MemoryStorage, StorageBackend, Store};
 use closure_core::throttle::LogGate;
 use closure_i18n::{CORE_NAMESPACE, user_message};
 use dashmap::DashMap;
@@ -182,6 +183,7 @@ struct Shared {
     settings: Arc<dyn SettingsProvider>,
     api: Arc<dyn DiscordApi>,
     translator: Arc<dyn Translator>,
+    storage: Arc<dyn StorageBackend>,
     config: DispatcherConfig,
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
     /// The guild of every live interaction, so a module cannot answer another guild's.
@@ -254,6 +256,27 @@ impl Dispatcher {
         translator: Arc<dyn Translator>,
         config: DispatcherConfig,
     ) -> Result<Self, DispatchError> {
+        Self::start_with_storage(
+            registry,
+            settings,
+            api,
+            translator,
+            config,
+            Arc::new(MemoryStorage::default()),
+        )
+        .await
+    }
+
+    /// [`Self::start`] with the place modules keep their data (see [`closure_core::storage`]).
+    /// Without it, data lives in memory and is gone when the bot stops.
+    pub async fn start_with_storage(
+        registry: Arc<ModuleRegistry>,
+        settings: Arc<dyn SettingsProvider>,
+        api: Arc<dyn DiscordApi>,
+        translator: Arc<dyn Translator>,
+        config: DispatcherConfig,
+        storage: Arc<dyn StorageBackend>,
+    ) -> Result<Self, DispatchError> {
         for module in registry.iter() {
             module
                 .on_load()
@@ -269,6 +292,7 @@ impl Dispatcher {
             settings,
             api,
             translator,
+            storage,
             config,
             guilds: DashMap::new(),
             interactions: Arc::new(InteractionGuilds::with_limits(config.interaction_limits)),
@@ -697,6 +721,12 @@ fn context_for(
         Arc::clone(&shared.translator),
     )
     .with_permissions(shared.settings.permissions(guild))
+    .with_store(Store::new(
+        Arc::clone(&shared.storage),
+        &settings.granted,
+        id.clone(),
+        guild,
+    ))
 }
 
 /// Updates the breaker and logs. An error from Discord (forbidden, not found, ...) means the

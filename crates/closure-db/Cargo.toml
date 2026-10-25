@@ -9,6 +9,7 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 closure-config.workspace = true
 closure-core.workspace = true
 futures-util.workspace = true

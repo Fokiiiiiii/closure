@@ -11,7 +11,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use closure_core::action::{Action, InteractionResponse};
 use closure_core::client::ApiClient;
@@ -26,6 +26,7 @@ use closure_core::module::{EventContext, Module};
 use closure_core::permission::GuildPermissions;
 use closure_core::registry::ModuleRegistry;
 use closure_core::settings::GuildPolicy;
+use closure_core::storage::{MemoryStorage, StorageBackend, Store};
 use closure_core::testing::MockApi;
 use closure_i18n::TranslatorBuilder;
 use twilight_model::guild::Permissions;
@@ -146,6 +147,7 @@ pub struct Harness {
     interactions: Arc<InteractionGuilds>,
     permissions: Mutex<GuildPermissions>,
     config: Mutex<serde_json::Value>,
+    storage: Arc<MemoryStorage>,
     elapsed: Arc<Mutex<Duration>>,
     next: AtomicU64,
 }
@@ -176,6 +178,16 @@ impl Harness {
                 })
                 .build()?,
         );
+        // What the module keeps lives in memory, and time passes for it as for the cooldowns.
+        let unix_start = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let storage_elapsed = Arc::clone(&elapsed);
+        let storage = Arc::new(MemoryStorage::with_clock(move || {
+            let passed = storage_elapsed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_secs();
+            i64::try_from(unix_start + passed).unwrap_or(i64::MAX)
+        }));
         let registry = ModuleRegistry::new(vec![Arc::clone(&module) as Arc<dyn Module>])?;
         let mut catalogs = TranslatorBuilder::new()?;
         catalogs.add_registry(&registry)?;
@@ -193,6 +205,7 @@ impl Harness {
             interactions: Arc::new(InteractionGuilds::default()),
             permissions: Mutex::new(permissions),
             config: Mutex::new(manifest.default_config.clone()),
+            storage,
             elapsed,
             next: AtomicU64::new(1),
             module,
@@ -217,6 +230,18 @@ impl Harness {
     /// Lets time pass for the cooldowns.
     pub fn advance(&self, by: Duration) {
         *self.elapsed.lock().unwrap_or_else(PoisonError::into_inner) += by;
+    }
+
+    /// What the module keeps, as the module sees it in the guild of the invocations.
+    #[must_use]
+    pub fn store(&self) -> Store {
+        let manifest = self.module.manifest();
+        Store::new(
+            Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
+            &manifest.capabilities,
+            manifest.id.clone(),
+            Id::new(GUILD),
+        )
     }
 
     /// The pretend Discord, to look at what else the module did.
@@ -291,7 +316,13 @@ impl Harness {
             Arc::new(config),
             Arc::clone(&self.translator),
         )
-        .with_permissions(Arc::new(permissions));
+        .with_permissions(Arc::new(permissions))
+        .with_store(Store::new(
+            Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
+            &manifest.capabilities,
+            manifest.id.clone(),
+            guild,
+        ));
 
         let before = self.api.actions().len();
         self.module.on_event(&ctx, &Event::Command(event)).await?;

@@ -15,6 +15,7 @@ use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId};
 use crate::locale::{Args, Catalog, Locale, Translator};
 use crate::permission::{GuildPermissions, PermissionSpec};
 use crate::settings::GuildPolicy;
+use crate::storage::Store;
 
 /// Stable identifier of a module, used in configuration keys, metrics and translation
 /// namespaces. Restricted to `[a-z0-9_-]`, starting with a letter, at most 32 characters.
@@ -423,6 +424,7 @@ pub struct EventContext {
     pub locale: Locale,
     policy: Arc<GuildPolicy>,
     permissions: Arc<GuildPermissions>,
+    store: Store,
     config: Arc<serde_json::Value>,
     translator: Arc<dyn Translator>,
 }
@@ -449,6 +451,7 @@ impl EventContext {
         translator: Arc<dyn Translator>,
     ) -> Self {
         Self {
+            store: Store::unavailable(module.clone(), guild_id),
             module,
             guild_id,
             api,
@@ -458,6 +461,19 @@ impl EventContext {
             config,
             translator,
         }
+    }
+
+    /// Gives the context the module's storage in this guild; without it every call fails.
+    #[must_use]
+    pub fn with_store(mut self, store: Store) -> Self {
+        self.store = store;
+        self
+    }
+
+    /// The module's own data in this guild: entries and counters.
+    #[must_use]
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     /// Gives the context the guild's permissions; without them nobody but the owner has any key.

@@ -54,6 +54,24 @@ Options are typed fields: `String`, `i64`, `f64`, `bool`, `UserId`, `ChannelId`,
 `#[arg(name = "..", desc = "..", min = 1, max = 5, min_length = 2, max_length = 40,
 choices = ["a", "b"])]`. Required options must come before optional ones.
 
+Keeping data: declare `.capability(Capability::Storage)` and use `cx.store()` (or `ctx.store()` in
+a plain module):
+
+- entries: `set`, `set_for(key, value, ttl)` (gone after the time), `get::<T>`, `delete`,
+  `list(prefix, limit)`; `replace(key, value, Expect::Revision(r), ttl)` writes only if nobody
+  wrote since you read revision `r` (`entry(key)`), so two handlers do not lose each other's
+  update; keys are 1-128 printable ASCII characters, values at most 32 KiB of JSON, at most
+  10 000 entries per module and guild;
+- counters: `counter_add(name, subject, delta)` returns the total, `counter_total`,
+  `counter_recent(name, subject, window)` (what was added in the last minutes, up to 90 days;
+  a window is whole minutes, rounded up, the current minute included), `counter_reset`; at most
+  100 000 counters per module and guild.
+
+The data belongs to the module and the guild; nothing else can read it. Going over a limit is an
+error (`StorageError`), never silent loss. Data is kept while the guild's configuration is; expired
+entries and old minute counts are removed hourly. There is no separate cache: an entry with a time
+to live is one.
+
 Test with `closure_sdk::testing::Harness`: it runs a command with a given user, roles and
 language against a pretend Discord, lets you change the guild's permissions and move the clock for
 cooldowns, and returns what the module answered. See

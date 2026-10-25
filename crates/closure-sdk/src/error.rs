@@ -5,6 +5,7 @@ use std::time::Duration;
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::locale::{ArgValue, Args};
 use closure_core::permission::Decision;
+use closure_core::storage::StorageError;
 
 use crate::args::ArgError;
 
@@ -58,6 +59,12 @@ impl From<ModuleError> for UserError {
 impl From<DiscordError> for UserError {
     fn from(error: DiscordError) -> Self {
         Self::Module(ModuleError::Discord(error))
+    }
+}
+
+impl From<StorageError> for UserError {
+    fn from(error: StorageError) -> Self {
+        Self::Module(ModuleError::other(error.to_string()))
     }
 }
 

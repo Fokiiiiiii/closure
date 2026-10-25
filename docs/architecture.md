@@ -66,7 +66,10 @@ gateway shard ─► cache.update ─► convert ─► guild hooks ─► Dispa
    failures into `DiscordError`, retries *reads* on transient failures (never writes), and
    records metrics.
 
-A module never receives an HTTP client, a token or a database handle. Its `ApiClient` is bound to
+A module never receives an HTTP client, a token or a database handle. What it keeps (entries and
+counters, with quotas) goes through a `Store` bound to its id and the guild of the event and
+guarded by the capability `storage`: PostgreSQL holds the data, and the module cannot name another
+module's or another guild's. Its `ApiClient` is bound to
 the guild of the event: an action that targets another guild is refused, whatever capabilities
 the module holds. An action that names a guild is compared directly. One that identifies only a
 channel or a message (send, edit, delete, react, channel edits and permission overwrites) is
