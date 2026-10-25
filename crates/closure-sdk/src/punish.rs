@@ -145,6 +145,7 @@ pub struct Punisher<'a> {
     moderator: Moderator,
     settings: Settings,
     locale: Locale,
+    undoing: Option<i64>,
 }
 
 impl<'a> Punisher<'a> {
@@ -155,6 +156,7 @@ impl<'a> Punisher<'a> {
             moderator,
             settings,
             locale: ctx.locale,
+            undoing: None,
         }
     }
 
@@ -162,6 +164,15 @@ impl<'a> Punisher<'a> {
     #[must_use]
     pub fn reply_locale(mut self, locale: Locale) -> Self {
         self.locale = locale;
+        self
+    }
+
+    /// Makes the lift that follows undo the case `case` and no other: it is revoked, where a lift
+    /// otherwise revokes the newest case of its kind that stands. An undo button names the case it
+    /// undoes, so that an older one is not taken for the newest.
+    #[must_use]
+    pub fn undoing(mut self, case: i64) -> Self {
+        self.undoing = Some(case);
         self
     }
 
@@ -263,9 +274,10 @@ impl<'a> Punisher<'a> {
             }
         }
         let case = self.record("untimeout", target, reason, None).await?;
-        self.revoke_latest(
+        self.revoke_lifted(
             target,
             "timeout",
+            case.number,
             format!("removed by case #{}", case.number),
         )
         .await;
@@ -361,8 +373,13 @@ impl<'a> Punisher<'a> {
         let case = self.record("unban", target, reason, None).await?;
         // Best effort: the member is unbanned already.
         let _ = self.ctx.scheduler().cancel(&unban_key(target)).await;
-        self.revoke_latest(target, "ban", format!("unbanned by case #{}", case.number))
-            .await;
+        self.revoke_lifted(
+            target,
+            "ban",
+            case.number,
+            format!("unbanned by case #{}", case.number),
+        )
+        .await;
         Ok(case)
     }
 
@@ -440,9 +457,10 @@ impl<'a> Punisher<'a> {
         // Best effort: the member is unmuted already.
         let _ = self.ctx.scheduler().cancel(&voice_key(target)).await;
         let case = self.record("vcunmute", target, reason, None).await?;
-        self.revoke_latest(
+        self.revoke_lifted(
             target,
             "vcmute",
+            case.number,
             format!("removed by case #{}", case.number),
         )
         .await;
@@ -585,6 +603,26 @@ impl<'a> Punisher<'a> {
             .await?;
         let _ = modlog::post(self.ctx, &case).await;
         Ok(case)
+    }
+
+    /// Revokes what the lift `lift` undoes: the case that `undoing` names, else the newest case of
+    /// `kind` that stands, with `reason`. The undo button has always written `removed by case #N`
+    /// for a named case, whatever its kind.
+    async fn revoke_lifted(&self, target: UserId, kind: &str, lift: i64, reason: String) {
+        match self.undoing {
+            Some(number) => {
+                let _ = self
+                    .ctx
+                    .cases()
+                    .revoke(
+                        number,
+                        self.moderator.id,
+                        Some(format!("removed by case #{lift}")),
+                    )
+                    .await;
+            }
+            None => self.revoke_latest(target, kind, reason).await,
+        }
     }
 
     /// Revokes the newest case of `kind` that still stands against `target`. Best effort: the

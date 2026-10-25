@@ -6,12 +6,12 @@
 //! the case still stands is what keeps an old button harmless.
 
 use closure_sdk::ui::{self, CustomId};
-use closure_sdk::{Args, Case, CaseError, ComponentCx, Cx, InteractionRef, UserError, UserId};
+use closure_sdk::{Args, CaseError, ComponentCx, Cx, InteractionRef, UserError, UserId};
 use twilight_model::channel::message::Component;
 use twilight_model::channel::message::component::ButtonStyle;
 
 use crate::templates::text_reply;
-use crate::{Config, audit_reason, mention, record, restrict, stands, unban_key};
+use crate::{Config, mention, punisher_for, stands};
 
 /// The route of the undo buttons.
 pub(crate) const ROUTE: &str = "undo";
@@ -118,10 +118,12 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
     let config: Config = cx.config()?;
     // Discord is called next, so the click is acknowledged first.
     cx.defer_update().await?;
+    let punisher = punisher_for(&cx, &config).undoing(number);
     let body = match kind {
         Kind::Timeout => {
-            let lifted = lift_timeout(&cx, &config, user, Some(undo_reason(&cx, number))).await?;
-            revoke_punishment(&cx, number, lifted.number).await;
+            let lifted = punisher
+                .lift_timeout(user, Some(undo_reason(&cx, number)))
+                .await?;
             cx.t(
                 "untimed-out",
                 &Args::new()
@@ -130,8 +132,7 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
             )
         }
         Kind::Ban => {
-            let lifted = lift_ban(&cx, user, Some(undo_reason(&cx, number))).await?;
-            revoke_punishment(&cx, number, lifted.number).await;
+            let lifted = punisher.unban(user, Some(undo_reason(&cx, number))).await?;
             cx.t(
                 "unbanned",
                 &Args::new()
@@ -140,9 +141,9 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
             )
         }
         Kind::Vcmute => {
-            let lifted =
-                lift_voice_mute(&cx, &config, user, Some(undo_reason(&cx, number))).await?;
-            revoke_punishment(&cx, number, lifted.number).await;
+            let lifted = punisher
+                .voice_unmute(user, Some(undo_reason(&cx, number)))
+                .await?;
             cx.t(
                 "voice-unmuted",
                 &Args::new()
@@ -182,54 +183,4 @@ fn undone_by<I: InteractionRef + 'static>(cx: &Cx<I>, body: &str) -> String {
         "{}\n{body}",
         cx.t("undo-by", &Args::new().with("user", mention(cx.user().id)))
     )
-}
-
-/// Revokes the punishment case `number`, once its un-case `lifted` is recorded. Best effort: the
-/// member is lifted already.
-async fn revoke_punishment<I: InteractionRef + 'static>(cx: &Cx<I>, number: i64, lifted: i64) {
-    let _ = cx
-        .cases()
-        .revoke(
-            number,
-            cx.user().id,
-            Some(format!("removed by case #{lifted}")),
-        )
-        .await;
-}
-
-/// Lifts the timeout of `user` and records the `untimeout` case, as `/untimeout` does.
-pub(crate) async fn lift_timeout<I: InteractionRef + 'static>(
-    cx: &Cx<I>,
-    config: &Config,
-    user: UserId,
-    reason: Option<String>,
-) -> Result<Case, UserError> {
-    restrict::lift_timeout(cx, config, user, reason.as_deref()).await?;
-    record(cx, "untimeout", user, reason, None).await
-}
-
-/// Lifts the ban of `user` and records the `unban` case, as `/unban` does.
-pub(crate) async fn lift_ban<I: InteractionRef + 'static>(
-    cx: &Cx<I>,
-    user: UserId,
-    reason: Option<String>,
-) -> Result<Case, UserError> {
-    cx.api()
-        .unban(cx.guild_id(), user, audit_reason(cx, reason.as_deref()))
-        .await?;
-    let case = record(cx, "unban", user, reason, None).await?;
-    // Best effort: the member is unbanned already.
-    let _ = cx.scheduler().cancel(&unban_key(user)).await;
-    Ok(case)
-}
-
-/// Lifts the voice mute of `user` and records the `vcunmute` case, as `/vcunmute` does.
-pub(crate) async fn lift_voice_mute<I: InteractionRef + 'static>(
-    cx: &Cx<I>,
-    config: &Config,
-    user: UserId,
-    reason: Option<String>,
-) -> Result<Case, UserError> {
-    restrict::unmute_in_voice(cx, config, user, reason.as_deref()).await?;
-    record(cx, "vcunmute", user, reason, None).await
 }

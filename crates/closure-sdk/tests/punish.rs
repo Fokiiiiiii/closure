@@ -103,6 +103,15 @@ struct Mute {
     reason: Option<String>,
 }
 
+/// An undo: the member, and the case the lift undoes.
+#[derive(CommandArgs)]
+struct Undo {
+    /// Member
+    user: UserId,
+    /// The case that is undone
+    case: i64,
+}
+
 fn setup(cx: &CommandCx, moderator: Moderator) -> Result<Punisher<'_>, UserError> {
     let setup: Setup = cx.config()?;
     Ok(Punisher::new(cx.ctx(), moderator, setup.settings()))
@@ -189,6 +198,24 @@ async fn voice_unmute(cx: CommandCx, args: Lift) -> Result<(), UserError> {
     answer_case(&cx, case).await
 }
 
+async fn undo_untimeout(cx: CommandCx, args: Undo) -> Result<(), UserError> {
+    let punisher = setup(&cx, Moderator::of(cx.user()))?.undoing(args.case);
+    let case = punisher.lift_timeout(args.user, None).await?;
+    answer_case(&cx, case).await
+}
+
+async fn undo_unban(cx: CommandCx, args: Undo) -> Result<(), UserError> {
+    let punisher = setup(&cx, Moderator::of(cx.user()))?.undoing(args.case);
+    let case = punisher.unban(args.user, None).await?;
+    answer_case(&cx, case).await
+}
+
+async fn undo_voice_unmute(cx: CommandCx, args: Undo) -> Result<(), UserError> {
+    let punisher = setup(&cx, Moderator::of(cx.user()))?.undoing(args.case);
+    let case = punisher.voice_unmute(args.user, None).await?;
+    answer_case(&cx, case).await
+}
+
 fn module() -> ModuleBuilder {
     let builder = ModuleBuilder::new("punisher", "Punisher", "0.1.0")
         .unwrap()
@@ -213,7 +240,18 @@ fn module() -> ModuleBuilder {
         .command(Command::<Lift>::new("unban", "Lift a ban").handler(unban))
         .command(Command::<Lift>::new("warn", "Warn").handler(warn))
         .command(Command::<Mute>::new("vcmute", "Voice mute").handler(voice_mute))
-        .command(Command::<Lift>::new("vcunmute", "Lift a voice mute").handler(voice_unmute));
+        .command(Command::<Lift>::new("vcunmute", "Lift a voice mute").handler(voice_unmute))
+        .command(
+            Command::<Undo>::new("undo_untimeout", "Lift a timeout, undoing a case")
+                .handler(undo_untimeout),
+        )
+        .command(
+            Command::<Undo>::new("undo_unban", "Lift a ban, undoing a case").handler(undo_unban),
+        )
+        .command(
+            Command::<Undo>::new("undo_vcunmute", "Lift a voice mute, undoing a case")
+                .handler(undo_voice_unmute),
+        );
     punish::jobs(builder)
 }
 
@@ -1331,5 +1369,172 @@ fn the_moderator_of_an_interaction_is_its_user() {
             id: Id::new(MEMBER),
             name: "mod".to_owned(),
         }
+    );
+}
+
+// ---- undoing: a lift revokes the case it names ----
+
+/// An undo command for `user` that names `case`.
+fn undo_of(name: &str, user: u64, case: i64) -> Invocation {
+    target(name, user).option("case", CommandOptionValue::Integer(case))
+}
+
+fn revoked_reason(case: &Case) -> Option<String> {
+    case.revoked
+        .as_ref()
+        .and_then(|revoked| revoked.reason.clone())
+}
+
+#[tokio::test]
+async fn undoing_a_timeout_revokes_only_the_case_it_names() {
+    let harness = harness();
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+
+    let replies = harness
+        .invoke(undo_of("undo_untimeout", MEMBER, 1))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("case #3"), "{replies:?}");
+    assert_eq!(sequence(&harness).last(), Some(&"untimeout"));
+
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(
+        revoked_reason(&first).as_deref(),
+        Some("removed by case #3")
+    );
+    let second = harness.cases().get(2).await.unwrap().unwrap();
+    assert!(second.revoked.is_none(), "{second:?}");
+}
+
+#[tokio::test]
+async fn without_undoing_a_lift_revokes_the_newest_timeout_that_stands() {
+    let harness = harness();
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    harness.invoke(target("untimeout", MEMBER)).await.unwrap();
+
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert!(first.revoked.is_none(), "{first:?}");
+    let second = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(
+        revoked_reason(&second).as_deref(),
+        Some("removed by case #3")
+    );
+}
+
+#[tokio::test]
+async fn undoing_an_unban_revokes_only_the_ban_it_names() {
+    let harness = harness();
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), Some("1d"), None))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
+
+    harness
+        .invoke(undo_of("undo_unban", MEMBER, 1))
+        .await
+        .unwrap();
+    assert_eq!(sequence(&harness).last(), Some(&"unban"));
+
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(
+        revoked_reason(&first).as_deref(),
+        Some("removed by case #3")
+    );
+    let second = harness.cases().get(2).await.unwrap().unwrap();
+    assert!(second.revoked.is_none(), "{second:?}");
+}
+
+#[tokio::test]
+async fn without_undoing_an_unban_revokes_the_newest_ban_that_stands() {
+    let harness = harness();
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), Some("1d"), None))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
+    harness.invoke(target("unban", MEMBER)).await.unwrap();
+
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert!(first.revoked.is_none(), "{first:?}");
+    let second = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(
+        revoked_reason(&second).as_deref(),
+        Some("unbanned by case #3")
+    );
+}
+
+#[tokio::test]
+async fn undoing_a_voice_unmute_revokes_only_the_mute_it_names() {
+    let harness = harness();
+    harness
+        .invoke(mute_of(MEMBER, Some("1h"), Some("noisy")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(mute_of(MEMBER, Some("1h"), Some("noisy")))
+        .await
+        .unwrap();
+
+    harness
+        .invoke(undo_of("undo_vcunmute", MEMBER, 1))
+        .await
+        .unwrap();
+    assert_eq!(sequence(&harness).last(), Some(&"vcunmute"));
+
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(
+        revoked_reason(&first).as_deref(),
+        Some("removed by case #3")
+    );
+    let second = harness.cases().get(2).await.unwrap().unwrap();
+    assert!(second.revoked.is_none(), "{second:?}");
+}
+
+#[tokio::test]
+async fn without_undoing_a_voice_unmute_revokes_the_newest_mute_that_stands() {
+    let harness = harness();
+    harness
+        .invoke(mute_of(MEMBER, Some("1h"), Some("noisy")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(mute_of(MEMBER, Some("1h"), Some("noisy")))
+        .await
+        .unwrap();
+    harness.invoke(target("vcunmute", MEMBER)).await.unwrap();
+
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert!(first.revoked.is_none(), "{first:?}");
+    let second = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(
+        revoked_reason(&second).as_deref(),
+        Some("removed by case #3")
     );
 }

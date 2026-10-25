@@ -181,6 +181,41 @@ language against a pretend Discord, lets you change the guild's permissions and 
 cooldowns and jobs, and returns what the module answered. See
 [`crates/closure-sdk/tests/commands.rs`](../crates/closure-sdk/tests/commands.rs).
 
+### Punishing from a module
+
+`closure_sdk::punish::Punisher` does what the `moderation` module does when a moderator punishes: the
+Discord action, the case, the log post, the direct message to the member, and the timer that ends a
+timed punishment. The caller checks what its own users may do (`cx.require`, `cx.check_target`) and
+reads its settings into a `Settings`:
+
+- `dm`: whether the member is messaged;
+- `timeout` and `voice`: a `punish::Method`, Discord's own feature or a role. With `Method::Role`,
+  `timeout_role` and `voice_role` hold the role's id.
+
+```rust
+let punisher = Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings)
+    .reply_locale(cx.locale());
+let done = punisher.ban(user, Some(Duration::from_secs(86_400)), 0, reason).await?;
+```
+
+`Moderator::bot(ctx, name)` names the bot for a module that acts without a person, such as automod.
+`reply_locale` sets the language of the notes that come back in `Done::notes` (read them with
+`note_text`). The direct message and the log use the server's language.
+
+The methods are `warn`, `timeout`, `lift_timeout`, `kick`, `ban`, `unban`, `voice_mute` and
+`voice_unmute`. Each records one case and returns it; a lift also revokes the newest case of its kind
+that still stands, or after `undoing(case)` the case it names. A punishment that could not do all of it (the direct message did not arrive, the
+timer could not be set) still goes through, and `notes` says so. Escalating on counts of warnings is
+the module's own decision.
+
+`punish::jobs(builder)` registers the handlers of the three timers (`unban`, `untimeout`, `vc_unmute`)
+under the names and payloads that scheduled rows already use. Call it once on the builder of a module
+that punishes with timers, and do not register those names again.
+
+Declare the capabilities of what the module carries out: `Cases`, `SendMessages` (the log),
+`SendDirectMessages`, `KickMembers`, `BanMembers`, `TimeoutMembers`, `ManageRoles`, `MuteMembers` and
+`ReadGuild`. `punish::jobs` adds `Schedule`.
+
 ### Replies
 
 A reply is one embed whose description is the text. `reply` and `reply_private` use the `Info`

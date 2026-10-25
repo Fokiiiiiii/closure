@@ -9,13 +9,13 @@ use std::time::Duration;
 use closure_sdk::duration::{TimeStyle, parse as parse_duration, timestamp};
 use closure_sdk::embed::{escape, truncate};
 use closure_sdk::modlog;
+use closure_sdk::punish::{self, Done, Method, Moderator, Punisher, Settings};
 use closure_sdk::{
     Args, Capability, Case, CaseError, CaseKind, Cases, Command, CommandArgs, CommandCx, Cooldown,
-    CoreError, Cx, DirectMessage, DiscordError, EventKind, InteractionRef, InteractionReply, JobCx,
-    Level, Locale, ModuleBuilder, ModuleError, NewCase, PermissionSpec, Reason, ScheduleError,
-    SdkModule, Sent, Subscription, UserError, UserId,
+    CoreError, Cx, EventKind, InteractionRef, InteractionReply, Level, Locale, ModuleBuilder,
+    NewCase, PermissionSpec, SdkModule, Subscription, UserError, UserId,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use twilight_model::gateway::Intents;
 
@@ -63,11 +63,11 @@ pub(crate) struct Config {
     /// What a warning brings about once a member reaches a number of active warnings.
     escalation: Vec<Rule>,
     /// How a timeout is given: Discord's timeout, or a role that a timer takes off again.
-    timeout_method: restrict::Method,
+    timeout_method: Method,
     /// The id of the role a timeout gives, when `timeout_method` is `role`.
     timeout_role: Option<String>,
     /// How a voice mute is given: Discord's voice mute, or a role that a timer takes off again.
-    voice_mute_method: restrict::Method,
+    voice_mute_method: Method,
     /// The id of the role a voice mute gives, when `voice_mute_method` is `role`.
     voice_mute_role: Option<String>,
     /// The templates a moderator picks from when a timeout, kick, ban or voice mute lacks a reason
@@ -83,9 +83,9 @@ impl Default for Config {
             require_reason: false,
             ban_delete_days: 0,
             escalation: Vec::new(),
-            timeout_method: restrict::Method::Discord,
+            timeout_method: Method::Discord,
             timeout_role: None,
-            voice_mute_method: restrict::Method::Discord,
+            voice_mute_method: Method::Discord,
             voice_mute_role: None,
             templates: templates::Templates::default(),
         }
@@ -225,13 +225,6 @@ struct BanArgs {
     delete_days: Option<i64>,
 }
 
-/// The payload of a `unban` job: the member, and the case of the ban it lifts.
-#[derive(Debug, Serialize, Deserialize)]
-struct Unban {
-    user: u64,
-    case: i64,
-}
-
 /// Where a case stands at a given time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -318,11 +311,6 @@ fn not_found(number: i64) -> UserError {
     UserError::message("case-not-found").with("number", number)
 }
 
-/// A length of time in seconds, as the clock and the cases count it.
-fn secs(duration: Duration) -> i64 {
-    i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-}
-
 /// The reason of a punishment: a blank one is no reason, and the server may ask for one.
 fn punishment_reason(config: &Config, text: Option<String>) -> Result<Option<String>, UserError> {
     let reason = reason_of(text);
@@ -332,42 +320,32 @@ fn punishment_reason(config: &Config, text: Option<String>) -> Result<Option<Str
     Ok(reason)
 }
 
-/// The reason as a direct message says it, in the language of the server.
-fn dm_reason<I: InteractionRef + 'static>(cx: &Cx<I>, reason: Option<&str>) -> String {
-    match reason {
-        Some(text) => escape(text),
-        None => cx.ctx().t_in(cx.ctx().locale, "reason-none", &Args::new()),
+/// The punisher of a command or a click: the user who runs it, the server's settings, and notes in
+/// the language of the reply.
+fn punisher_for<'a, I: InteractionRef + 'static>(cx: &'a Cx<I>, config: &Config) -> Punisher<'a> {
+    Punisher::new(cx.ctx(), Moderator::of(cx.user()), punish_settings(config))
+        .reply_locale(cx.locale())
+}
+
+/// What the server chose for the punishments, as the SDK takes it.
+fn punish_settings(config: &Config) -> Settings {
+    Settings {
+        dm: config.dm_on_action,
+        timeout: config.timeout_method,
+        timeout_role: restrict::role_of(config.timeout_role.as_deref()),
+        voice: config.voice_mute_method,
+        voice_role: restrict::role_of(config.voice_mute_role.as_deref()),
     }
 }
 
-/// The reason Discord's audit log keeps: who did it, then why.
-fn audit_reason<I: InteractionRef + 'static>(cx: &Cx<I>, reason: Option<&str>) -> Reason {
-    let who = &cx.user().name;
-    Reason::truncated(&match reason {
-        Some(reason) => format!("{who}: {reason}"),
-        None => who.to_owned(),
-    })
-}
-
-/// Messages the member about an action, when the server wants that, in the server language. Returns
-/// the note for the reply when the message did not arrive. A member who is not in the server is
-/// not messaged and gets no note.
-async fn notify<I: InteractionRef + 'static>(
-    cx: &Cx<I>,
-    config: &Config,
-    user: UserId,
-    key: &str,
-    args: &Args,
-) -> Option<String> {
-    if !config.dm_on_action {
-        return None;
-    }
-    let text = cx.ctx().t_in(cx.ctx().locale, key, args);
-    match cx.direct_message(user, DirectMessage::text(text)).await {
-        Ok(Sent::Delivered(_))
-        | Err(UserError::Module(ModuleError::Discord(DiscordError::NotFound))) => None,
-        Ok(Sent::Closed) | Err(_) => Some(cx.t("dm-not-delivered", &Args::new())),
-    }
+/// The case of a punishment and its notes, the notes in the language of the reply.
+fn case_and_notes(punisher: &Punisher<'_>, done: Done) -> (Case, Vec<String>) {
+    let notes = done
+        .notes
+        .iter()
+        .map(|note| punisher.note_text(note))
+        .collect();
+    (done.case, notes)
 }
 
 /// A reply with its notes, each after a space.
@@ -402,44 +380,6 @@ async fn record<I: InteractionRef + 'static>(
     Ok(case)
 }
 
-/// Revokes the newest case of `kind` that still stands against `target`. Best effort: the Discord
-/// action is done already, so a failure here does not fail the command.
-async fn revoke_latest(cx: &CommandCx, target: UserId, kind: &str, reason: String) {
-    if let Ok(cases) = active_cases(cx.cases(), target, kind, cx.now(), 1).await
-        && let Some(case) = cases.first()
-    {
-        let _ = cx
-            .cases()
-            .revoke(case.number, cx.user().id, Some(reason))
-            .await;
-    }
-}
-
-/// The key of the timer that lifts the ban of `user`.
-fn unban_key(user: UserId) -> String {
-    format!("unban:{}", user.get())
-}
-
-/// Sets the timer that lifts the ban of `user` (case `case`) after `after`.
-async fn schedule_unban<I: InteractionRef + 'static>(
-    cx: &Cx<I>,
-    user: UserId,
-    case: i64,
-    after: Duration,
-) -> Result<(), ScheduleError> {
-    cx.scheduler()
-        .job(
-            "unban",
-            &Unban {
-                user: user.get(),
-                case,
-            },
-        )?
-        .key(&unban_key(user))
-        .after(after)
-        .await
-}
-
 /// The seconds of a timeout, which Discord takes at most 28 days of.
 fn timeout_seconds(duration: Duration) -> Result<u32, UserError> {
     u32::try_from(duration.as_secs())
@@ -454,121 +394,6 @@ fn delete_seconds(days: i64) -> Result<u32, UserError> {
         Ok(seconds) if seconds <= MAX_BAN_DELETE_SECONDS => Ok(seconds),
         _ => Err(UserError::message("ban-delete-days-range")),
     }
-}
-
-/// Times a member out and records it, then messages the member: the member stays in the server,
-/// so the message comes after. Returns the case and the note of the message.
-pub(crate) async fn time_out<I: InteractionRef + 'static>(
-    cx: &Cx<I>,
-    config: &Config,
-    user: UserId,
-    duration: Duration,
-    reason: Option<String>,
-) -> Result<(Case, Vec<String>), UserError> {
-    let now = cx.now();
-    let reason_text = dm_reason(cx, reason.as_deref());
-    let role = restrict::give_timeout(cx, config, user, duration, reason.as_deref()).await?;
-    let case = record(cx, "timeout", user, reason, Some(now + secs(duration))).await?;
-    // The role of a timeout is taken off by a timer; a note says when no timer could be set.
-    let timer_note = match role {
-        Some(role) => restrict::schedule_timeout_lift(cx, user, case.number, role, duration)
-            .await
-            .is_err()
-            .then(|| cx.t("timeout-no-timer", &Args::new())),
-        None => None,
-    };
-    let note = notify(
-        cx,
-        config,
-        user,
-        "dm-timed-out",
-        &Args::new()
-            .with("duration", cx.format_duration_in(cx.ctx().locale, duration))
-            .with("reason", reason_text),
-    )
-    .await;
-    Ok((case, [note, timer_note].into_iter().flatten().collect()))
-}
-
-/// Kicks a member and records it. The direct message comes first: a kicked member shares no server
-/// with the bot. Returns the case and the note of the message.
-pub(crate) async fn kick_member<I: InteractionRef + 'static>(
-    cx: &Cx<I>,
-    config: &Config,
-    user: UserId,
-    reason: Option<String>,
-) -> Result<(Case, Vec<String>), UserError> {
-    let note = notify(
-        cx,
-        config,
-        user,
-        "dm-kicked",
-        &Args::new().with("reason", dm_reason(cx, reason.as_deref())),
-    )
-    .await;
-    cx.api()
-        .kick(cx.guild_id(), user, audit_reason(cx, reason.as_deref()))
-        .await?;
-    let case = record(cx, "kick", user, reason, None).await?;
-    Ok((case, note.into_iter().collect()))
-}
-
-/// Bans a member for good or for `duration`, deleting `delete_message_seconds` of their messages.
-/// The direct message comes first, as with a kick. A timed ban gets a timer that lifts it. Returns
-/// the case and the notes: the message, and a note when the timer could not be set.
-pub(crate) async fn ban_member<I: InteractionRef + 'static>(
-    cx: &Cx<I>,
-    config: &Config,
-    user: UserId,
-    duration: Option<Duration>,
-    delete_message_seconds: u32,
-    reason: Option<String>,
-) -> Result<(Case, Vec<String>), UserError> {
-    let note = match duration {
-        Some(duration) => {
-            notify(
-                cx,
-                config,
-                user,
-                "dm-banned-for",
-                &Args::new()
-                    .with("duration", cx.format_duration_in(cx.ctx().locale, duration))
-                    .with("reason", dm_reason(cx, reason.as_deref())),
-            )
-            .await
-        }
-        None => {
-            notify(
-                cx,
-                config,
-                user,
-                "dm-banned",
-                &Args::new().with("reason", dm_reason(cx, reason.as_deref())),
-            )
-            .await
-        }
-    };
-    cx.api()
-        .ban(
-            cx.guild_id(),
-            user,
-            delete_message_seconds,
-            audit_reason(cx, reason.as_deref()),
-        )
-        .await?;
-    let expires_at = duration.map(|duration| cx.now() + secs(duration));
-    let case = record(cx, "ban", user, reason, expires_at).await?;
-    // A new ban replaces the timer of an earlier one, which would lift this ban too early.
-    let _ = cx.scheduler().cancel(&unban_key(user)).await;
-    // The ban holds even when its timer cannot be set; the note says so.
-    let timer_note = match duration {
-        Some(duration) => schedule_unban(cx, user, case.number, duration)
-            .await
-            .is_err()
-            .then(|| cx.t("ban-no-timer", &Args::new())),
-        None => None,
-    };
-    Ok((case, [note, timer_note].into_iter().flatten().collect()))
 }
 
 /// Carries out the escalation that the warning `warning` brought about, at `active` active
@@ -588,14 +413,16 @@ async fn escalate(
             .with("count", count(active))
             .with("case", warning),
     );
-    match escalation {
-        Escalation::Timeout(duration) => time_out(cx, config, user, duration, Some(reason)).await,
-        Escalation::Kick => kick_member(cx, config, user, Some(reason)).await,
+    let punisher = punisher_for(cx, config);
+    let done = match escalation {
+        Escalation::Timeout(duration) => punisher.timeout(user, duration, Some(reason)).await?,
+        Escalation::Kick => punisher.kick(user, Some(reason)).await?,
         Escalation::Ban(duration) => {
             let delete = delete_seconds(i64::from(config.ban_delete_days))?;
-            ban_member(cx, config, user, duration, delete, Some(reason)).await
+            punisher.ban(user, duration, delete, Some(reason)).await?
         }
-    }
+    };
+    Ok(case_and_notes(&punisher, done))
 }
 
 /// What an escalation does, in words, in the language of the moderator.
@@ -655,25 +482,15 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
     let reason = punishment_reason(&config, args.reason)?;
     let now = cx.now();
     let expires_at = now + i64::from(config.warn_expire_days) * DAY;
-    let case = record(&cx, "warn", args.user, reason.clone(), Some(expires_at)).await?;
+    // The warning is stored already: a member who cannot be messaged keeps it, and the reply says
+    // that the message did not arrive instead of failing.
+    let punisher = punisher_for(&cx, &config);
+    let done = punisher.warn(args.user, reason, Some(expires_at)).await?;
     let active = active_cases(cx.cases(), args.user, "warn", now, usize::MAX)
         .await?
         .len();
-
-    // The warning is stored already: a member who cannot be messaged keeps it, and the reply says
-    // that the message did not arrive instead of failing.
-    let note = notify(
-        &cx,
-        &config,
-        args.user,
-        "dm-warned",
-        &Args::new()
-            .with("reason", dm_reason(&cx, reason.as_deref()))
-            .with("active", count(active)),
-    )
-    .await;
+    let (case, notes) = case_and_notes(&punisher, done);
     let escalation = escalation_line(&cx, &config, args.user, active, case.number).await;
-    let notes: Vec<String> = note.into_iter().collect();
     let mut text = with_notes(
         cx.t(
             "warned",
@@ -838,14 +655,9 @@ async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
 async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
-    let case = undo::lift_timeout(&cx, &config, args.user, reason_of(args.reason)).await?;
-    revoke_latest(
-        &cx,
-        args.user,
-        "timeout",
-        format!("removed by case #{}", case.number),
-    )
-    .await;
+    let case = punisher_for(&cx, &config)
+        .lift_timeout(args.user, reason_of(args.reason))
+        .await?;
     cx.reply_private_t(
         "untimed-out",
         &Args::new()
@@ -894,14 +706,10 @@ async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
 /// Lifts a ban. The timer of a timed ban goes, and the newest ban that still stands is revoked.
 async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
-    let case = undo::lift_ban(&cx, args.user, reason_of(args.reason)).await?;
-    revoke_latest(
-        &cx,
-        args.user,
-        "ban",
-        format!("unbanned by case #{}", case.number),
-    )
-    .await;
+    let config: Config = cx.config()?;
+    let case = punisher_for(&cx, &config)
+        .unban(args.user, reason_of(args.reason))
+        .await?;
     cx.reply_private_t(
         "unbanned",
         &Args::new()
@@ -909,20 +717,6 @@ async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
             .with("number", case.number),
     )
     .await
-}
-
-/// Lifts a timed ban when its time is up. A member who was unbanned by hand is done already, so
-/// the job may run twice.
-async fn lift_ban(cx: JobCx) -> Result<(), ModuleError> {
-    let payload: Unban = cx.payload()?;
-    let Some(user) = UserId::new_checked(payload.user) else {
-        return Err(ModuleError::other("a ban job names no member"));
-    };
-    let reason = Reason::truncated(&format!("the ban of case #{} ran out", payload.case));
-    match cx.api().unban(cx.guild_id(), user, reason).await {
-        Ok(()) | Err(DiscordError::NotFound) => Ok(()),
-        Err(error) => Err(ModuleError::Discord(error)),
-    }
 }
 
 /// The module, still open for a test to build on.
@@ -1018,9 +812,9 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
     )
 }
 
-/// The commands that act on members, and the job that lifts a timed ban.
+/// The commands that act on members, and the jobs that lift their punishments when the time is up.
 fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
-    builder
+    let builder = builder
         .command(
             Command::<TimeoutArgs>::new("timeout", "Time a member out")
                 .requires("moderation.timeout")
@@ -1062,10 +856,8 @@ fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
                 .requires("moderation.voice")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(restrict::voice_unmute),
-        )
-        .job("unban", lift_ban)
-        .job("untimeout", restrict::end_timeout)
-        .job("vc_unmute", restrict::end_voice_mute)
+        );
+    punish::jobs(builder)
 }
 
 /// The module, still open for a test to build on.

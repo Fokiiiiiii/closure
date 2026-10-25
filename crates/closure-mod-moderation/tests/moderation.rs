@@ -3510,3 +3510,73 @@ fn the_module_listens_for_joins_with_the_members_intent() {
     assert!(manifest.intents.contains(Intents::GUILD_MEMBERS));
     assert!(manifest.subscription(EventKind::MemberJoined).is_some());
 }
+
+// ---- an undo button of an older punishment ----
+
+/// Case #1 of the member is revoked by the lift #3, and case #2 still stands.
+async fn assert_only_the_older_case_revoked(harness: &Harness) {
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(
+        first.revoked.map(|revoked| revoked.reason),
+        Some(Some("removed by case #3".to_owned()))
+    );
+    let second = harness.cases().get(2).await.unwrap().unwrap();
+    assert!(second.revoked.is_none(), "{second:?}");
+}
+
+#[tokio::test]
+async fn pressing_undo_on_an_older_timeout_revokes_only_that_one() {
+    let harness = harness();
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("first")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("second")))
+        .await
+        .unwrap();
+
+    press(&harness, &undo_id_of_case("timeout", MEMBER, 1)).await;
+    assert_only_the_older_case_revoked(&harness).await;
+}
+
+#[tokio::test]
+async fn pressing_undo_on_an_older_ban_revokes_only_that_one() {
+    let harness = harness();
+    harness
+        .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(ban(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
+
+    press_as(
+        &harness,
+        &undo_id_of_case("ban", MEMBER, 1),
+        MODERATOR,
+        &[ADMIN_ROLE],
+    )
+    .await;
+    assert_only_the_older_case_revoked(&harness).await;
+}
+
+#[tokio::test]
+async fn pressing_undo_on_an_older_voice_mute_revokes_only_that_one() {
+    let harness = harness();
+    harness
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("loud")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("loud")))
+        .await
+        .unwrap();
+
+    press(&harness, &undo_id_of_case("vcmute", MEMBER, 1)).await;
+    assert_only_the_older_case_revoked(&harness).await;
+}

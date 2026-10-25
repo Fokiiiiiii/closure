@@ -2,11 +2,12 @@
 //! takes a role off, and a timeout is lost the same way, so a rejoin would end a punishment early.
 //! Only what still stands is given again: a case that was revoked or ran out is not.
 
+use closure_sdk::punish::Method;
 use closure_sdk::{
     Args, Case, DiscordError, Event, EventContext, Flow, ModuleError, Reason, UserId,
 };
 
-use crate::restrict::{self, Method};
+use crate::restrict;
 use crate::{Config, MAX_TIMEOUT_SECONDS, active_cases};
 
 /// What runs when a member joins: the newest timeout and voice mute that stand are given again.

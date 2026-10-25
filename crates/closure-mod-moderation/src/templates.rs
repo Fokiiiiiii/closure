@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use closure_sdk::duration::parse as parse_duration;
 use closure_sdk::embed::truncate;
+use closure_sdk::punish::Method;
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{
     Args, Color, CommandCx, ComponentCx, Cx, EmbedBuilder, InteractionRef, InteractionReply,
@@ -20,10 +21,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use twilight_model::channel::message::Component;
 
-use crate::restrict::{self, Method};
 use crate::{
-    Config, ban_member, delete_seconds, history, kick_member, mention, time_out, timeout_seconds,
-    undo, with_notes,
+    Config, case_and_notes, delete_seconds, history, mention, punisher_for, timeout_seconds, undo,
+    with_notes,
 };
 
 /// The route of the component that the picker's select menu sends its pick to.
@@ -413,21 +413,29 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
     let duration = punishment.duration();
     // Counted before the action, so that the case of the action is left out of the history line.
     let before = history::before(cx, user).await;
-    let (case, notes) = match punishment.kind {
+    let punisher = punisher_for(cx, config);
+    let done = match punishment.kind {
         Kind::Timeout => {
             let duration = duration.ok_or_else(|| UserError::message("template-required"))?;
-            time_out(cx, config, user, duration, punishment.reason).await?
+            punisher.timeout(user, duration, punishment.reason).await?
         }
-        Kind::Kick => kick_member(cx, config, user, punishment.reason).await?,
+        Kind::Kick => punisher.kick(user, punishment.reason).await?,
         Kind::Ban => {
             let days = punishment
                 .delete_days
                 .unwrap_or(i64::from(config.ban_delete_days));
             let delete = delete_seconds(days)?;
-            ban_member(cx, config, user, duration, delete, punishment.reason).await?
+            punisher
+                .ban(user, duration, delete, punishment.reason)
+                .await?
         }
-        Kind::Vcmute => restrict::mute(cx, config, user, duration, punishment.reason).await?,
+        Kind::Vcmute => {
+            punisher
+                .voice_mute(user, duration, punishment.reason)
+                .await?
+        }
     };
+    let (case, notes) = case_and_notes(&punisher, done);
     let mut words = Args::new()
         .with("user", mention(user))
         .with("number", case.number);
