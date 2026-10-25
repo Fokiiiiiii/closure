@@ -231,6 +231,15 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.ctx.cases()
     }
 
+    /// Posts a case to the log channel of the guild (see [`crate::modlog`]); does nothing when
+    /// the guild has none. The module needs the capability `SendMessages` as well.
+    pub async fn modlog(
+        &self,
+        case: &closure_core::cases::Case,
+    ) -> Result<Option<closure_core::event::MessageId>, UserError> {
+        crate::modlog::post(self.ctx(), case).await
+    }
+
     /// A message of the module's catalog in the language of the answer.
     #[must_use]
     pub fn t(&self, key: &str, args: &Args) -> String {
@@ -544,6 +553,15 @@ impl JobCx {
     #[must_use]
     pub fn cases(&self) -> &closure_core::cases::Cases {
         self.ctx.cases()
+    }
+
+    /// Posts a case to the log channel of the guild (see [`crate::modlog`]); does nothing when
+    /// the guild has none. The module needs the capability `SendMessages` as well.
+    pub async fn modlog(
+        &self,
+        case: &closure_core::cases::Case,
+    ) -> Result<Option<closure_core::event::MessageId>, UserError> {
+        crate::modlog::post(&self.ctx, case).await
     }
 
     /// The module's configuration in this guild, as its own type.

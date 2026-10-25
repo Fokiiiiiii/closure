@@ -28,3 +28,19 @@ sdk-target-self = 自分自身には実行できません。
 sdk-target-bot = ボットには実行できません。
 sdk-target-owner = サーバーの所有者には実行できません。
 sdk-target-higher = 最も上位のロールが自分以上のメンバーには実行できません。
+
+# モデレーションログ。サーバーのログチャンネルに投稿される (closure-sdk の `modlog`)。
+modlog-title = ケース #{ $number } · { $kind }
+modlog-kind-warn = 警告
+modlog-kind-timeout = タイムアウト
+modlog-kind-kick = キック
+modlog-kind-ban = BAN
+modlog-kind-unban = BAN 解除
+modlog-kind-note = メモ
+modlog-target = 対象
+modlog-moderator = 実行者
+modlog-reason = 理由
+modlog-no-reason = 理由なし
+modlog-expires = 期限
+modlog-revoked = 取り消し
+modlog-revoked-by = { $who }（{ $when }）

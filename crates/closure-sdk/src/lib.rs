@@ -41,6 +41,7 @@ mod cx;
 pub mod duration;
 pub mod embed;
 mod error;
+pub mod modlog;
 mod module;
 pub mod testing;
 pub mod ui;

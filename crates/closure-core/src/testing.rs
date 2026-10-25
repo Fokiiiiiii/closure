@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
+use twilight_model::channel::Message;
 use twilight_model::guild::{Member, Role};
 
 use crate::action::{Action, Outcome};
@@ -20,6 +21,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The message Discord answers a send with: a plain text message with the given id.
+fn sent_message(channel: ChannelId, id: u64) -> Option<Message> {
+    serde_json::from_value(serde_json::json!({
+        "id": id.to_string(),
+        "channel_id": channel.to_string(),
+        "content": "",
+        "author": { "id": "1", "username": "closure", "discriminator": "0", "avatar": null, "bot": true },
+        "attachments": [], "embeds": [], "mention_everyone": false, "mention_roles": [],
+        "mentions": [], "pinned": false, "timestamp": "2026-10-24T00:00:00.000000+00:00",
+        "edited_timestamp": null, "tts": false, "type": 0
+    }))
+    .ok()
 }
 
 /// A module that does nothing; handy for exercising registries and configuration.
@@ -68,6 +83,12 @@ impl MockApi {
             Action::ListRoles { guild_id } => Ok(lock(&self.roles)
                 .get(guild_id)
                 .map_or(Outcome::None, |roles| Outcome::Roles(roles.clone()))),
+            // Each message gets an id of its own, so a test can tell them apart.
+            Action::SendMessage { channel_id, .. } => {
+                let id = u64::try_from(lock(&self.actions).len()).unwrap_or(u64::MAX) + 1;
+                Ok(sent_message(*channel_id, id)
+                    .map_or(Outcome::None, |message| Outcome::Message(Box::new(message))))
+            }
             _ => Ok(Outcome::None),
         }
     }

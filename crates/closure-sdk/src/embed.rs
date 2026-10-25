@@ -13,7 +13,7 @@ const TITLE_LIMIT: usize = 256;
 const DESCRIPTION_LIMIT: usize = 4096;
 const FIELDS_LIMIT: usize = 25;
 const FIELD_NAME_LIMIT: usize = 256;
-const FIELD_VALUE_LIMIT: usize = 1024;
+pub const FIELD_VALUE_LIMIT: usize = 1024;
 const FOOTER_LIMIT: usize = 2048;
 const AUTHOR_LIMIT: usize = 256;
 /// Discord refuses an embed whose text, added up, is longer.

@@ -267,6 +267,8 @@ pub struct Harness {
     scheduler: Arc<MemoryScheduler>,
     cases: Arc<MemoryCases>,
     elapsed: Arc<Mutex<Duration>>,
+    policy: Mutex<GuildPolicy>,
+    locale: Mutex<Locale>,
     next: AtomicU64,
 }
 
@@ -332,6 +334,8 @@ impl Harness {
             scheduler,
             cases,
             elapsed,
+            policy: Mutex::new(GuildPolicy::default()),
+            locale: Mutex::new(Locale::DEFAULT),
             next: AtomicU64::new(1),
             module,
         })
@@ -350,6 +354,20 @@ impl Harness {
     /// Sets the module's configuration in the guild.
     pub fn set_config(&self, config: serde_json::Value) {
         *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config;
+    }
+
+    /// Sets the guild's log channel. The channel exists in the guild, as Discord would have it.
+    pub fn set_log_channel(&self, channel: u64) {
+        self.api.add_channel(Id::new(channel), Some(Id::new(GUILD)));
+        self.policy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .log_channel = Some(Id::new(channel));
+    }
+
+    /// Sets the guild's language (English when not set).
+    pub fn set_guild_locale(&self, locale: Locale) {
+        *self.locale.lock().unwrap_or_else(PoisonError::into_inner) = locale;
     }
 
     /// Lets time pass for the cooldowns.
@@ -437,6 +455,20 @@ impl Harness {
         &self.api
     }
 
+    /// The embeds of every message the module sent, in order.
+    #[must_use]
+    pub fn sent_embeds(&self) -> Vec<Embed> {
+        self.api
+            .actions()
+            .into_iter()
+            .filter_map(|action| match action {
+                Action::SendMessage { embeds, .. } => Some(embeds),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
     /// What the module gets with an event of `guild`.
     fn context(&self, guild: GuildId) -> EventContext {
         let manifest = self.module.manifest();
@@ -461,8 +493,13 @@ impl Harness {
             manifest.id.clone(),
             guild,
             client,
-            Locale::DEFAULT,
-            Arc::new(GuildPolicy::default()),
+            *self.locale.lock().unwrap_or_else(PoisonError::into_inner),
+            Arc::new(
+                self.policy
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone(),
+            ),
             Arc::new(config),
             Arc::clone(&self.translator),
         )

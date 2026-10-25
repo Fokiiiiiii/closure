@@ -40,3 +40,19 @@ sdk-target-self = You cannot do that to yourself.
 sdk-target-bot = You cannot do that to a bot.
 sdk-target-owner = You cannot do that to the owner of the server.
 sdk-target-higher = You cannot do that to someone whose highest role is not below yours.
+
+# The moderation log, posted to the log channel of a server (closure-sdk `modlog`).
+modlog-title = Case #{ $number } · { $kind }
+modlog-kind-warn = Warning
+modlog-kind-timeout = Timeout
+modlog-kind-kick = Kick
+modlog-kind-ban = Ban
+modlog-kind-unban = Unban
+modlog-kind-note = Note
+modlog-target = Target
+modlog-moderator = Moderator
+modlog-reason = Reason
+modlog-no-reason = No reason given
+modlog-expires = Expires
+modlog-revoked = Revoked
+modlog-revoked-by = By { $who } { $when }
