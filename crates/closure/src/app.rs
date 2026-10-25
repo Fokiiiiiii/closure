@@ -432,6 +432,16 @@ mod tests {
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
         assert_eq!(commands.len(), 11);
         for command in commands {
+            // A name Discord would refuse (uppercase, too long) is dropped with only a log line,
+            // so it is looked for here.
+            assert!(
+                command
+                    .name_localizations
+                    .as_ref()
+                    .is_some_and(|l| l.contains_key("ja")),
+                "{} has no Japanese name",
+                command.name
+            );
             assert!(
                 command
                     .description_localizations
