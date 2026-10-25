@@ -30,7 +30,10 @@ const MAX_ACTIVE: usize = 25;
 const SHOWN: usize = 10;
 /// How many characters of a reason `/warn list` shows.
 const REASON_SHOWN: usize = 80;
-/// The counter that numbers a member's warnings; it never goes down.
+/// The counter that numbers a member's warnings; it never goes down, and a number whose warning
+/// could not be stored is simply not used.
+const NUMBERS: &str = "numbers";
+/// The counter of the warnings that were really given.
 const ISSUED: &str = "issued";
 /// How often a change is tried again when somebody else changed the same entry meanwhile.
 const TRIES: usize = 5;
@@ -138,6 +141,22 @@ async fn change(
     Err(ModuleError::other("the warnings are being changed too often").into())
 }
 
+/// Adds a warning unless the member is full. Run on the list that is being replaced, so a
+/// warning given at the same moment as another cannot take the member over the limit.
+fn push(list: &mut Vec<Warning>, user: u64, warning: Warning) -> Result<(), UserError> {
+    if list.len() >= MAX_ACTIVE {
+        return Err(full(user));
+    }
+    list.push(warning);
+    Ok(())
+}
+
+fn full(user: u64) -> UserError {
+    UserError::message("warn-full")
+        .with("user", mention(user))
+        .with("limit", count(MAX_ACTIVE))
+}
+
 fn shorten(text: &str) -> String {
     if text.chars().count() <= REASON_SHOWN {
         return text.to_owned();
@@ -154,32 +173,36 @@ async fn add(cx: closure_sdk::CommandCx, args: Add) -> Result<(), UserError> {
         return Err(UserError::message("warn-self"));
     }
     let config: Config = cx.config()?;
-    // Checked here and not again when storing: warnings given at the very same moment can go a
-    // few over, and the entry stays far below the limit of the storage.
+    // Looked at first so a member who is full costs no number and no job; looked at again when
+    // storing, where the list is the one this write replaces.
     if read(cx.store(), user).await?.0.len() >= MAX_ACTIVE {
-        return Err(UserError::message("warn-full")
-            .with("user", mention(user))
-            .with("limit", count(MAX_ACTIVE)));
+        return Err(full(user));
     }
 
-    let id = cx.store().counter_add(ISSUED, user, 1).await?;
-    // The job first: one for a warning that was not stored does nothing, but a warning without
-    // its job would never expire.
+    let id = cx.store().counter_add(NUMBERS, user, 1).await?;
+    // The job first: one for a warning that was not stored does nothing (and is taken back
+    // below), but a warning without its job would never expire.
     let days = u64::from(config.expire_days);
     cx.scheduler()
         .job("expire", &Expire { user, id })?
         .key(&expire_key(user, id))
         .after(Duration::from_secs(days * 86_400))
         .await?;
-    let list = change(cx.store(), user, |list| {
-        list.push(Warning {
-            id,
-            reason: args.reason.clone(),
-            by: moderator.get(),
-        });
-        Ok(())
-    })
-    .await?;
+    let warning = Warning {
+        id,
+        reason: args.reason.clone(),
+        by: moderator.get(),
+    };
+    let stored = change(cx.store(), user, |list| push(list, user, warning.clone())).await;
+    let list = match stored {
+        Ok(list) => list,
+        Err(error) => {
+            // Best effort: a job left behind finds no warning and does nothing.
+            let _ = cx.scheduler().cancel(&expire_key(user, id)).await;
+            return Err(error);
+        }
+    };
+    cx.store().counter_add(ISSUED, user, 1).await?;
     cx.reply_private_t(
         "warn-added",
         &Args::new()
@@ -380,4 +403,153 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
 /// The module as the host loads it.
 pub fn module() -> Result<SdkModule, CoreError> {
     builder()?.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use closure_core::capability::{Capability, CapabilitySet};
+    use closure_core::storage::{Entry, MemoryStorage, StorageBackend};
+
+    use super::*;
+
+    fn warning(id: i64) -> Warning {
+        Warning {
+            id,
+            reason: None,
+            by: 1,
+        }
+    }
+
+    /// Storage where somebody else writes the entry once, right before the first write that
+    /// expects a revision: what two moderators warning the same member at the same time cause.
+    struct Rival {
+        inner: MemoryStorage,
+        extra: Warning,
+        done: AtomicBool,
+    }
+
+    type Id = closure_sdk::GuildId;
+
+    #[async_trait::async_trait]
+    impl StorageBackend for Rival {
+        async fn get(
+            &self,
+            module: &closure_sdk::ModuleId,
+            guild: Id,
+            key: &str,
+        ) -> Result<Option<Entry>, StorageError> {
+            self.inner.get(module, guild, key).await
+        }
+
+        async fn put(
+            &self,
+            module: &closure_sdk::ModuleId,
+            guild: Id,
+            key: &str,
+            value: serde_json::Value,
+            ttl: Option<Duration>,
+            expect: Expect,
+        ) -> Result<i64, StorageError> {
+            if matches!(expect, Expect::Revision(_)) && !self.done.swap(true, Ordering::SeqCst) {
+                let entry = self.inner.get(module, guild, key).await?.unwrap();
+                let mut list: Vec<Warning> = serde_json::from_value(entry.value).unwrap();
+                list.push(self.extra.clone());
+                let value = serde_json::to_value(list).unwrap();
+                self.inner
+                    .put(module, guild, key, value, None, Expect::Any)
+                    .await?;
+            }
+            self.inner.put(module, guild, key, value, ttl, expect).await
+        }
+
+        async fn delete(
+            &self,
+            module: &closure_sdk::ModuleId,
+            guild: Id,
+            key: &str,
+        ) -> Result<bool, StorageError> {
+            self.inner.delete(module, guild, key).await
+        }
+
+        async fn list(
+            &self,
+            module: &closure_sdk::ModuleId,
+            guild: Id,
+            prefix: &str,
+            limit: usize,
+        ) -> Result<Vec<(String, Entry)>, StorageError> {
+            self.inner.list(module, guild, prefix, limit).await
+        }
+
+        async fn counter_add(
+            &self,
+            module: &closure_sdk::ModuleId,
+            guild: Id,
+            counter: &str,
+            subject: u64,
+            delta: i64,
+        ) -> Result<i64, StorageError> {
+            self.inner
+                .counter_add(module, guild, counter, subject, delta)
+                .await
+        }
+
+        async fn counter_get(
+            &self,
+            module: &closure_sdk::ModuleId,
+            guild: Id,
+            counter: &str,
+            subject: u64,
+            window: Option<Duration>,
+        ) -> Result<i64, StorageError> {
+            self.inner
+                .counter_get(module, guild, counter, subject, window)
+                .await
+        }
+
+        async fn counter_reset(
+            &self,
+            module: &closure_sdk::ModuleId,
+            guild: Id,
+            counter: &str,
+            subject: u64,
+        ) -> Result<(), StorageError> {
+            self.inner
+                .counter_reset(module, guild, counter, subject)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_warning_added_at_the_same_moment_cannot_take_a_member_over_the_limit() {
+        let backend = Arc::new(Rival {
+            inner: MemoryStorage::default(),
+            extra: warning(100),
+            done: AtomicBool::new(false),
+        });
+        let granted: CapabilitySet = [Capability::Storage].into_iter().collect();
+        let store = Store::new(
+            Arc::clone(&backend) as Arc<dyn StorageBackend>,
+            &granted,
+            closure_sdk::ModuleId::new("warn").unwrap(),
+            twilight_model::id::Id::new(1),
+        );
+        let user = 7;
+        change(&store, user, |list| {
+            list.extend((1..=24).map(warning));
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // This one saw 24 and goes on; the rival's write makes 25 before it is stored.
+        let result = change(&store, user, |list| push(list, user, warning(101))).await;
+
+        assert!(result.is_err(), "the 26th is refused");
+        let (list, _) = read(&store, user).await.unwrap();
+        assert_eq!(list.len(), 25, "24 and the rival's");
+    }
 }

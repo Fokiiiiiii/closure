@@ -70,7 +70,11 @@ no module declares is an error, so a typo is reported. Each list holds at most 2
 
 `--bot-config <file>` (or `BOT_CONFIG`) names a document of this same form that every server
 starts from: the preset, then this file, then the server's own document, key by key (`null` in the
-server's document means "use the bot's value"). The file is read once at start-up and must be a
+server's document means "use the bot's value"). The layers are applied one after the other: a
+module's configuration is its defaults, with the bot's `config` merged over them, with the server's
+merged over that, so a layer that replaces an object by a number (or the other way round) leaves
+nothing of the layers below it. A Discord id in `permissions.roles` and `permissions.users` is the
+same id however it is written (`5`, `05`); writing it twice in one document is refused. The file is read once at start-up and must be a
 valid configuration on its own, or the bot does not start.
 
 ### Presets and limits

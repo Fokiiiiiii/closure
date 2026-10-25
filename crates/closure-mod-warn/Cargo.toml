@@ -15,6 +15,7 @@ serde_json.workspace = true
 twilight-model.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 closure-core.workspace = true
 closure-i18n.workspace = true
 tokio.workspace = true

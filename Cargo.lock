@@ -571,6 +571,7 @@ dependencies = [
 name = "closure-mod-warn"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "closure-core",
  "closure-i18n",
  "closure-sdk",

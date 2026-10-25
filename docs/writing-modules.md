@@ -47,9 +47,17 @@ What the SDK does for each command:
   (`.with("name", value)` fills its variables); any other error (`?` on a Discord call) goes to the
   dispatcher, which says that something went wrong and counts the failure;
 - a handler that answers nothing is answered with "Done." so Discord does not show a failure;
-- the first answer is the response to the interaction, the following ones are follow-ups;
-  `cx.defer(ephemeral)` first lets the answer take longer than three seconds;
-- `cx.require("warn.add")`, `cx.level()` and `cx.actor()` are there for checks inside a handler;
+- the first answer is the response to the interaction, the following ones are follow-ups; they
+  take turns (one is sent before the next starts), and an answer that is refused before anything
+  is sent (a text over 2000 characters) leaves the interaction unanswered, so you can answer again
+  with less. `cx.defer(ephemeral)` first lets the answer take longer than three seconds. Discord
+  cannot make a public message private: after `cx.defer(false)` an answer for the user alone (a
+  `UserError`, `reply_private`) finishes the public message with "Done." and goes to the user as a
+  follow-up; use `cx.defer(true)` when the answer is private;
+- on a click, `cx.defer_update()` acknowledges it and `cx.update(..)` changes the message
+  afterwards; an update takes off the embeds and components the reply does not have;
+- `cx.require("warn.add")`, `cx.level()` and `cx.actor()` are there for checks inside a handler
+  (`require` asks about your module's own keys only);
 - subcommands: `.group("warnings", "Look at warnings", [Command::<A>::new("show", ..).handler(..), ..])`.
 
 Options are typed fields: `String`, `i64`, `f64`, `bool`, `UserId`, `ChannelId`, `RoleId`;
@@ -78,8 +86,13 @@ The handler gets only the events that pass the filter (`in_channels`, `not_in_ch
 `ignore_bots`, `ignore_roles`), after modules with a higher priority (default 0; equal priorities
 run together). Returning `Flow::Stop` keeps the event from the modules with a lower priority, which
 is how an auto-moderation module claims a message it deleted. One handler per kind of event;
-declare the capabilities it needs. In a plain module the same is `ModuleManifest::subscribe(..)`
-plus `Module::on_event_flow`. `Harness::emit(event)` delivers an event as the dispatcher would.
+declare the capabilities it needs, and the Gateway intents the events need with
+`.intents(Intents::GUILD_MESSAGES)` (messages, `GUILD_MEMBERS` for members, `GUILD_MESSAGE_REACTIONS`,
+`GUILD_MODERATION` for bans; members and message content are privileged and have to be switched on
+for the bot in the Discord developer portal): a module that subscribes without the intent is refused
+when it is built, because Discord would never send it the events. Clicks, forms and jobs are not
+subscribed to; they have `component`, `modal` and `job`. In a plain module the same is
+`ModuleManifest::subscribe(..)` plus `Module::on_event_flow`. `Harness::emit(event)` delivers an event as the dispatcher would.
 
 Keeping data: declare `.capability(Capability::Storage)` and use `cx.store()` (or `ctx.store()` in
 a plain module):
@@ -87,12 +100,17 @@ a plain module):
 - entries: `set`, `set_for(key, value, ttl)` (gone after the time), `get::<T>`, `delete`,
   `list(prefix, limit)`; `replace(key, value, Expect::Revision(r), ttl)` writes only if nobody
   wrote since you read revision `r` (`entry(key)`), so two handlers do not lose each other's
-  update; keys are 1-128 printable ASCII characters, values at most 32 KiB of JSON, at most
+  update. A revision is a number no two writes share, so one read before the entry was deleted
+  (or ran out) and made again never matches the new entry; keys are 1-128 printable ASCII characters, values at most 32 KiB of JSON, at most
   10 000 entries per module and guild;
 - counters: `counter_add(name, subject, delta)` returns the total, `counter_total`,
   `counter_recent(name, subject, window)` (what was added in the last minutes, up to 90 days;
   a window is whole minutes, rounded up, the current minute included), `counter_reset`; at most
   100 000 counters per module and guild.
+
+A cooldown keeps at most 50 000 uses in memory per module (a use is forgotten when its period is
+over); when that many are waiting, a user it has not seen yet is not held back, so it is a brake
+against repetition and not a count you can rely on to the single use.
 
 The data belongs to the module and the guild; nothing else can read it. Going over a limit is an
 error (`StorageError`), never silent loss. Data is kept while the guild's configuration is; expired
@@ -108,7 +126,8 @@ or again and again with `.every(period, first)` (at least 10 seconds; if the bot
 runs it missed are skipped, not made up for). A job with a `.key(..)` is replaced when the same
 key is scheduled again and `scheduler().cancel(key)` removes it; keys belong to the module and
 the guild. Jobs are kept in PostgreSQL and survive a restart; at most 10 000 wait per module and
-guild, and nothing is set more than 10 years ahead.
+guild. A delay (`after`, the first run and the period of `every`) is at most 10 years, and a time
+given to `at` is between 1970 and the end of the year 9999.
 
 Delivery is *at least once*: if the handler returns an error, panics or times out, or the bot
 stops while it runs, the job comes again (after 5 s, 10 s, 20 s, ... at most an hour), up to 8

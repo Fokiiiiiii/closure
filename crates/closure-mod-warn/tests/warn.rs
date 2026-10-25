@@ -277,3 +277,33 @@ fn both_languages_define_the_same_messages() {
         Vec::<String>::new()
     );
 }
+
+#[tokio::test]
+async fn a_warning_that_could_not_be_given_is_not_counted_as_given() {
+    let harness = harness();
+    // The scheduler has no room for the job that makes the warning expire.
+    let scheduler = harness.scheduler();
+    for n in 0..closure_core::schedule::MAX_JOBS {
+        scheduler
+            .job("fill", &n)
+            .unwrap()
+            .key(&format!("f{n}"))
+            .after(Duration::from_secs(3600))
+            .await
+            .unwrap();
+    }
+    assert!(harness.invoke(add(MEMBER, "no room")).await.is_err());
+    assert!(scheduler.cancel("f0").await.unwrap());
+
+    harness.advance(Duration::from_secs(5));
+    harness.invoke(add(MEMBER, "now there is")).await.unwrap();
+    let list = harness
+        .invoke(sub("list", MEMBER).roles([MODERATOR_ROLE]))
+        .await
+        .unwrap();
+    assert!(text(&list).contains("1 active, 1 given in all"), "{list:?}");
+    assert!(
+        text(&list).contains("#2 now there is"),
+        "the number was used up: {list:?}"
+    );
+}

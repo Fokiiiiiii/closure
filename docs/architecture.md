@@ -169,6 +169,9 @@ returned actions into `ApiClient::execute` calls. Nothing else in the system wou
   limits clients if it is reachable by anyone untrusted.
 - Command events go only to the module that owns the command, not to other subscribers; clicks,
   forms and due jobs likewise go only to the module they belong to.
+- `effective` configuration (`GET .../config/effective`) shows the `permissions` section as it was
+  written, not resolved: the levels of the module defaults and of Administrator are not filled
+  in. What is enforced is resolved correctly.
 - Jobs of a guild the bot has left stay in the table; they fail (Discord refuses the module) and
   are removed two weeks after they were given up on. Nothing yet shows the jobs of a guild to its
   administrators.
