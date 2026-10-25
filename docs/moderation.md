@@ -161,6 +161,36 @@ A kick takes no duration, so a duration on a kick template is not used.
 
 `require_reason` now concerns only `/warn`. The four punishment commands use templates instead.
 
+- **Placeholders.** A template's `reason` may contain `{user}` (the member's mention), `{moderator}`
+  (the moderator's name) and `{server}` (the server's name; "this server" when Discord cannot say). They
+  are filled in when the pick is made, and the case, the direct message and the log keep the filled-in
+  reason, cut to 512 characters. The server's name is asked for only when the reason names it. Other
+  words in braces stay as typed, and a reason the moderator typed is never filled in. The menu shows the
+  reason as written.
+
+## Undo and the history line
+
+The reply of `/timeout`, `/ban`, `/vcmute` and `/warn`, and of a template pick for the first three, carries an
+**Undo** button (**Revoke** for a warning). Pressing it does what the matching un-command does, and the
+message is replaced by the result with a line that says who undid it: `/untimeout`, `/unban`,
+`/vcunmute`, or, for a warning, `/case revoke`. `/kick` and `/note` have nothing to undo, so they have no
+button.
+
+- Any moderator may press the button, but each press checks the permission of the punishment again
+  (`moderation.timeout`, `moderation.ban`, `moderation.voice`, or `moderation.revoke` for a warning) and
+  whether the bot may act on the member.
+- A press changes nothing when the case no longer stands: it was revoked, lifted by a command, or has
+  run out. The presser is then told that it is already over. Buttons do not expire by themselves, so
+  this check is what keeps an old button harmless.
+- Undoing a timeout, a ban or a voice mute records the un-case with the reason `Undone from case #N`, and
+  revokes case N, the one the button belongs to. Undoing a warning revokes it without any action on
+  Discord.
+
+The reply of `/timeout`, `/kick`, `/ban` and `/vcmute` ends with a history line in small text: the
+active warnings and the cases the member had before this action. The new case is not counted. Up to
+100 cases are counted; more are shown as `100+ cases`. The line is left out when the cases cannot be
+read, and the action is not affected.
+
 ## Cases and the log
 
 Every action is a **case**. Cases are numbered per server, and the numbers are shared with the other

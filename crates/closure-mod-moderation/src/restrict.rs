@@ -13,6 +13,7 @@ use closure_sdk::{
 use serde::{Deserialize, Serialize};
 
 use crate::templates;
+use crate::undo;
 use crate::{
     Config, DAY, MemberReason, audit_reason, dm_reason, mention, notify, reason_of, record,
     revoke_latest, secs, timeout_seconds,
@@ -148,8 +149,8 @@ pub(crate) async fn schedule_timeout_lift<I: InteractionRef + 'static>(
 
 /// Lifts the timeout of `user`, by Discord's or by the timeout role. The role's timer is
 /// cancelled, best effort; Discord's timeout has no timer of its own.
-pub(crate) async fn lift_timeout(
-    cx: &CommandCx,
+pub(crate) async fn lift_timeout<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     reason: Option<&str>,
@@ -217,8 +218,8 @@ async fn mute_in_voice<I: InteractionRef + 'static>(
 
 /// Lifts the voice mute of `user`, by Discord's or by the voice role, and cancels its timer. The
 /// timer is best effort: the member is unmuted already.
-async fn unmute_in_voice(
-    cx: &CommandCx,
+pub(crate) async fn unmute_in_voice<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     reason: Option<&str>,
@@ -332,9 +333,7 @@ pub(crate) async fn voice_mute(cx: CommandCx, args: VoiceMute) -> Result<(), Use
 pub(crate) async fn voice_unmute(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
-    let reason = reason_of(args.reason);
-    unmute_in_voice(&cx, &config, args.user, reason.as_deref()).await?;
-    let case = record(&cx, "vcunmute", args.user, reason, None).await?;
+    let case = undo::lift_voice_mute(&cx, &config, args.user, reason_of(args.reason)).await?;
     revoke_latest(
         &cx,
         args.user,

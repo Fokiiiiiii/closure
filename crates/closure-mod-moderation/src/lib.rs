@@ -18,8 +18,10 @@ use closure_sdk::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod history;
 mod restrict;
 mod templates;
+mod undo;
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
@@ -681,7 +683,17 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
         &notes,
     );
     text.extend(escalation.map(|line| format!("\n{line}")));
-    cx.reply_private(text).await
+    cx.reply_with(InteractionReply {
+        components: undo::row(Some(undo::button(
+            &cx,
+            undo::Kind::Warn,
+            args.user,
+            case.number,
+        ))),
+        ephemeral: true,
+        ..templates::text_reply(text)?
+    })
+    .await
 }
 
 /// Notes something about a member. A note is a case without expiry and is not a warning.
@@ -824,9 +836,7 @@ async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
 async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
-    let reason = reason_of(args.reason);
-    restrict::lift_timeout(&cx, &config, args.user, reason.as_deref()).await?;
-    let case = record(&cx, "untimeout", args.user, reason, None).await?;
+    let case = undo::lift_timeout(&cx, &config, args.user, reason_of(args.reason)).await?;
     revoke_latest(
         &cx,
         args.user,
@@ -882,17 +892,7 @@ async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
 /// Lifts a ban. The timer of a timed ban goes, and the newest ban that still stands is revoked.
 async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
-    let reason = reason_of(args.reason);
-    cx.api()
-        .unban(
-            cx.guild_id(),
-            args.user,
-            audit_reason(&cx, reason.as_deref()),
-        )
-        .await?;
-    let case = record(&cx, "unban", args.user, reason, None).await?;
-    // Both are best effort: the member is unbanned already.
-    let _ = cx.scheduler().cancel(&unban_key(args.user)).await;
+    let case = undo::lift_ban(&cx, args.user, reason_of(args.reason)).await?;
     revoke_latest(
         &cx,
         args.user,
@@ -1123,6 +1123,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         )?)
         .config(schema, defaults)
         .component(templates::ROUTE, templates::pick)
+        .component(undo::ROUTE, undo::press)
         .command(
             Command::<Warn>::new("warn", "Warn a member")
                 .requires("moderation.warn")

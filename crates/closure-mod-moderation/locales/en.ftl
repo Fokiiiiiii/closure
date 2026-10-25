@@ -142,3 +142,20 @@ template-pick-vcmute = Pick a template to mute { $user } in voice channels.
 template-required = Give a reason (and for a timeout a duration), or ask an administrator to set up templates.
 template-expired = This selection expired. Run the command again.
 template-gone = That template is no longer set up. Run the command again.
+undo-button = Undo
+undo-button-warn = Revoke
+undo-by = -# ↩ Undone by { $user }.
+undo-reason = Undone from case #{ $case }.
+undone-by-button = Undone with its button.
+undo-not-needed = That is already over.
+history-line = -# Before this: { $warnings }, { $cases }.
+history-warnings = { $count ->
+    [one] 1 active warning
+   *[other] { $count } active warnings
+}
+history-cases = { $count ->
+    [one] 1 case
+   *[other] { $count } cases
+}
+history-cases-more = { $count }+ cases
+this-server = this server

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use twilight_model::channel::Message;
-use twilight_model::guild::{Member, Role};
+use twilight_model::guild::{Guild, Member, Role};
 
 use crate::action::{Action, Outcome};
 use crate::client::DiscordApi;
@@ -37,6 +37,23 @@ fn sent_message(channel: ChannelId, id: u64) -> Option<Message> {
     .ok()
 }
 
+/// A guild with the given id and name and nothing else of note.
+fn guild_named(guild: GuildId, name: &str) -> Guild {
+    serde_json::from_value(serde_json::json!({
+        "id": guild.to_string(),
+        "name": name,
+        "owner_id": "999999999",
+        "roles": [], "emojis": [], "features": [], "stickers": [],
+        "afk_timeout": 300, "default_message_notifications": 0,
+        "explicit_content_filter": 0, "mfa_level": 0, "nsfw_level": 0,
+        "premium_tier": 0, "system_channel_flags": 0, "verification_level": 0,
+        "preferred_locale": "en-US", "premium_progress_bar_enabled": false,
+        "max_members": null, "max_presences": null, "member_count": null,
+        "splash": null, "banner": null, "icon": null, "description": null
+    }))
+    .unwrap_or_else(|error| panic!("a test guild: {error}"))
+}
+
 /// A module that does nothing; handy for exercising registries and configuration.
 #[derive(Debug, Clone)]
 pub struct StubModule(pub ModuleManifest);
@@ -65,6 +82,7 @@ pub struct MockApi {
     /// Members the pretend Discord knows, by guild and user; `None` is a user who is not one.
     members: Mutex<HashMap<(GuildId, UserId), Option<Member>>>,
     roles: Mutex<HashMap<GuildId, Vec<Role>>>,
+    guild_names: Mutex<HashMap<GuildId, String>>,
     lookups: Mutex<usize>,
 }
 
@@ -83,6 +101,11 @@ impl MockApi {
             Action::ListRoles { guild_id } => Ok(lock(&self.roles)
                 .get(guild_id)
                 .map_or(Outcome::None, |roles| Outcome::Roles(roles.clone()))),
+            Action::GetGuild { guild_id } => Ok(lock(&self.guild_names)
+                .get(guild_id)
+                .map_or(Outcome::None, |name| {
+                    Outcome::Guild(Box::new(guild_named(*guild_id, name)))
+                })),
             Action::SendMessage { channel_id, .. } => Ok(self.sent(*channel_id)),
             // The channel of a direct message is not known to the mock; any id will do.
             Action::SendDirectMessage { .. } => Ok(self.sent(ChannelId::new(1))),
@@ -139,6 +162,11 @@ impl MockApi {
     /// Declares the roles of `guild`.
     pub fn set_roles(&self, guild: GuildId, roles: Vec<Role>) {
         lock(&self.roles).insert(guild, roles);
+    }
+
+    /// Declares the name of `guild`, which the pretend Discord gives when the guild is asked for.
+    pub fn set_guild_name(&self, guild: GuildId, name: &str) {
+        lock(&self.guild_names).insert(guild, name.to_owned());
     }
 
     /// How often a channel's guild was looked up.

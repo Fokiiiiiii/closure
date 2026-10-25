@@ -14,14 +14,16 @@ use closure_sdk::embed::truncate;
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{
     Args, Color, CommandCx, ComponentCx, Cx, EmbedBuilder, InteractionRef, InteractionReply,
-    ModuleError, UserError, UserId,
+    ModuleError, Reason, UserError, UserId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use twilight_model::channel::message::Component;
 
 use crate::restrict::{self, Method};
 use crate::{
-    Config, ban_member, delete_seconds, kick_member, mention, time_out, timeout_seconds, with_notes,
+    Config, ban_member, delete_seconds, history, kick_member, mention, time_out, timeout_seconds,
+    undo, with_notes,
 };
 
 /// The route of the component that the picker's select menu sends its pick to.
@@ -90,6 +92,16 @@ impl Kind {
             Self::Kick => "template-pick-kick",
             Self::Ban => "template-pick-ban",
             Self::Vcmute => "template-pick-vcmute",
+        }
+    }
+
+    /// The undo button of the punishment, if it has something to undo.
+    fn undo(self) -> Option<undo::Kind> {
+        match self {
+            Self::Timeout => Some(undo::Kind::Timeout),
+            Self::Kick => None,
+            Self::Ban => Some(undo::Kind::Ban),
+            Self::Vcmute => Some(undo::Kind::Vcmute),
         }
     }
 
@@ -212,7 +224,7 @@ fn pending_key(token: &str) -> String {
 }
 
 /// A reply that shows `text` as the one embed of the Info tone, as the replies of this module do.
-fn text_reply(text: String) -> Result<InteractionReply, UserError> {
+pub(crate) fn text_reply(text: String) -> Result<InteractionReply, UserError> {
     let embed = EmbedBuilder::new()
         .description(text)
         .color(Color::Info)
@@ -294,8 +306,13 @@ pub(crate) async fn punish(
     let Some(punishment) = offer(cx, config, punishment).await? else {
         return Ok(());
     };
-    let text = carry_out(cx, config, punishment).await?;
-    cx.reply_private(text).await
+    let done = carry_out(cx, config, punishment).await?;
+    cx.reply_with(InteractionReply {
+        components: undo::row(done.undo),
+        ephemeral: true,
+        ..text_reply(done.text)?
+    })
+    .await
 }
 
 /// A moderator picked a template. The punishment waiting for it runs, with the template's reason
@@ -321,8 +338,68 @@ pub(crate) async fn pick(cx: ComponentCx) -> Result<(), UserError> {
         .ok_or_else(|| UserError::message("template-gone"))?;
     // The punishment calls Discord; the picker is replaced once it is done.
     cx.defer_update().await?;
-    let text = carry_out(&cx, &config, punishment.filled(&template)).await?;
-    cx.update(text_reply(text)?).await
+    // A reason the command gave wins, so the template's is filled in only when it is used.
+    let template = if punishment.reason.is_none() {
+        filled_reason(&cx, punishment.member()?, template).await
+    } else {
+        template
+    };
+    let done = carry_out(&cx, &config, punishment.filled(&template)).await?;
+    let mut reply = text_reply(done.text)?;
+    reply.components = undo::row(done.undo);
+    cx.update(reply).await
+}
+
+/// The template's reason with `{user}`, `{moderator}` and `{server}` filled in. The server's name is
+/// asked for only when the reason names it; when Discord cannot say, the words for the server stand
+/// in for it.
+async fn filled_reason<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
+    member: UserId,
+    template: Usable,
+) -> Usable {
+    let mut values = vec![
+        ("{user}", mention(member)),
+        ("{moderator}", cx.user().name.clone()),
+    ];
+    if template.reason.contains("{server}") {
+        let server = match cx.api().get_guild(cx.guild_id()).await {
+            Ok(guild) => guild.name,
+            Err(_) => cx.t("this-server", &Args::new()),
+        };
+        values.push(("{server}", server));
+    }
+    let reason = expand(&template.reason, &values);
+    Usable {
+        reason: truncate(&reason, Reason::MAX_CHARS),
+        ..template
+    }
+}
+
+/// Replaces each token of `values` in `text` with its value. The text is read once, so a value is
+/// never expanded again, and a `{word}` that is no token stays as it is.
+fn expand(text: &str, values: &[(&str, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        if let Some((token, value)) = values.iter().find(|(token, _)| tail.starts_with(*token)) {
+            out.push_str(value);
+            rest = &tail[token.len()..];
+        } else {
+            out.push('{');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A punishment's reply as text, and the undo button that lifts the punishment again.
+pub(crate) struct Carried {
+    pub(crate) text: String,
+    pub(crate) undo: Option<Component>,
 }
 
 /// Carries out a punishment and returns the text of its reply. A command and a picked template
@@ -331,9 +408,11 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
     cx: &Cx<I>,
     config: &Config,
     punishment: Punishment,
-) -> Result<String, UserError> {
+) -> Result<Carried, UserError> {
     let user = punishment.member()?;
     let duration = punishment.duration();
+    // Counted before the action, so that the case of the action is left out of the history line.
+    let before = history::before(cx, user).await;
     let (case, notes) = match punishment.kind {
         Kind::Timeout => {
             let duration = duration.ok_or_else(|| UserError::message("template-required"))?;
@@ -355,10 +434,21 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
     if let Some(duration) = duration {
         words = words.with("duration", cx.format_duration(duration));
     }
-    Ok(with_notes(
+    let mut text = with_notes(
         cx.t(punishment.kind.reply_key(duration.is_some()), &words),
         &notes,
-    ))
+    );
+    if let Some(before) = before {
+        text.push('\n');
+        text.push_str(&history::line(cx, before));
+    }
+    Ok(Carried {
+        text,
+        undo: punishment
+            .kind
+            .undo()
+            .map(|kind| undo::button(cx, kind, user, case.number)),
+    })
 }
 
 /// The settings of the templates.
@@ -400,7 +490,7 @@ fn list(description: &str) -> serde_json::Value {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 512,
-                    "description": "The reason the punishment gets."
+                    "description": "The reason the punishment gets. {user} stands for the member, {moderator} for the moderator and {server} for the server."
                 },
                 "duration": {
                     "type": "string",

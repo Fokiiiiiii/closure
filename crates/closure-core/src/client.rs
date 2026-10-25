@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use twilight_model::channel::message::{Embed, Message};
-use twilight_model::guild::Member;
+use twilight_model::guild::{Guild, Member};
 
 use crate::action::{
     Action, Emoji, InteractionReply, InteractionResponse, MentionPolicy, ModalSpec, Outcome, Reason,
@@ -290,6 +290,13 @@ impl ApiClient {
         {
             Outcome::Member(member) => Ok(*member),
             _ => Err(unexpected("get_member")),
+        }
+    }
+
+    pub async fn get_guild(&self, guild_id: GuildId) -> Result<Guild, DiscordError> {
+        match self.execute(Action::GetGuild { guild_id }).await? {
+            Outcome::Guild(guild) => Ok(*guild),
+            _ => Err(unexpected("get_guild")),
         }
     }
 

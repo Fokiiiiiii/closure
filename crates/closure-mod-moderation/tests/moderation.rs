@@ -2525,3 +2525,693 @@ fn the_templates_are_checked_against_their_schema() {
     ]))));
     assert!(!accepted_settings(ban_templates(json!(vec![template; 26]))));
 }
+
+// ---- undo buttons ----
+
+/// The buttons of a reply, as `(label, custom_id)`.
+fn buttons_of(reply: &Reply) -> Vec<(String, String)> {
+    reply
+        .components
+        .iter()
+        .flat_map(|component| match component {
+            Component::ActionRow(row) => row
+                .components
+                .iter()
+                .filter_map(|inner| match inner {
+                    Component::Button(button) => Some((
+                        button.label.clone().unwrap_or_default(),
+                        button.custom_id.clone().unwrap_or_default(),
+                    )),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// The undo button of a reply, as `(label, custom_id)`.
+fn undo_of(reply: &Reply) -> Option<(String, String)> {
+    buttons_of(reply)
+        .into_iter()
+        .find(|(_, custom_id)| custom_id.starts_with("moderation:undo:"))
+}
+
+/// The custom id of the undo button of the first reply.
+fn undo_id(replies: &[Reply]) -> String {
+    undo_of(&replies[0]).expect("an undo button").1
+}
+
+fn undo_id_of_case(kind: &str, target: u64, number: i64) -> String {
+    format!("moderation:undo:*:{kind}:{target}:{number}")
+}
+
+/// Presses the button `custom_id` as `user`, who has `roles`.
+async fn press_as(harness: &Harness, custom_id: &str, user: u64, roles: &[u64]) -> Vec<Reply> {
+    harness
+        .click(
+            Click::new(custom_id)
+                .user(user)
+                .roles(roles.iter().copied()),
+        )
+        .await
+        .unwrap()
+}
+
+/// Presses the button as the moderator.
+async fn press(harness: &Harness, custom_id: &str) -> Vec<Reply> {
+    press_as(harness, custom_id, MODERATOR, &[MODERATOR_ROLE]).await
+}
+
+/// How often the module asked Discord for the guild.
+fn guild_fetches(harness: &Harness) -> usize {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter(|action| matches!(action, Action::GetGuild { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn a_timeout_ban_vcmute_and_warn_reply_carry_an_undo_button_and_a_kick_or_note_does_not() {
+    let harness = harness();
+    let timed = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(
+        undo_of(&timed[0]),
+        Some(("Undo".to_owned(), undo_id_of_case("timeout", MEMBER, 1))),
+        "{timed:?}"
+    );
+
+    harness.advance(Duration::from_secs(3));
+    let banned = harness
+        .invoke(ban(FREE, Some("raid"), None, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        undo_of(&banned[0]),
+        Some(("Undo".to_owned(), undo_id_of_case("ban", FREE, 2))),
+        "{banned:?}"
+    );
+
+    harness.advance(Duration::from_secs(3));
+    let muted = harness
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("loud")))
+        .await
+        .unwrap();
+    assert_eq!(
+        undo_of(&muted[0]),
+        Some(("Undo".to_owned(), undo_id_of_case("vcmute", MEMBER, 3))),
+        "{muted:?}"
+    );
+
+    harness.advance(Duration::from_secs(3));
+    let warned = harness.invoke(warn(MEMBER, Some("rude"))).await.unwrap();
+    assert_eq!(
+        undo_of(&warned[0]),
+        Some(("Revoke".to_owned(), undo_id_of_case("warn", MEMBER, 4))),
+        "{warned:?}"
+    );
+
+    harness.advance(Duration::from_secs(3));
+    let kicked = harness.invoke(kick(MEMBER, Some("rude"))).await.unwrap();
+    assert!(buttons_of(&kicked[0]).is_empty(), "{kicked:?}");
+    let noted = harness.invoke(note(MEMBER, "watch")).await.unwrap();
+    assert!(buttons_of(&noted[0]).is_empty(), "{noted:?}");
+}
+
+#[tokio::test]
+async fn pressing_undo_on_a_timeout_lifts_it_records_the_untimeout_and_replaces_the_message() {
+    let harness = harness();
+    let timed = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    let replies = press(&harness, &undo_id(&timed)).await;
+
+    let edit = edit_of(&replies).expect("the message is replaced");
+    assert!(
+        edit.content
+            .starts_with("-# ↩ Undone by <@100>.\nRemoved the timeout of <@7> — case #2."),
+        "{replies:?}"
+    );
+    assert!(edit.components.is_empty(), "{replies:?}");
+    assert!(!edit.ephemeral, "the replaced message is shared");
+    assert_eq!(sequence(&harness), ["timeout", "dm", "untimeout"]);
+
+    let lifted = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(lifted.kind.as_str(), "untimeout");
+    assert_eq!(lifted.reason.as_deref(), Some("Undone from case #1."));
+    assert_eq!(lifted.moderator, Id::new(MODERATOR));
+    let undone = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(
+        undone.revoked.map(|revoked| revoked.reason),
+        Some(Some("removed by case #2".to_owned()))
+    );
+}
+
+#[tokio::test]
+async fn a_picked_timeout_replaces_the_picker_with_a_result_that_has_an_undo_button() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "timeout",
+        json!([{ "id": "short", "label": "Short", "reason": "Spam", "duration": "1h" }]),
+    ));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, Some("spam")))
+        .await
+        .unwrap();
+    let picked = pick(&harness, &picker_id(&replies), "short").await;
+    let edit = edit_of(&picked).expect("the picker is replaced");
+    let undo = undo_of(edit).map(|(_, custom_id)| custom_id);
+    assert_eq!(
+        undo,
+        Some(undo_id_of_case("timeout", MEMBER, 1)),
+        "{picked:?}"
+    );
+
+    let undone = press(&harness, &undo.unwrap_or_default()).await;
+    assert!(
+        edit_of(&undone)
+            .expect("the message is replaced")
+            .content
+            .contains("Removed the timeout of <@7>"),
+        "{undone:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_press_says_that_is_already_over_and_does_nothing_again() {
+    let harness = harness();
+    let timed = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    let id = undo_id(&timed);
+    press(&harness, &id).await;
+    let before = sequence(&harness);
+
+    let again = press(&harness, &id).await;
+    assert!(text(&again).contains("That is already over."), "{again:?}");
+    assert!(edit_of(&again).is_none(), "{again:?}");
+    assert_eq!(sequence(&harness), before, "no second action on Discord");
+    assert!(harness.cases().get(3).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_press_after_the_un_command_ran_is_not_needed() {
+    let harness = harness();
+    let timed = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    let id = undo_id(&timed);
+    harness.advance(Duration::from_secs(3));
+    harness.invoke(untimeout(MEMBER, None)).await.unwrap();
+    let before = sequence(&harness);
+
+    let late = press(&harness, &id).await;
+    assert!(text(&late).contains("That is already over."), "{late:?}");
+    assert_eq!(sequence(&harness), before);
+}
+
+#[tokio::test]
+async fn a_press_after_the_timeout_ran_out_is_not_needed() {
+    let harness = harness();
+    let timed = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    let id = undo_id(&timed);
+    harness.advance(Duration::from_secs(2 * 3_600));
+    let before = sequence(&harness);
+
+    let late = press(&harness, &id).await;
+    assert!(text(&late).contains("That is already over."), "{late:?}");
+    assert_eq!(sequence(&harness), before);
+}
+
+#[tokio::test]
+async fn a_ban_is_undone_only_by_an_administrator_and_a_timed_one_loses_its_timer() {
+    let harness = harness();
+    let banned = harness
+        .invoke(ban(FREE, Some("raid"), Some("2h"), None))
+        .await
+        .unwrap();
+    let id = undo_id(&banned);
+    assert_eq!(harness.jobs(), 1, "the timer of the two hour ban");
+
+    let refused = press(&harness, &id).await;
+    assert!(edit_of(&refused).is_none(), "{refused:?}");
+    assert!(
+        !sequence(&harness).contains(&"unban"),
+        "{:?}",
+        sequence(&harness)
+    );
+    assert_eq!(harness.jobs(), 1);
+
+    let lifted = press_as(&harness, &id, MODERATOR, &[ADMIN_ROLE]).await;
+    assert!(
+        edit_of(&lifted)
+            .expect("the message is replaced")
+            .content
+            .contains("Unbanned <@42> — case #2."),
+        "{lifted:?}"
+    );
+    assert_eq!(sequence(&harness).last(), Some(&"unban"));
+    assert_eq!(harness.jobs(), 0, "the timer is cancelled");
+    let lifted_case = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(lifted_case.kind.as_str(), "unban");
+    assert_eq!(lifted_case.reason.as_deref(), Some("Undone from case #1."));
+}
+
+#[tokio::test]
+async fn pressing_undo_on_a_voice_mute_lifts_it_and_records_the_vcunmute() {
+    let harness = harness();
+    let muted = harness
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("loud")))
+        .await
+        .unwrap();
+    let replies = press(&harness, &undo_id(&muted)).await;
+
+    assert!(
+        edit_of(&replies)
+            .expect("the message is replaced")
+            .content
+            .contains("Removed the voice mute of <@7> — case #2."),
+        "{replies:?}"
+    );
+    assert_eq!(sequence(&harness).last(), Some(&"vcunmute"));
+    assert_eq!(harness.jobs(), 0, "the timer of the mute is cancelled");
+    let lifted = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(lifted.kind.as_str(), "vcunmute");
+    assert_eq!(lifted.reason.as_deref(), Some("Undone from case #1."));
+}
+
+#[tokio::test]
+async fn pressing_undo_on_a_warning_revokes_it_without_touching_discord() {
+    let harness = harness();
+    let warned = harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
+    let id = undo_id(&warned);
+    let before = sequence(&harness);
+
+    let refused = press_as(&harness, &id, UNPRIVILEGED, &[]).await;
+    assert!(edit_of(&refused).is_none(), "{refused:?}");
+    assert!(cases_of(&harness, MEMBER).await[0].revoked.is_none());
+
+    let replies = press(&harness, &id).await;
+    let edit = edit_of(&replies).expect("the message is replaced");
+    assert!(edit.content.contains("Case #1 was revoked."), "{replies:?}");
+    assert!(edit.components.is_empty(), "{replies:?}");
+    assert_eq!(sequence(&harness), before, "no action on Discord");
+
+    let revoked = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(
+        revoked.revoked.map(|revoked| revoked.reason),
+        Some(Some("Undone with its button.".to_owned()))
+    );
+    let listed = harness.invoke(warnings(MEMBER)).await.unwrap();
+    assert!(
+        text(&listed).contains("has no active warnings"),
+        "{listed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_press_without_the_permission_is_refused_and_nothing_happens() {
+    let harness = harness();
+    let timed = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    let before = sequence(&harness);
+
+    let refused = press_as(&harness, &undo_id(&timed), UNPRIVILEGED, &[]).await;
+    assert!(edit_of(&refused).is_none(), "{refused:?}");
+    assert_eq!(sequence(&harness), before);
+    assert!(cases_of(&harness, MEMBER).await[0].revoked.is_none());
+}
+
+#[tokio::test]
+async fn a_press_whose_case_is_of_another_member_or_another_kind_is_refused() {
+    let harness = harness();
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    let before = sequence(&harness);
+
+    let other_member = press(&harness, &undo_id_of_case("timeout", FREE, 1)).await;
+    assert!(
+        text(&other_member).contains("That is already over."),
+        "{other_member:?}"
+    );
+    // An administrator presses, so that the kind is what refuses it and not the permission.
+    let other_kind = press_as(
+        &harness,
+        &undo_id_of_case("ban", MEMBER, 1),
+        MODERATOR,
+        &[ADMIN_ROLE],
+    )
+    .await;
+    assert!(
+        text(&other_kind).contains("That is already over."),
+        "{other_kind:?}"
+    );
+    assert_eq!(sequence(&harness), before);
+    assert!(cases_of(&harness, MEMBER).await[0].revoked.is_none());
+}
+
+// ---- history line ----
+
+/// The last line of the reply's text, the history line when it has one.
+fn last_line(replies: &[Reply]) -> &str {
+    text(replies).lines().last().unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_clean_member_gets_a_history_line_of_zeros() {
+    let harness = harness();
+    let replies = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(
+        last_line(&replies),
+        "-# Before this: 0 active warnings, 0 cases.",
+        "{replies:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_history_counts_earlier_warnings_and_cases_but_not_the_new_one() {
+    let harness = harness();
+    harness.invoke(warn(MEMBER, Some("a"))).await.unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness.invoke(warn(MEMBER, Some("b"))).await.unwrap();
+    for word in ["one", "two", "three"] {
+        harness.invoke(note(MEMBER, word)).await.unwrap();
+    }
+
+    let replies = harness.invoke(kick(MEMBER, Some("rude"))).await.unwrap();
+    assert_eq!(
+        last_line(&replies),
+        "-# Before this: 2 active warnings, 5 cases.",
+        "{replies:?}"
+    );
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 6);
+}
+
+#[tokio::test]
+async fn one_warning_and_one_case_are_said_in_the_singular() {
+    let harness = harness();
+    harness.invoke(warn(MEMBER, Some("a"))).await.unwrap();
+    harness.advance(Duration::from_secs(3));
+    let replies = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(
+        last_line(&replies),
+        "-# Before this: 1 active warning, 1 case.",
+        "{replies:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_history_line_is_in_japanese_for_a_japanese_moderator() {
+    let harness = harness();
+    harness.invoke(warn(MEMBER, Some("a"))).await.unwrap();
+    harness.advance(Duration::from_secs(3));
+    let replies = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")).locale(Locale::Ja))
+        .await
+        .unwrap();
+    assert_eq!(
+        last_line(&replies),
+        "-# 今回より前: 有効な警告 1 件、ケース 1 件。",
+        "{replies:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_history_of_a_hundred_cases_or_more_says_so_at_the_scan_limit() {
+    let exactly = harness();
+    for _ in 0..100 {
+        exactly.invoke(note(MEMBER, "n")).await.unwrap();
+    }
+    let replies = exactly
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(
+        last_line(&replies),
+        "-# Before this: 0 active warnings, 100 cases.",
+        "{replies:?}"
+    );
+
+    let more = harness();
+    for _ in 0..101 {
+        more.invoke(note(MEMBER, "n")).await.unwrap();
+    }
+    let replies = more
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(
+        last_line(&replies),
+        "-# Before this: 0 active warnings, 100+ cases.",
+        "{replies:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_history_line_is_on_the_picker_path_too_and_not_on_a_warning() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "timeout",
+        json!([{ "id": "short", "label": "Short", "reason": "Spam", "duration": "1h" }]),
+    ));
+    let warned = harness.invoke(warn(MEMBER, Some("a"))).await.unwrap();
+    assert!(!text(&warned).contains("Before this"), "{warned:?}");
+
+    harness.advance(Duration::from_secs(3));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, Some("spam")))
+        .await
+        .unwrap();
+    let picked = pick(&harness, &picker_id(&replies), "short").await;
+    let edit = edit_of(&picked).expect("the picker is replaced");
+    assert_eq!(
+        edit.content.lines().last(),
+        Some("-# Before this: 1 active warning, 1 case."),
+        "{picked:?}"
+    );
+}
+
+// ---- placeholders in template reasons ----
+
+#[tokio::test]
+async fn each_placeholder_is_expanded_in_the_stored_reason_and_the_direct_message() {
+    let harness = harness();
+    harness.api().set_guild_name(Id::new(GUILD), "Test Server");
+    harness.set_config(templates_for(
+        "timeout",
+        json!([{
+            "id": "raid",
+            "label": "Raid",
+            "reason": "Raid by {moderator} on {user} in {server}",
+            "duration": "1h"
+        }]),
+    ));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, None))
+        .await
+        .unwrap();
+    let described = options_of(&replies[0]);
+    assert!(
+        described[0]
+            .2
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("Raid by {moderator} on {user} in {server}"),
+        "the picker shows the template as written: {described:?}"
+    );
+
+    let picked = pick(&harness, &picker_id(&replies), "raid").await;
+    assert!(edit_of(&picked).is_some(), "{picked:?}");
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(
+        case.reason.as_deref(),
+        Some("Raid by tester on <@7> in Test Server")
+    );
+    // The direct message escapes the text, which breaks the mention into plain text.
+    assert!(
+        dm_contents(&harness)[0].contains("Raid by tester on <\u{200B}@7\\> in Test Server"),
+        "{:?}",
+        dm_contents(&harness)
+    );
+}
+
+#[tokio::test]
+async fn the_server_is_asked_for_only_when_a_reason_names_it() {
+    let harness = harness();
+    harness.api().set_guild_name(Id::new(GUILD), "Test Server");
+    harness.set_config(templates_for(
+        "timeout",
+        json!([
+            { "id": "plain", "label": "Plain", "reason": "No server word", "duration": "1h" },
+            { "id": "srv", "label": "Server", "reason": "Raid on {server}", "duration": "1h" }
+        ]),
+    ));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, None))
+        .await
+        .unwrap();
+    pick(&harness, &picker_id(&replies), "plain").await;
+    assert_eq!(guild_fetches(&harness), 0);
+
+    harness.advance(Duration::from_secs(3));
+    let replies = harness.invoke(timeout_of(FREE, None, None)).await.unwrap();
+    let picked = pick(&harness, &picker_id(&replies), "srv").await;
+    assert!(edit_of(&picked).is_some(), "{picked:?}");
+    assert_eq!(guild_fetches(&harness), 1);
+    assert_eq!(
+        harness
+            .cases()
+            .get(2)
+            .await
+            .unwrap()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("Raid on Test Server")
+    );
+}
+
+#[tokio::test]
+async fn a_reason_the_command_gives_wins_and_the_server_is_not_asked_for() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "timeout",
+        json!([{ "id": "srv", "label": "Server", "reason": "Raid on {server}", "duration": "1h" }]),
+    ));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, Some("typed")))
+        .await
+        .unwrap();
+    let picked = pick(&harness, &picker_id(&replies), "srv").await;
+    assert!(edit_of(&picked).is_some(), "{picked:?}");
+    assert_eq!(guild_fetches(&harness), 0);
+    assert_eq!(
+        harness
+            .cases()
+            .get(1)
+            .await
+            .unwrap()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("typed")
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_word_stays_as_typed_and_a_typed_reason_is_not_expanded() {
+    let harness = harness();
+    harness.set_config(templates_for(
+        "timeout",
+        json!([{ "id": "odd", "label": "Odd", "reason": "{foo} for {user}", "duration": "1h" }]),
+    ));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, None))
+        .await
+        .unwrap();
+    pick(&harness, &picker_id(&replies), "odd").await;
+    assert_eq!(
+        harness
+            .cases()
+            .get(1)
+            .await
+            .unwrap()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("{foo} for <@7>")
+    );
+
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(timeout(FREE, "1h", Some("typed {user} {moderator}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        harness
+            .cases()
+            .get(2)
+            .await
+            .unwrap()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("typed {user} {moderator}")
+    );
+}
+
+#[tokio::test]
+async fn a_value_that_holds_a_placeholder_is_not_expanded_again() {
+    let harness = harness();
+    harness.api().set_guild_name(Id::new(GUILD), "{moderator}");
+    harness.set_config(templates_for(
+        "timeout",
+        json!([{ "id": "srv", "label": "Server", "reason": "By {server}", "duration": "1h" }]),
+    ));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, None))
+        .await
+        .unwrap();
+    pick(&harness, &picker_id(&replies), "srv").await;
+    assert_eq!(
+        harness
+            .cases()
+            .get(1)
+            .await
+            .unwrap()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("By {moderator}")
+    );
+}
+
+#[tokio::test]
+async fn an_expanded_reason_is_cut_to_the_length_a_case_keeps() {
+    let harness = harness();
+    harness
+        .api()
+        .set_guild_name(Id::new(GUILD), &"b".repeat(100));
+    let template = format!("{}{{server}}", "a".repeat(450));
+    harness.set_config(templates_for(
+        "timeout",
+        json!([{ "id": "long", "label": "Long", "reason": template, "duration": "1h" }]),
+    ));
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, None))
+        .await
+        .unwrap();
+    let picked = pick(&harness, &picker_id(&replies), "long").await;
+    assert!(edit_of(&picked).is_some(), "{picked:?}");
+    let reason = harness
+        .cases()
+        .get(1)
+        .await
+        .unwrap()
+        .unwrap()
+        .reason
+        .unwrap_or_default();
+    assert_eq!(reason.chars().count(), 512);
+    assert!(reason.ends_with('…'));
+}
