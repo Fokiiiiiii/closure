@@ -336,6 +336,35 @@ async fn a_warning_is_posted_to_the_log_channel_when_there_is_one() {
     assert_eq!(cases_of(&quiet, MEMBER).await.len(), 1);
 }
 
+// ---- tones ----
+
+#[tokio::test]
+async fn a_confirmed_punishment_is_a_success_with_the_guild_emoji_and_a_list_stays_info() {
+    const SUCCESS_COLOUR: u32 = 0x0057_F287;
+    const INFO_COLOUR: u32 = 0x0058_65F2;
+    let harness = harness();
+    let warned = harness.invoke(warn(MEMBER, Some("tone"))).await.unwrap();
+    assert_eq!(
+        warned[0].embeds[0].color,
+        Some(SUCCESS_COLOUR),
+        "{warned:?}"
+    );
+    assert!(
+        warned[0].embeds[0]
+            .description
+            .as_deref()
+            .is_some_and(|text| text.starts_with("✅ ")),
+        "{warned:?}"
+    );
+    let timed = harness
+        .invoke(timeout_of(MEMBER, Some("1h"), Some("tone")))
+        .await
+        .unwrap();
+    assert_eq!(timed[0].embeds[0].color, Some(SUCCESS_COLOUR), "{timed:?}");
+    let listed = harness.invoke(warnings(MEMBER)).await.unwrap();
+    assert_eq!(listed[0].embeds[0].color, Some(INFO_COLOUR), "{listed:?}");
+}
+
 // ---- /warnings ----
 
 #[tokio::test]

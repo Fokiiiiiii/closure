@@ -4,6 +4,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use closure_core::event::CommandOptionValue;
+use closure_core::settings::GuildPolicy;
+use closure_core::timezone::Timezone;
 use closure_sdk::testing::{Harness, Invocation};
 use closure_sdk::{Command, CommandArgs, CommandCx, Locale, ModuleBuilder, Span, UserError};
 
@@ -142,6 +144,57 @@ async fn an_explicit_zone_wins_over_the_server_language() {
         (expected - 2..=expected).contains(&seconds(&reply)),
         "{reply} vs {expected}"
     );
+}
+
+#[tokio::test]
+async fn a_server_timezone_replaces_the_language_default() {
+    let harness = harness();
+    harness.set_policy(GuildPolicy {
+        timezone: Some(Timezone::parse("Asia/Tokyo").unwrap()),
+        ..GuildPolicy::default()
+    });
+    // An English server would read this as UTC, nine hours later than the Tokyo moment.
+    let before = now();
+    let target = target();
+    let reply = run(&harness, &wall_clock(target, 9 * HOUR)).await;
+    let expected = target - before;
+    assert!(
+        (expected - 2..=expected).contains(&seconds(&reply)),
+        "{reply} vs {expected}"
+    );
+}
+
+#[tokio::test]
+async fn a_japanese_server_with_a_utc_timezone_reads_utc() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+    harness.set_policy(GuildPolicy {
+        timezone: Some(Timezone::parse("UTC").unwrap()),
+        ..GuildPolicy::default()
+    });
+    let before = now();
+    let target = target();
+    let reply = run(&harness, &wall_clock(target, 0)).await;
+    let expected = target - before;
+    assert!(
+        (expected - 2..=expected).contains(&seconds(&reply)),
+        "{reply} vs {expected}"
+    );
+}
+
+#[tokio::test]
+async fn an_error_names_the_server_timezone_it_was_read_in() {
+    let harness = harness();
+    harness.set_policy(GuildPolicy {
+        timezone: Some(Timezone::parse("-0500").unwrap()),
+        ..GuildPolicy::default()
+    });
+    let past = wall_clock(now() - HOUR, -5 * HOUR);
+    let replies = harness
+        .invoke(Invocation::new("until").option("until", CommandOptionValue::String(past)))
+        .await
+        .expect("the command runs");
+    assert!(replies[0].content.contains("UTC-05:00"), "{replies:?}");
 }
 
 #[tokio::test]

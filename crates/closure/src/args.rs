@@ -63,6 +63,11 @@ pub struct Args {
     #[arg(long)]
     pub skip_command_registration: bool,
 
+    /// How many days messages stay in the history that modules with `message_history` read.
+    /// `0` keeps none: nothing is recorded, and kept messages are removed at the next purge.
+    #[arg(long, env = "MESSAGE_HISTORY_DAYS", default_value_t = 7)]
+    pub message_history_days: u32,
+
     #[arg(long, env = "LOG_FORMAT", value_enum, default_value_t = LogFormat::Pretty)]
     pub log_format: LogFormat,
 }
@@ -75,6 +80,7 @@ impl fmt::Debug for Args {
             .field("api_enabled", &self.api_admin_token.is_some())
             .field("command_guild", &self.command_guild)
             .field("skip_command_registration", &self.skip_command_registration)
+            .field("message_history_days", &self.message_history_days)
             .field("log_format", &self.log_format)
             .finish_non_exhaustive()
     }

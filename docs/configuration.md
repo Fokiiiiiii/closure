@@ -17,6 +17,8 @@ preset: large              # small | medium | large   (default: medium)
 language: ja               # auto | en | ja           (default: auto)
 log_channel: 123456789012345678
 moderator_roles: [111111111111111111, 222222222222222222]
+timezone: Asia/Tokyo       # the zone of a date typed without one
+prefix: "!"                # text commands; unset, they are off
 
 limits:                    # override single values of the preset
   handler_timeout_secs: 20
@@ -41,6 +43,9 @@ modules:
 | `language` | The language of the bot's messages. `auto` follows the community language the server chose in Discord. |
 | `log_channel` | Where modules post moderation logs. |
 | `moderator_roles` | Roles whose members may use moderation features (at most 100). |
+| `timezone` | The zone of a date and time typed in a command without one; see [time zone, prefix and emojis](#time-zone-prefix-and-emojis). |
+| `prefix` | The prefix of text commands, 1 to 10 characters without spaces. Unset, text commands are off. |
+| `success_emoji`, `error_emoji` | The emoji in front of success and error replies; see [time zone, prefix and emojis](#time-zone-prefix-and-emojis). |
 | `limits` | Per-server resource limits; see below. |
 | `permissions` | Levels of roles and members, and what is decided about single permission keys; see below. |
 | `modules.<id>` | `enabled`, an optional `capabilities` list, and `config` — validated against the module's own JSON Schema. |
@@ -65,6 +70,37 @@ For one key, `permissions.keys.<key>` may set `min_level` (instead of the module
 `allow` (roles and users who may use it whatever their level) and `deny` (who may never use it).
 `deny` beats `allow` and `allow` beats the level; the owner of the server is never refused. A key
 no module declares is an error, so a typo is reported. Each list holds at most 200 entries.
+
+### Time zone, prefix and emojis
+
+`timezone` is the zone of a date and time typed in a command without one, such as `2026-11-01 18:00`
+(see [durations as a date and time](moderation.md#durations-as-a-date-and-time)). Without it, a
+Japanese server reads such a time as UTC+09:00 and any other server as UTC. It is one of:
+
+- `UTC`, `Z`, `GMT`, or an offset: `UTC+9`, `UTC+09:00`, `UTC-5`, `GMT+9`, `+09:00`, `-0500`. The
+  offset is between `UTC-12:00` and `UTC+14:00`.
+- A fixed zone: `Asia/Tokyo`, `Asia/Seoul` (+9), `Asia/Shanghai`, `Asia/Hong_Kong`, `Asia/Taipei`,
+  `Asia/Singapore` (+8), `Asia/Bangkok`, `Asia/Jakarta` (+7), `Asia/Kolkata` (+5:30), `Asia/Dubai` (+4).
+
+`UTC`, `GMT` and `Z` (and the `UTC` or `GMT` before an offset) are accepted in any capitalisation, and
+surrounding spaces are ignored. The zone names are case-sensitive: `Asia/Tokyo`, not `asia/tokyo`.
+
+A zone with daylight saving time, such as `America/New_York` or `Europe/London`, is refused, because a
+name cannot follow the change of the clocks. Write its offset for now and change it when the clocks
+change:
+
+```yaml
+timezone: UTC-5    # America/New_York in winter; use UTC-4 from March to November
+```
+
+`prefix` is 1 to 10 characters without spaces, such as `!` or `>>`. Text commands read it; the
+commands themselves are not part of this version. An empty prefix is refused: leave the key out to turn
+text commands off.
+
+`success_emoji` and `error_emoji` go in front of the text of a success or an error reply, followed by a
+space, so `✅ Warned user 7` reads as the success it is. The default is `✅` and `❌`. Each is a Unicode
+emoji (`❤️`, `👍🏽`) or a custom one as `<:name:id>` or `<a:name:id>`, at most 100 characters. An empty
+string (`""`) puts no emoji there. Info replies and warnings never get one.
 
 ### Bot-wide defaults
 

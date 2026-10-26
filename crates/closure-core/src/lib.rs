@@ -12,6 +12,7 @@ pub mod cases;
 pub mod client;
 pub mod error;
 pub mod event;
+pub mod history;
 pub mod interaction;
 pub mod latency;
 pub mod locale;
@@ -24,5 +25,6 @@ pub mod storage;
 pub mod subscription;
 pub mod testing;
 pub mod throttle;
+pub mod timezone;
 
 pub use twilight_model::gateway::Intents;

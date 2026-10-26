@@ -113,6 +113,12 @@ impl From<CaseError> for UserError {
     }
 }
 
+impl From<closure_core::history::HistoryError> for UserError {
+    fn from(error: closure_core::history::HistoryError) -> Self {
+        Self::Module(ModuleError::other(error.to_string()))
+    }
+}
+
 impl From<ScheduleError> for UserError {
     fn from(error: ScheduleError) -> Self {
         Self::Module(ModuleError::other(error.to_string()))

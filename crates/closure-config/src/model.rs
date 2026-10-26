@@ -35,6 +35,37 @@ fn optional_snowflakes_schema(_: &mut schemars::SchemaGenerator) -> schemars::Sc
     })
 }
 
+fn optional_timezone_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [{
+            "type": "string",
+            "description": "The zone of a date typed without one: UTC, Z, an offset such as UTC+9, UTC+09:00, UTC-5, +09:00 or -0500, or a fixed zone such as Asia/Tokyo. Zones with daylight saving time are refused; use a fixed offset instead."
+        }, { "type": "null" }]
+    })
+}
+
+fn optional_prefix_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [{
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10,
+            "pattern": "^\\S+$",
+            "description": "The prefix of text commands, 1 to 10 characters without spaces. Unset, text commands are off."
+        }, { "type": "null" }]
+    })
+}
+
+fn optional_emoji_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [{
+            "type": "string",
+            "maxLength": 100,
+            "description": "A Unicode emoji, or a custom one as <:name:id> or <a:name:id>. An empty string means no emoji."
+        }, { "type": "null" }]
+    })
+}
+
 /// A starting point sized for the server. It only chooses defaults; every value can still be
 /// overridden individually.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -260,6 +291,19 @@ pub struct GuildOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "optional_snowflakes_schema")]
     pub moderator_roles: Option<Vec<RoleId>>,
+    /// Kept as written and checked when the document is compiled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_timezone_schema")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_prefix_schema")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_emoji_schema")]
+    pub success_emoji: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_emoji_schema")]
+    pub error_emoji: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<LimitsOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -285,6 +329,11 @@ pub struct EffectiveConfig {
     pub language: Language,
     pub log_channel: Option<ChannelId>,
     pub moderator_roles: Vec<RoleId>,
+    /// The zone as a label such as `UTC+09:00`.
+    pub timezone: Option<String>,
+    pub prefix: Option<String>,
+    pub success_emoji: String,
+    pub error_emoji: String,
     pub limits: Limits,
     pub permissions: PermissionsOverride,
     pub modules: BTreeMap<String, ModuleEffective>,

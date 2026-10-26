@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use closure_core::module::Module;
+use closure_core::settings::GuildPolicy;
 use closure_sdk::testing::{Harness, Invocation, ReplyKind};
 use closure_sdk::{Command, ModuleBuilder, Tone, UserError};
 use serde::Deserialize;
@@ -47,6 +48,16 @@ fn module() -> ModuleBuilder {
                 cx.say(Tone::Warning, "two").await?;
                 cx.say(Tone::Error, "three").await
             }),
+        )
+        .command(
+            Command::<()>::new("empty-success", "An empty success is refused").handler(
+                |cx, ()| async move {
+                    if cx.say(Tone::Success, "").await.is_err() {
+                        cx.reply("refused").await?;
+                    }
+                    Ok(())
+                },
+            ),
         )
         .command(
             Command::<()>::new("empty", "An empty reply is refused").handler(|cx, ()| async move {
@@ -128,8 +139,52 @@ async fn each_tone_takes_its_own_colour() {
     let replies = harness.invoke(Invocation::new("tones")).await.unwrap();
     let colours: Vec<Option<u32>> = replies.iter().map(|reply| reply.embeds[0].color).collect();
     assert_eq!(colours, [Some(SUCCESS), Some(WARNING), Some(ERROR)]);
-    assert_eq!(replies[0].content, "one");
+    // Success and error texts get the guild's emoji in front; a warning gets none.
+    assert_eq!(replies[0].content, "✅ one");
+    assert_eq!(replies[1].content, "two");
+    assert_eq!(replies[2].content, "❌ three");
+}
+
+#[tokio::test]
+async fn success_and_error_replies_take_the_guild_emojis_and_info_takes_none() {
+    let harness = Harness::new(module()).unwrap();
+    let replies = harness.invoke(Invocation::new("tones")).await.unwrap();
+    assert_eq!(replies[0].content, "✅ one");
+    assert_eq!(replies[2].content, "❌ three");
+    let plain = harness.invoke(Invocation::new("plain")).await.unwrap();
+    assert_eq!(plain[0].content, "Hello.");
+}
+
+#[tokio::test]
+async fn a_custom_emoji_is_used_and_an_empty_one_means_none() {
+    let harness = Harness::new(module()).unwrap();
+    harness.set_policy(GuildPolicy {
+        success_emoji: "<:party:123456789012345678>".to_owned(),
+        error_emoji: String::new(),
+        ..GuildPolicy::default()
+    });
+    let replies = harness.invoke(Invocation::new("tones")).await.unwrap();
+    assert_eq!(replies[0].content, "<:party:123456789012345678> one");
     assert_eq!(replies[2].content, "three");
+}
+
+#[tokio::test]
+async fn an_empty_success_is_still_refused_and_gets_no_emoji_alone() {
+    let harness = Harness::new(module()).unwrap();
+    let replies = harness
+        .invoke(Invocation::new("empty-success"))
+        .await
+        .unwrap();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0].content, "refused");
+}
+
+#[tokio::test]
+async fn an_error_answer_takes_the_error_emoji_and_stays_private_with_replies_public() {
+    let harness = harness_with(json!({ "replies": "public" }));
+    let replies = harness.invoke(Invocation::new("fail")).await.unwrap();
+    assert!(replies[0].ephemeral, "{replies:?}");
+    assert_eq!(replies[0].content, "❌ Only for you.");
 }
 
 #[tokio::test]
@@ -201,7 +256,7 @@ async fn an_error_is_an_error_embed_and_private_even_when_replies_are_public() {
     assert_eq!(replies[0].embeds[0].color, Some(ERROR));
     assert_eq!(
         replies[0].embeds[0].description.as_deref(),
-        Some("Only for you.")
+        Some("❌ Only for you.")
     );
 }
 

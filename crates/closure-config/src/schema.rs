@@ -1419,6 +1419,19 @@ mod tests {
     }
 
     #[test]
+    fn schema_publishes_the_guild_wide_settings() {
+        let schema = document_schema(&registry()).unwrap();
+        for key in ["timezone", "prefix", "success_emoji", "error_emoji"] {
+            assert!(schema["properties"][key].is_object(), "{key}");
+        }
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&json!({ "timezone": "Asia/Tokyo", "prefix": "!" })));
+        assert!(validator.is_valid(&json!({ "timezone": null, "error_emoji": "" })));
+        assert!(!validator.is_valid(&json!({ "prefix": "a b" })));
+        assert!(!validator.is_valid(&json!({ "prefix": "" })));
+    }
+
+    #[test]
     fn schema_rejects_what_the_parser_rejects() {
         let schema = document_schema(&registry()).unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();

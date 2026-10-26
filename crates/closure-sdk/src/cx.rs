@@ -344,6 +344,13 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.ctx.cases()
     }
 
+    /// The messages the host kept in this guild. The module needs the capability
+    /// `message_history` (`ModuleBuilder::capability(Capability::ReadMessageHistory)`).
+    #[must_use]
+    pub fn history(&self) -> &closure_core::history::MessageHistory {
+        self.ctx.history()
+    }
+
     /// Posts a case to the log channel of the guild (see [`crate::modlog`]); does nothing when
     /// the guild has none. The module needs the capability `SendMessages` as well.
     pub async fn modlog(
@@ -413,15 +420,36 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.say_private_t(Tone::Info, key, args).await
     }
 
+    /// The text as the guild's replies show it: a success or an error gets the guild's emoji in
+    /// front. Empty text stays empty, so that it is still refused.
+    pub fn tone_text(&self, tone: Tone, text: impl Into<String>) -> String {
+        let text = text.into();
+        if text.is_empty() {
+            return text;
+        }
+        let policy = self.ctx.policy();
+        let emoji = match tone {
+            Tone::Success => &policy.success_emoji,
+            Tone::Error => &policy.error_emoji,
+            Tone::Info | Tone::Warning => return text,
+        };
+        if emoji.is_empty() {
+            text
+        } else {
+            format!("{emoji} {text}")
+        }
+    }
+
     /// Answers with the text as an embed of `tone`, where everyone in the channel sees it.
     pub async fn say(&self, tone: Tone, text: impl Into<String>) -> Result<(), UserError> {
-        self.reply_with(embed_reply(tone, text.into(), false)?)
+        self.reply_with(embed_reply(tone, self.tone_text(tone, text), false)?)
             .await
     }
 
     /// [`Self::say`] so that only the user who sent the interaction sees it.
     pub async fn say_private(&self, tone: Tone, text: impl Into<String>) -> Result<(), UserError> {
-        self.reply_with(embed_reply(tone, text.into(), true)?).await
+        self.reply_with(embed_reply(tone, self.tone_text(tone, text), true)?)
+            .await
     }
 
     /// [`Self::say`] with a message of the module's catalog.
@@ -436,7 +464,8 @@ impl<I: InteractionRef + 'static> Cx<I> {
 
     /// Answers privately whatever the `replies` setting says; for errors and refusals.
     pub(crate) async fn say_locked(&self, tone: Tone, text: String) -> Result<(), UserError> {
-        self.send(embed_reply(tone, text, true)?).await
+        self.send(embed_reply(tone, self.tone_text(tone, text), true)?)
+            .await
     }
 
     /// The first answer is the response to the interaction (or, after [`Self::defer`], the
@@ -695,6 +724,12 @@ impl JobCx {
     #[must_use]
     pub fn cases(&self) -> &closure_core::cases::Cases {
         self.ctx.cases()
+    }
+
+    /// The messages the host kept in this guild (see [`Cx::history`]).
+    #[must_use]
+    pub fn history(&self) -> &closure_core::history::MessageHistory {
+        self.ctx.history()
     }
 
     /// Posts a case to the log channel of the guild (see [`crate::modlog`]); does nothing when

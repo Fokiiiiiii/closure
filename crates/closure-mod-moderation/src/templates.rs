@@ -15,7 +15,7 @@ use closure_sdk::punish::Method;
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{
     Args, Color, CommandCx, ComponentCx, Cx, EmbedBuilder, InteractionRef, InteractionReply,
-    ModuleError, Reason, Span, UserError, UserId,
+    ModuleError, Reason, Span, Tone, UserError, UserId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -228,9 +228,21 @@ fn pending_key(token: &str) -> String {
 
 /// A reply that shows `text` as the one embed of the Info tone, as the replies of this module do.
 pub(crate) fn text_reply(text: String) -> Result<InteractionReply, UserError> {
+    embed_reply(Color::Info, text)
+}
+
+/// The reply of an action that went through: the Success tone, with the guild's emoji in front.
+pub(crate) fn success_reply<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
+    text: String,
+) -> Result<InteractionReply, UserError> {
+    embed_reply(Color::Success, cx.tone_text(Tone::Success, text))
+}
+
+fn embed_reply(color: Color, text: String) -> Result<InteractionReply, UserError> {
     let embed = EmbedBuilder::new()
         .description(text)
-        .color(Color::Info)
+        .color(color)
         .build()
         .map_err(|error| ModuleError::other(error.to_string()))?;
     Ok(InteractionReply {
@@ -321,7 +333,7 @@ pub(crate) async fn punish(
     cx.reply_with(InteractionReply {
         components: undo::row(done.undo),
         ephemeral: true,
-        ..text_reply(done.text)?
+        ..success_reply(cx, done.text)?
     })
     .await
 }
@@ -356,7 +368,7 @@ pub(crate) async fn pick(cx: ComponentCx) -> Result<(), UserError> {
         template
     };
     let done = carry_out(&cx, &config, punishment.filled(&template)).await?;
-    let mut reply = text_reply(done.text)?;
+    let mut reply = success_reply(&cx, done.text)?;
     reply.components = undo::row(done.undo);
     cx.update(reply).await
 }

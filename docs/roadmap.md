@@ -8,7 +8,9 @@ as the rest.
 State at the time of writing: the SDK has commands (derive macro, subcommands, cooldown,
 permission levels), configuration in three layers, storage and counters, event subscriptions,
 buttons, menus, forms and pages, jobs, durations, a check of who a moderation may act on, and
-the reference module `closure-mod-moderation`.
+the reference module `closure-mod-moderation`. Done as libraries for the automod rules: recent
+actions (`closure_sdk::recent`), counters with triggers (`closure_sdk::counters`) and a small
+template language (`closure_sdk::template`); see [writing modules](writing-modules.md).
 
 ## Order of work
 
@@ -21,12 +23,12 @@ the reference module `closure-mod-moderation`.
 | — | **`moderation` module**: ban, kick, timeout, warn, cases, log (all done: warn, note, cases, log, timeout, kick, ban with timed bans and unban, and escalation of warnings; see [moderation](moderation.md)) | first real module |
 | — | **Moderation, stage 1** (done): embed replies and the `replies` setting for every module, timeouts and voice mutes by Discord or by a role, templates when a reason or duration is left out, undo buttons, a history line, rejoin re-application. Still to come: autocomplete of templates and context-menu commands (M11) | the owner rewrites the moderation commands later; the platform parts stay |
 | — | **Automod skeleton** (done): the `automod` module with the frame its rules run in: nine checks, scope, actions, dry run, notify and `/automod status` (see [automod](automod.md)). Next: the owner specifies the detailed rules; strikes; the message history and cache of M10 | the rules come later, the frame stays |
-| M10 | Message kit: richer `MessageInfo`, text matching helpers, the content intent: **done** (see [writing modules](writing-modules.md#reading-messages)). Still to do: message history, optional bounded cache | automod and logging |
+| M10 | Message kit: richer `MessageInfo`, text matching helpers, the content intent: **done** (see [writing modules](writing-modules.md#reading-messages)). Message history: **done** (see [writing modules](writing-modules.md#message-history)). Still to do: optional bounded cache | automod and logging |
 | M11 | Interaction surface: **done** (below; the clearing of expired buttons is not) | convenience for every module |
 | M12 | Events and actions that Discord has and we do not (below) | breadth |
 | M13 | Services: user profile, templates, audit trail for modules, HTTP client, metrics, feature switches | breadth |
 | M14 | Tooling: compile-fail tests for the macro, button expiry, `/permissions explain`; done: docs generator (`cargo run -p closure-xtask -- docs`), module scaffold (`new-module`), x-ui hints | quality |
-| later | Workflow, module-to-module calls, hot reload (Lua/WASM); a per-server time zone for the dates typed in commands (now UTC, or UTC+09:00 on a Japanese server) | designed, not started |
+| later | Workflow, module-to-module calls, hot reload (Lua/WASM); real time zones with daylight saving (a server sets a fixed offset for now) | designed, not started |
 
 ## Gaps by area (checked against the code)
 
@@ -44,10 +46,12 @@ the reference module `closure-mod-moderation`.
 The writing guide has a section for each: [writing modules](writing-modules.md#option-types-groups-autocomplete-context-menus-expiring-buttons).
 
 ### Events we do not deliver (M12)
-Voice state changes (join, leave, move, mute), threads (create, update, delete, members),
-invites (create, delete), scheduled events, guild updates (name, settings), emoji and sticker
-changes, AutoMod action executed, poll votes, webhook and integration updates, presence (a
-privileged intent, optional), and an audit log entry created.
+Voice state changes (join, leave, move, mute), threads (member changes and updates other than
+archive and unarchive), invites (create, delete), scheduled events, guild updates (name,
+settings), emoji and sticker changes, AutoMod action executed, poll votes, webhook and
+integration updates, presence (a privileged intent, optional), and an audit log entry created.
+Delivered: role changes, threads (create, archive, unarchive, delete) and cases recorded by any
+module, see [writing modules](writing-modules.md#events-about-roles-threads-and-cases).
 
 ### Actions we do not have (M12)
 Done: reading messages (one, history, pins), pin/unpin, crosspost, removing reactions, listing

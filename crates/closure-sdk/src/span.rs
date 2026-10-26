@@ -1,7 +1,7 @@
 //! Times a user types for a punishment: a length (`1h30m`, see [`crate::duration`]) or a moment
 //! (`2026-11-01 18:00`, `18時`, `明日 9:00`, a Discord timestamp), read against the clock when it
-//! is resolved. A moment without a zone is read at UTC+09:00 on a Japanese server and at UTC on
-//! any other; a per-server time zone setting would replace that rule.
+//! is resolved. A moment without a zone is read in the server's time zone when it has one, else
+//! at UTC+09:00 on a Japanese server and at UTC on any other.
 
 use std::ops::RangeInclusive;
 use std::time::Duration;
@@ -9,6 +9,7 @@ use std::time::Duration;
 use closure_core::event::InteractionRef;
 use closure_core::locale::Locale;
 use closure_core::schedule::MAX_DELAY;
+use closure_core::timezone::{Timezone, offset_label};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -72,7 +73,11 @@ impl Span {
     /// [`Self::resolve_at`] at the command's clock, with the server's offset. The error names the
     /// offset that was read.
     pub fn resolve<I: InteractionRef + 'static>(&self, cx: &Cx<I>) -> Result<Duration, UserError> {
-        let default = default_offset(cx.ctx().locale);
+        let default = cx
+            .ctx()
+            .policy()
+            .timezone
+            .map_or_else(|| default_offset(cx.ctx().locale), Timezone::offset_seconds);
         self.resolve_at(cx.now(), default).map_err(|error| {
             let offset = match read(&self.0) {
                 Ok(Parsed::Moment(moment)) => moment.zone.unwrap_or(default),
@@ -87,25 +92,16 @@ impl SpanError {
     fn into_user(self, offset: i64) -> UserError {
         match self {
             Self::NotUnderstood => UserError::sdk("span-not-understood"),
-            Self::Past => UserError::sdk("span-past").with("zone", zone_label(offset)),
-            Self::TooFar => UserError::sdk("span-too-far").with("zone", zone_label(offset)),
+            Self::Past => UserError::sdk("span-past").with("zone", offset_label(offset)),
+            Self::TooFar => UserError::sdk("span-too-far").with("zone", offset_label(offset)),
         }
     }
 }
 
-/// The offset in seconds of a server's language: Japanese is UTC+09:00, the others UTC.
+/// The offset in seconds of a server's language, for a server with no time zone set: Japanese is
+/// UTC+09:00, the others UTC.
 fn default_offset(locale: Locale) -> i64 {
     if matches!(locale, Locale::Ja) { JST } else { 0 }
-}
-
-/// `UTC`, or `UTC+09:00`, the zone a moment was read in.
-fn zone_label(offset: i64) -> String {
-    if offset == 0 {
-        return "UTC".to_owned();
-    }
-    let sign = if offset < 0 { '-' } else { '+' };
-    let minutes = offset.abs() / 60;
-    format!("UTC{sign}{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// What a span stands for, as read from its text.
@@ -500,7 +496,7 @@ mod tests {
     use closure_core::schedule::MAX_DELAY;
 
     use super::{
-        DAY, JST, Span, SpanError, civil_from_days, days_from_civil, days_in_month, zone_label,
+        DAY, JST, Span, SpanError, civil_from_days, days_from_civil, days_in_month, offset_label,
     };
 
     /// 2026-10-26 12:00 UTC, a Monday.
@@ -555,9 +551,9 @@ mod tests {
 
     #[test]
     fn zones_are_labelled_for_errors() {
-        assert_eq!(zone_label(0), "UTC");
-        assert_eq!(zone_label(JST), "UTC+09:00");
-        assert_eq!(zone_label(-5 * 3_600), "UTC-05:00");
+        assert_eq!(offset_label(0), "UTC");
+        assert_eq!(offset_label(JST), "UTC+09:00");
+        assert_eq!(offset_label(-5 * 3_600), "UTC-05:00");
     }
 
     #[test]

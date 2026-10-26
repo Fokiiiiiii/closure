@@ -10,6 +10,7 @@ use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{
     ChannelId, CommandInvocation, Event, EventKind, InteractionToken, MessageInfo, UserInfo,
 };
+use closure_core::history::{HistoryBackend, MemoryHistory, SavedMessage};
 use closure_core::interaction::InteractionGuilds;
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Locale;
@@ -63,6 +64,11 @@ enum Behavior {
     ScheduleAnother,
     /// Records a case for the message it got and logs the guild and the case's number.
     RecordCase,
+    /// Like `RecordCase`, but only for messages, so that a module which also gets the case
+    /// announcements does not record one for each of them.
+    RecordCaseOnMessage,
+    /// Logs the content of the kept message it was told about, or why it cannot read it.
+    ReadHistoryOfMessage,
 }
 
 struct Probe {
@@ -362,6 +368,22 @@ impl Module for Probe {
             Behavior::RespondToClick => self.respond_to_click(ctx, event).await,
             Behavior::ScheduleAnother => self.schedule_another(ctx).await,
             Behavior::RecordCase => self.record_case(ctx).await,
+            Behavior::RecordCaseOnMessage => match event {
+                Event::MessageCreated(_) => self.record_case(ctx).await,
+                _ => Ok(()),
+            },
+            Behavior::ReadHistoryOfMessage => {
+                let Event::MessageCreated(message) = event else {
+                    return Ok(());
+                };
+                let line = match ctx.history().get(message.channel_id, message.id).await {
+                    Ok(Some(saved)) => format!("history:{}", saved.content),
+                    Ok(None) => "history:none".to_owned(),
+                    Err(error) => format!("history:error:{error}"),
+                };
+                self.log.lock().unwrap().push(line);
+                Ok(())
+            }
             Behavior::ReadPolicy => {
                 self.read_policy(ctx);
                 Ok(())
@@ -547,6 +569,51 @@ async fn harness(
         Arc::clone(&api) as Arc<dyn DiscordApi>,
         translator,
         config,
+    )
+    .await
+    .unwrap();
+    Harness { dispatcher, api }
+}
+
+/// [`harness`] with the message history the modules read given.
+async fn harness_with_history(
+    probes: &[(&Arc<Probe>, bool)],
+    limits: RuntimeLimits,
+    config: DispatcherConfig,
+    history: Arc<dyn HistoryBackend>,
+) -> Harness {
+    let registry = Arc::new(
+        ModuleRegistry::new(
+            probes
+                .iter()
+                .map(|(probe, _)| Arc::clone(*probe) as Arc<dyn Module>)
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let mut settings = StaticSettings::new(probes.iter().map(|(probe, enabled)| {
+        (
+            probe.manifest.id.clone(),
+            ModuleSettings {
+                enabled: *enabled,
+                config: Arc::new(json!({})),
+                granted: probe.manifest.capabilities.clone(),
+            },
+        )
+    }));
+    settings.limits = limits;
+    let api = Arc::new(MockApi::default());
+    let translator = Arc::new(TranslatorBuilder::new().unwrap().build());
+    let dispatcher = Dispatcher::start_with_services(
+        registry,
+        Arc::new(settings),
+        Arc::clone(&api) as Arc<dyn DiscordApi>,
+        translator,
+        config,
+        Arc::new(MemoryStorage::default()),
+        Arc::new(MemoryScheduler::default()),
+        Arc::new(MemoryCases::default()),
+        history,
     )
     .await
     .unwrap();
@@ -970,6 +1037,7 @@ async fn modules_are_given_the_guilds_policy() {
     settings.policy = Arc::new(GuildPolicy {
         log_channel: Some(Id::new(9)),
         moderator_roles: vec![Id::new(5)],
+        ..GuildPolicy::default()
     });
     let dispatcher = Dispatcher::start(
         registry,
@@ -2151,6 +2219,7 @@ async fn with_scheduler(probes: &[(&Arc<Probe>, bool)]) -> (Dispatcher, Arc<Memo
         Arc::new(closure_core::storage::MemoryStorage::default()),
         Arc::clone(&scheduler) as Arc<dyn SchedulerBackend>,
         Arc::new(closure_core::cases::MemoryCases::default()),
+        Arc::new(MemoryHistory::default()),
     )
     .await
     .unwrap();
@@ -2280,4 +2349,256 @@ async fn a_job_the_module_cannot_handle_is_dropped_even_when_it_repeats() {
         1
     );
     assert!(scheduler.is_empty(), "a repeating job does not live on");
+}
+
+fn role_change() -> Event {
+    Event::RolesChanged(closure_core::event::RolesChange {
+        guild_id: Id::new(GUILD),
+        user: user(7),
+        added: vec![Id::new(5)],
+        removed: vec![],
+    })
+}
+
+fn thread(id: u64, parent: Option<u64>) -> closure_core::event::ThreadInfo {
+    closure_core::event::ThreadInfo {
+        id: Id::new(id),
+        guild_id: Id::new(GUILD),
+        parent_id: parent.map(Id::new),
+        name: "thread".into(),
+        owner_id: Some(Id::new(7)),
+        archived: false,
+        locked: false,
+        created_at: None,
+    }
+}
+
+fn case_announced() -> Event {
+    Event::CaseCreated(closure_core::cases::Case {
+        number: 1,
+        guild_id: Id::new(GUILD),
+        module: ModuleId::new("recorder").unwrap(),
+        kind: closure_core::cases::CaseKind::new("warn").unwrap(),
+        target: Id::new(9),
+        moderator: Id::new(8),
+        reason: None,
+        created_at: 0,
+        expires_at: None,
+        revoked: None,
+    })
+}
+
+/// One event of every kind this file adds, in the order `kinds` lists them.
+fn new_kind_events() -> Vec<(EventKind, Event)> {
+    vec![
+        (EventKind::RolesChanged, role_change()),
+        (
+            EventKind::ThreadCreated,
+            Event::ThreadCreated(thread(20, Some(3))),
+        ),
+        (
+            EventKind::ThreadArchived,
+            Event::ThreadArchived(thread(20, Some(3))),
+        ),
+        (
+            EventKind::ThreadUnarchived,
+            Event::ThreadUnarchived(thread(20, Some(3))),
+        ),
+        (
+            EventKind::ThreadDeleted,
+            Event::ThreadDeleted {
+                guild_id: Id::new(GUILD),
+                thread_id: Id::new(20),
+                parent_id: Id::new(3),
+            },
+        ),
+        (EventKind::CaseCreated, case_announced()),
+    ]
+}
+
+#[tokio::test]
+async fn each_new_kind_reaches_the_modules_subscribed_to_it_and_no_other() {
+    let events = new_kind_events();
+    let probes: Vec<Arc<Probe>> = events
+        .iter()
+        .enumerate()
+        .map(|(index, (kind, _))| Probe::new(&format!("m{index}"), &[*kind], &[]))
+        .collect();
+    let refs: Vec<(&Arc<Probe>, bool)> = probes.iter().map(|probe| (probe, true)).collect();
+    let h = harness(&refs, limits(64, 1), DispatcherConfig::default()).await;
+
+    for (_, event) in events.iter().cloned() {
+        h.dispatcher.dispatch(event);
+    }
+    h.dispatcher.flush().await;
+
+    for (probe, (kind, _)) in probes.iter().zip(&events) {
+        assert_eq!(probe.log(), ["load", kind.as_str()], "{}", kind.as_str());
+    }
+}
+
+#[tokio::test]
+async fn a_module_filtering_on_the_parent_channel_gets_only_the_threads_in_it() {
+    let log = shared_log();
+    let watcher = Probe::subscribed(
+        "watcher",
+        Subscription::new(EventKind::ThreadCreated).in_channels([Id::new(3)]),
+        &log,
+    );
+    let h = harness(
+        &[(&watcher, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher
+        .dispatch(Event::ThreadCreated(thread(20, Some(3))));
+    h.dispatcher
+        .dispatch(Event::ThreadCreated(thread(21, Some(4))));
+    h.dispatcher.flush().await;
+
+    assert_eq!(seen(&log), ["watcher:thread_created"]);
+}
+
+#[tokio::test]
+async fn a_recorded_case_reaches_every_subscriber_once_the_creator_included() {
+    let recorder = Probe::new(
+        "recorder",
+        &[EventKind::MessageCreated, EventKind::CaseCreated],
+        &[Capability::Cases],
+    );
+    recorder.set(Behavior::RecordCaseOnMessage);
+    let listener = Probe::new("listener", &[EventKind::CaseCreated], &[]);
+    let bystander = messages_only("bystander");
+    let h = harness(
+        &[(&recorder, true), (&listener, true), (&bystander, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.flush().await;
+
+    assert_eq!(
+        recorder.log(),
+        ["load", "msg:1", "case:1:1", "case_created"]
+    );
+    assert_eq!(listener.log(), ["load", "case_created"]);
+    assert_eq!(bystander.log(), ["load", "msg:1"]);
+}
+
+#[tokio::test]
+async fn a_failing_subscriber_does_not_fail_the_recording() {
+    let recorder = Probe::new(
+        "recorder",
+        &[EventKind::MessageCreated],
+        &[Capability::Cases],
+    );
+    recorder.set(Behavior::RecordCaseOnMessage);
+    let failing = Probe::new("failing", &[EventKind::CaseCreated], &[]);
+    failing.set(Behavior::Fail);
+    let h = harness(
+        &[(&recorder, true), (&failing, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.flush().await;
+
+    assert!(recorder.log().contains(&"case:1:1".to_owned()));
+    assert_eq!(failing.log(), ["load", "case_created"]);
+}
+
+#[tokio::test]
+async fn a_case_that_was_not_recorded_is_not_announced() {
+    // Not granted `cases`: the recording is refused, so nobody hears of a case.
+    let refused = Probe::new("refused", &[EventKind::MessageCreated], &[]);
+    refused.set(Behavior::RecordCaseOnMessage);
+    let listener = Probe::new("listener", &[EventKind::CaseCreated], &[]);
+    let h = harness(
+        &[(&refused, true), (&listener, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    h.dispatcher.flush().await;
+
+    assert!(refused.log().iter().all(|line| !line.starts_with("case:")));
+    assert_eq!(listener.log(), ["load"]);
+}
+
+#[tokio::test]
+async fn a_case_made_while_its_announcement_is_handled_is_not_announced_again() {
+    let recorder = Probe::new(
+        "recorder",
+        &[EventKind::MessageCreated, EventKind::CaseCreated],
+        &[Capability::Cases],
+    );
+    // Records for every event it gets, the case announcements included.
+    recorder.set(Behavior::RecordCase);
+    let h = harness(
+        &[(&recorder, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(message(3, 1));
+    // Without the guard each announcement records another case, and the chain never ends.
+    tokio::time::timeout(Duration::from_secs(5), h.dispatcher.flush())
+        .await
+        .expect("the announcements of the cases do not end");
+
+    let log = recorder.log();
+    assert_eq!(
+        log.iter().filter(|line| *line == "case_created").count(),
+        1,
+        "{log:?}"
+    );
+    assert_eq!(
+        log.iter().filter(|line| line.starts_with("case:")).count(),
+        2,
+        "{log:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_module_reads_a_kept_message_only_with_the_capability() {
+    let history = Arc::new(MemoryHistory::default());
+    let reader = Probe::new(
+        "reader",
+        &[EventKind::MessageCreated],
+        &[Capability::ReadMessageHistory],
+    );
+    reader.set(Behavior::ReadHistoryOfMessage);
+    let plain = Probe::new("plain", &[EventKind::MessageCreated], &[]);
+    plain.set(Behavior::ReadHistoryOfMessage);
+    let h = harness_with_history(
+        &[(&reader, true), (&plain, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+        Arc::clone(&history) as Arc<dyn HistoryBackend>,
+    )
+    .await;
+
+    // The host keeps the message before the modules hear of it, as the gateway hook does.
+    let mut event = message(3, 1);
+    if let Event::MessageCreated(info) = &mut event {
+        info.content = "hello".into();
+        history.save(&SavedMessage::from_info(info)).await.unwrap();
+    }
+    h.dispatcher.dispatch(event);
+    h.dispatcher.flush().await;
+
+    assert_eq!(reader.log(), ["load", "msg:1", "history:hello"]);
+    assert_eq!(
+        plain.log()[2],
+        "history:error:the module is not granted the capability `message_history`"
+    );
 }

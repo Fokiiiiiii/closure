@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use closure::message_history::{MessageRecorder, unix_now};
 use closure_config::SettingsStore;
-use closure_core::event::GuildId;
+use closure_core::event::{Event as ModuleEvent, GuildId};
 use closure_core::locale::Locale;
 use closure_db::Db;
 use closure_discord::GuildHooks;
@@ -14,11 +15,22 @@ use crate::sync;
 pub struct AppHooks {
     db: Db,
     store: Arc<SettingsStore>,
+    messages: MessageRecorder,
 }
 
 impl AppHooks {
-    pub fn new(db: Db, store: Arc<SettingsStore>) -> Self {
-        Self { db, store }
+    /// `message_history_days` is how long kept messages stay (see [`MessageRecorder`]).
+    pub fn new(db: Db, store: Arc<SettingsStore>, message_history_days: u32) -> Self {
+        let messages = MessageRecorder::new(
+            Arc::new(db.clone()),
+            Arc::clone(&store),
+            message_history_days,
+        );
+        Self {
+            db,
+            store,
+            messages,
+        }
     }
 }
 
@@ -56,13 +68,27 @@ impl GuildHooks for AppHooks {
             tracing::warn!(%guild, %error, "could not record that the bot left the guild");
         }
     }
+
+    fn wants_messages(&self, guild: GuildId) -> bool {
+        self.messages.keeps(guild)
+    }
+
+    async fn message(&self, event: &ModuleEvent) {
+        if let Err(error) = self.messages.record(event, unix_now()).await {
+            tracing::warn!(kind = event.kind().as_str(), %error, "could not keep a message");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use closure_config::{ConfigCompiler, parse_overrides};
+    use closure_core::capability::Capability;
+    use closure_core::event::{MessageInfo, UserInfo};
+    use closure_core::module::{Module, ModuleId, ModuleManifest};
     use closure_core::registry::ModuleRegistry;
     use closure_core::settings::SettingsProvider;
+    use closure_core::testing::StubModule;
     use sqlx::PgPool;
     use twilight_model::id::Id;
 
@@ -73,11 +99,67 @@ mod tests {
         Arc::new(SettingsStore::new(ConfigCompiler::new(registry).unwrap()))
     }
 
+    /// A store with one module that reads the message history; it is off until a guild enables it.
+    fn store_with_a_reader() -> Arc<SettingsStore> {
+        let mut manifest = ModuleManifest::new(ModuleId::new("reader").unwrap(), "reader", "0.1.0");
+        manifest.capabilities = [Capability::ReadMessageHistory].into_iter().collect();
+        let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
+        let registry = Arc::new(ModuleRegistry::new(vec![module]).unwrap());
+        Arc::new(SettingsStore::new(ConfigCompiler::new(registry).unwrap()))
+    }
+
+    fn message(guild: u64, id: u64) -> ModuleEvent {
+        ModuleEvent::MessageCreated(MessageInfo {
+            id: Id::new(id),
+            channel_id: Id::new(5),
+            guild_id: Id::new(guild),
+            author: UserInfo {
+                id: Id::new(7),
+                name: "someone".into(),
+                bot: false,
+            },
+            author_roles: Vec::new(),
+            content: "hello".into(),
+            mentioned_users: Vec::new(),
+            mentioned_roles: Vec::new(),
+            mentions_everyone: false,
+            attachments: Vec::new(),
+            embed_count: 0,
+            sticker_count: 0,
+            reply_to: None,
+            from_webhook: false,
+            created_at: 1_700_000_000,
+            edited_at: None,
+        })
+    }
+
+    #[sqlx::test(migrations = "../closure-db/migrations")]
+    async fn a_message_is_kept_only_where_an_enabled_module_wants_it(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        let store = store_with_a_reader();
+        store
+            .set_guild_yaml(Id::new(2), "modules:\n  reader:\n    enabled: true\n")
+            .unwrap();
+        let hooks = AppHooks::new(db, Arc::clone(&store), 7);
+
+        assert!(!hooks.wants_messages(Id::new(1)));
+        assert!(hooks.wants_messages(Id::new(2)));
+        hooks.message(&message(1, 10)).await;
+        hooks.message(&message(2, 11)).await;
+
+        let kept: Vec<i64> =
+            sqlx::query_scalar("SELECT message_id FROM saved_messages ORDER BY message_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(kept, [11]);
+    }
+
     #[sqlx::test(migrations = "../closure-db/migrations")]
     async fn a_new_guild_is_recorded_and_its_discord_language_remembered(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
         let store = store();
-        let hooks = AppHooks::new(db, Arc::clone(&store));
+        let hooks = AppHooks::new(db, Arc::clone(&store), 7);
 
         hooks
             .guild_available(Id::new(5), "Test", Some(Locale::Ja))
@@ -96,7 +178,7 @@ mod tests {
     async fn leaving_and_rejoining_restores_the_stored_configuration(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
         let store = store();
-        let hooks = AppHooks::new(db.clone(), Arc::clone(&store));
+        let hooks = AppHooks::new(db.clone(), Arc::clone(&store), 7);
         let guild = Id::new(5);
         db.save_config(guild, None, &parse_overrides("language: ja").unwrap(), None)
             .await
@@ -148,7 +230,7 @@ mod tests {
     #[sqlx::test(migrations = "../closure-db/migrations")]
     async fn database_failures_do_not_panic_or_block(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
-        let hooks = AppHooks::new(db, store());
+        let hooks = AppHooks::new(db, store(), 7);
         pool.close().await;
         hooks
             .guild_available(Id::new(5), "Test", Some(Locale::Ja))

@@ -7,8 +7,8 @@ use closure_core::action::Emoji;
 use closure_core::event::{
     AttachmentInfo, AutocompleteInvocation, ChannelInfo, CommandInvocation, CommandOption,
     CommandOptionValue, ComponentInvocation, ContextInvocation, ContextTarget, Event, GuildId,
-    InteractionToken, MemberInfo, Mentionable, MessageInfo, ModalSubmission, ReactionInfo,
-    RoleInfo, UserInfo,
+    InteractionToken, MemberInfo, Mentionable, MessageInfo, ModalSubmission, ReactionInfo, RoleId,
+    RoleInfo, RolesChange, ThreadInfo, UserInfo,
 };
 use closure_core::locale::Locale;
 use twilight_gateway::Event as Gateway;
@@ -21,7 +21,9 @@ use twilight_model::application::interaction::modal::ModalInteractionComponent;
 use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
 use twilight_model::channel::message::{EmojiReactionType, Message, MessageType};
 use twilight_model::channel::{Attachment, Channel};
-use twilight_model::gateway::payload::incoming::GuildCreate;
+use twilight_model::gateway::payload::incoming::{
+    GuildCreate, MemberUpdate, ThreadCreate, ThreadDelete,
+};
 use twilight_model::guild::{Member, Role};
 use twilight_model::id::Id;
 use twilight_model::id::marker::GenericMarker;
@@ -478,6 +480,106 @@ pub(crate) fn event(gateway: &Gateway) -> Option<Event> {
     })
 }
 
+/// What the cache held about the entity an event changes, read before the cache applied the
+/// event. Without it, the events that compare old and new state are not sent.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Before {
+    /// The roles of the member, when the member was cached.
+    pub(crate) roles: Option<Vec<RoleId>>,
+    /// Whether the thread was archived, when the thread was cached.
+    pub(crate) archived: Option<bool>,
+}
+
+/// Every event a payload gives: the one it converts to, then the one that compares it with
+/// `before` (a role change follows its member update).
+pub(crate) fn events(gateway: &Gateway, before: &Before) -> Vec<Event> {
+    event(gateway)
+        .into_iter()
+        .chain(state_change(gateway, before))
+        .collect()
+}
+
+fn state_change(gateway: &Gateway, before: &Before) -> Option<Event> {
+    match gateway {
+        Gateway::MemberUpdate(updated) => roles_changed(updated, before.roles.as_deref()),
+        Gateway::ThreadCreate(created) => thread_created(created),
+        Gateway::ThreadUpdate(updated) => archive_change(&updated.0, before.archived),
+        Gateway::ThreadDelete(deleted) => Some(thread_deleted(deleted)),
+        _ => None,
+    }
+}
+
+fn roles_changed(updated: &MemberUpdate, previous: Option<&[RoleId]>) -> Option<Event> {
+    let previous = previous?;
+    let added: Vec<RoleId> = updated
+        .roles
+        .iter()
+        .filter(|role| !previous.contains(role))
+        .copied()
+        .collect();
+    let removed: Vec<RoleId> = previous
+        .iter()
+        .filter(|role| !updated.roles.contains(role))
+        .copied()
+        .collect();
+    if added.is_empty() && removed.is_empty() {
+        return None;
+    }
+    Some(Event::RolesChanged(RolesChange {
+        guild_id: updated.guild_id,
+        user: user(&updated.user),
+        added,
+        removed,
+    }))
+}
+
+fn thread(channel: &Channel) -> Option<ThreadInfo> {
+    let metadata = channel.thread_metadata.as_ref();
+    Some(ThreadInfo {
+        id: channel.id,
+        guild_id: channel.guild_id?,
+        parent_id: channel.parent_id,
+        name: channel.name.clone().unwrap_or_default(),
+        owner_id: channel.owner_id,
+        archived: metadata.is_some_and(|metadata| metadata.archived),
+        locked: metadata.is_some_and(|metadata| metadata.locked),
+        created_at: metadata
+            .and_then(|metadata| metadata.create_timestamp)
+            .map(seconds),
+    })
+}
+
+/// Discord marks a thread that was just made; the threads the bot learns of at start-up or when it
+/// is added to one come without the mark.
+fn thread_created(created: &ThreadCreate) -> Option<Event> {
+    if created.0.newly_created != Some(true) {
+        return None;
+    }
+    Some(Event::ThreadCreated(thread(&created.0)?))
+}
+
+fn archive_change(channel: &Channel, previous: Option<bool>) -> Option<Event> {
+    let previous = previous?;
+    let archived = channel.thread_metadata.as_ref()?.archived;
+    if previous == archived {
+        return None;
+    }
+    let info = thread(channel)?;
+    Some(if archived {
+        Event::ThreadArchived(info)
+    } else {
+        Event::ThreadUnarchived(info)
+    })
+}
+
+fn thread_deleted(deleted: &ThreadDelete) -> Event {
+    Event::ThreadDeleted {
+        guild_id: deleted.guild_id,
+        thread_id: deleted.id,
+        parent_id: deleted.parent_id,
+    }
+}
+
 fn reaction(reaction: &twilight_model::gateway::GatewayReaction) -> Option<ReactionInfo> {
     Some(ReactionInfo {
         guild_id: reaction.guild_id?,
@@ -492,7 +594,8 @@ fn reaction(reaction: &twilight_model::gateway::GatewayReaction) -> Option<React
 mod tests {
     use serde_json::{Value, json};
     use twilight_model::gateway::payload::incoming::{
-        BanAdd, GuildDelete, InteractionCreate, MessageCreate, MessageDelete, MessageUpdate,
+        BanAdd, GuildDelete, InteractionCreate, MemberUpdate, MessageCreate, MessageDelete,
+        MessageUpdate, ThreadCreate, ThreadDelete, ThreadUpdate,
     };
 
     use super::*;
@@ -666,6 +769,139 @@ mod tests {
         // never reaches the converter. This pins that assumption.
         let partial = json!({ "id": "100", "channel_id": "3", "guild_id": "1", "embeds": [] });
         assert!(serde_json::from_value::<MessageUpdate>(partial).is_err());
+    }
+
+    fn member_update(roles: &[&str]) -> Gateway {
+        let update: MemberUpdate = serde_json::from_value(json!({
+            "guild_id": "1", "roles": roles, "pending": false, "user": user_json("7", false),
+            "joined_at": "2026-10-24T00:00:00.000000+00:00"
+        }))
+        .unwrap();
+        Gateway::MemberUpdate(Box::new(update))
+    }
+
+    fn before_roles(roles: &[u64]) -> Before {
+        Before {
+            roles: Some(roles.iter().map(|id| Id::new(*id)).collect()),
+            ..Before::default()
+        }
+    }
+
+    fn roles_of(events: &[Event]) -> Option<(Vec<u64>, Vec<u64>)> {
+        events.iter().find_map(|event| match event {
+            Event::RolesChanged(change) => Some((
+                change.added.iter().map(|id| id.get()).collect(),
+                change.removed.iter().map(|id| id.get()).collect(),
+            )),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_role_change_is_the_difference_to_the_cached_roles() {
+        let events = events(&member_update(&["6", "8"]), &before_roles(&[5, 7]));
+        assert!(matches!(events.first(), Some(Event::MemberUpdated(_))));
+        assert_eq!(roles_of(&events), Some((vec![6, 8], vec![5, 7])));
+        let Some(Event::RolesChanged(change)) = events.get(1) else {
+            panic!("expected a role change after the member update");
+        };
+        assert_eq!(change.guild_id, Id::new(1));
+        assert_eq!(change.user.id, Id::new(7));
+    }
+
+    #[test]
+    fn no_role_change_is_said_without_the_roles_the_bot_knew_before() {
+        let events = events(&member_update(&["6"]), &Before::default());
+        assert!(matches!(events.as_slice(), [Event::MemberUpdated(_)]));
+    }
+
+    #[test]
+    fn an_update_that_keeps_the_roles_says_nothing_about_them() {
+        let events = events(&member_update(&["5"]), &before_roles(&[5]));
+        assert!(matches!(events.as_slice(), [Event::MemberUpdated(_)]));
+    }
+
+    fn thread_json(id: &str, archived: bool, newly_created: Option<bool>) -> Value {
+        json!({
+            "id": id, "type": 11, "guild_id": "1", "name": "t", "parent_id": "2", "owner_id": "7",
+            "thread_metadata": {
+                "archived": archived, "auto_archive_duration": 1440, "locked": false,
+                "archive_timestamp": "2026-10-24T00:00:00.000000+00:00",
+                "create_timestamp": "2026-10-24T00:00:00.000000+00:00"
+            },
+            "newly_created": newly_created
+        })
+    }
+
+    fn thread_created(newly_created: Option<bool>) -> Gateway {
+        let channel: Channel =
+            serde_json::from_value(thread_json("20", false, newly_created)).unwrap();
+        Gateway::ThreadCreate(Box::new(ThreadCreate(channel)))
+    }
+
+    fn thread_updated(archived: bool) -> Gateway {
+        let channel: Channel = serde_json::from_value(thread_json("20", archived, None)).unwrap();
+        Gateway::ThreadUpdate(Box::new(ThreadUpdate(channel)))
+    }
+
+    fn before_archived(archived: Option<bool>) -> Before {
+        Before {
+            archived,
+            ..Before::default()
+        }
+    }
+
+    #[test]
+    fn a_thread_made_now_is_announced_and_one_the_bot_learns_of_is_not() {
+        let announced = events(&thread_created(Some(true)), &Before::default());
+        let [Event::ThreadCreated(thread)] = announced.as_slice() else {
+            panic!("expected one thread creation, got {announced:?}");
+        };
+        assert_eq!(thread.id, Id::new(20));
+        assert_eq!(thread.parent_id, Some(Id::new(2)));
+        assert_eq!(thread.owner_id, Some(Id::new(7)));
+        assert!(!thread.archived && thread.created_at.is_some());
+
+        assert!(events(&thread_created(None), &Before::default()).is_empty());
+        assert!(events(&thread_created(Some(false)), &Before::default()).is_empty());
+    }
+
+    #[test]
+    fn a_thread_archived_or_unarchived_compares_with_the_cached_state() {
+        let archived = events(&thread_updated(true), &before_archived(Some(false)));
+        assert!(matches!(archived.as_slice(), [Event::ThreadArchived(t)] if t.archived));
+
+        let unarchived = events(&thread_updated(false), &before_archived(Some(true)));
+        assert!(matches!(unarchived.as_slice(), [Event::ThreadUnarchived(t)] if !t.archived));
+
+        assert!(events(&thread_updated(true), &before_archived(Some(true))).is_empty());
+        assert!(events(&thread_updated(false), &before_archived(Some(false))).is_empty());
+        // Not cached before: whether it was archived is unknown, so no event.
+        assert!(events(&thread_updated(true), &Before::default()).is_empty());
+        assert!(events(&thread_updated(false), &Before::default()).is_empty());
+    }
+
+    #[test]
+    fn a_deleted_thread_names_its_guild_and_parent() {
+        let deleted: ThreadDelete = serde_json::from_value(json!({
+            "guild_id": "1", "id": "20", "type": 11, "parent_id": "2"
+        }))
+        .unwrap();
+        let events = events(&Gateway::ThreadDelete(deleted), &Before::default());
+        assert!(matches!(
+            events.as_slice(),
+            [Event::ThreadDeleted { guild_id, thread_id, parent_id }]
+                if *guild_id == Id::new(1) && *thread_id == Id::new(20) && *parent_id == Id::new(2)
+        ));
+    }
+
+    #[test]
+    fn a_thread_outside_any_guild_is_dropped() {
+        let mut channel: Channel =
+            serde_json::from_value(thread_json("20", false, Some(true))).unwrap();
+        channel.guild_id = None;
+        let gateway = Gateway::ThreadCreate(Box::new(ThreadCreate(channel)));
+        assert!(events(&gateway, &Before::default()).is_empty());
     }
 
     #[test]

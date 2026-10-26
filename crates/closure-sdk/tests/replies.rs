@@ -160,7 +160,7 @@ async fn a_private_answer_after_a_public_deferral_is_not_written_into_the_public
     );
     assert!(!replies[1].content.contains("Only for you"), "{replies:?}");
     assert!(!replies[1].ephemeral);
-    assert_eq!(replies[2].content, "Only for you.");
+    assert_eq!(replies[2].content, "❌ Only for you.");
     assert!(replies[2].ephemeral, "the secret goes to the user alone");
 }
 

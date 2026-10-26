@@ -6,6 +6,7 @@ use crate::event::{ChannelId, GuildId, RoleId};
 use crate::locale::Locale;
 use crate::module::ModuleId;
 use crate::permission::GuildPermissions;
+use crate::timezone::Timezone;
 
 /// The effective settings of one module in one guild.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,12 +18,33 @@ pub struct ModuleSettings {
 }
 
 /// Guild-wide settings every module may rely on, independent of its own configuration.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuildPolicy {
     /// Where moderation logs go, if the guild chose a channel.
     pub log_channel: Option<ChannelId>,
     /// Roles whose members may use moderation features.
     pub moderator_roles: Vec<RoleId>,
+    /// The zone of a date typed without one; `None` keeps the language's default.
+    pub timezone: Option<Timezone>,
+    /// The prefix of text commands; `None` turns them off.
+    pub prefix: Option<String>,
+    /// Put in front of the text of a success reply, followed by a space; empty for none.
+    pub success_emoji: String,
+    /// Put in front of the text of an error reply, followed by a space; empty for none.
+    pub error_emoji: String,
+}
+
+impl Default for GuildPolicy {
+    fn default() -> Self {
+        Self {
+            log_channel: None,
+            moderator_roles: Vec::new(),
+            timezone: None,
+            prefix: None,
+            success_emoji: "✅".to_owned(),
+            error_emoji: "❌".to_owned(),
+        }
+    }
 }
 
 impl GuildPolicy {
@@ -88,8 +110,8 @@ mod tests {
     #[test]
     fn moderators_are_members_holding_any_moderator_role() {
         let policy = GuildPolicy {
-            log_channel: None,
             moderator_roles: vec![Id::new(5), Id::new(6)],
+            ..GuildPolicy::default()
         };
         assert!(policy.is_moderator(&[Id::new(1), Id::new(6)]));
         assert!(!policy.is_moderator(&[Id::new(1), Id::new(2)]));

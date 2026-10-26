@@ -37,6 +37,7 @@ extern crate self as closure_sdk;
 
 pub mod args;
 mod cooldown;
+pub mod counters;
 mod cx;
 pub mod dm;
 pub mod duration;
@@ -45,7 +46,9 @@ mod error;
 pub mod modlog;
 mod module;
 pub mod punish;
+pub mod recent;
 mod span;
+pub mod template;
 pub mod testing;
 pub mod text;
 pub mod ui;
@@ -59,6 +62,7 @@ pub use closure_core::event::{AttachmentInfo, Event, EventKind, InteractionRef, 
 pub use closure_core::event::{
     ChannelId, CommandInvocation, GuildId, Mentionable, RoleId, UserId, UserInfo,
 };
+pub use closure_core::history::{HistoryError, MessageHistory, SavedMessage};
 pub use closure_core::locale::{Args, Locale};
 pub use closure_core::module::EventContext;
 pub use closure_core::module::{ChoiceValue, ModuleId, OptionChoice, OptionKind, OptionSpec};

@@ -37,6 +37,10 @@ pub enum Capability {
     /// Read the history, pins and reaction users of a channel. Message content is private to
     /// the channel, so this is granted separately from the moderation capabilities.
     ReadMessages,
+    /// Read the messages the host kept of this guild, for a while (see [`crate::history`]).
+    /// Message content is private, so it is granted on its own.
+    #[serde(rename = "message_history")]
+    ReadMessageHistory,
     DeafenMembers,
     MoveMembers,
     ManageThreads,
@@ -48,7 +52,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::SendMessages,
         Self::AddReactions,
         Self::ManageMessages,
@@ -69,6 +73,7 @@ impl Capability {
         Self::Cases,
         Self::SendDirectMessages,
         Self::ReadMessages,
+        Self::ReadMessageHistory,
         Self::DeafenMembers,
         Self::MoveMembers,
         Self::ManageThreads,
@@ -102,6 +107,7 @@ impl Capability {
             Self::Cases => "cases",
             Self::SendDirectMessages => "send_direct_messages",
             Self::ReadMessages => "read_messages",
+            Self::ReadMessageHistory => "message_history",
             Self::DeafenMembers => "deafen_members",
             Self::MoveMembers => "move_members",
             Self::ManageThreads => "manage_threads",

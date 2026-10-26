@@ -89,7 +89,7 @@ async fn a_duration_option_that_is_not_a_duration_is_refused() {
     assert_eq!(replies.len(), 1);
     assert_eq!(
         replies[0].content,
-        "The value of `time` is missing or not valid."
+        "❌ The value of `time` is missing or not valid."
     );
 }
 
@@ -230,10 +230,10 @@ async fn act(harness: &Harness, by: Invocation, target: u64) -> String {
     replies[0].content.clone()
 }
 
-const SELF_TEXT: &str = "You cannot do that to yourself.";
-const OWNER_TEXT: &str = "You cannot do that to the owner of the server.";
-const BOT_TEXT: &str = "You cannot do that to a bot.";
-const HIGHER_TEXT: &str = "You cannot do that to someone whose highest role is not below yours.";
+const SELF_TEXT: &str = "❌ You cannot do that to yourself.";
+const OWNER_TEXT: &str = "❌ You cannot do that to the owner of the server.";
+const BOT_TEXT: &str = "❌ You cannot do that to a bot.";
+const HIGHER_TEXT: &str = "❌ You cannot do that to someone whose highest role is not below yours.";
 
 #[tokio::test]
 async fn nobody_can_act_on_themselves() {
@@ -246,7 +246,7 @@ async fn the_refusal_is_in_the_users_language() {
     let harness = guarded(true);
     assert_eq!(
         act(&harness, Invocation::new("act").locale(Locale::Ja), 100).await,
-        "自分自身には実行できません。"
+        "❌ 自分自身には実行できません。"
     );
 }
 

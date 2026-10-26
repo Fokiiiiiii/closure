@@ -13,7 +13,7 @@ use closure_sdk::punish::{self, Done, Method, Moderator, Punisher, Settings};
 use closure_sdk::{
     Args, Capability, Case, CaseError, CaseKind, Cases, Command, CommandArgs, CommandCx, Cooldown,
     CoreError, Cx, EventKind, InteractionRef, InteractionReply, Level, Locale, ModuleBuilder,
-    NewCase, PermissionSpec, SdkModule, Span, Subscription, UserError, UserId,
+    NewCase, PermissionSpec, SdkModule, Span, Subscription, Tone, UserError, UserId,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -510,7 +510,7 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
             case.number,
         ))),
         ephemeral: true,
-        ..templates::text_reply(text)?
+        ..templates::success_reply(&cx, text)?
     })
     .await
 }
@@ -518,7 +518,8 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
 /// Notes something about a member. A note is a case without expiry and is not a warning.
 async fn note(cx: CommandCx, args: Note) -> Result<(), UserError> {
     let case = record(&cx, "note", args.user, Some(args.text), None).await?;
-    cx.reply_private_t(
+    cx.say_private_t(
+        Tone::Success,
         "noted",
         &Args::new()
             .with("user", mention(args.user))
@@ -629,8 +630,12 @@ async fn case_revoke(cx: CommandCx, args: Revoke) -> Result<(), UserError> {
         Err(error) => return Err(error.into()),
     };
     let _ = cx.modlog(&revoked).await;
-    cx.reply_private_t("case-revoked", &Args::new().with("number", args.number))
-        .await
+    cx.say_private_t(
+        Tone::Success,
+        "case-revoked",
+        &Args::new().with("number", args.number),
+    )
+    .await
 }
 
 /// Times a member out. Discord's own timeout is 28 days at most, so a longer one is refused before
@@ -664,7 +669,8 @@ async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     let case = punisher_for(&cx, &config)
         .lift_timeout(args.user, reason_of(args.reason))
         .await?;
-    cx.reply_private_t(
+    cx.say_private_t(
+        Tone::Success,
         "untimed-out",
         &Args::new()
             .with("user", mention(args.user))
@@ -719,7 +725,8 @@ async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     let case = punisher_for(&cx, &config)
         .unban(args.user, reason_of(args.reason))
         .await?;
-    cx.reply_private_t(
+    cx.say_private_t(
+        Tone::Success,
         "unbanned",
         &Args::new()
             .with("user", mention(args.user))

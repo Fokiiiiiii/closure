@@ -6,6 +6,7 @@ use closure_core::module::{ModuleId, ModuleManifest, ModuleRuntime};
 use closure_core::permission::{GuildPermissions, KeyRule, Level, PermissionKey};
 use closure_core::registry::ModuleRegistry;
 use closure_core::settings::{GuildPolicy, ModuleSettings};
+use closure_core::timezone::Timezone;
 use jsonschema::Validator;
 use serde_json::Value;
 use twilight_model::id::Id;
@@ -17,6 +18,8 @@ use crate::model::{
 };
 
 const MAX_MODERATOR_ROLES: usize = 100;
+const MAX_PREFIX_CHARS: usize = 10;
+const MAX_EMOJI_CHARS: usize = 100;
 
 /// How many entries each list of the `permissions` section may hold.
 const MAX_PERMISSION_ENTRIES: usize = 200;
@@ -216,6 +219,13 @@ fn compile_with(
         ));
     }
 
+    let PolicyText {
+        timezone,
+        prefix,
+        success_emoji,
+        error_emoji,
+    } = compile_policy_text(overrides, &mut issues);
+
     let permissions = compile_permissions(registry, overrides, &mut issues);
     check_known_modules(registry, overrides, &mut issues);
 
@@ -253,6 +263,10 @@ fn compile_with(
     let policy = Arc::new(GuildPolicy {
         log_channel: overrides.log_channel,
         moderator_roles: moderator_roles.clone(),
+        timezone,
+        prefix: prefix.clone(),
+        success_emoji: success_emoji.clone(),
+        error_emoji: error_emoji.clone(),
     });
     Ok(GuildSettings {
         effective: EffectiveConfig {
@@ -261,6 +275,10 @@ fn compile_with(
             language: overrides.language.unwrap_or_default(),
             log_channel: overrides.log_channel,
             moderator_roles,
+            timezone: timezone.map(Timezone::label),
+            prefix,
+            success_emoji,
+            error_emoji,
             limits,
             permissions: overrides.permissions.clone().unwrap_or_default(),
             modules: effective_modules,
@@ -269,6 +287,121 @@ fn compile_with(
         policy,
         permissions: Arc::new(permissions),
     })
+}
+
+/// The guild-wide text settings the policy carries, each checked.
+struct PolicyText {
+    timezone: Option<Timezone>,
+    prefix: Option<String>,
+    success_emoji: String,
+    error_emoji: String,
+}
+
+fn compile_policy_text(overrides: &GuildOverrides, issues: &mut Vec<Issue>) -> PolicyText {
+    let timezone = overrides
+        .timezone
+        .as_deref()
+        .and_then(|text| match Timezone::parse(text) {
+            Ok(zone) => Some(zone),
+            Err(error) => {
+                issues.push(Issue::new("timezone", "invalid", error.to_string()));
+                None
+            }
+        });
+    PolicyText {
+        timezone,
+        prefix: compile_prefix(overrides.prefix.as_deref(), issues),
+        success_emoji: compile_emoji(
+            "success_emoji",
+            overrides.success_emoji.as_deref(),
+            "✅",
+            issues,
+        ),
+        error_emoji: compile_emoji(
+            "error_emoji",
+            overrides.error_emoji.as_deref(),
+            "❌",
+            issues,
+        ),
+    }
+}
+
+/// The prefix of text commands, when the guild set one.
+fn compile_prefix(text: Option<&str>, issues: &mut Vec<Issue>) -> Option<String> {
+    let text = text?;
+    let length = text.chars().count();
+    if (1..=MAX_PREFIX_CHARS).contains(&length) && !text.chars().any(char::is_whitespace) {
+        return Some(text.to_owned());
+    }
+    issues.push(Issue::new(
+        "prefix",
+        "invalid",
+        format!("a prefix is 1 to {MAX_PREFIX_CHARS} characters without spaces"),
+    ));
+    None
+}
+
+/// An emoji the replies put in front of their text. Empty means none, and an unset one is
+/// `default`.
+fn compile_emoji(
+    key: &'static str,
+    text: Option<&str>,
+    default: &str,
+    issues: &mut Vec<Issue>,
+) -> String {
+    let Some(text) = text else {
+        return default.to_owned();
+    };
+    let shaped = is_custom_emoji(text) || is_unicode_emoji(text);
+    if text.is_empty() || (shaped && text.chars().count() <= MAX_EMOJI_CHARS) {
+        return text.to_owned();
+    }
+    issues.push(Issue::new(
+        key,
+        "invalid",
+        format!(
+            "an emoji is a Unicode emoji or <:name:id> or <a:name:id>, at most {MAX_EMOJI_CHARS} characters; an empty string means none"
+        ),
+    ));
+    default.to_owned()
+}
+
+/// `<:name:id>` or `<a:name:id>`, with a name of 2 to 32 characters and a Discord id.
+fn is_custom_emoji(text: &str) -> bool {
+    let Some(body) = text
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+    else {
+        return false;
+    };
+    let Some((name, id)) = body
+        .strip_prefix("a:")
+        .or_else(|| body.strip_prefix(':'))
+        .and_then(|rest| rest.split_once(':'))
+    else {
+        return false;
+    };
+    (2..=32).contains(&name.chars().count())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && (17..=20).contains(&id.len())
+        && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// A Unicode emoji, checked by shape only: no spaces or letters, and an ASCII digit, `#` or `*`
+/// only as a keycap (`1️⃣`).
+fn is_unicode_emoji(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    !chars.is_empty()
+        && chars.iter().enumerate().all(|(index, &c)| {
+            if c.is_ascii() {
+                matches!(c, '0'..='9' | '#' | '*')
+                    && chars
+                        .get(index + 1)
+                        .is_some_and(|&next| next == '\u{fe0f}' || next == '\u{20e3}')
+            } else {
+                !c.is_whitespace() && !c.is_control()
+            }
+        })
 }
 
 /// The guild's decisions about levels and permission keys, with what every module declared as
@@ -642,6 +775,99 @@ mod tests {
             "{error}"
         );
         ConfigCompiler::with_publisher(registry, |_| Ok(json!({ "type": "object" }))).unwrap();
+    }
+
+    #[test]
+    fn the_guild_policy_carries_the_time_zone_prefix_and_emojis() {
+        let settings = compiled(
+            "
+timezone: Asia/Tokyo
+prefix: '!'
+success_emoji: '👍'
+error_emoji: ''
+",
+        )
+        .unwrap();
+        let policy = &settings.policy;
+        assert_eq!(
+            policy.timezone,
+            Some(Timezone::parse("Asia/Tokyo").unwrap())
+        );
+        assert_eq!(policy.prefix.as_deref(), Some("!"));
+        assert_eq!(policy.success_emoji, "👍");
+        assert_eq!(policy.error_emoji, "");
+        assert_eq!(settings.effective.timezone.as_deref(), Some("UTC+09:00"));
+    }
+
+    #[test]
+    fn absent_policy_settings_keep_their_defaults() {
+        let settings = compiled("log_channel: 77").unwrap();
+        let policy = &settings.policy;
+        assert_eq!(policy.timezone, None);
+        assert_eq!(policy.prefix, None);
+        assert_eq!(policy.success_emoji, "✅");
+        assert_eq!(policy.error_emoji, "❌");
+        assert_eq!(settings.effective.timezone, None);
+    }
+
+    #[test]
+    fn a_bad_time_zone_is_an_issue_naming_the_key() {
+        assert_eq!(
+            issues_of("timezone: America/New_York"),
+            [("timezone".to_owned(), "invalid")]
+        );
+        assert_eq!(
+            issues_of("timezone: Tokyo"),
+            [("timezone".to_owned(), "invalid")]
+        );
+    }
+
+    #[test]
+    fn the_prefix_is_one_to_ten_characters_without_spaces() {
+        for ok in ["!", "1234567890", ">>", "ぽ"] {
+            let settings = compiled(&format!("prefix: '{ok}'")).unwrap();
+            assert_eq!(settings.policy.prefix.as_deref(), Some(ok));
+        }
+        for bad in ["", "a b", "12345678901", "tab\there"] {
+            assert_eq!(
+                issues_of(&format!("prefix: '{bad}'")),
+                [("prefix".to_owned(), "invalid")],
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn emojis_are_unicode_or_custom_and_at_most_a_hundred_characters() {
+        let settings = compiled(
+            "
+success_emoji: '<:party:123456789012345678>'
+error_emoji: '<a:wave:123456789012345678>'
+",
+        )
+        .unwrap();
+        assert_eq!(settings.policy.success_emoji, "<:party:123456789012345678>");
+        assert_eq!(settings.policy.error_emoji, "<a:wave:123456789012345678>");
+        for ok in ["❤️", "👍🏽", "🇯🇵", "1️⃣"] {
+            let settings = compiled(&format!("error_emoji: '{ok}'")).unwrap();
+            assert_eq!(settings.policy.error_emoji, ok);
+        }
+        let long = "🙂".repeat(101);
+        for bad in [
+            "ok",
+            "1",
+            "@",
+            "<:x:123456789012345678>",
+            "<:party:12>",
+            long.as_str(),
+            " 👍",
+        ] {
+            assert_eq!(
+                issues_of(&format!("success_emoji: '{bad}'")),
+                [("success_emoji".to_owned(), "invalid")],
+                "{bad:?}"
+            );
+        }
     }
 
     fn warn_module() -> Arc<dyn Module> {

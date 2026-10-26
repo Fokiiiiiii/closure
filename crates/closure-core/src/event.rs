@@ -11,6 +11,7 @@ use twilight_model::id::marker::{
 };
 
 use crate::action::Emoji;
+use crate::cases::Case;
 use crate::locale::Locale;
 use crate::schedule::ScheduledJob;
 
@@ -119,6 +120,29 @@ pub struct RoleInfo {
     pub name: String,
     pub position: i64,
     pub permissions: Permissions,
+}
+
+/// A member gained or lost roles. Only sent when the bot knew the roles the member had before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RolesChange {
+    pub guild_id: GuildId,
+    pub user: UserInfo,
+    pub added: Vec<RoleId>,
+    pub removed: Vec<RoleId>,
+}
+
+/// A thread: a channel started from a message or made in a channel that has `parent_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadInfo {
+    pub id: ChannelId,
+    pub guild_id: GuildId,
+    pub parent_id: Option<ChannelId>,
+    pub name: String,
+    pub owner_id: Option<UserId>,
+    pub archived: bool,
+    pub locked: bool,
+    /// Unix seconds, when Discord reports when the thread was made.
+    pub created_at: Option<i64>,
 }
 
 /// The token of an interaction. It authorises replies for fifteen minutes, so it is
@@ -419,6 +443,18 @@ pub enum Event {
         guild_id: GuildId,
         role_id: RoleId,
     },
+    RolesChanged(RolesChange),
+    ThreadCreated(ThreadInfo),
+    ThreadArchived(ThreadInfo),
+    ThreadUnarchived(ThreadInfo),
+    ThreadDeleted {
+        guild_id: GuildId,
+        thread_id: ChannelId,
+        parent_id: ChannelId,
+    },
+    /// A case was recorded in the guild, by any module (see [`crate::cases`]). The module that
+    /// recorded it gets it too.
+    CaseCreated(Case),
     Command(CommandInvocation),
     /// A click or a choice on a component of one of the module's messages.
     Component(ComponentInvocation),
@@ -457,6 +493,12 @@ pub enum EventKind {
     RoleCreated,
     RoleUpdated,
     RoleDeleted,
+    RolesChanged,
+    ThreadCreated,
+    ThreadArchived,
+    ThreadUnarchived,
+    ThreadDeleted,
+    CaseCreated,
     Command,
     Component,
     Modal,
@@ -472,7 +514,9 @@ impl EventKind {
     #[must_use]
     pub fn required_intents(self) -> Intents {
         match self {
-            Self::MemberJoined | Self::MemberUpdated | Self::MemberLeft => Intents::GUILD_MEMBERS,
+            Self::MemberJoined | Self::MemberUpdated | Self::MemberLeft | Self::RolesChanged => {
+                Intents::GUILD_MEMBERS
+            }
             Self::MessageCreated
             | Self::MessageUpdated
             | Self::MessageDeleted
@@ -487,6 +531,12 @@ impl EventKind {
             | Self::RoleCreated
             | Self::RoleUpdated
             | Self::RoleDeleted
+            // Threads and cases need no intent beyond `GUILDS`, which the bot always asks for.
+            | Self::ThreadCreated
+            | Self::ThreadArchived
+            | Self::ThreadUnarchived
+            | Self::ThreadDeleted
+            | Self::CaseCreated
             | Self::Command
             | Self::Component
             | Self::Modal
@@ -518,6 +568,12 @@ impl EventKind {
             Self::RoleCreated => "role_created",
             Self::RoleUpdated => "role_updated",
             Self::RoleDeleted => "role_deleted",
+            Self::RolesChanged => "roles_changed",
+            Self::ThreadCreated => "thread_created",
+            Self::ThreadArchived => "thread_archived",
+            Self::ThreadUnarchived => "thread_unarchived",
+            Self::ThreadDeleted => "thread_deleted",
+            Self::CaseCreated => "case_created",
             Self::Command => "command",
             Self::Component => "component",
             Self::Modal => "modal",
@@ -551,6 +607,12 @@ impl Event {
             Self::RoleCreated(_) => EventKind::RoleCreated,
             Self::RoleUpdated(_) => EventKind::RoleUpdated,
             Self::RoleDeleted { .. } => EventKind::RoleDeleted,
+            Self::RolesChanged(_) => EventKind::RolesChanged,
+            Self::ThreadCreated(_) => EventKind::ThreadCreated,
+            Self::ThreadArchived(_) => EventKind::ThreadArchived,
+            Self::ThreadUnarchived(_) => EventKind::ThreadUnarchived,
+            Self::ThreadDeleted { .. } => EventKind::ThreadDeleted,
+            Self::CaseCreated(_) => EventKind::CaseCreated,
             Self::Command(_) => EventKind::Command,
             Self::Component(_) => EventKind::Component,
             Self::Modal(_) => EventKind::Modal,
@@ -580,6 +642,11 @@ impl Event {
             Self::Modal(submission) => Some(submission.channel_id),
             Self::Autocomplete(query) => Some(query.channel_id),
             Self::ContextCommand(invocation) => Some(invocation.channel_id),
+            // A thread counts as part of its parent channel, the way a filter reads it.
+            Self::ThreadCreated(thread)
+            | Self::ThreadArchived(thread)
+            | Self::ThreadUnarchived(thread) => Some(thread.parent_id.unwrap_or(thread.id)),
+            Self::ThreadDeleted { parent_id, .. } => Some(*parent_id),
             _ => None,
         }
     }
@@ -599,6 +666,7 @@ impl Event {
             Self::Modal(submission) => submission.user.bot,
             Self::Autocomplete(query) => query.user.bot,
             Self::ContextCommand(invocation) => invocation.user.bot,
+            Self::RolesChanged(change) => change.user.bot,
             _ => false,
         }
     }
@@ -630,7 +698,13 @@ impl Event {
             | Self::MessagesBulkDeleted { guild_id, .. }
             | Self::BanAdded { guild_id, .. }
             | Self::BanRemoved { guild_id, .. }
-            | Self::RoleDeleted { guild_id, .. } => *guild_id,
+            | Self::RoleDeleted { guild_id, .. }
+            | Self::ThreadDeleted { guild_id, .. }
+            | Self::RolesChanged(RolesChange { guild_id, .. }) => *guild_id,
+            Self::ThreadCreated(thread)
+            | Self::ThreadArchived(thread)
+            | Self::ThreadUnarchived(thread) => thread.guild_id,
+            Self::CaseCreated(case) => case.guild_id,
             Self::MemberJoined(info) | Self::MemberUpdated(info) => info.guild_id,
             Self::MessageCreated(info) | Self::MessageUpdated(info) => info.guild_id,
             Self::ReactionAdded(info) | Self::ReactionRemoved(info) => info.guild_id,
@@ -720,5 +794,93 @@ mod tests {
         let token = InteractionToken::new("secret-token");
         assert!(!format!("{token:?}").contains("secret-token"));
         assert_eq!(token.expose(), "secret-token");
+    }
+
+    fn thread(parent: Option<u64>) -> ThreadInfo {
+        ThreadInfo {
+            id: Id::new(20),
+            guild_id: Id::new(1),
+            parent_id: parent.map(Id::new),
+            name: "t".into(),
+            owner_id: Some(Id::new(7)),
+            archived: false,
+            locked: false,
+            created_at: Some(0),
+        }
+    }
+
+    #[test]
+    fn a_thread_event_is_about_its_parent_channel() {
+        assert_eq!(
+            Event::ThreadCreated(thread(Some(2))).channel_id(),
+            Some(Id::new(2))
+        );
+        assert_eq!(
+            Event::ThreadArchived(thread(None)).channel_id(),
+            Some(Id::new(20))
+        );
+        let deleted = Event::ThreadDeleted {
+            guild_id: Id::new(1),
+            thread_id: Id::new(20),
+            parent_id: Id::new(2),
+        };
+        assert_eq!(deleted.channel_id(), Some(Id::new(2)));
+        assert_eq!(deleted.guild_id(), Id::new(1));
+    }
+
+    #[test]
+    fn a_role_change_says_who_and_which_roles() {
+        let change = Event::RolesChanged(RolesChange {
+            guild_id: Id::new(1),
+            user: user(),
+            added: vec![Id::new(5)],
+            removed: vec![],
+        });
+        assert_eq!(change.kind(), EventKind::RolesChanged);
+        assert_eq!(change.guild_id(), Id::new(1));
+        assert!(!change.caused_by_bot());
+        assert!(change.member_roles().is_empty());
+        assert_eq!(
+            EventKind::RolesChanged.required_intents(),
+            Intents::GUILD_MEMBERS
+        );
+    }
+
+    #[test]
+    fn a_case_belongs_to_its_guild_and_to_no_channel() {
+        let case = Case {
+            number: 1,
+            guild_id: Id::new(1),
+            module: crate::module::ModuleId::new("m").unwrap(),
+            kind: crate::cases::CaseKind::new("warn").unwrap(),
+            target: Id::new(7),
+            moderator: Id::new(8),
+            reason: None,
+            created_at: 0,
+            expires_at: None,
+            revoked: None,
+        };
+        let event = Event::CaseCreated(case);
+        assert_eq!(event.kind(), EventKind::CaseCreated);
+        assert_eq!(event.guild_id(), Id::new(1));
+        assert_eq!(event.channel_id(), None);
+        assert_eq!(EventKind::CaseCreated.required_intents(), Intents::empty());
+    }
+
+    #[test]
+    fn every_kind_is_named_on_the_wire_as_as_str_says() {
+        for kind in [
+            EventKind::RolesChanged,
+            EventKind::ThreadCreated,
+            EventKind::ThreadArchived,
+            EventKind::ThreadUnarchived,
+            EventKind::ThreadDeleted,
+            EventKind::CaseCreated,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{}\"", kind.as_str())
+            );
+        }
     }
 }

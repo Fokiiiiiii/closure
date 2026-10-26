@@ -14,13 +14,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use closure_core::action::{Action, InteractionReply, InteractionResponse};
-use closure_core::cases::{CaseBackend, Cases, MemoryCases};
+use closure_core::cases::{Case, CaseBackend, Cases, MemoryCases};
 use closure_core::client::ApiClient;
 use closure_core::error::ModuleError;
 use closure_core::event::{
     AttachmentInfo, AutocompleteInvocation, CommandInvocation, CommandOption, CommandOptionValue,
     ComponentInvocation, ContextInvocation, ContextTarget, Event, GuildId, InteractionToken,
-    MessageInfo, ModalSubmission, UserId, UserInfo,
+    MessageInfo, ModalSubmission, RolesChange, ThreadInfo, UserId, UserInfo,
+};
+use closure_core::history::{
+    HistoryBackend, HistoryError, MemoryHistory, MessageHistory, SavedMessage,
 };
 use closure_core::interaction::InteractionGuilds;
 use closure_core::latency::GatewayLatency;
@@ -492,6 +495,7 @@ pub struct Harness {
     storage: Arc<MemoryStorage>,
     scheduler: Arc<MemoryScheduler>,
     cases: Arc<MemoryCases>,
+    history: Arc<MemoryHistory>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     elapsed: Arc<Mutex<Duration>>,
     policy: Mutex<GuildPolicy>,
@@ -545,6 +549,7 @@ impl Harness {
         let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(unix_now.clone());
         let storage = Arc::new(MemoryStorage::with_clock(unix_now.clone()));
         let cases = Arc::new(MemoryCases::with_clock(unix_now.clone()));
+        let history = Arc::new(MemoryHistory::default());
         let scheduler = Arc::new(MemoryScheduler::with_clock(unix_now));
         let registry = ModuleRegistry::new(vec![Arc::clone(&module) as Arc<dyn Module>])?;
         let mut catalogs = TranslatorBuilder::new()?;
@@ -566,6 +571,7 @@ impl Harness {
             storage,
             scheduler,
             cases,
+            history,
             clock,
             elapsed,
             policy: Mutex::new(GuildPolicy::default()),
@@ -599,6 +605,11 @@ impl Harness {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .log_channel = Some(Id::new(channel));
+    }
+
+    /// Replaces the guild's policy (its log channel, moderator roles, time zone, prefix and emojis).
+    pub fn set_policy(&self, policy: GuildPolicy) {
+        *self.policy.lock().unwrap_or_else(PoisonError::into_inner) = policy;
     }
 
     /// Sets the guild's language (English when not set).
@@ -650,6 +661,25 @@ impl Harness {
             manifest.id.clone(),
             Id::new(GUILD),
         )
+    }
+
+    /// The module's message history in the guild of the invocations.
+    #[must_use]
+    pub fn history(&self) -> MessageHistory {
+        let manifest = self.module.manifest();
+        MessageHistory::new(
+            Arc::clone(&self.history) as Arc<dyn HistoryBackend>,
+            &manifest.capabilities,
+            manifest.id.clone(),
+            Id::new(GUILD),
+        )
+    }
+
+    /// Keeps `message` in the history of the guild of the invocations, as the host would have
+    /// recorded it. Its `guild_id` is set to that guild.
+    pub async fn seed_message(&self, mut message: SavedMessage) -> Result<(), HistoryError> {
+        message.guild_id = Id::new(GUILD);
+        self.history.save(&message).await
     }
 
     /// The module's scheduler in the guild of the invocations, to set up jobs a test starts from.
@@ -776,6 +806,12 @@ impl Harness {
             manifest.id.clone(),
             guild,
         ))
+        .with_history(MessageHistory::new(
+            Arc::clone(&self.history) as Arc<dyn HistoryBackend>,
+            &manifest.capabilities,
+            manifest.id.clone(),
+            guild,
+        ))
         .with_clock({
             let clock = Arc::clone(&self.clock);
             move || clock()
@@ -876,6 +912,91 @@ impl Harness {
             edited_at: None,
         };
         self.emit(Event::MessageCreated(info)).await
+    }
+
+    /// Delivers a member's role change, with the roles the gateway reports as added and removed.
+    /// `None` when the module did not subscribe to it or its filter left it out.
+    pub async fn roles_changed(
+        &self,
+        user: u64,
+        added: &[u64],
+        removed: &[u64],
+    ) -> Result<Option<Flow>, ModuleError> {
+        self.emit(Event::RolesChanged(RolesChange {
+            guild_id: Id::new(GUILD),
+            user: tester(user),
+            added: added.iter().map(|id| Id::new(*id)).collect(),
+            removed: removed.iter().map(|id| Id::new(*id)).collect(),
+        }))
+        .await
+    }
+
+    /// Delivers a thread of the guild that was just created under `parent`.
+    pub async fn thread_created(
+        &self,
+        thread: u64,
+        parent: u64,
+    ) -> Result<Option<Flow>, ModuleError> {
+        self.emit(Event::ThreadCreated(
+            self.thread_info(thread, parent, false),
+        ))
+        .await
+    }
+
+    /// Delivers a thread of the guild that was archived.
+    pub async fn thread_archived(
+        &self,
+        thread: u64,
+        parent: u64,
+    ) -> Result<Option<Flow>, ModuleError> {
+        self.emit(Event::ThreadArchived(
+            self.thread_info(thread, parent, true),
+        ))
+        .await
+    }
+
+    /// Delivers a thread of the guild that was unarchived.
+    pub async fn thread_unarchived(
+        &self,
+        thread: u64,
+        parent: u64,
+    ) -> Result<Option<Flow>, ModuleError> {
+        self.emit(Event::ThreadUnarchived(
+            self.thread_info(thread, parent, false),
+        ))
+        .await
+    }
+
+    /// Delivers the deletion of a thread of the guild.
+    pub async fn thread_deleted(
+        &self,
+        thread: u64,
+        parent: u64,
+    ) -> Result<Option<Flow>, ModuleError> {
+        self.emit(Event::ThreadDeleted {
+            guild_id: Id::new(GUILD),
+            thread_id: Id::new(thread),
+            parent_id: Id::new(parent),
+        })
+        .await
+    }
+
+    /// Delivers a case recorded in the guild, as the dispatcher announces it to every module.
+    pub async fn case_created(&self, case: Case) -> Result<Option<Flow>, ModuleError> {
+        self.emit(Event::CaseCreated(case)).await
+    }
+
+    fn thread_info(&self, thread: u64, parent: u64, archived: bool) -> ThreadInfo {
+        ThreadInfo {
+            id: Id::new(thread),
+            guild_id: Id::new(GUILD),
+            parent_id: Some(Id::new(parent)),
+            name: format!("thread-{thread}"),
+            owner_id: Some(Id::new(OTHER_OWNER)),
+            archived,
+            locked: false,
+            created_at: Some((self.clock)()),
+        }
     }
 
     /// A new interaction of `guild`: its number and its recorded token. Somebody owns the server

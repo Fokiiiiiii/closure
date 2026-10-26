@@ -6,6 +6,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use closure_core::module::Module;
 
+pub mod message_history;
+
 /// Every module this build ships. Adding a module means adding it here.
 pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
     Ok(vec![

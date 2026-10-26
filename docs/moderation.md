@@ -253,9 +253,10 @@ regard to letter case, and extra spaces are allowed:
 | words | `today 18:00`, `tomorrow 18:00`, `今日 18:00`, `明日 18:00`, `明後日 9時` | that day at that time |
 | Discord timestamp | `<t:1767225600>`, `<t:1767225600:R>` | that moment, pasted from a message |
 
-A zone may end the text: `Z`, `UTC`, `JST`, `+09:00`, `+0900`, `+9` or `-05:00`. Without one, the zone is
-chosen by the **language of the server**: Japanese is UTC+09:00, every other language is UTC. This is a
-simplification; a per-server time zone setting is on the [roadmap](roadmap.md).
+A zone may end the text: `Z`, `UTC`, `JST`, `+09:00`, `+0900`, `+9` or `-05:00`. Without one, the
+zone is the server's `timezone` setting when it has one (see [time zone, prefix and emojis](configuration.md#time-zone-prefix-and-emojis)).
+Otherwise it is chosen by the **language of the server**: Japanese is UTC+09:00, every other language is
+UTC. The server's zone is a fixed offset, so a zone with daylight saving time has to be changed by hand.
 
 A moment must be in the future and no more than ten years away. Years are 2000 to 2200, and the day must
 exist (no 2026-02-30, no 2100-02-29). Hours run from 0 to 23, minutes and seconds from 0 to 59. A moment

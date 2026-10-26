@@ -95,6 +95,12 @@ when it is built, because Discord would never send it the events. Clicks, forms 
 subscribed to; they have `component`, `modal` and `job`. In a plain module the same is
 `ModuleManifest::subscribe(..)` plus `Module::on_event_flow`. `Harness::emit(event)` delivers an event as the dispatcher would.
 
+Events about roles, threads and cases:
+
+- `RolesChanged` (`GUILD_MEMBERS`): a member gained (`added`) or lost (`removed`) roles, against the roles the bot had cached. Nothing is sent when the bot did not know the member's roles before. `MemberUpdated` is still sent for the same update.
+- `ThreadCreated`, `ThreadArchived`, `ThreadUnarchived`, `ThreadDeleted` (`GUILDS`): `ThreadCreated` only for a thread that was just made; threads the bot learns of at start-up or when it is added to one are not announced. Archive and unarchive compare with the cached state, so nothing is sent when that state is unknown. A thread counts as part of its parent channel for `in_channels` and `not_in_channels`. These events carry no roles, so `ignore_roles` does not apply to them.
+- `CaseCreated`: a case recorded in the guild by any module, delivered once after it was stored. The module that recorded it gets it too, so compare `case.module` with your own id. A failing handler does not fail the recording. A case recorded while a `CaseCreated` handler runs is stored but not announced again, so announcements never chain; the case quota is not used up by such a loop.
+
 Keeping data: declare `.capability(Capability::Storage)` and use `cx.store()` (or `ctx.store()` in
 a plain module):
 
@@ -157,8 +163,9 @@ A `Span` field is a command option that takes a length as above or a moment, suc
 or `18時`: `#[derive(CommandArgs)] struct Mute { user: UserId, until: Span }`. The text is checked when
 the command arrives, so a typo is refused as a bad argument. The handler resolves it with
 `span.resolve(&cx)?`, which reads the clock of the command and returns the length from now, or
-`UserError` (not understood, in the past, more than ten years away). A moment without a zone is read at
-UTC+09:00 on a Japanese server and at UTC otherwise (see the moderation guide). `Span::resolve_at(now,
+`UserError` (not understood, in the past, more than ten years away). A moment without a zone is read in the
+server's `timezone` when it has one, else at UTC+09:00 on a Japanese server and at UTC otherwise (see the
+moderation guide). `Span::resolve_at(now,
 offset)` is the same without a `Cx`, for tests. `Span::from_duration` makes a span from a `Duration`.
 
 An embed (the box under a message) is built with `EmbedBuilder`, which checks Discord's limits when
@@ -229,6 +236,11 @@ Declare the capabilities of what the module carries out: `Cases`, `SendMessages`
 A reply is one embed whose description is the text. `reply` and `reply_private` use the `Info`
 tone; `say`, `say_private`, `say_t` and `say_private_t` take a `Tone` (`Info`, `Success`, `Warning`
 or `Error`) for the colour of the bar. Empty text is refused as before.
+
+A `Success` reply starts with the server's `success_emoji` and an `Error` reply with its
+`error_emoji` (see [configuration](configuration.md#time-zone-prefix-and-emojis)), followed by a space;
+`Info` and `Warning` get none. `cx.tone_text(tone, text)` gives the text as the reply shows it, for a
+reply built by hand. Tests set the policy with `Harness::set_policy(GuildPolicy { .. })`.
 
 Errors the SDK answers (a `UserError` such as a missing permission or a cooldown) are `Error`
 embeds and always private, whatever the setting below says.
@@ -479,6 +491,89 @@ let foreign = links(&message.content).iter().any(|link| !link.is_domain("example
 
 In a test, `Harness::message(Message::new(author, channel).content("…"))` delivers a message the
 way the dispatcher does, and returns what the module's filter let through.
+
+## Message history
+
+A module that looks at earlier messages (spam by author, cleaning a user's recent messages, logs of
+edits and deletions) declares `Capability::ReadMessageHistory`, the capability `message_history`.
+It reads the history with `cx.history()` in a command, or `ctx.history()` in an event handler:
+
+- `by_author(user, since, limit)` and `in_channel(channel, since, limit)` list messages newest
+  first, sent at or after `since` (unix seconds). `limit` is clamped to 1 to 100.
+- `get(channel, id)` returns one message.
+
+Each result is a `SavedMessage` with the author, the content, attachments, mentions, reply target,
+and the times it was sent, edited and deleted. A deleted message stays in the history with
+`deleted_at` set, so a module can see what was removed. The handle also has `save` and
+`mark_deleted`, which the host uses to record what Discord sends.
+
+What is kept:
+
+- The host records created, edited and deleted messages (bulk deletes too), bot messages included.
+  It records only in guilds where some enabled module holds `message_history`. Where none does,
+  nothing is recorded.
+- Retention is set with `--message-history-days` (`MESSAGE_HISTORY_DAYS`), 7 by default. Older
+  messages are removed by the storage upkeep. `0` keeps nothing.
+- An edit replaces the stored text. An update that carries no text keeps the stored text, because
+  Discord sends none without the content intent.
+- Without the content intent (see "Reading messages") new messages have empty text in the history.
+  Nothing is invented for them.
+- A module only sees the messages of its own guild.
+
+In a test, `Harness::seed_message(SavedMessage)` puts a message into the history of the harness guild,
+and `harness.history()` reads it back with the module's own capability.
+
+## Recent actions
+
+`closure_sdk::recent::RecentActions` keeps what happened in the last moments (messages, mentions,
+joins) so that a module can count a burst and act once. It is in memory only: a restart starts
+empty. Keep one in the module's state; a clone shares the same store.
+
+- `record(guild, Recent { kind, subject, group, count, at, messages, tag })` stores an action.
+  Actions older than `RecentLimits::max_age` (default one hour) before the newest one are dropped,
+  and so are the oldest past `max_entries_per_guild` (default 20,000).
+- `sum`, `entries` and `take` look at one kind (and one subject, or all) in the last `within`.
+  A window starts inclusively: an action exactly `within` old counts. `take` removes what it
+  returns, so a burst trips a rule once.
+- `RecentFilter` narrows to one group (such as a channel) and can require the window to span
+  enough distinct groups or subjects. When it does not, `sum` is 0 and `take` returns nothing.
+- `mark_handled(guild, key, until)` and `already_handled(guild, key, now)` let later actions of the
+  same burst pass without triggering again, until `until`.
+
+## Counters
+
+`closure_sdk::counters::Counters` keeps named integers that a module declares in its config as
+`CounterDef`s: one global value, or one per channel and/or per user (`per_channel`, `per_user`).
+Values are kept between `0` and `2^31 - 1`; `add` and `set` clamp into that range.
+
+- `Decay { amount, every }` moves the value by `amount` for each whole period since the value was
+  last written. It is applied when the value is read or changed, so no job runs. A period that has
+  not passed yet is kept for later.
+- A `TriggerDef` has a `Condition` such as `>= 5` (`>`, `<`, `=`, `!=`, `<=` too) and a reverse,
+  such as `< 5`. A change from an old value to a new one fires a trigger when the condition did not
+  hold for the old value and holds for the new one. Its reverse fires when the condition held for
+  the old value and the reverse holds for the new one. So a value that jumps over the reverse's
+  range fires nothing; a later step across it does. `reset` and `reset_all` fire nothing.
+- Each change is a compare-and-set write of the scope's entry through the module's `Store`. A
+  conflict is retried up to five times, then reported as `CounterError::Conflict`. Needs the
+  `storage` capability.
+
+Shortcut: a trigger that only decay crosses fires on the next change of that scope, not when the
+decay happens, and a value nobody has written yet reads as its initial value.
+
+## Templates
+
+`closure_sdk::template` renders text from values a module gives it: `Template::parse(text)` once,
+then `render(&values)`, or `template::render(text, &values)` in one step.
+
+- `{name}` and `{a.b.c}` are replaced by the value at that path. A name the values do not have
+  renders as nothing. A list shows its items joined by commas; a map shows nothing, so name one of
+  its fields.
+- `{{` and `}}` are literal braces. A lone `}`, and a `{` that is never closed or sits inside
+  another variable, are errors with their character position.
+- There are no functions. A render stops at 4,000 characters.
+- `template::values::user`, `guild` and `message` build the usual maps (ids are text, as in
+  Zeppelin); `Values::from_json` takes a JSON object of data.
 
 ## More actions and their capabilities
 

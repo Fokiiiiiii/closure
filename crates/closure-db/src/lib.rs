@@ -10,6 +10,7 @@ mod cases;
 mod config;
 mod error;
 mod guilds;
+mod history;
 mod ids;
 mod scheduler;
 mod storage;
@@ -148,6 +149,7 @@ mod tests {
                 "guilds",
                 "module_counters",
                 "module_kv",
+                "saved_messages",
                 "scheduled_jobs"
             ]
         );

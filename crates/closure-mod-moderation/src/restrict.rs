@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use closure_sdk::punish::Method;
-use closure_sdk::{Args, CommandArgs, CommandCx, RoleId, Span, UserError, UserId};
+use closure_sdk::{Args, CommandArgs, CommandCx, RoleId, Span, Tone, UserError, UserId};
 
 use crate::templates;
 use crate::{Config, MemberReason, mention, punisher_for, reason_of, timeout_seconds};
@@ -77,7 +77,8 @@ pub(crate) async fn voice_unmute(cx: CommandCx, args: MemberReason) -> Result<()
     let case = punisher_for(&cx, &config)
         .voice_unmute(args.user, reason_of(args.reason))
         .await?;
-    cx.reply_private_t(
+    cx.say_private_t(
+        Tone::Success,
         "voice-unmuted",
         &Args::new()
             .with("user", mention(args.user))

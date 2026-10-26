@@ -1,6 +1,6 @@
 //! Running the gateway shards.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -28,6 +28,10 @@ use crate::dispatcher::Dispatcher;
 /// How long a hook may take before the gateway moves on without it.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How many message events may wait for their hook. Past it the newest is dropped and logged:
+/// keeping them all would let a slow database grow memory without bound.
+const MESSAGE_QUEUE_CAPACITY: usize = 10_000;
+
 /// Called by the gateway for guild arrivals and departures.
 ///
 /// Hooks run in order on a background task, right after the event is handed to the dispatcher,
@@ -46,6 +50,16 @@ pub trait GuildHooks: Send + Sync {
 
     /// The bot was removed from the guild (not merely disconnected by an outage).
     async fn guild_removed(&self, _guild: GuildId) {}
+
+    /// Whether the messages of the guild are wanted now (see [`Self::message`]). Asked for every
+    /// message event before it is copied, so it must be a cheap read.
+    fn wants_messages(&self, _guild: GuildId) -> bool {
+        false
+    }
+
+    /// A message event of a guild that [`Self::wants_messages`] said yes to. Hooks of message
+    /// events run in the order the events came, before the guild hooks waiting at the same time.
+    async fn message(&self, _event: &ModuleEvent) {}
 }
 
 /// Hooks that do nothing.
@@ -166,6 +180,8 @@ struct ShardContext {
     cache: Arc<InMemoryCache>,
     dispatcher: Dispatcher,
     hooks: Arc<HookQueue>,
+    /// Asked whether a message event is wanted before it is queued.
+    guild_hooks: Arc<dyn GuildHooks>,
     health: Arc<GatewayHealth>,
     latency: Arc<GatewayLatency>,
     shutdown: CancellationToken,
@@ -215,7 +231,17 @@ struct HookQueue {
 #[derive(Default)]
 struct HookQueueState {
     pending: HashMap<GuildId, HookJob>,
+    /// Message events in the order they came; every one is kept up to the capacity.
+    messages: VecDeque<ModuleEvent>,
     /// Set once no shard can push any more.
+    closed: bool,
+}
+
+/// What the worker takes from the queue in one go, so that the queue cannot close between the
+/// reading of the pending work and the reading of `closed`.
+struct Taken {
+    jobs: Vec<HookJob>,
+    messages: Vec<ModuleEvent>,
     closed: bool,
 }
 
@@ -225,20 +251,36 @@ impl HookQueue {
         self.wake.notify_one();
     }
 
+    /// Queues a message event for [`GuildHooks::message`]. Past the capacity the event is dropped
+    /// and logged by its kind alone, never its content.
+    fn push_message(&self, event: ModuleEvent) {
+        let mut state = self.state();
+        if state.messages.len() >= MESSAGE_QUEUE_CAPACITY {
+            tracing::warn!(
+                kind = event.kind().as_str(),
+                "message hooks are behind; a message event was dropped"
+            );
+            return;
+        }
+        state.messages.push_back(event);
+        self.wake.notify_one();
+    }
+
     /// Declares that nothing will be pushed any more, so the worker may end once it is idle.
     fn close(&self) {
         self.state().closed = true;
         self.wake.notify_one();
     }
 
-    /// Everything pending, and whether the queue is closed. Both are read under one lock, so a
-    /// closed queue that reports no jobs really is finished.
-    fn take(&self) -> (Vec<HookJob>, bool) {
+    /// Everything pending, and whether the queue is closed. All of it is read under one lock, so
+    /// a closed queue that reports no work really is finished.
+    fn take(&self) -> Taken {
         let mut state = self.state();
-        (
-            std::mem::take(&mut state.pending).into_values().collect(),
-            state.closed,
-        )
+        Taken {
+            jobs: std::mem::take(&mut state.pending).into_values().collect(),
+            messages: std::mem::take(&mut state.messages).into(),
+            closed: state.closed,
+        }
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, HookQueueState> {
@@ -250,15 +292,23 @@ impl HookQueue {
 /// events handled while the shards were shutting down are not lost.
 async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
     loop {
-        let (jobs, closed) = queue.take();
-        if jobs.is_empty() {
-            if closed {
+        let taken = queue.take();
+        if taken.jobs.is_empty() && taken.messages.is_empty() {
+            if taken.closed {
                 return;
             }
             queue.wake.notified().await;
             continue;
         }
-        for job in jobs {
+        for event in &taken.messages {
+            if tokio::time::timeout(HOOK_TIMEOUT, hooks.message(event))
+                .await
+                .is_err()
+            {
+                tracing::warn!(kind = event.kind().as_str(), "message hook timed out");
+            }
+        }
+        for job in taken.jobs {
             let hook = async {
                 match &job {
                     HookJob::Available {
@@ -273,6 +323,26 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
                 tracing::warn!(?job, "guild hook timed out");
             }
         }
+    }
+}
+
+/// The guild a message event concerns; `None` for every other event.
+fn message_guild(event: &ModuleEvent) -> Option<GuildId> {
+    match event {
+        ModuleEvent::MessageCreated(info) | ModuleEvent::MessageUpdated(info) => {
+            Some(info.guild_id)
+        }
+        ModuleEvent::MessageDeleted { guild_id, .. }
+        | ModuleEvent::MessagesBulkDeleted { guild_id, .. } => Some(*guild_id),
+        _ => None,
+    }
+}
+
+/// Queues a message event when its guild wants messages. The check comes first, so an event of a
+/// guild that keeps none is never copied.
+fn offer_message(queue: &HookQueue, hooks: &dyn GuildHooks, event: &ModuleEvent) {
+    if message_guild(event).is_some_and(|guild| hooks.wants_messages(guild)) {
+        queue.push_message(event.clone());
     }
 }
 
@@ -318,6 +388,7 @@ pub async fn start_gateway(
         cache,
         dispatcher,
         hooks: Arc::clone(&hook_queue),
+        guild_hooks: Arc::clone(&hooks),
         health: Arc::clone(&health),
         latency: config.latency,
         shutdown,
@@ -377,7 +448,31 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
     }
 }
 
+/// What the cache holds about what `event` changes. Read before the cache applies the event,
+/// because afterwards it only holds the new state.
+fn before(cache: &InMemoryCache, event: &Event) -> convert::Before {
+    match event {
+        Event::MemberUpdate(updated) => convert::Before {
+            roles: cache
+                .member(updated.guild_id, updated.user.id)
+                .map(|member| member.roles().to_vec()),
+            ..convert::Before::default()
+        },
+        Event::ThreadUpdate(updated) => convert::Before {
+            archived: cache.channel(updated.0.id).and_then(|channel| {
+                channel
+                    .thread_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.archived)
+            }),
+            ..convert::Before::default()
+        },
+        _ => convert::Before::default(),
+    }
+}
+
 fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, event: &Event) {
+    let before = before(&context.cache, event);
     context.cache.update(event);
     if let Some(ready) = readiness_change(event) {
         context.health.set(id, ready);
@@ -390,25 +485,25 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
         context.latency.record(u64::from(id.number()), latency);
     }
 
-    let Some(converted) = convert::event(event) else {
-        return;
-    };
-    let hook = match &converted {
-        ModuleEvent::GuildAvailable {
-            guild_id,
-            name,
-            preferred_locale,
-        } => Some(HookJob::Available {
-            guild: *guild_id,
-            name: name.clone(),
-            preferred_locale: *preferred_locale,
-        }),
-        ModuleEvent::GuildRemoved { guild_id } => Some(HookJob::Removed { guild: *guild_id }),
-        _ => None,
-    };
-    context.dispatcher.dispatch(converted);
-    if let Some(job) = hook {
-        context.hooks.push(job);
+    for converted in convert::events(event, &before) {
+        offer_message(&context.hooks, &*context.guild_hooks, &converted);
+        let hook = match &converted {
+            ModuleEvent::GuildAvailable {
+                guild_id,
+                name,
+                preferred_locale,
+            } => Some(HookJob::Available {
+                guild: *guild_id,
+                name: name.clone(),
+                preferred_locale: *preferred_locale,
+            }),
+            ModuleEvent::GuildRemoved { guild_id } => Some(HookJob::Removed { guild: *guild_id }),
+            _ => None,
+        };
+        context.dispatcher.dispatch(converted);
+        if let Some(job) = hook {
+            context.hooks.push(job);
+        }
     }
 }
 
@@ -416,6 +511,11 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
 mod tests {
     use closure_core::module::{Module, ModuleId, ModuleManifest};
     use closure_core::testing::StubModule;
+    use serde_json::json;
+    use twilight_model::channel::Channel;
+    use twilight_model::gateway::payload::incoming::{
+        MemberAdd, MemberUpdate, ThreadCreate, ThreadUpdate,
+    };
 
     use super::*;
 
@@ -468,6 +568,76 @@ mod tests {
         assert_eq!(readiness_change(&Event::Resumed), Some(true));
         assert_eq!(readiness_change(&Event::GatewayClose(None)), Some(false));
         assert_eq!(readiness_change(&Event::GatewayHeartbeatAck), None);
+    }
+
+    fn user_json() -> serde_json::Value {
+        json!({ "id": "7", "username": "alice", "discriminator": "0", "avatar": null, "bot": false })
+    }
+
+    #[test]
+    fn the_state_before_an_update_is_read_before_the_cache_takes_it() {
+        let cache = new_cache();
+        let added: MemberAdd = serde_json::from_value(json!({
+            "guild_id": "1", "user": user_json(), "roles": ["5"], "pending": false,
+            "joined_at": "2026-10-24T00:00:00.000000+00:00", "deaf": false, "mute": false, "flags": 0
+        }))
+        .unwrap();
+        cache.update(&Event::MemberAdd(Box::new(added)));
+        let update: MemberUpdate = serde_json::from_value(json!({
+            "guild_id": "1", "user": user_json(), "roles": ["6"], "pending": false
+        }))
+        .unwrap();
+        let event = Event::MemberUpdate(Box::new(update.clone()));
+        assert_eq!(
+            before(&cache, &event).roles,
+            Some(vec![twilight_model::id::Id::new(5)])
+        );
+        cache.update(&event);
+        assert_eq!(
+            before(&cache, &Event::MemberUpdate(Box::new(update))).roles,
+            Some(vec![twilight_model::id::Id::new(6)]),
+            "the cache has moved on, so this is the state it holds now"
+        );
+        let stranger: MemberUpdate = serde_json::from_value(json!({
+            "guild_id": "1", "user": { "id": "8", "username": "bob", "discriminator": "0", "avatar": null, "bot": false },
+            "roles": [], "pending": false
+        }))
+        .unwrap();
+        assert_eq!(
+            before(&cache, &Event::MemberUpdate(Box::new(stranger))).roles,
+            None
+        );
+    }
+
+    #[test]
+    fn the_archived_state_of_a_cached_thread_is_read_before_it_changes() {
+        let cache = new_cache();
+        let channel: Channel = serde_json::from_value(json!({
+            "id": "20", "type": 11, "guild_id": "1", "name": "t", "parent_id": "2",
+            "thread_metadata": {
+                "archived": false, "auto_archive_duration": 1440, "locked": false,
+                "archive_timestamp": "2026-10-24T00:00:00.000000+00:00"
+            }
+        }))
+        .unwrap();
+        cache.update(&Event::ThreadCreate(Box::new(ThreadCreate(
+            channel.clone(),
+        ))));
+        let mut archived = channel;
+        archived.thread_metadata.as_mut().unwrap().archived = true;
+        let event = Event::ThreadUpdate(Box::new(ThreadUpdate(archived)));
+        assert_eq!(before(&cache, &event).archived, Some(false));
+        assert_eq!(
+            before(
+                &cache,
+                &Event::ThreadUpdate(Box::new(ThreadUpdate(
+                    serde_json::from_value(json!({ "id": "99", "type": 11, "guild_id": "1" }))
+                        .unwrap()
+                )))
+            )
+            .archived,
+            None
+        );
     }
 
     #[derive(Default)]
@@ -576,6 +746,7 @@ mod tests {
             cache: new_cache(),
             dispatcher,
             hooks: Arc::clone(&queue),
+            guild_hooks: Arc::new(NoHooks),
             health: Arc::new(GatewayHealth::new(2)),
             latency: Arc::default(),
             shutdown: CancellationToken::new(),
@@ -583,9 +754,69 @@ mod tests {
         let second = Arc::clone(&context);
 
         drop(context);
-        assert!(!queue.take().1, "one shard is still running");
+        assert!(!queue.take().closed, "one shard is still running");
         drop(second);
-        assert!(queue.take().1, "the last shard is gone");
+        assert!(queue.take().closed, "the last shard is gone");
+    }
+
+    /// Keeps the deleted messages of the guilds it wants, in the order they came.
+    #[derive(Default)]
+    struct Messages {
+        seen: Mutex<Vec<u64>>,
+    }
+
+    #[async_trait]
+    impl GuildHooks for Messages {
+        fn wants_messages(&self, guild: GuildId) -> bool {
+            guild == twilight_model::id::Id::new(1)
+        }
+
+        async fn message(&self, event: &ModuleEvent) {
+            if let ModuleEvent::MessageDeleted { message_id, .. } = event {
+                self.seen.lock().unwrap().push(message_id.get());
+            }
+        }
+    }
+
+    fn deleted(guild: u64, message: u64) -> ModuleEvent {
+        ModuleEvent::MessageDeleted {
+            guild_id: twilight_model::id::Id::new(guild),
+            channel_id: twilight_model::id::Id::new(5),
+            message_id: twilight_model::id::Id::new(message),
+        }
+    }
+
+    #[tokio::test]
+    async fn message_events_of_wanted_guilds_run_in_arrival_order() {
+        let hooks = Arc::new(Messages::default());
+        let queue = Arc::new(HookQueue::default());
+        offer_message(&queue, &*hooks, &deleted(1, 10));
+        offer_message(&queue, &*hooks, &deleted(1, 11));
+        // Guild 2 does not want messages: the event is never queued, so never cloned either.
+        offer_message(&queue, &*hooks, &deleted(2, 12));
+        offer_message(&queue, &*hooks, &deleted(1, 13));
+        queue.close();
+
+        run_hook_worker(Arc::clone(&hooks) as Arc<dyn GuildHooks>, queue).await;
+        assert_eq!(*hooks.seen.lock().unwrap(), [10, 11, 13]);
+    }
+
+    #[test]
+    fn message_events_past_the_queue_capacity_are_dropped_and_the_first_kept() {
+        let queue = HookQueue::default();
+        // Snowflakes are never zero, so the ids start at one.
+        let capacity = u64::try_from(MESSAGE_QUEUE_CAPACITY).unwrap();
+        for id in 1..=capacity + 5 {
+            queue.push_message(deleted(1, id));
+        }
+        let taken = queue.take();
+        assert_eq!(taken.messages.len(), MESSAGE_QUEUE_CAPACITY);
+        let id_of = |event: &ModuleEvent| match event {
+            ModuleEvent::MessageDeleted { message_id, .. } => message_id.get(),
+            _ => panic!("only deletions were pushed"),
+        };
+        assert_eq!(id_of(&taken.messages[0]), 1);
+        assert_eq!(id_of(&taken.messages[MESSAGE_QUEUE_CAPACITY - 1]), capacity);
     }
 
     #[test]

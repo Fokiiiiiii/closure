@@ -11,17 +11,19 @@
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use closure_core::action::InteractionReply;
 use closure_core::capability::{Capability, CapabilitySet};
-use closure_core::cases::{CaseBackend, Cases, MemoryCases};
+use closure_core::cases::{Case, CaseBackend, CaseError, Cases, MemoryCases, NewCase};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
 use closure_core::event::{
     AutocompleteInvocation, ContextTarget, Event, GuildId, InteractionRef, UserId,
 };
+use closure_core::history::{HistoryBackend, MemoryHistory, MessageHistory};
 use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::{Args, Locale, Translator};
@@ -219,6 +221,7 @@ struct Shared {
     storage: Arc<dyn StorageBackend>,
     scheduler: Arc<dyn SchedulerBackend>,
     cases: Arc<dyn CaseBackend>,
+    history: Arc<dyn HistoryBackend>,
     config: DispatcherConfig,
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
     /// The guild of every live interaction, so a module cannot answer another guild's.
@@ -250,6 +253,74 @@ impl std::fmt::Debug for Dispatcher {
     }
 }
 
+tokio::task_local! {
+    /// Whether the module call running in this task was given a `CaseCreated`. A case recorded
+    /// then is not announced again, or two modules answering each other's cases would loop.
+    static HANDLING_CASE_ANNOUNCEMENT: bool;
+}
+
+/// Records cases through `inner`, then queues a `CaseCreated` for the guild. Queuing never waits,
+/// and the modules that get the event cannot fail the recording.
+struct NotifyingCases {
+    inner: Arc<dyn CaseBackend>,
+    shared: Weak<Shared>,
+}
+
+#[async_trait]
+impl CaseBackend for NotifyingCases {
+    async fn create(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        case: NewCase,
+    ) -> Result<Case, CaseError> {
+        let created = self.inner.create(module, guild, case).await?;
+        let chained = HANDLING_CASE_ANNOUNCEMENT
+            .try_with(|handling| *handling)
+            .unwrap_or(false);
+        // Gone only once the dispatcher is dropped, when nobody is left to tell.
+        if !chained && let Some(shared) = self.shared.upgrade() {
+            Dispatcher { shared }.dispatch(Event::CaseCreated(created.clone()));
+        }
+        Ok(created)
+    }
+
+    async fn get(&self, guild: GuildId, number: i64) -> Result<Option<Case>, CaseError> {
+        self.inner.get(guild, number).await
+    }
+
+    async fn list_for_target(
+        &self,
+        guild: GuildId,
+        target: UserId,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        self.inner
+            .list_for_target(guild, target, before, limit)
+            .await
+    }
+
+    async fn list_recent(
+        &self,
+        guild: GuildId,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        self.inner.list_recent(guild, before, limit).await
+    }
+
+    async fn revoke(
+        &self,
+        guild: GuildId,
+        number: i64,
+        by: UserId,
+        reason: Option<String>,
+    ) -> Result<Case, CaseError> {
+        self.inner.revoke(guild, number, by, reason).await
+    }
+}
+
 /// How an event concerns a particular channel, user or role: events with the same key are
 /// handled in order.
 fn ordering_key(event: &Event) -> u64 {
@@ -269,6 +340,12 @@ fn ordering_key(event: &Event) -> u64 {
         | Event::ChannelDeleted(channel) => channel.id.get(),
         Event::RoleCreated(role) | Event::RoleUpdated(role) => role.id.get(),
         Event::RoleDeleted { role_id, .. } => role_id.get(),
+        Event::RolesChanged(change) => change.user.id.get(),
+        Event::ThreadCreated(thread)
+        | Event::ThreadArchived(thread)
+        | Event::ThreadUnarchived(thread) => thread.id.get(),
+        Event::ThreadDeleted { thread_id, .. } => thread_id.get(),
+        Event::CaseCreated(case) => case.target.get(),
         Event::Command(invocation) => invocation.user.id.get(),
         Event::Autocomplete(query) => query.user.id.get(),
         Event::ContextCommand(invocation) => invocation.user.id.get(),
@@ -326,12 +403,13 @@ impl Dispatcher {
             storage,
             Arc::new(MemoryScheduler::default()),
             Arc::new(MemoryCases::default()),
+            Arc::new(MemoryHistory::default()),
         )
         .await
     }
 
-    /// [`Self::start_with_storage`] with the place scheduled jobs and moderation cases are kept
-    /// as well. Whoever keeps the jobs runs them with [`Self::run_job`].
+    /// [`Self::start_with_storage`] with the place scheduled jobs, moderation cases and the
+    /// message history are kept as well. Whoever keeps the jobs runs them with [`Self::run_job`].
     // Each service is its own argument: one struct for them would change every caller.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_with_services(
@@ -343,6 +421,7 @@ impl Dispatcher {
         storage: Arc<dyn StorageBackend>,
         scheduler: Arc<dyn SchedulerBackend>,
         cases: Arc<dyn CaseBackend>,
+        history: Arc<dyn HistoryBackend>,
     ) -> Result<Self, DispatchError> {
         for module in registry.iter() {
             module
@@ -355,14 +434,19 @@ impl Dispatcher {
         }
 
         let interactions = Arc::new(InteractionGuilds::with_limits(config.interaction_limits));
-        let shared = Arc::new(Shared {
+        // The case backend needs the shared state it is part of, so it holds a weak reference.
+        let shared = Arc::new_cyclic(|weak| Shared {
             registry,
             settings,
             api,
             translator,
             storage,
             scheduler,
-            cases,
+            cases: Arc::new(NotifyingCases {
+                inner: cases,
+                shared: Weak::clone(weak),
+            }),
+            history,
             config,
             guilds: DashMap::new(),
             interactions,
@@ -836,9 +920,14 @@ async fn call_module(
     // Read per call, so a changed timeout applies to the very next event.
     let handler_timeout = shared.settings.limits(guild).handler_timeout;
     let started = Instant::now();
+    let announcing = matches!(**event, Event::CaseCreated(_));
     let mut task = tokio::spawn({
         let event = Arc::clone(event);
-        async move { module.on_event_flow(&ctx, &event).await }
+        async move {
+            HANDLING_CASE_ANNOUNCEMENT
+                .scope(announcing, module.on_event_flow(&ctx, &event))
+                .await
+        }
     });
     let waited = tokio::select! {
         result = tokio::time::timeout(handler_timeout, &mut task) => Some(result),
@@ -909,6 +998,12 @@ fn context_for(
     ))
     .with_cases(Cases::new(
         Arc::clone(&shared.cases),
+        &settings.granted,
+        id.clone(),
+        guild,
+    ))
+    .with_history(MessageHistory::new(
+        Arc::clone(&shared.history),
         &settings.granted,
         id.clone(),
         guild,

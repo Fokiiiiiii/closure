@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use closure::message_history::{retention_cutoff, unix_now};
 use closure::modules;
 use closure_api::{ApiState, GatewayStatus, Readiness, ServerLimits, router};
 use closure_config::{ConfigCompiler, SettingsStore, parse_overrides};
 use closure_core::cases::CaseBackend;
+use closure_core::history::HistoryBackend;
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Translator;
 use closure_core::registry::ModuleRegistry;
@@ -177,7 +179,11 @@ async fn start_api(
 const STORAGE_PURGE_EVERY: Duration = Duration::from_secs(3600);
 
 /// Removes what modules no longer need from the database, now and then, until `shutdown`.
-fn start_storage_upkeep(db: Db, shutdown: CancellationToken) -> JoinHandle<()> {
+fn start_storage_upkeep(
+    db: Db,
+    message_history_days: u32,
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match db.purge_module_storage().await {
@@ -193,6 +199,14 @@ fn start_storage_upkeep(db: Db, shutdown: CancellationToken) -> JoinHandle<()> {
                 }
                 Ok(_) => {}
                 Err(error) => tracing::warn!(%error, "could not remove old scheduled jobs"),
+            }
+            let cutoff = retention_cutoff(unix_now(), message_history_days);
+            match db.purge_before(cutoff).await {
+                Ok(messages) if messages > 0 => {
+                    tracing::info!(messages, "removed messages past the history retention");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not remove old messages"),
             }
             tokio::select! {
                 () = shutdown.cancelled() => return,
@@ -248,6 +262,7 @@ async fn serve(
                 Arc::new(db.clone()) as Arc<dyn StorageBackend>,
                 Arc::new(db.clone()) as Arc<dyn SchedulerBackend>,
                 Arc::new(db.clone()) as Arc<dyn CaseBackend>,
+                Arc::new(db.clone()) as Arc<dyn HistoryBackend>,
             )
             .await
             .context("a module failed to load")?,
@@ -269,7 +284,11 @@ async fn serve(
         Err(error) => tracing::warn!(%error, "could not read the guild list from Discord"),
     }
 
-    let hooks = Arc::new(AppHooks::new(db.clone(), Arc::clone(&core.store)));
+    let hooks = Arc::new(AppHooks::new(
+        db.clone(),
+        Arc::clone(&core.store),
+        args.message_history_days,
+    ));
     let gateway = started.gateway.insert(
         start_gateway(
             &http,
@@ -338,7 +357,7 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("could not load guild configurations")?;
 
-    let upkeep_task = start_storage_upkeep(db.clone(), shutdown.clone());
+    let upkeep_task = start_storage_upkeep(db.clone(), args.message_history_days, shutdown.clone());
     let mut started = Started::default();
     let outcome = serve(&args, &core, &db, metrics, &shutdown, &mut started).await;
     match &outcome {

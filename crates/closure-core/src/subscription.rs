@@ -129,7 +129,7 @@ mod tests {
     use twilight_model::id::Id;
 
     use super::*;
-    use crate::event::{MessageInfo, UserInfo};
+    use crate::event::{MessageInfo, ThreadInfo, UserInfo};
 
     fn message(channel: u64, bot: bool, roles: &[u64]) -> Event {
         Event::MessageCreated(MessageInfo {
@@ -208,6 +208,33 @@ mod tests {
         assert!(!all.matches(&message(3, true, &[])));
         assert!(!all.matches(&message(3, false, &[50])));
         assert!(!all.matches(&message(4, false, &[])));
+    }
+
+    #[test]
+    fn a_thread_is_in_its_parent_channel_for_the_channel_filters() {
+        let thread = |parent: Option<u64>| {
+            Event::ThreadCreated(ThreadInfo {
+                id: Id::new(20),
+                guild_id: Id::new(1),
+                parent_id: parent.map(Id::new),
+                name: "t".into(),
+                owner_id: None,
+                archived: false,
+                locked: false,
+                created_at: None,
+            })
+        };
+        let in_parent = Subscription::new(EventKind::ThreadCreated)
+            .in_channels([Id::new(3)])
+            .filter;
+        assert!(in_parent.matches(&thread(Some(3))));
+        assert!(!in_parent.matches(&thread(Some(4))));
+
+        let outside = Subscription::new(EventKind::ThreadCreated)
+            .not_in_channels([Id::new(3)])
+            .filter;
+        assert!(!outside.matches(&thread(Some(3))));
+        assert!(outside.matches(&thread(Some(4))));
     }
 
     #[test]

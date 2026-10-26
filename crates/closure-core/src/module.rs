@@ -14,6 +14,7 @@ use crate::cases::Cases;
 use crate::client::ApiClient;
 use crate::error::{CoreError, ModuleError};
 use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId, UserId};
+use crate::history::MessageHistory;
 use crate::latency::{GatewayLatency, LatencySummary};
 use crate::locale::{Args, Catalog, Locale, Translator};
 use crate::permission::{GuildPermissions, PermissionSpec};
@@ -598,6 +599,7 @@ pub struct EventContext {
     store: Store,
     scheduler: Scheduler,
     cases: Cases,
+    history: MessageHistory,
     config: Arc<serde_json::Value>,
     translator: Arc<dyn Translator>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
@@ -630,6 +632,7 @@ impl EventContext {
             store: Store::unavailable(module.clone(), guild_id),
             scheduler: Scheduler::unavailable(module.clone(), guild_id),
             cases: Cases::unavailable(module.clone(), guild_id),
+            history: MessageHistory::unavailable(module.clone(), guild_id),
             module,
             guild_id,
             api,
@@ -720,6 +723,19 @@ impl EventContext {
     #[must_use]
     pub fn cases(&self) -> &Cases {
         &self.cases
+    }
+
+    /// Gives the context the module's message history in this guild; without it every call fails.
+    #[must_use]
+    pub fn with_history(mut self, history: MessageHistory) -> Self {
+        self.history = history;
+        self
+    }
+
+    /// The messages the host kept in this guild, if the module holds `message_history`.
+    #[must_use]
+    pub fn history(&self) -> &MessageHistory {
+        &self.history
     }
 
     /// Gives the context the guild's permissions; without them nobody but the owner has any key.

@@ -146,7 +146,7 @@ async fn someone_without_the_permission_is_told_why_and_the_handler_does_not_run
     let replies = harness.invoke(warn(7)).await.unwrap();
     assert_eq!(
         texts(&replies),
-        ["You are not allowed to do that here. It needs level 50 and you are at level 1."]
+        ["❌ You are not allowed to do that here. It needs level 50 and you are at level 1."]
     );
     assert!(replies[0].ephemeral);
     let ja = harness.invoke(warn(7).locale(Locale::Ja)).await.unwrap();
@@ -174,7 +174,7 @@ async fn someone_without_the_permission_is_told_why_and_the_handler_does_not_run
     });
     harness.advance(Duration::from_secs(11));
     let replies = harness.invoke(warn(7).roles([10])).await.unwrap();
-    assert_eq!(texts(&replies), ["You are not allowed to do that here."]);
+    assert_eq!(texts(&replies), ["❌ You are not allowed to do that here."]);
 }
 
 #[tokio::test]
@@ -185,7 +185,7 @@ async fn the_cooldown_holds_a_user_back_and_says_for_how_long() {
     let replies = harness.invoke(warn(7).roles([10])).await.unwrap();
     assert_eq!(
         texts(&replies),
-        ["Please wait 8 more second(s) before using that again."]
+        ["❌ Please wait 8 more second(s) before using that again."]
     );
     assert!(replies[0].ephemeral);
     // Someone else is not held back, and after the period the user is free again.
@@ -209,7 +209,7 @@ async fn a_message_error_is_answered_privately_from_the_modules_catalog() {
         )
         .await
         .unwrap();
-    assert_eq!(texts(&replies), ["That is too many warnings."]);
+    assert_eq!(texts(&replies), ["❌ That is too many warnings."]);
     assert!(replies[0].ephemeral);
 }
 
@@ -236,7 +236,7 @@ async fn a_handler_that_says_nothing_is_answered_and_options_of_the_wrong_type_a
         .unwrap();
     assert_eq!(
         texts(&replies),
-        ["The value of `list` is missing or not valid."]
+        ["❌ The value of `list` is missing or not valid."]
     );
 }
 
