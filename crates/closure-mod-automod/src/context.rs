@@ -58,6 +58,11 @@ pub enum Source {
         trigger: String,
         reverse: bool,
     },
+    /// The antiraid level changed, from `old` to `level`.
+    Antiraid {
+        level: String,
+        old: String,
+    },
 }
 
 /// What happened to a thread.
@@ -185,6 +190,21 @@ impl Context {
             }
             _ => return None,
         })
+    }
+
+    /// A change of the antiraid level. It names no member and no channel.
+    #[must_use]
+    pub fn antiraid(level: &str, old: &str) -> Self {
+        Self {
+            user: None,
+            channel: None,
+            message: None,
+            source: Source::Antiraid {
+                level: level.to_owned(),
+                old: old.to_owned(),
+            },
+            created: true,
+        }
     }
 
     /// The member the event is about, when it is the user of the context.

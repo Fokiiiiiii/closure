@@ -8,6 +8,7 @@
 //! `/automod status`. It is off until a server turns it on.
 
 mod actions;
+mod antiraid;
 mod commands;
 mod config;
 mod context;
@@ -115,6 +116,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .capability(Capability::Schedule)
         .capability(Capability::ReadGuild)
         .capability(Capability::ReadMessageHistory)
+        .capability(Capability::ManageGuild)
         // MESSAGE_CONTENT is privileged: it must be switched on for the bot in the Discord developer
         // portal, or the rules see no text at all. GUILD_MEMBERS is privileged too: the joins, the
         // leaves and the role changes need it.
@@ -134,6 +136,21 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             Level::MODERATOR,
             "Look at and change the counters of automod",
         )?)
+        .permission(PermissionSpec::new(
+            "automod.antiraid.view",
+            Level::MODERATOR,
+            "See the antiraid level and its quarantine",
+        )?)
+        .permission(PermissionSpec::new(
+            "automod.antiraid.set",
+            Level::ADMIN,
+            "Raise or lower the antiraid level",
+        )?)
+        .permission(PermissionSpec::new(
+            "automod.antiraid.release",
+            Level::MODERATOR,
+            "Release members from the antiraid quarantine",
+        )?)
         .config(schema, defaults)
         .group(
             "automod",
@@ -147,46 +164,112 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .groups(
             "automod",
             AUTOMOD_DESCRIPTION,
-            [
-                SubcommandGroup::new("counters", "Look at and change the counters of automod")
-                    .subcommand(
-                        Command::<commands::View>::new("view", "Show the value of a counter")
-                            .requires("automod.counters")
-                            .handler({
-                                let state = Arc::clone(&state);
-                                move |cx, args| commands::view(Arc::clone(&state), cx, args)
-                            }),
-                    )
-                    .subcommand(
-                        Command::<commands::Set>::new("set", "Set the value of a counter")
-                            .requires("automod.counters")
-                            .handler({
-                                let state = Arc::clone(&state);
-                                move |cx, args| commands::set(Arc::clone(&state), cx, args)
-                            }),
-                    )
-                    .subcommand(
-                        Command::<commands::Add>::new("add", "Add to a counter")
-                            .requires("automod.counters")
-                            .handler({
-                                let state = Arc::clone(&state);
-                                move |cx, args| commands::add(Arc::clone(&state), cx, args)
-                            }),
-                    )
-                    .subcommand(
-                        Command::<commands::Reset>::new("reset", "Put a counter back to its start")
-                            .requires("automod.counters")
-                            .handler({
-                                let state = Arc::clone(&state);
-                                move |cx, args| commands::reset(Arc::clone(&state), cx, args)
-                            }),
-                    ),
-            ],
+            [counters_group(&state), antiraid_group(&state)],
         )
-        .job(actions::CLEANUP_JOB, actions::cleanup);
+        .autocomplete("automod antiraid set", "level", {
+            let state = Arc::clone(&state);
+            move |cx| {
+                let state = Arc::clone(&state);
+                async move { commands::level_choices(&state, &cx) }
+            }
+        })
+        .job(actions::CLEANUP_JOB, actions::cleanup)
+        .job(antiraid::EXPIRE_JOB, {
+            let state = Arc::clone(&state);
+            move |cx| {
+                let state = Arc::clone(&state);
+                async move { antiraid::expire(&state, cx).await }
+            }
+        });
     Ok(punish::jobs(builder)
         .catalog(Locale::En, EN)
         .catalog(Locale::Ja, JA))
+}
+
+/// `/automod counters`: the commands that look at and change the counters.
+fn counters_group(state: &Arc<engine::State>) -> SubcommandGroup {
+    SubcommandGroup::new("counters", "Look at and change the counters of automod")
+        .subcommand(
+            Command::<commands::View>::new("view", "Show the value of a counter")
+                .requires("automod.counters")
+                .handler({
+                    let state = Arc::clone(state);
+                    move |cx, args| commands::view(Arc::clone(&state), cx, args)
+                }),
+        )
+        .subcommand(
+            Command::<commands::Set>::new("set", "Set the value of a counter")
+                .requires("automod.counters")
+                .handler({
+                    let state = Arc::clone(state);
+                    move |cx, args| commands::set(Arc::clone(&state), cx, args)
+                }),
+        )
+        .subcommand(
+            Command::<commands::Add>::new("add", "Add to a counter")
+                .requires("automod.counters")
+                .handler({
+                    let state = Arc::clone(state);
+                    move |cx, args| commands::add(Arc::clone(&state), cx, args)
+                }),
+        )
+        .subcommand(
+            Command::<commands::Reset>::new("reset", "Put a counter back to its start")
+                .requires("automod.counters")
+                .handler({
+                    let state = Arc::clone(state);
+                    move |cx, args| commands::reset(Arc::clone(&state), cx, args)
+                }),
+        )
+}
+
+/// `/automod antiraid`: the antiraid level, and the quarantine of the members who joined at a level
+/// that has one.
+fn antiraid_group(state: &Arc<engine::State>) -> SubcommandGroup {
+    SubcommandGroup::new(
+        "antiraid",
+        "Raise or lower the antiraid level, and release the quarantined members",
+    )
+    .subcommand(
+        Command::<()>::new("view", "Show the antiraid level and the quarantine")
+            .requires("automod.antiraid.view")
+            .handler({
+                let state = Arc::clone(state);
+                move |cx, args| commands::antiraid_view(Arc::clone(&state), cx, args)
+            }),
+    )
+    .subcommand(
+        Command::<commands::AntiraidSet>::new("set", "Raise or lower the antiraid level")
+            .requires("automod.antiraid.set")
+            .handler({
+                let state = Arc::clone(state);
+                move |cx, args| commands::antiraid_set(Arc::clone(&state), cx, args)
+            }),
+    )
+    .subcommand(
+        Command::<()>::new("clear", "Put the antiraid level back to the calm one")
+            .requires("automod.antiraid.set")
+            .handler({
+                let state = Arc::clone(state);
+                move |cx, args| commands::antiraid_clear(Arc::clone(&state), cx, args)
+            }),
+    )
+    .subcommand(
+        Command::<commands::AntiraidRelease>::new("release", "Take a member out of the quarantine")
+            .requires("automod.antiraid.release")
+            .handler({
+                let state = Arc::clone(state);
+                move |cx, args| commands::antiraid_release(Arc::clone(&state), cx, args)
+            }),
+    )
+    .subcommand(
+        Command::<()>::new("release-all", "Take every member out of the quarantine")
+            .requires("automod.antiraid.release")
+            .handler({
+                let state = Arc::clone(state);
+                move |cx, args| commands::antiraid_release_all(Arc::clone(&state), cx, args)
+            }),
+    )
 }
 
 /// The module as the host loads it.

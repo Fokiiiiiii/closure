@@ -58,8 +58,9 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | `ban`, `unban`, `kick`, `warn`, `mute`, `unmute` | `case` with `kinds`: the cases the moderation modules record (`timeout` and `untimeout` stand for mute and unmute); `note` is not recorded yet |
 | `member_join` (`only_new`, `new_threshold`), `member_leave`, `member_join_spam` | `member_join`, `member_join_spam`, `member_leave` |
 | `counter_trigger` | `counter` (a trigger of a counter fired, or its reverse) |
-| `antiraid_level` | not yet: antiraid is the next stage |
-| 19 actions | `delete`, `purge`, `warn`, `timeout`, `kick`, `ban`, `reply` (with `auto_delete`), `alert`, `addRoles` (`add_roles`), `removeRoles` (`remove_roles`), `changeNickname` (`set_nickname`), `setSlowmode` (`slowmode`), `addToCounter` (`add_to_counter`), `setCounter` (`set_counter`). Templates with `{user}`, `{rule}`, `{detail}` and more |
+| `antiraid_level` | `antiraid_level` (the level changed, to or from the levels named). Its context carries `{level}` and `{old}` |
+| 19 actions | `delete`, `purge`, `warn`, `timeout`, `kick`, `ban`, `reply` (with `auto_delete`), `alert`, `addRoles` (`add_roles`), `removeRoles` (`remove_roles`), `changeNickname` (`set_nickname`), `setSlowmode` (`slowmode`), `addToCounter` (`add_to_counter`), `setCounter` (`set_counter`), `setAntiraidLevel` (`set_antiraid_level`). Templates with `{user}`, `{rule}`, `{detail}` and more |
+| antiraid levels: `antiraid_levels` (none, low, medium, high, lockdown) with their slowmode, invite pause and quarantine | the module's `antiraid` section: named levels (the first is calm), per-level `slowmode` (restored when the level goes down), `pause_invites` (only when antiraid paused them), `quarantine` (new members of that level; the role is created as `Quarantine` when none is given, and it is never released automatically: `/automod antiraid release` or `release-all`), `notify_channel`; `/automod antiraid view\|set\|clear\|release\|release-all`. A timed level goes back to calm |
 | counters | the module's `counters`: per member, per channel or overall, lazy decay, triggers and reverses, changed by actions and by `/automod counters`. Zeppelin's counter commands are `/automod counters view\|set\|add\|reset` here |
 | message history for spam, `clean`, logs | available as the `message_history` capability: messages kept for `--message-history-days` (7 by default), with edits and deletions (see [writing modules](writing-modules.md#message-history)) |
 | `Logs` event log | ModLog of cases only |
@@ -74,8 +75,8 @@ These are in Zeppelin and are left out on purpose, for now:
 - `presets`: a rule is written out in full; a preset would be a second source of truth.
 - `changePerms`: channel permission edits are a moderator's decision, not a rule's.
 - `startThread` and `archiveThread`: threads are for the members, not for automod.
-- `pauseInvites`: needs the invite settings, which no module manages yet.
-- `setAntiraidLevel` and the `antiraid_level` trigger: antiraid is the next stage of automod.
+- `pauseInvites` as a rule action: the invites are paused by antiraid levels only (see the antiraid
+  row); a rule cannot switch them off.
 - Coordinated spam (`coordinated_message_spam`, `coordinated_link_spam`): it needs the messages of many
   members compared at once, and is not built yet.
 - `match_visible_names` and `match_custom_status`: the gateway does not give the names shown in a

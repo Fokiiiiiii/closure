@@ -37,6 +37,8 @@ pub enum RestrictionRole {
     Timeout,
     /// A voice mute.
     Voice,
+    /// A member held back by an antiraid level: no speaking, and no reactions or threads.
+    Quarantine,
 }
 
 impl RestrictionRole {
@@ -46,6 +48,7 @@ impl RestrictionRole {
         match self {
             Self::Timeout => "timeout",
             Self::Voice => "vcmute",
+            Self::Quarantine => "quarantine",
         }
     }
 
@@ -56,6 +59,7 @@ impl RestrictionRole {
         match self {
             Self::Timeout => "Timed out",
             Self::Voice => "Voice muted",
+            Self::Quarantine => "Quarantine",
         }
     }
 
@@ -74,13 +78,22 @@ impl RestrictionRole {
                     | Permissions::REQUEST_TO_SPEAK
             }
             Self::Voice => Permissions::SPEAK | Permissions::STREAM | Permissions::USE_VAD,
+            Self::Quarantine => {
+                Permissions::SEND_MESSAGES
+                    | Permissions::SEND_MESSAGES_IN_THREADS
+                    | Permissions::CREATE_PUBLIC_THREADS
+                    | Permissions::CREATE_PRIVATE_THREADS
+                    | Permissions::ADD_REACTIONS
+                    | Permissions::SPEAK
+                    | Permissions::STREAM
+            }
         }
     }
 
     /// The permission that the restriction takes away, which another role may still allow.
     fn speaking(self) -> Permissions {
         match self {
-            Self::Timeout => Permissions::SEND_MESSAGES,
+            Self::Timeout | Self::Quarantine => Permissions::SEND_MESSAGES,
             Self::Voice => Permissions::SPEAK,
         }
     }
@@ -177,7 +190,11 @@ async fn ensure_synced(
 /// Sets the dedicated roles that are remembered on a channel that was just created, so that the
 /// channel keeps the restrictions. A module calls this on `ChannelCreated`.
 pub async fn channel_created(ctx: &EventContext, channel: ChannelId) -> Result<(), ModuleError> {
-    for which in [RestrictionRole::Timeout, RestrictionRole::Voice] {
+    for which in [
+        RestrictionRole::Timeout,
+        RestrictionRole::Voice,
+        RestrictionRole::Quarantine,
+    ] {
         let Some(role) = remembered(ctx, which)
             .await
             .map_err(|error| store_error(&error))?

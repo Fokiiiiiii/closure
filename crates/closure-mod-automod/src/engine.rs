@@ -118,6 +118,11 @@ pub async fn on_event(state: &State, ctx: EventContext, event: Event) -> Result<
         }
     }
     let loaded = state.load(&ctx)?;
+    // The quarantine of a joining member is applied whatever the rules say, and a leaving member is
+    // forgotten by it.
+    let quarantine =
+        crate::antiraid::member_event(&ctx, &state.memory, loaded.setup.antiraid.as_ref(), &event)
+            .await;
     drain(
         state,
         &ctx,
@@ -125,6 +130,7 @@ pub async fn on_event(state: &State, ctx: EventContext, event: Event) -> Result<
         VecDeque::from([Work { context, depth: 0 }]),
     )
     .await?;
+    quarantine?;
     Ok(Flow::Continue)
 }
 
@@ -254,6 +260,7 @@ async fn act(
         memory: &state.memory,
         counters: &loaded.setup.counters,
         config: &loaded.config,
+        antiraid: loaded.setup.antiraid.as_ref(),
     };
     actions::apply(&deps, rule, hit, context).await
 }

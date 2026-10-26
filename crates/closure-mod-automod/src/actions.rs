@@ -46,6 +46,7 @@ pub struct Deps<'a> {
     pub memory: &'a Memory,
     pub counters: &'a [CounterDef],
     pub config: &'a Config,
+    pub antiraid: Option<&'a crate::antiraid::Antiraid>,
 }
 
 /// Whether an action ran, and whether it punished a member.
@@ -218,6 +219,9 @@ async fn run(
         }
         Action::AddToCounter { counter, amount } => {
             change_counter(deps, context, counter, Op::Add(*amount)).await
+        }
+        Action::SetAntiraidLevel { level, duration } => {
+            set_antiraid_level(deps, level, *duration).await
         }
         Action::SetCounter { counter, value } => {
             change_counter(deps, context, counter, Op::Set(*value)).await
@@ -479,6 +483,33 @@ async fn set_slowmode(
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+/// Raises or lowers the antiraid level. The change is a context of its own, so the rules that watch
+/// the level see it, a few levels deep at most.
+async fn set_antiraid_level(
+    deps: &Deps<'_>,
+    level: &str,
+    duration: Option<Duration>,
+) -> Result<(Ran, Vec<Context>), ModuleError> {
+    let Some(antiraid) = deps.antiraid else {
+        return Err(ModuleError::other("antiraid is not set up"));
+    };
+    let change = crate::antiraid::set_level(
+        deps.ctx,
+        antiraid,
+        level,
+        crate::antiraid::Setter::Bot,
+        duration,
+    )
+    .await?;
+    Ok(match change {
+        Some(change) => (
+            Ran::Other,
+            vec![Context::antiraid(&change.new, &change.old)],
+        ),
+        None => skipped(),
+    })
 }
 
 /// Changes a counter for the member and the channel of the context. The triggers the change fired
@@ -753,6 +784,9 @@ fn values(
         } => values
             .with("counter", counter.as_str())
             .with("trigger", trigger.as_str()),
+        Source::Antiraid { level, old } => values
+            .with("level", level.as_str())
+            .with("old", old.as_str()),
         _ => values,
     }
 }
@@ -828,7 +862,7 @@ fn mention(user: UserId) -> String {
     format!("<@{}>", user.get())
 }
 
-fn text(ctx: &EventContext, key: &str, args: &Args) -> String {
+pub(crate) fn text(ctx: &EventContext, key: &str, args: &Args) -> String {
     ctx.t_in(ctx.locale, key, args)
 }
 

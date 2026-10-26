@@ -239,6 +239,8 @@ own event and on no other. A member the event does not name is left out of the a
 { type: thread_created }
 
 # counter: a trigger of a counter fired (or, with reverse, its reverse did), see Counters
+# antiraid_level: the antiraid level changed, to one of levels (any when none is given) from one of
+# from (any when none is given), see Antiraid
 { type: counter, counter: strikes, trigger: high }
 { type: counter, counter: strikes, trigger: high, reverse: true }
 ```
@@ -298,6 +300,7 @@ fails. At most 30 days.
 | `{ do: slowmode, duration: 30s, channels: ["…"] }` | Sets the slowmode of the channels given, or of the channel of the event when none are given. `0s` turns it off. At most six hours. The same value is not set again within ten minutes: Discord limits how often a channel is edited. |
 | `{ do: add_to_counter, counter: strikes, amount: 1 }` | Adds to a counter, for the member and the channel of the event, as the counter is kept (see [Counters](#counters)). |
 | `{ do: set_counter, counter: strikes, value: 0 }` | Sets a counter, as above. |
+| `{ do: set_antiraid_level, level: high, duration: 30m }` | Raises (or lowers) the antiraid level. With a `duration` the calm level comes back after it. Does nothing when the server is at that level already. See [Antiraid](#antiraid). |
 
 The actions run in the order given. A failing action does not stop the next one; the first error is
 logged. Every punishment is recorded as its own case, as a moderator's command would record it.
@@ -322,6 +325,7 @@ run. The table says what each action needs.
 | `add_roles`, `remove_roles`, `set_nickname` | a member | every event with a member |
 | `slowmode` | a channel: its `channels`, or the channel of the event | the message triggers, thread events, counter triggers that have a channel |
 | `add_to_counter`, `set_counter` | the member and the channel the counter is kept for | every event; a missing one is an error in the log |
+| `set_antiraid_level` | nothing; it changes the server, not a member | every event; a level change it makes runs the `antiraid_level` triggers |
 
 | Trigger | Member | Channel | Message |
 | --- | --- | --- | --- |
@@ -407,6 +411,71 @@ permission (moderators by default):
 triggers it fires, as an action does, and it changes the counter in a dry run too: it is the
 moderator's own action. The reply is private.
 
+### Antiraid
+
+Antiraid is the server's level for a raid. The levels are named in order, and the first is the calm
+one; a server is at the calm level until someone raises it, with `/automod antiraid set` or with a
+rule's `set_antiraid_level` action. The section is off until it is written:
+
+```
+antiraid: {
+  levels: ["calm", "low", "high"],          # 2 to 10 names, the first is calm (default: none, low, medium, high, lockdown)
+  effects: {
+    low:  { slowmode: { seconds: 10 } },    # no channels: every text channel of the server (up to 200)
+    high: {
+      slowmode: { channels: ["5"], seconds: 30 },
+      pause_invites: true,                  # switches the server's invites off while the level lasts
+      quarantine: {},                       # new members get the "Quarantine" role (or role: "<id>")
+      notify_channel: "60"                  # told of each change, besides the log channel
+    }
+  }
+}
+```
+
+A level without an `effects` entry does nothing. An effect that names a level which is not in `levels`,
+a bad id or an out-of-range value makes the whole section invalid: antiraid is then off, `/automod status`
+says why, and the rules keep running.
+
+- **Slowmode** remembers the slowmode of each channel before the first change, and restores it when a
+  level no longer covers the channel. A channel the level does not cover is left alone.
+- **Invites** are paused by antiraid only when they are open. Invites the server closed itself stay closed
+  when the level goes down; antiraid does not open them.
+- **Quarantine** applies to members who join while the current level has one: they get the quarantine
+  role (and `marker_role`, if given). The role denies speaking, reactions and threads, as a timeout does.
+  A level change does not touch members who are already in the server. A quarantine is **never released
+  automatically**, when the level goes down or otherwise: a moderator releases a member with
+  `/automod antiraid release`, or everyone with `release-all`. A member who leaves is forgotten. Bots are
+  not quarantined. At most 5,000 members are quarantined at once; past that, joins are not quarantined.
+- **Every change** is posted to the log channel and to the level's `notify_channel`: from and to, who made
+  it, until when, how many Discord changes were made and how many failed. A failing change does not stop
+  the others.
+- A timed level (`duration`) ends by itself. The end applies only to the change it belongs to: a later
+  change of level is not undone by the earlier timer.
+
+Raising the level automatically is a rule, like any other. This one raises the level to `high` when
+five members join within a minute, and lowers it to calm after half an hour:
+
+```
+rules: {
+  raid: {
+    triggers: [{ type: member_join_spam, amount: 5, within: 1m }],
+    actions: [{ do: set_antiraid_level, level: high, duration: 30m }]
+  },
+  calm_down: {
+    triggers: [{ type: antiraid_level, levels: [high] }],
+    actions: [{ do: alert, channel: "60", text: "{rule}: the level is high, {detail}" }]
+  }
+}
+```
+
+The level changes are checked against the rules a few levels deep, the same way counter triggers are; a
+chain of changes that goes too deep is dropped and reported.
+
+Commands (`/automod antiraid`): `view` shows the level, since when, by whom, until when, and how many
+members are quarantined (moderators). `set <level> [duration]` and `clear` change the level (administrators).
+`release <user>` and `release-all` take members out of the quarantine (moderators). `/automod status` shows
+the level.
+
 ### Dry run
 
 With `dry_run: true` nothing is done: no deletion, no punishment, no case, no cooldown, and a burst
@@ -418,8 +487,8 @@ a dry run does nothing at all.
 
 `/automod status` (privately) shows whether dry run is on, how many rules are enabled, disabled and
 invalid, each rule on a line (its triggers, its actions, its cooldown), the events the enabled rules
-listen to, the counters with how each is kept and its triggers, and each invalid rule with the
-reason. Invalid rules never run. A counter that is not usable (a bad definition) is reported in
+listen to, the antiraid level, the counters with how each is kept and its triggers, and each invalid
+rule with the reason. Invalid rules never run. A counter that is not usable (a bad definition) is reported in
 place of the counters; a rule that names such a counter is invalid.
 
 A rule is invalid when its shape is wrong, a value is out of range (a window longer than an hour, a
@@ -439,7 +508,7 @@ one got in some other way.
 - Administrators are not known from a message. Only the moderator level counts for the exemption, so
   an administrator without a moderator role is checked like a member.
 - `distinct_users`, thread parents for spam, presets, `changePerms`, `startThread` and
-  `archiveThread`, `pauseInvites`, the antiraid levels and their trigger, coordinated spam, and the
+  `archiveThread`, coordinated spam, and the
   `match_visible_names` and `match_custom_status` matchers of the older automod are not in this
   version (see [the parity list](zeppelin-parity.md)).
 - A slowmode is not set again to the same value within ten minutes; a different value is set at once.

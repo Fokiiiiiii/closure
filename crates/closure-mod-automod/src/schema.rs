@@ -11,6 +11,8 @@ const SNOWFLAKE: &str = "^[0-9]{1,20}$";
 const RULE_ID: &str = "^[a-z0-9_-]{1,32}$";
 /// Counter names and the names of their triggers are kept to plain characters, as rule ids are.
 const COUNTER_NAME: &str = "^[a-z0-9_-]{1,32}$";
+/// Antiraid level names: the same plain characters as counter names.
+const LEVEL_NAME: &str = "^[a-z0-9_-]{1,32}$";
 const CONDITION: &str = "^\\s*(>=|<=|!=|>|<|=)\\s*[0-9]{1,10}\\s*$";
 const MAX_COUNTER_VALUE: i64 = 2_147_483_647;
 
@@ -71,6 +73,7 @@ pub fn settings() -> (Value, Value) {
                     "propertyNames": { "pattern": COUNTER_NAME },
                     "additionalProperties": counter()
                 },
+                "antiraid": antiraid(),
                 "rules": {
                     "type": "object",
                     "maxProperties": 100,
@@ -90,9 +93,81 @@ pub fn settings() -> (Value, Value) {
             "remove_roles_on_mute": false,
             "restore_roles_on_mute": true,
             "counters": {},
+            "antiraid": null,
             "rules": {}
         }),
     )
+}
+
+/// The antiraid section: the levels a raid raises the server to, what each level changes, and the
+/// quarantine of the members who join while one is up. Absent means antiraid is off.
+fn antiraid() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "description": "Antiraid: the levels a server is raised to while a raid runs. Absent means antiraid is off.",
+        "x-ui": { "level": "advanced" },
+        "properties": {
+            "levels": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 10,
+                "uniqueItems": true,
+                "description": "The levels, the first being the calm one. Defaults to none, low, medium, high, lockdown.",
+                "items": { "type": "string", "pattern": LEVEL_NAME }
+            },
+            "effects": {
+                "type": "object",
+                "description": "What each level does, keyed by level name. A level without an entry does nothing.",
+                "propertyNames": { "pattern": LEVEL_NAME },
+                "additionalProperties": antiraid_effect()
+            },
+            "quarantine_release": {
+                "const": false,
+                "description": "Reserved: a quarantine is released by a moderator, never by a level going down."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn antiraid_effect() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "slowmode": {
+                "type": "object",
+                "properties": {
+                    "channels": {
+                        "type": "array",
+                        "maxItems": 100,
+                        "description": "The channels to slow down. Empty means every text channel of the server.",
+                        "items": { "type": "string", "pattern": SNOWFLAKE }
+                    },
+                    "seconds": { "type": "integer", "minimum": 0, "maximum": 21600 }
+                },
+                "required": ["seconds"],
+                "additionalProperties": false
+            },
+            "pause_invites": {
+                "type": "boolean",
+                "description": "Whether new invites are switched off while the level lasts."
+            },
+            "quarantine": {
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string", "pattern": SNOWFLAKE, "description": "A role of the server. Absent means a role Closure creates." },
+                    "marker_role": { "type": "string", "pattern": SNOWFLAKE }
+                },
+                "additionalProperties": false
+            },
+            "notify_channel": {
+                "type": "string",
+                "pattern": SNOWFLAKE,
+                "description": "A channel that is told when the level changes."
+            }
+        },
+        "additionalProperties": false
+    })
 }
 
 fn counter() -> Value {
@@ -205,10 +280,11 @@ fn scope() -> Value {
 }
 
 fn trigger() -> Value {
-    json!({
-        "oneOf": [
-            tagged("any_message", json!({}), &[]),
-            tagged("words", json!({
+    let mut variants = vec![
+        tagged("any_message", json!({}), &[]),
+        tagged(
+            "words",
+            json!({
                 "words": { "type": "array", "minItems": 1, "maxItems": 500,
                            "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
                 "case_sensitive": { "type": "boolean" },
@@ -216,16 +292,24 @@ fn trigger() -> Value {
                 "normalize": { "type": "boolean" },
                 "strip_markdown": { "type": "boolean" },
                 "targets": targets()
-            }), &["words"]),
-            tagged("regex", json!({
+            }),
+            &["words"],
+        ),
+        tagged(
+            "regex",
+            json!({
                 "patterns": { "type": "array", "minItems": 1, "maxItems": 20,
                               "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
                 "case_sensitive": { "type": "boolean" },
                 "normalize": { "type": "boolean" },
                 "strip_markdown": { "type": "boolean" },
                 "targets": targets()
-            }), &["patterns"]),
-            tagged("links", json!({
+            }),
+            &["patterns"],
+        ),
+        tagged(
+            "links",
+            json!({
                 "mode": { "type": "string", "enum": ["any", "allowlist", "blocklist"] },
                 "domains": { "type": "array", "maxItems": 200,
                              "items": { "type": "string", "minLength": 1, "maxLength": 253 } },
@@ -235,43 +319,88 @@ fn trigger() -> Value {
                                    "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
                 "exclude_regex": { "type": "array", "maxItems": 50,
                                    "items": { "type": "string", "minLength": 1, "maxLength": 200 } }
-            }), &[]),
-            tagged("invites", json!({
+            }),
+            &[],
+        ),
+        tagged(
+            "invites",
+            json!({
                 "allow_codes": { "type": "array", "maxItems": 100,
                                  "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
                 "block_codes": { "type": "array", "maxItems": 100,
                                  "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
-            }), &[]),
-            tagged("attachments", json!({
+            }),
+            &[],
+        ),
+        tagged(
+            "attachments",
+            json!({
                 "min_count": { "type": "integer", "minimum": 1, "maximum": 10 },
                 "max_count": { "type": "integer", "minimum": 0, "maximum": 10 },
                 "blocked_extensions": list_of_text(16),
                 "allowed_extensions": list_of_text(16),
                 "blocked_mime_types": list_of_text(64),
                 "allowed_mime_types": list_of_text(64)
-            }), &[]),
-            tagged("caps", json!({
+            }),
+            &[],
+        ),
+        tagged(
+            "caps",
+            json!({
                 "max_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
                 "min_letters": { "type": "integer", "minimum": 1, "maximum": 2000 }
-            }), &["max_ratio"]),
-            tagged("repeat", json!({
+            }),
+            &["max_ratio"],
+        ),
+        tagged(
+            "repeat",
+            json!({
                 "max_run": { "type": "integer", "minimum": 2, "maximum": 2000 }
-            }), &["max_run"]),
-            tagged("stickers", json!({
+            }),
+            &["max_run"],
+        ),
+        tagged(
+            "stickers",
+            json!({
                 "max": { "type": "integer", "minimum": 0, "maximum": 10 }
-            }), &["max"]),
-            tagged("member_join", json!({
+            }),
+            &["max"],
+        ),
+    ];
+    variants.extend(trigger_events());
+    variants.extend(antiraid_triggers());
+    json!({ "oneOf": variants })
+}
+
+/// The triggers that read a member, a role, a case, a thread or a counter.
+fn trigger_events() -> Vec<Value> {
+    vec![
+        tagged(
+            "member_join",
+            json!({
                 "only_new": { "type": "boolean" },
                 "new_threshold": { "type": "string", "pattern": DURATION }
-            }), &[]),
-            tagged("member_join_spam", json!({
+            }),
+            &[],
+        ),
+        tagged(
+            "member_join_spam",
+            json!({
                 "amount": { "type": "integer", "minimum": 1, "maximum": 10000 },
                 "within": { "type": "string", "pattern": DURATION }
-            }), &["amount", "within"]),
-            tagged("member_leave", json!({}), &[]),
-            tagged("role_added", json!({ "roles": snowflakes(25) }), &["roles"]),
-            tagged("role_removed", json!({ "roles": snowflakes(25) }), &["roles"]),
-            tagged("case", json!({
+            }),
+            &["amount", "within"],
+        ),
+        tagged("member_leave", json!({}), &[]),
+        tagged("role_added", json!({ "roles": snowflakes(25) }), &["roles"]),
+        tagged(
+            "role_removed",
+            json!({ "roles": snowflakes(25) }),
+            &["roles"],
+        ),
+        tagged(
+            "case",
+            json!({
                 "kinds": {
                     "type": "array",
                     "maxItems": 9,
@@ -280,17 +409,25 @@ fn trigger() -> Value {
                     ] }
                 },
                 "include_own": { "type": "boolean" }
-            }), &[]),
-            tagged("thread_created", json!({}), &[]),
-            tagged("thread_archived", json!({}), &[]),
-            tagged("thread_unarchived", json!({}), &[]),
-            tagged("thread_deleted", json!({}), &[]),
-            tagged("counter", json!({
+            }),
+            &[],
+        ),
+        tagged("thread_created", json!({}), &[]),
+        tagged("thread_archived", json!({}), &[]),
+        tagged("thread_unarchived", json!({}), &[]),
+        tagged("thread_deleted", json!({}), &[]),
+        tagged(
+            "counter",
+            json!({
                 "counter": { "type": "string", "pattern": COUNTER_NAME },
                 "trigger": { "type": "string", "pattern": COUNTER_NAME },
                 "reverse": { "type": "boolean" }
-            }), &["counter", "trigger"]),
-            tagged("spam", json!({
+            }),
+            &["counter", "trigger"],
+        ),
+        tagged(
+            "spam",
+            json!({
                 "measure": { "type": "string", "enum": [
                     "messages", "mentions", "links", "attachments", "emojis",
                     "lines", "characters", "stickers", "duplicates"
@@ -301,9 +438,10 @@ fn trigger() -> Value {
                 "distinct_channels": { "type": "integer", "minimum": 2, "maximum": 50 },
                 "ignore_identical_messages": { "type": "boolean" },
                 "group_identical_messages": { "type": "boolean" }
-            }), &["measure", "amount"]),
-        ]
-    })
+            }),
+            &["measure", "amount"],
+        ),
+    ]
 }
 
 /// A variant of the trigger union: its `type`, its own options, and the options it needs.
@@ -329,50 +467,114 @@ fn list_of_text(max_length: u32) -> Value {
 
 fn action() -> Value {
     let reason = json!({ "type": "string", "minLength": 1, "maxLength": 2000 });
-    json!({
-        "oneOf": [
-            action_tagged("delete", json!({}), &[]),
-            action_tagged("purge", json!({
+    let mut variants = vec![
+        action_tagged("delete", json!({}), &[]),
+        action_tagged(
+            "purge",
+            json!({
                 "within": { "type": "string", "pattern": DURATION }
-            }), &["within"]),
-            action_tagged("warn", json!({ "reason": reason.clone() }), &[]),
-            action_tagged("timeout", json!({
+            }),
+            &["within"],
+        ),
+        action_tagged("warn", json!({ "reason": reason.clone() }), &[]),
+        action_tagged(
+            "timeout",
+            json!({
                 "duration": { "type": "string", "pattern": DURATION },
                 "reason": reason.clone()
-            }), &["duration"]),
-            action_tagged("kick", json!({ "reason": reason.clone() }), &[]),
-            action_tagged("ban", json!({
+            }),
+            &["duration"],
+        ),
+        action_tagged("kick", json!({ "reason": reason.clone() }), &[]),
+        action_tagged(
+            "ban",
+            json!({
                 "duration": { "type": "string", "pattern": DURATION },
                 "delete_days": { "type": "integer", "minimum": 0, "maximum": 7 },
                 "reason": reason.clone()
-            }), &[]),
-            action_tagged("reply", json!({
+            }),
+            &[],
+        ),
+        action_tagged(
+            "reply",
+            json!({
                 "text": reason.clone(),
                 "auto_delete": { "type": "string", "pattern": DURATION }
-            }), &["text"]),
-            action_tagged("alert", json!({
+            }),
+            &["text"],
+        ),
+        action_tagged(
+            "alert",
+            json!({
                 "channel": { "type": "string", "pattern": SNOWFLAKE },
                 "text": reason.clone()
-            }), &["channel"]),
-            action_tagged("add_roles", json!({ "roles": snowflakes(25) }), &["roles"]),
-            action_tagged("remove_roles", json!({ "roles": snowflakes(25) }), &["roles"]),
-            action_tagged("set_nickname", json!({
+            }),
+            &["channel"],
+        ),
+        action_tagged("add_roles", json!({ "roles": snowflakes(25) }), &["roles"]),
+        action_tagged(
+            "remove_roles",
+            json!({ "roles": snowflakes(25) }),
+            &["roles"],
+        ),
+        action_tagged(
+            "set_nickname",
+            json!({
                 "name": { "type": "string", "minLength": 1, "maxLength": 100 }
-            }), &["name"]),
-            action_tagged("slowmode", json!({
+            }),
+            &["name"],
+        ),
+        action_tagged(
+            "slowmode",
+            json!({
                 "duration": { "type": "string", "pattern": DURATION },
                 "channels": { "type": "array", "maxItems": 10, "items": { "type": "string", "pattern": SNOWFLAKE } }
-            }), &["duration"]),
-            action_tagged("add_to_counter", json!({
+            }),
+            &["duration"],
+        ),
+        action_tagged(
+            "add_to_counter",
+            json!({
                 "counter": { "type": "string", "pattern": COUNTER_NAME },
                 "amount": { "type": "integer", "minimum": -MAX_COUNTER_VALUE, "maximum": MAX_COUNTER_VALUE }
-            }), &["counter", "amount"]),
-            action_tagged("set_counter", json!({
+            }),
+            &["counter", "amount"],
+        ),
+        action_tagged(
+            "set_counter",
+            json!({
                 "counter": { "type": "string", "pattern": COUNTER_NAME },
                 "value": { "type": "integer", "minimum": 0, "maximum": MAX_COUNTER_VALUE }
-            }), &["counter", "value"]),
-        ]
-    })
+            }),
+            &["counter", "value"],
+        ),
+    ];
+    variants.extend(antiraid_actions());
+    json!({ "oneOf": variants })
+}
+
+/// `antiraid_level`: a level change, to or from the levels named.
+fn antiraid_triggers() -> Vec<Value> {
+    vec![tagged(
+        "antiraid_level",
+        json!({
+            "levels": { "type": "array", "maxItems": 10, "items": { "type": "string", "pattern": LEVEL_NAME } },
+            "from": { "type": "array", "maxItems": 10, "items": { "type": "string", "pattern": LEVEL_NAME } }
+        }),
+        &[],
+    )]
+}
+
+/// `set_antiraid_level`: the level to raise or lower to, and for how long.
+fn antiraid_actions() -> Vec<Value> {
+    vec![action_tagged(
+        "set_antiraid_level",
+        json!({
+            "level": { "type": "string", "pattern": LEVEL_NAME },
+            "duration": { "type": "string", "pattern": DURATION }
+        }),
+        &["level"],
+    )]
 }
 
 /// A list of Discord ids, at most `max` of them.

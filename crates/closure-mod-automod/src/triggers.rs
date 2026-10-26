@@ -5,8 +5,8 @@ use closure_sdk::text::{self, Link};
 use closure_sdk::{Args, ChannelId, EventContext, MessageInfo, RoleId, UserId, duration};
 
 use crate::config::{
-    Attachments, Caps, CaseTrigger, CounterTrigger, Invites, LinkMode, Links, Patterns, Repeat,
-    RoleList, Rule, Stickers, Target, Trigger, Words,
+    AntiraidTrigger, Attachments, Caps, CaseTrigger, CounterTrigger, Invites, LinkMode, Links,
+    Patterns, Repeat, RoleList, Rule, Stickers, Target, Trigger, Words,
 };
 use crate::context::{Context, Source, ThreadEvent};
 use crate::spam;
@@ -78,6 +78,7 @@ pub fn check(scan: &Scan<'_>, rule: &Rule, index: usize, context: &Context) -> O
         Trigger::ThreadUnarchived(_) => thread_hit(ctx, context, ThreadEvent::Unarchived),
         Trigger::ThreadDeleted(_) => thread_hit(ctx, context, ThreadEvent::Deleted),
         Trigger::Counter(counter) => counter_hit(ctx, counter, context),
+        Trigger::AntiraidLevel(antiraid) => antiraid_hit(ctx, antiraid, context),
         other => {
             let message = context.message.as_ref()?;
             message_check(ctx, other, message)
@@ -215,6 +216,22 @@ fn counter_hit(ctx: &EventContext, trigger: &CounterTrigger, context: &Context) 
         .with("counter", counter.as_str())
         .with("trigger", fired.as_str());
     Some(Hit::about(say(ctx, "detail-counter", &args), context))
+}
+
+/// The antiraid level changed to one the trigger names, from one it names.
+fn antiraid_hit(ctx: &EventContext, trigger: &AntiraidTrigger, context: &Context) -> Option<Hit> {
+    let Source::Antiraid { level, old } = &context.source else {
+        return None;
+    };
+    if (!trigger.levels.is_empty() && !trigger.levels.contains(level))
+        || (!trigger.from.is_empty() && !trigger.from.contains(old))
+    {
+        return None;
+    }
+    let args = Args::new()
+        .with("level", level.as_str())
+        .with("old", old.as_str());
+    Some(Hit::about(say(ctx, "detail-antiraid", &args), context))
 }
 
 fn words_hit(ctx: &EventContext, words: &Words, message: &MessageInfo) -> Option<Hit> {

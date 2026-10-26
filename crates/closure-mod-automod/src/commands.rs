@@ -4,10 +4,14 @@
 use std::sync::Arc;
 
 use closure_sdk::counters::{CounterDef, Counters};
-use closure_sdk::{Args, ChannelId, CommandArgs, CommandCx, ModuleError, UserError, UserId};
+use closure_sdk::{
+    Args, AutocompleteCx, ChannelId, Choice, CommandArgs, CommandCx, ModuleError, Span, UserError,
+    UserId,
+};
 
+use crate::antiraid::{self, Setter, Tally};
 use crate::config::Problem;
-use crate::context::Who;
+use crate::context::{Context, Who};
 use crate::counter::{self, Missing, Op};
 use crate::engine::{self, Loaded, State};
 
@@ -53,6 +57,22 @@ pub struct Reset {
     pub user: Option<UserId>,
     /// The channel the counter is kept for; with no scope given, every scope is reset
     pub channel: Option<ChannelId>,
+}
+
+/// `/automod antiraid set`: the level to raise or lower the server to, and for how long.
+#[derive(CommandArgs)]
+pub struct AntiraidSet {
+    /// The level to raise or lower the server to
+    #[arg(autocomplete)]
+    pub level: String,
+    /// How long the level lasts, such as 30m or 2h; the calm level comes back after it
+    pub duration: Option<Span>,
+}
+
+#[derive(CommandArgs)]
+pub struct AntiraidRelease {
+    /// The member to take out of the quarantine
+    pub user: UserId,
 }
 
 pub async fn view(state: Arc<State>, cx: CommandCx, args: View) -> Result<(), UserError> {
@@ -246,4 +266,157 @@ async fn reply_value(
             .with("value", value),
     );
     cx.reply_private(text).await
+}
+
+// ---- /automod antiraid ----
+
+/// The level names that start with what the user typed, for the `set` command.
+pub fn level_choices(state: &State, cx: &AutocompleteCx) -> Result<Vec<Choice>, UserError> {
+    let loaded = state.load(cx.ctx()).map_err(UserError::Module)?;
+    let Some(antiraid) = loaded.setup.antiraid.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let typed = cx.focused().to_owned();
+    Ok(antiraid
+        .levels
+        .iter()
+        .filter(|level| level.starts_with(typed.as_str()))
+        .map(|level| Choice::new(level.as_str(), level.as_str()))
+        .collect())
+}
+
+pub async fn antiraid_view(state: Arc<State>, cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let loaded = load(&state, &cx)?;
+    let Some(antiraid) = loaded.setup.antiraid.as_ref() else {
+        return antiraid_off(&cx).await;
+    };
+    let store = cx.ctx().store();
+    let (level, _) = antiraid::level(store, antiraid.calm())
+        .await
+        .map_err(UserError::Module)?;
+    let quarantined = antiraid::quarantined_count(store)
+        .await
+        .map_err(UserError::Module)?;
+    let by = match level.set_by {
+        Setter::Bot => cx.t("antiraid-by-rule", &Args::new()),
+        Setter::User { id } => format!("<@{id}>"),
+    };
+    let until = level.until.map_or_else(
+        || cx.t("antiraid-no-end", &Args::new()),
+        |at| cx.t("antiraid-until", &Args::new().with("at", at)),
+    );
+    let text = cx.t(
+        "antiraid-view",
+        &Args::new()
+            .with("level", level.name.as_str())
+            .with("since", format!("<t:{}:f>", level.set_at))
+            .with("by", by)
+            .with("until", until)
+            .with("quarantined", count(quarantined)),
+    );
+    cx.reply_private(text).await
+}
+
+pub async fn antiraid_set(
+    state: Arc<State>,
+    cx: CommandCx,
+    args: AntiraidSet,
+) -> Result<(), UserError> {
+    let duration = match &args.duration {
+        Some(span) => Some(span.resolve(&cx)?),
+        None => None,
+    };
+    let by = Setter::User {
+        id: cx.user().id.get(),
+    };
+    set_and_reply(&state, &cx, &args.level, by, duration).await
+}
+
+pub async fn antiraid_clear(state: Arc<State>, cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let loaded = load(&state, &cx)?;
+    let Some(antiraid) = loaded.setup.antiraid.as_ref() else {
+        return antiraid_off(&cx).await;
+    };
+    let calm = antiraid.calm().to_owned();
+    let by = Setter::User {
+        id: cx.user().id.get(),
+    };
+    set_and_reply(&state, &cx, &calm, by, None).await
+}
+
+pub async fn antiraid_release(
+    state: Arc<State>,
+    cx: CommandCx,
+    args: AntiraidRelease,
+) -> Result<(), UserError> {
+    let tally = antiraid::release(cx.ctx(), &state.memory, args.user)
+        .await
+        .map_err(UserError::Module)?;
+    reply_tally(&cx, "antiraid-released", tally).await
+}
+
+pub async fn antiraid_release_all(
+    state: Arc<State>,
+    cx: CommandCx,
+    (): (),
+) -> Result<(), UserError> {
+    let tally = antiraid::release_all(cx.ctx(), &state.memory)
+        .await
+        .map_err(UserError::Module)?;
+    reply_tally(&cx, "antiraid-released-all", tally).await
+}
+
+/// Changes the level and runs the change through the rules, then says what it did.
+async fn set_and_reply(
+    state: &State,
+    cx: &CommandCx,
+    level: &str,
+    by: Setter,
+    duration: Option<std::time::Duration>,
+) -> Result<(), UserError> {
+    let loaded = load(state, cx)?;
+    let Some(antiraid) = loaded.setup.antiraid.as_ref() else {
+        return antiraid_off(cx).await;
+    };
+    let change = antiraid::set_level(cx.ctx(), antiraid, level, by, duration)
+        .await
+        .map_err(UserError::Module)?;
+    let Some(change) = change else {
+        let text = cx.t("antiraid-already", &Args::new().with("level", level));
+        return cx.reply_private(text).await;
+    };
+    engine::after_command(
+        state,
+        cx.ctx(),
+        vec![Context::antiraid(&change.new, &change.old)],
+    )
+    .await
+    .map_err(UserError::Module)?;
+    let text = cx.t(
+        "antiraid-set-done",
+        &Args::new()
+            .with("old", change.old.as_str())
+            .with("new", change.new.as_str())
+            .with("changed", count(change.tally.changed))
+            .with("failed", count(change.tally.failed)),
+    );
+    cx.reply_private(text).await
+}
+
+async fn reply_tally(cx: &CommandCx, key: &str, tally: Tally) -> Result<(), UserError> {
+    let text = cx.t(
+        key,
+        &Args::new()
+            .with("changed", count(tally.changed))
+            .with("failed", count(tally.failed)),
+    );
+    cx.reply_private(text).await
+}
+
+async fn antiraid_off(cx: &CommandCx) -> Result<(), UserError> {
+    cx.reply_private(cx.t("antiraid-off", &Args::new())).await
+}
+
+fn count(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }

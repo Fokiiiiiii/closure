@@ -1692,6 +1692,7 @@ async fn the_guild_roles_and_channel_order_are_changed_as_sent() {
         patch: GuildPatch {
             name: Some("renamed".into()),
             verification_level: Some(VerificationLevel::High),
+            invites_disabled: None,
         },
         reason: reason("raid"),
     };
@@ -1742,6 +1743,65 @@ async fn the_guild_roles_and_channel_order_are_changed_as_sent() {
         requests[2].body.contains("\"id\":\"1\""),
         "{}",
         requests[2].body
+    );
+}
+
+/// A guild whose features are `COMMUNITY` and, when `invites` is set, `INVITES_DISABLED`.
+fn guild_with_features(invites: bool) -> &'static str {
+    if invites {
+        r#"{"id":"10","name":"g","owner_id":"999999999","roles":[],"emojis":[],"features":["COMMUNITY","INVITES_DISABLED"],"stickers":[],"afk_timeout":300,"default_message_notifications":0,"explicit_content_filter":0,"mfa_level":0,"nsfw_level":0,"premium_tier":0,"system_channel_flags":0,"verification_level":0,"preferred_locale":"en-US","premium_progress_bar_enabled":false,"max_members":null,"max_presences":null,"member_count":null,"splash":null,"banner":null,"icon":null,"description":null}"#
+    } else {
+        r#"{"id":"10","name":"g","owner_id":"999999999","roles":[],"emojis":[],"features":["COMMUNITY"],"stickers":[],"afk_timeout":300,"default_message_notifications":0,"explicit_content_filter":0,"mfa_level":0,"nsfw_level":0,"premium_tier":0,"system_channel_flags":0,"verification_level":0,"preferred_locale":"en-US","premium_progress_bar_enabled":false,"max_members":null,"max_presences":null,"member_count":null,"splash":null,"banner":null,"icon":null,"description":null}"#
+    }
+}
+
+#[tokio::test]
+async fn invites_are_paused_by_setting_the_feature_among_the_ones_the_guild_has() {
+    let discord =
+        FakeDiscord::start(vec![(200, guild_with_features(false)), (200, GUILD_JSON)]).await;
+    let edit = Action::EditGuild {
+        guild_id: Id::new(10),
+        patch: GuildPatch {
+            name: None,
+            verification_level: None,
+            invites_disabled: Some(true),
+        },
+        reason: reason("raid"),
+    };
+    assert_eq!(discord.api().execute(edit).await, Ok(Outcome::None));
+    assert_eq!(
+        method_paths(&discord),
+        ["GET /guilds/10", "PATCH /guilds/10"]
+    );
+    assert!(
+        discord.requests()[1]
+            .body
+            .contains(r#""features":["COMMUNITY","INVITES_DISABLED"]"#),
+        "{}",
+        discord.requests()[1].body
+    );
+}
+
+#[tokio::test]
+async fn invites_are_resumed_by_removing_only_the_invites_feature() {
+    let discord =
+        FakeDiscord::start(vec![(200, guild_with_features(true)), (200, GUILD_JSON)]).await;
+    let edit = Action::EditGuild {
+        guild_id: Id::new(10),
+        patch: GuildPatch {
+            name: None,
+            verification_level: None,
+            invites_disabled: Some(false),
+        },
+        reason: reason("raid over"),
+    };
+    assert_eq!(discord.api().execute(edit).await, Ok(Outcome::None));
+    assert!(
+        discord.requests()[1]
+            .body
+            .contains(r#""features":["COMMUNITY"]"#),
+        "{}",
+        discord.requests()[1].body
     );
 }
 

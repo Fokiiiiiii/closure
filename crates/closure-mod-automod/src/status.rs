@@ -7,7 +7,9 @@ use closure_sdk::counters::CounterDef;
 use closure_sdk::embed::{Color, EmbedBuilder, truncate};
 use closure_sdk::{Args, CommandCx, InteractionReply, UserError};
 
-use crate::config::{Config, Entry, Problem, Rule, action_key, event_key, setup, trigger_key};
+use crate::config::{
+    Config, Entry, Problem, Rule, Setup, action_key, event_key, setup, trigger_key,
+};
 
 /// An embed's description holds at most 4096 characters; a little is kept back.
 const DESCRIPTION_CHARS: usize = 3_900;
@@ -15,6 +17,7 @@ const DESCRIPTION_CHARS: usize = 3_900;
 pub async fn status(cx: CommandCx, (): ()) -> Result<(), UserError> {
     let config: Config = cx.config()?;
     let setup = setup(&config, cx.ctx().store());
+    let antiraid = antiraid_line(&cx, &setup).await?;
     let entries = setup.rules;
     let valid: Vec<&Rule> = entries
         .iter()
@@ -66,6 +69,7 @@ pub async fn status(cx: CommandCx, (): ()) -> Result<(), UserError> {
         }
         None => {}
     }
+    lines.push(antiraid);
     let problems: Vec<String> = entries
         .iter()
         .filter_map(|entry| match entry {
@@ -97,6 +101,26 @@ pub async fn status(cx: CommandCx, (): ()) -> Result<(), UserError> {
         ephemeral: true,
     })
     .await
+}
+
+/// The antiraid level, or why antiraid is not in use.
+async fn antiraid_line(cx: &CommandCx, setup: &Setup) -> Result<String, UserError> {
+    if let Some(problem) = &setup.antiraid_problem {
+        return Ok(cx.t(
+            "status-antiraid-invalid",
+            &Args::new().with("reason", problem_text(cx, problem)),
+        ));
+    }
+    let Some(antiraid) = setup.antiraid.as_ref() else {
+        return Ok(cx.t("status-antiraid-off", &Args::new()));
+    };
+    let (level, _) = crate::antiraid::level(cx.ctx().store(), antiraid.calm())
+        .await
+        .map_err(UserError::Module)?;
+    Ok(cx.t(
+        "status-antiraid",
+        &Args::new().with("level", level.name.as_str()),
+    ))
 }
 
 fn rule_line(cx: &CommandCx, rule: &Rule) -> String {

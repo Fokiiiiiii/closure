@@ -283,6 +283,8 @@ pub const MAX_INVITE_AGE_SECONDS: u32 = 604_800;
 pub struct GuildPatch {
     pub name: Option<String>,
     pub verification_level: Option<VerificationLevel>,
+    /// Turns the guild's `INVITES_DISABLED` feature on or off, the other features left as they are.
+    pub invites_disabled: Option<bool>,
 }
 
 /// Where a scheduled event takes place.
@@ -2808,6 +2810,7 @@ mod tests {
             patch: GuildPatch {
                 name: name.map(Into::into),
                 verification_level: None,
+                invites_disabled: None,
             },
             reason: reason(),
         };

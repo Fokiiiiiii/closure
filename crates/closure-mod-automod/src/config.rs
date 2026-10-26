@@ -74,6 +74,8 @@ pub struct Config {
     pub counters: BTreeMap<String, CounterConfig>,
     /// The rules as written, keyed by id. Each one is read on its own, see [`parse_rules`].
     pub rules: BTreeMap<String, Value>,
+    /// The antiraid section, read on its own by [`crate::antiraid::read`]; absent means antiraid is off.
+    pub antiraid: Option<Value>,
 }
 
 impl Default for Config {
@@ -88,6 +90,7 @@ impl Default for Config {
             restore_roles_on_mute: RoleSetting::Flag(true),
             counters: BTreeMap::new(),
             rules: BTreeMap::new(),
+            antiraid: None,
         }
     }
 }
@@ -219,6 +222,17 @@ pub enum Trigger {
     ThreadUnarchived(Empty),
     ThreadDeleted(Empty),
     Counter(CounterTrigger),
+    AntiraidLevel(AntiraidTrigger),
+}
+
+/// The antiraid level changed. Empty `levels` is any level, empty `from` is any level before.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AntiraidTrigger {
+    #[serde(default)]
+    pub levels: Vec<String>,
+    #[serde(default)]
+    pub from: Vec<String>,
 }
 
 /// A member joined. With `only_new`, only an account made within `new_threshold` trips it.
@@ -572,6 +586,12 @@ pub enum Action {
         counter: String,
         value: i64,
     },
+    /// Raises or lowers the antiraid level. A timed level goes back to the calm one after `duration`.
+    SetAntiraidLevel {
+        level: String,
+        #[serde(default, deserialize_with = "readable_option")]
+        duration: Option<Duration>,
+    },
 }
 
 /// Why a rule is not run, or why the counters are not used.
@@ -599,6 +619,9 @@ pub struct Setup {
     /// The counters, when they are all valid; none when they are not, see `counters_problem`.
     pub counters: Vec<CounterDef>,
     pub counters_problem: Option<Problem>,
+    /// The antiraid section, when it is there and valid; see `antiraid_problem` otherwise.
+    pub antiraid: Option<crate::antiraid::Antiraid>,
+    pub antiraid_problem: Option<Problem>,
 }
 
 /// Reads the counters and then the rules, which may name the counters. The counters are checked by
@@ -614,10 +637,16 @@ pub fn setup(config: &Config, store: &Store) -> Setup {
         Err(problem) => (Vec::new(), Some(problem)),
     };
     let rules = parse_rules(&config.rules, &counters);
+    let (antiraid, antiraid_problem) = match crate::antiraid::read(config.antiraid.as_ref()) {
+        Ok(antiraid) => (antiraid, None),
+        Err(problem) => (None, Some(problem)),
+    };
     Setup {
         rules,
         counters,
         counters_problem,
+        antiraid,
+        antiraid_problem,
     }
 }
 
@@ -799,7 +828,8 @@ impl Trigger {
             | Self::ThreadArchived(_)
             | Self::ThreadUnarchived(_)
             | Self::ThreadDeleted(_)
-            | Self::Case(_) => Ok(()),
+            | Self::Case(_)
+            | Self::AntiraidLevel(_) => Ok(()),
             Self::Words(words) => words.check(),
             Self::Regex(patterns) => patterns.compile(),
             Self::Links(links) => links.compile(),
@@ -1037,6 +1067,12 @@ impl Action {
             }
             Self::Delete(_) | Self::Kick { reason: None } | Self::Warn { reason: None } => Ok(()),
             Self::Kick { reason } | Self::Warn { reason } => reason_ok(reason.as_deref()),
+            Self::SetAntiraidLevel { duration, .. } => match duration {
+                Some(duration) if duration.is_zero() || *duration > MAX_TIMEOUT => {
+                    Err(Problem::Key("problem-antiraid-duration"))
+                }
+                _ => Ok(()),
+            },
             Self::Purge { within } => {
                 if within.is_zero() || *within > MAX_PURGE {
                     Err(Problem::Key("problem-purge"))
@@ -1166,6 +1202,7 @@ pub fn trigger_key(trigger: &Trigger) -> &'static str {
         Trigger::ThreadUnarchived(_) => "trigger-thread-unarchived",
         Trigger::ThreadDeleted(_) => "trigger-thread-deleted",
         Trigger::Counter(_) => "trigger-counter",
+        Trigger::AntiraidLevel(_) => "trigger-antiraid-level",
         Trigger::AnyMessage(_) => "trigger-any-message",
         Trigger::Words(_) => "trigger-words",
         Trigger::Regex(_) => "trigger-regex",
@@ -1196,6 +1233,7 @@ pub fn action_key(action: &Action) -> &'static str {
         Action::Slowmode { .. } => "action-slowmode",
         Action::AddToCounter { .. } => "action-add-to-counter",
         Action::SetCounter { .. } => "action-set-counter",
+        Action::SetAntiraidLevel { .. } => "action-set-antiraid-level",
     }
 }
 
@@ -1221,6 +1259,7 @@ pub fn event_key(trigger: &Trigger) -> &'static str {
         | Trigger::ThreadUnarchived(_)
         | Trigger::ThreadDeleted(_) => "event-threads",
         Trigger::Counter(_) => "event-counters",
+        Trigger::AntiraidLevel(_) => "event-antiraid",
     }
 }
 
