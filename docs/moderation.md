@@ -67,6 +67,11 @@ well, to show the replies of this module to the invoking user only or to everyon
 A voice mute without a duration stays until `/vcunmute`. With a duration, a timer lifts it. A timer for
 `discord` that finds the member not in voice tries again ten minutes later, and gives up a day after the
 mute was due. A new voice mute or timeout replaces the timer of an earlier one for the same member.
+A timer does not end a punishment while a newer one of the same kind still stands for the member (from this
+module or another). A timed ban waits: the newer ban has its own timer, or a command lifts it. A timeout by
+role and a voice mute, by role or by Discord, are not lifted early either: their timer is set again for the
+end of the newest one that stands, so the last one to end lifts it. If one of them has no end, the timer does
+nothing, and the role or mute stays until a command lifts it.
 
 Known limits:
 
@@ -199,6 +204,10 @@ button.
 - Undoing a timeout, a ban or a voice mute records the un-case with the reason `Undone from case #N`, and
   revokes case N, the one the button belongs to. Undoing a warning revokes it without any action on
   Discord.
+- If a newer timeout, ban or voice mute of the member still stands, the button of an older one only
+  revokes its own case, with the reason `Undone with its button.`, and the reply says that a newer one
+  still applies. Discord and the timers are left alone, since the newer punishment is still in force;
+  its own button or command lifts it.
 
 The reply of `/timeout`, `/kick`, `/ban` and `/vcmute` ends with a history line in small text: the
 active warnings and the cases the member had before this action. The new case is not counted. Up to

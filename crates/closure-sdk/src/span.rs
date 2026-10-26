@@ -241,7 +241,8 @@ fn zone_of(text: &str) -> Option<i64> {
     let body = &text[1..];
     let (hours, minutes) = match body.split_once(':') {
         Some((hours, minutes)) => (hours, Some(minutes)),
-        None if body.len() == 4 => (&body[..2], Some(&body[2..])),
+        // Slice only ASCII: byte 2 of a four-byte body may fall inside a character.
+        None if body.len() == 4 && body.is_ascii() => (&body[..2], Some(&body[2..])),
         None => (body, None),
     };
     let hours = digits_of(hours, 1..=2)?;
@@ -714,5 +715,43 @@ mod tests {
     fn a_length_from_a_duration_resolves_to_itself() {
         let span = Span::from_duration(Duration::from_secs(90 * 60));
         assert_eq!(span.resolve_at(NOW, 0), Ok(Duration::from_secs(90 * 60)));
+    }
+
+    /// Every string of up to eight bytes made of multi-byte and combining pieces.
+    fn hostile_tails() -> Vec<String> {
+        const PIECES: [&str; 6] = ["a", "日", "😀", "\u{301}", "é", "ß"];
+        let mut all = vec![String::new()];
+        let mut frontier = vec![String::new()];
+        while let Some(text) = frontier.pop() {
+            for piece in PIECES {
+                if text.len() + piece.len() <= 8 {
+                    let next = text.clone() + piece;
+                    all.push(next.clone());
+                    frontier.push(next);
+                }
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn a_zone_with_non_ascii_text_is_refused_without_a_panic() {
+        assert_eq!(
+            Span::parse("18:00+a日"),
+            Err(SpanError::NotUnderstood),
+            "byte 2 falls inside 日"
+        );
+        for prefix in ["18:00", "2026-11-01 18:00", "today 09:00", ""] {
+            for sign in ["+", "-"] {
+                for tail in hostile_tails() {
+                    let text = format!("{prefix}{sign}{tail}");
+                    assert_eq!(
+                        Span::parse(&text),
+                        Err(SpanError::NotUnderstood),
+                        "{text:?}"
+                    );
+                }
+            }
+        }
     }
 }

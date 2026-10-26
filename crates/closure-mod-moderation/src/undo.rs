@@ -4,9 +4,12 @@
 //!
 //! A button never expires by itself, since the SDK has no expiry for components yet. The check that
 //! the case still stands is what keeps an old button harmless.
+//!
+//! The button of an older punishment while a newer one still stands only revokes its own case:
+//! the newer one is still in force, so Discord and the timers are left alone.
 
 use closure_sdk::ui::{self, CustomId};
-use closure_sdk::{Args, CaseError, ComponentCx, Cx, InteractionRef, UserError, UserId};
+use closure_sdk::{Args, Case, CaseError, ComponentCx, Cx, InteractionRef, UserError, UserId};
 use twilight_model::channel::message::Component;
 use twilight_model::channel::message::component::ButtonStyle;
 
@@ -124,49 +127,21 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
             let lifted = punisher
                 .lift_timeout(user, Some(undo_reason(&cx, number)))
                 .await?;
-            cx.t(
-                "untimed-out",
-                &Args::new()
-                    .with("user", mention(user))
-                    .with("number", lifted.number),
-            )
+            lift_body(&cx, number, &lifted, user, "untimed-out").await?
         }
         Kind::Ban => {
             let lifted = punisher.unban(user, Some(undo_reason(&cx, number))).await?;
-            cx.t(
-                "unbanned",
-                &Args::new()
-                    .with("user", mention(user))
-                    .with("number", lifted.number),
-            )
+            lift_body(&cx, number, &lifted, user, "unbanned").await?
         }
         Kind::Vcmute => {
             let lifted = punisher
                 .voice_unmute(user, Some(undo_reason(&cx, number)))
                 .await?;
-            cx.t(
-                "voice-unmuted",
-                &Args::new()
-                    .with("user", mention(user))
-                    .with("number", lifted.number),
-            )
+            lift_body(&cx, number, &lifted, user, "voice-unmuted").await?
         }
         // A warning is revoked, as `/case revoke` revokes it: no action on Discord.
         Kind::Warn => {
-            let revoked = match cx
-                .cases()
-                .revoke(
-                    number,
-                    cx.user().id,
-                    Some(cx.t("undone-by-button", &Args::new())),
-                )
-                .await
-            {
-                Ok(case) => case,
-                Err(CaseError::AlreadyRevoked | CaseError::NotFound) => return Err(not_needed()),
-                Err(error) => return Err(error.into()),
-            };
-            let _ = cx.modlog(&revoked).await;
+            revoke(&cx, number).await?;
             cx.t("case-revoked", &Args::new().with("number", number))
         }
     };
@@ -175,6 +150,47 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
 
 fn undo_reason<I: InteractionRef + 'static>(cx: &Cx<I>, number: i64) -> String {
     cx.t("undo-reason", &Args::new().with("case", number))
+}
+
+/// The result of a lift. A lift that a newer punishment still holds returns the case it was asked
+/// to undo, still standing: nothing was lifted, so only that case is revoked.
+async fn lift_body<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
+    number: i64,
+    lifted: &Case,
+    user: UserId,
+    lifted_key: &str,
+) -> Result<String, UserError> {
+    // A lift records a new case, so the number is the undone one only when nothing was lifted.
+    if lifted.number == number {
+        revoke(cx, number).await?;
+        return Ok(cx.t("undo-superseded", &Args::new().with("number", number)));
+    }
+    Ok(cx.t(
+        lifted_key,
+        &Args::new()
+            .with("user", mention(user))
+            .with("number", lifted.number),
+    ))
+}
+
+/// Revokes case `number` as a button does, and posts the revocation to the log.
+async fn revoke<I: InteractionRef + 'static>(cx: &Cx<I>, number: i64) -> Result<(), UserError> {
+    let revoked = match cx
+        .cases()
+        .revoke(
+            number,
+            cx.user().id,
+            Some(cx.t("undone-by-button", &Args::new())),
+        )
+        .await
+    {
+        Ok(case) => case,
+        Err(CaseError::AlreadyRevoked | CaseError::NotFound) => return Err(not_needed()),
+        Err(error) => return Err(error.into()),
+    };
+    let _ = cx.modlog(&revoked).await;
+    Ok(())
 }
 
 /// The result, with the line that says who undid the punishment.

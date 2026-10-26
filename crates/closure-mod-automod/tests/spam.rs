@@ -13,9 +13,10 @@
 
 mod common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use closure_sdk::testing::Message;
+use closure_sdk::testing::{Harness, Message};
 use common::*;
 use serde_json::{Value, json};
 
@@ -314,4 +315,72 @@ async fn a_single_message_measure_without_a_window_needs_no_history() {
     );
     say(&harness, MEMBER, "a\nb\nc").await;
     assert_eq!(deletions(&harness), 1);
+}
+
+// ---- one burst, however many evaluations see it ----
+
+/// A rule that alerts the notify channel once two messages of a member are in the window.
+fn alerts_on_two() -> Harness {
+    flood(
+        messages(2),
+        json!([{ "do": "alert", "channel": NOTIFY.to_string(), "text": "burst" }]),
+    )
+}
+
+/// A rule that alerts the notify channel once two members join within the window.
+fn alerts_on_two_joins() -> Harness {
+    flood(
+        json!({ "type": "member_join_spam", "amount": 2, "within": "30s" }),
+        json!([{ "do": "alert", "channel": NOTIFY.to_string(), "text": "burst" }]),
+    )
+}
+
+#[tokio::test]
+async fn two_evaluations_of_one_burst_punish_once() {
+    let harness = alerts_on_two();
+    tokio::join!(
+        post(&harness, custom(MEMBER, CHANNEL, "a")),
+        post(&harness, custom(MEMBER, CHANNEL, "b")),
+    );
+    assert_eq!(texts_in(&harness, NOTIFY), vec!["burst".to_owned()]);
+}
+
+/// Two evaluations on two threads at once, repeated: the checks of a burst overlap, and it must
+/// still fire once in every round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_messages_of_one_burst_on_two_threads_punish_once() {
+    for round in 0..200 {
+        let harness = Arc::new(alerts_on_two());
+        let tasks = ["a", "b"].map(|text| {
+            let harness = Arc::clone(&harness);
+            tokio::spawn(async move { post(&harness, custom(MEMBER, CHANNEL, text)).await })
+        });
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(
+            texts_in(&harness, NOTIFY),
+            vec!["burst".to_owned()],
+            "round {round}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_joins_of_one_join_burst_on_two_threads_punish_once() {
+    for round in 0..200 {
+        let harness = Arc::new(alerts_on_two_joins());
+        let tasks = [MEMBER, OTHER_MEMBER].map(|user| {
+            let harness = Arc::clone(&harness);
+            tokio::spawn(async move { join(&harness, user).await })
+        });
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(
+            texts_in(&harness, NOTIFY),
+            vec!["burst".to_owned()],
+            "round {round}"
+        );
+    }
 }

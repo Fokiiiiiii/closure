@@ -7,9 +7,10 @@
 //! [`CounterError::Conflict`]. Decay is lazy: a value is brought up to date from the time of its
 //! last write whenever it is read or changed, so no job runs in the background.
 //!
-//! Triggers look at each change as a step from the old value to the new one. A trigger fires
-//! when the step takes the value from not matching its condition to matching it. Its reverse
-//! fires when the step takes the value from matching the condition to matching the reverse.
+//! Triggers look at each change as a step from the value as last written (before decay) to the new
+//! one. A trigger fires when the step takes the value from not matching its condition to matching
+//! it. Its reverse fires when the step takes the value from matching the condition to matching the
+//! reverse.
 //! So a value that jumps over the reverse's range fires nothing until a step crosses it.
 //!
 //! Shortcut: a trigger that only decay crosses fires on the next change of that scope, not at
@@ -287,15 +288,19 @@ impl Counters {
                 }
                 None => (None, Expect::Missing),
             };
-            let (old, at) = match current {
-                Some(stored) => catch_up(def.decay, stored.value, stored.at, now),
-                None => (def.initial_value, now),
+            // Triggers judge the stored value, so a crossing that only decay made is part of this step.
+            let (stored_value, old, at) = match current {
+                Some(stored) => {
+                    let (old, at) = catch_up(def.decay, stored.value, stored.at, now);
+                    (stored.value, old, at)
+                }
+                None => (def.initial_value, def.initial_value, now),
             };
             let new = match write {
                 Write::Add(delta) => old.saturating_add(*delta).clamp(0, MAX_COUNTER_VALUE),
                 Write::Set(value) => (*value).clamp(0, MAX_COUNTER_VALUE),
             };
-            let fired_now = advance_triggers(&def.triggers, old, new);
+            let fired_now = advance_triggers(&def.triggers, stored_value, new);
             let stored = Stored { value: new, at };
             match self.store.replace(&key, &stored, expect, None).await {
                 Ok(_) => {
@@ -344,12 +349,12 @@ impl Counters {
     }
 }
 
-/// The triggers a change from `old` to `new` fires: a trigger when the condition goes from not
-/// holding to holding, its reverse when the condition goes from holding to the reverse holding.
-fn advance_triggers(triggers: &[TriggerDef], old: i64, new: i64) -> Vec<Fired> {
+/// The triggers a change from `stored`, the value as last written, to `new` fires: a trigger when the
+/// condition goes from not holding to holding, its reverse when it goes from holding to the reverse.
+fn advance_triggers(triggers: &[TriggerDef], stored: i64, new: i64) -> Vec<Fired> {
     let mut events = Vec::new();
     for trigger in triggers {
-        let was = trigger.condition.matches(old);
+        let was = trigger.condition.matches(stored);
         if !was && trigger.condition.matches(new) {
             events.push(Fired {
                 trigger: trigger.name.clone(),
@@ -904,5 +909,89 @@ mod tests {
                 .await;
         assert!(results.iter().all(Result::is_ok), "{results:?}");
         assert_eq!(counters.get("g", None, None, NOW).await.unwrap(), 4);
+    }
+
+    /// A counter that moves by `amount` every second, with a `>= 5` trigger and its `< 5` reverse.
+    fn decaying_high(amount: i64) -> CounterDef {
+        let mut def = plain("g");
+        def.decay = Some(Decay {
+            amount,
+            every: Duration::from_secs(1),
+        });
+        def.triggers = vec![TriggerDef {
+            name: "high".to_owned(),
+            condition: Condition::parse(">= 5").unwrap(),
+            reverse: Condition::parse("< 5").unwrap(),
+        }];
+        def
+    }
+
+    #[tokio::test]
+    async fn a_reverse_crossing_made_by_decay_fires_at_the_next_change() {
+        let counters = counters(&[decaying_high(1)]);
+        counters.set("g", None, None, 5, NOW).await.unwrap();
+        // Decayed to 4 a second later, the value has left the condition: the reverse fires now.
+        let change = counters.add("g", None, None, 0, NOW + 1).await.unwrap();
+        assert_eq!((change.old, change.new), (4, 4));
+        assert_eq!(change.fired, vec![fired("high", true)]);
+        assert!(
+            counters
+                .add("g", None, None, 0, NOW + 1)
+                .await
+                .unwrap()
+                .fired
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crossing_made_by_growth_fires_at_the_next_change() {
+        let counters = counters(&[decaying_high(-1)]);
+        counters.set("g", None, None, 4, NOW).await.unwrap();
+        let change = counters.add("g", None, None, 0, NOW + 1).await.unwrap();
+        assert_eq!(change.new, 5);
+        assert_eq!(change.fired, vec![fired("high", false)]);
+    }
+
+    #[tokio::test]
+    async fn a_crossing_made_by_decay_and_a_delta_together_fires_once() {
+        let counters = counters(&[decaying_high(-1)]);
+        counters.set("g", None, None, 4, NOW).await.unwrap();
+        // Growth takes 4 to 5 and the delta to 6: one step from 4, so one fire.
+        let change = counters.add("g", None, None, 1, NOW + 1).await.unwrap();
+        assert_eq!(change.new, 6);
+        assert_eq!(change.fired, vec![fired("high", false)]);
+    }
+
+    #[tokio::test]
+    async fn a_set_to_the_value_decay_left_does_not_fire_again() {
+        let counters = counters(&[decaying_high(1)]);
+        counters.set("g", None, None, 5, NOW).await.unwrap();
+        // The stored 5 already holds the condition, so setting 5 again is no crossing.
+        let change = counters.set("g", None, None, 5, NOW + 1).await.unwrap();
+        assert_eq!(change.old, 4);
+        assert!(change.fired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_crossing_is_reported_once_when_changes_race() {
+        let mut def = plain("g");
+        def.triggers = vec![TriggerDef {
+            name: "two".to_owned(),
+            condition: Condition::parse(">= 2").unwrap(),
+            reverse: Condition::parse("< 2").unwrap(),
+        }];
+        let backend = Arc::new(Interleaved(MemoryStorage::default()));
+        let counters = Counters::new(&store_on(backend), &[def]).unwrap();
+        let results =
+            futures_util::future::join_all((0..4).map(|_| counters.add("g", None, None, 1, NOW)))
+                .await;
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        let fires: usize = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .map(|change| change.fired.len())
+            .sum();
+        assert_eq!(fires, 1);
     }
 }

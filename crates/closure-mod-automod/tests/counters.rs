@@ -16,8 +16,9 @@ mod common;
 
 use std::time::Duration;
 
+use closure_core::error::DiscordError;
 use closure_core::event::CommandOptionValue;
-use closure_sdk::testing::{Harness, Invocation, Reply};
+use closure_sdk::testing::{Harness, Invocation, Message, Reply};
 use common::*;
 use serde_json::{Value, json};
 use twilight_model::id::Id;
@@ -437,5 +438,46 @@ async fn a_trigger_of_an_unknown_counter_makes_its_rule_invalid_and_is_listed() 
     assert!(
         status.contains("`bad`"),
         "the invalid rule is listed: {status}"
+    );
+}
+
+#[tokio::test]
+async fn a_counter_trigger_fired_before_a_failing_action_still_runs_its_rule() {
+    let harness = with(
+        json!({
+            "strikes": { "per_user": true, "triggers": { "high": ">= 1" } },
+            "seen": { "per_user": true }
+        }),
+        rules(&[
+            (
+                "plus",
+                rule(
+                    json!([words("+")]),
+                    json!([
+                        { "do": "add_to_counter", "counter": "strikes", "amount": 1 },
+                        { "do": "delete" }
+                    ]),
+                ),
+            ),
+            (
+                "high",
+                rule(
+                    json!([{ "type": "counter", "counter": "strikes", "trigger": "high" }]),
+                    json!([{ "do": "add_to_counter", "counter": "seen", "amount": 1 }]),
+                ),
+            ),
+        ]),
+    );
+    harness
+        .api()
+        .fail_nth(1, DiscordError::Fatal("the request was refused".into()));
+    let result = harness
+        .message(Message::new(MEMBER, CHANNEL).content("+"))
+        .await;
+    assert!(result.is_err(), "the failing delete is reported");
+    assert_eq!(
+        value(&harness, "seen", Some(MEMBER), None).await,
+        1,
+        "the counter change was stored, so its trigger runs its rule"
     );
 }

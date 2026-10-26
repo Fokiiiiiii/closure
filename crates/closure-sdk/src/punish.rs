@@ -170,6 +170,10 @@ impl<'a> Punisher<'a> {
     /// Makes the lift that follows undo the case `case` and no other: it is revoked, where a lift
     /// otherwise revokes the newest case of its kind that stands. An undo button names the case it
     /// undoes, so that an older one is not taken for the newest.
+    ///
+    /// When a newer case of the kind still stands, the lift does nothing: Discord and the timers
+    /// keep the newer punishment in force. The lift then returns `case` as it is, still standing,
+    /// and the caller revokes it.
     #[must_use]
     pub fn undoing(mut self, case: i64) -> Self {
         self.undoing = Some(case);
@@ -256,6 +260,9 @@ impl<'a> Punisher<'a> {
         target: UserId,
         reason: Option<String>,
     ) -> Result<Case, UserError> {
+        if let Some(undone) = self.superseded(target, "timeout").await? {
+            return Ok(undone);
+        }
         let guild = self.ctx.guild_id;
         match self.settings.timeout {
             Method::Discord => {
@@ -366,6 +373,9 @@ impl<'a> Punisher<'a> {
     /// Lifts the ban of `target` and records an `unban` case, which revokes the newest ban that
     /// still stands.
     pub async fn unban(&self, target: UserId, reason: Option<String>) -> Result<Case, UserError> {
+        if let Some(undone) = self.superseded(target, "ban").await? {
+            return Ok(undone);
+        }
         self.ctx
             .api
             .unban(self.ctx.guild_id, target, self.audit(reason.as_deref()))
@@ -438,6 +448,9 @@ impl<'a> Punisher<'a> {
         target: UserId,
         reason: Option<String>,
     ) -> Result<Case, UserError> {
+        if let Some(undone) = self.superseded(target, "vcmute").await? {
+            return Ok(undone);
+        }
         let guild = self.ctx.guild_id;
         match self.settings.voice {
             Method::Discord => {
@@ -469,6 +482,25 @@ impl<'a> Punisher<'a> {
 
     fn audit(&self, reason: Option<&str>) -> Reason {
         audit_reason(&self.moderator.name, reason)
+    }
+
+    /// The case `undoing` names, when a newer case of `kind` still stands against `target`: the
+    /// lift then leaves Discord and the timers to that newer case. None when the lift goes on.
+    async fn superseded(&self, target: UserId, kind: &str) -> Result<Option<Case>, UserError> {
+        let Some(number) = self.undoing else {
+            return Ok(None);
+        };
+        let newest = active_cases(self.ctx.cases(), target, kind, self.ctx.now(), 1).await?;
+        if newest.first().is_none_or(|case| case.number <= number) {
+            return Ok(None);
+        }
+        let case = self
+            .ctx
+            .cases()
+            .get(number)
+            .await?
+            .ok_or(CaseError::NotFound)?;
+        Ok(Some(case))
     }
 
     fn timeout_role(&self) -> Result<RoleId, UserError> {
@@ -776,8 +808,76 @@ async fn active_cases(
     Ok(found)
 }
 
+/// Whether a case of `kind` other than `case` stands against `user` at the job's time. A ban lift
+/// waits for it: a timed ban has its own timer, and a permanent one lifts by a command.
+async fn another_stands(
+    ctx: &EventContext,
+    user: UserId,
+    kind: &str,
+    case: i64,
+) -> Result<bool, ModuleError> {
+    let standing = active_cases(ctx.cases(), user, kind, ctx.now(), 2)
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    Ok(standing.iter().any(|other| other.number != case))
+}
+
+/// What holds the member after the lift of one case is due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// No other case of the kind stands.
+    Free,
+    /// The latest other standing case ends at this time (unix seconds).
+    Until(i64),
+    /// Another standing case has no end.
+    Forever,
+}
+
+/// What the other cases of `kind` against `user` leave to the lift of `case`.
+async fn held_by_others(
+    ctx: &EventContext,
+    user: UserId,
+    kind: &str,
+    case: i64,
+) -> Result<Hold, ModuleError> {
+    let standing = active_cases(ctx.cases(), user, kind, ctx.now(), usize::MAX)
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    let mut latest = None;
+    for other in standing.iter().filter(|other| other.number != case) {
+        let Some(at) = other.expires_at else {
+            return Ok(Hold::Forever);
+        };
+        latest = Some(latest.map_or(at, |latest: i64| latest.max(at)));
+    }
+    Ok(latest.map_or(Hold::Free, Hold::Until))
+}
+
+/// Sets the lift again for `until`, under `key`, which replaces the job the lift is running from.
+async fn reschedule<T: Serialize>(
+    ctx: &EventContext,
+    name: &str,
+    key: &str,
+    payload: &T,
+    until: i64,
+) -> Result<(), ModuleError> {
+    let after = Duration::from_secs(u64::try_from(until - ctx.now()).unwrap_or_default());
+    ctx.scheduler()
+        .job(name, payload)
+        .map_err(|error| ModuleError::other(error.to_string()))?
+        .key(key)
+        .after(after)
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))
+}
+
 /// Registers the handlers of the timers' jobs: `unban`, `untimeout` and `vc_unmute`. Their names,
 /// keys and payloads are the ones moderation writes, so rows scheduled before keep working.
+///
+/// A lift that a newer case of its kind still holds does not take the punishment off early. A ban
+/// lift does nothing then. A role lift is set again for the latest end of the others, or does
+/// nothing while one of them has no end; it is due again then, so the last one to end takes the
+/// role off.
 #[must_use]
 pub fn jobs(builder: ModuleBuilder) -> ModuleBuilder {
     builder
@@ -793,6 +893,9 @@ async fn lift_ban(cx: JobCx) -> Result<(), ModuleError> {
     let Some(user) = UserId::new_checked(payload.user) else {
         return Err(ModuleError::other("a ban job names no member"));
     };
+    if another_stands(cx.ctx(), user, "ban", payload.case).await? {
+        return Ok(());
+    }
     let reason = Reason::truncated(&format!("the ban of case #{} ran out", payload.case));
     match cx.api().unban(cx.guild_id(), user, reason).await {
         Ok(()) | Err(DiscordError::NotFound) => Ok(()),
@@ -809,6 +912,13 @@ async fn end_timeout(cx: JobCx) -> Result<(), ModuleError> {
     ) else {
         return Err(ModuleError::other("a timeout job names no member or role"));
     };
+    match held_by_others(cx.ctx(), user, "timeout", payload.case).await? {
+        Hold::Free => {}
+        Hold::Forever => return Ok(()),
+        Hold::Until(at) => {
+            return reschedule(cx.ctx(), "untimeout", &untimeout_key(user), &payload, at).await;
+        }
+    }
     let reason = Reason::truncated(&format!("the timeout of case #{} ran out", payload.case));
     match cx
         .api()
@@ -827,6 +937,14 @@ async fn end_voice_mute(cx: JobCx) -> Result<(), ModuleError> {
     let Some(user) = UserId::new_checked(payload.user) else {
         return Err(ModuleError::other("a voice mute job names no member"));
     };
+    // Nothing else lifts a Discord mute later, so the lift waits for the others as a role does.
+    match held_by_others(cx.ctx(), user, "vcmute", payload.case).await? {
+        Hold::Free => {}
+        Hold::Forever => return Ok(()),
+        Hold::Until(at) => {
+            return reschedule(cx.ctx(), "vc_unmute", &voice_key(user), &payload, at).await;
+        }
+    }
     let reason = Reason::truncated(&format!("the voice mute of case #{} ran out", payload.case));
     let result = match (payload.via, payload.role.and_then(RoleId::new_checked)) {
         (Method::Discord, _) => {

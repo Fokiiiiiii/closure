@@ -55,6 +55,31 @@ pub struct RecentFilter {
     pub distinct_subjects_at_least: Option<usize>,
 }
 
+/// A window that a burst is checked against, and the key that marks the burst handled once it fires.
+#[derive(Debug, Clone, Copy)]
+pub struct Burst<'a> {
+    pub kind: &'a str,
+    /// The subject whose actions count; `None` counts every subject.
+    pub subject: Option<u64>,
+    pub within: Duration,
+    pub filter: &'a RecentFilter,
+    pub handled_key: &'a str,
+    /// Unix second the key stops being handled, set when a burst is claimed.
+    pub handled_until: i64,
+}
+
+/// What a check of a [`Burst`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claim {
+    /// The key is handled: the burst has already fired.
+    Handled,
+    /// The window does not pass its gates, or the count it was given.
+    Short,
+    /// The burst passes. `entries` are the actions it counted, oldest first, and `count` is the
+    /// value the count gave them.
+    Counted { count: u64, entries: Vec<Recent> },
+}
+
 #[derive(Debug, Default)]
 struct GuildLog {
     /// Oldest first.
@@ -270,17 +295,78 @@ impl RecentActions {
     /// do not trigger again.
     pub fn mark_handled(&self, guild: GuildId, key: &str, until: i64) {
         let mut guilds = self.guilds();
+        mark(guilds.entry(guild).or_default(), key, until);
+    }
+
+    /// Checks a burst and, when it passes, takes the actions it counts out of the window and marks
+    /// its key handled. The check and the taking happen under one lock, so two checks of the same
+    /// burst cannot both pass. `counts` gives the count of the window, or `None` when it does not pass.
+    #[must_use]
+    pub fn claim_burst(
+        &self,
+        guild: GuildId,
+        now: i64,
+        burst: &Burst<'_>,
+        counts: impl FnOnce(&[&Recent]) -> Option<u64>,
+    ) -> Claim {
+        self.burst(guild, now, burst, true, counts)
+    }
+
+    /// The check of [`Self::claim_burst`], without taking or marking anything.
+    #[must_use]
+    pub fn inspect_burst(
+        &self,
+        guild: GuildId,
+        now: i64,
+        burst: &Burst<'_>,
+        counts: impl FnOnce(&[&Recent]) -> Option<u64>,
+    ) -> Claim {
+        self.burst(guild, now, burst, false, counts)
+    }
+
+    fn burst(
+        &self,
+        guild: GuildId,
+        now: i64,
+        burst: &Burst<'_>,
+        commit: bool,
+        counts: impl FnOnce(&[&Recent]) -> Option<u64>,
+    ) -> Claim {
+        let mut guilds = self.guilds();
         let log = guilds.entry(guild).or_default();
-        if let Some(previous) = log.handled.insert(key.to_owned(), until) {
-            log.expiring.remove(&(previous, key.to_owned()));
+        log.prune_handled(now);
+        if log.handled.contains_key(burst.handled_key) {
+            return Claim::Handled;
         }
-        log.expiring.insert((until, key.to_owned()));
-        while log.handled.len() > MAX_HANDLED_PER_GUILD {
-            let Some((_, oldest)) = log.expiring.pop_first() else {
-                break;
+        let wanted = query(burst.kind, burst.subject, burst.within, now, burst.filter);
+        let (count, entries) = {
+            let selected = select(log, wanted);
+            if !spans_enough(burst.filter, &selected) {
+                return Claim::Short;
+            }
+            let Some(count) = counts(&selected) else {
+                return Claim::Short;
             };
-            log.handled.remove(&oldest);
+            (count, selected.into_iter().cloned().collect::<Vec<_>>())
+        };
+        if commit {
+            log.entries.retain(|entry| !wanted.matches(entry));
+            mark(log, burst.handled_key, burst.handled_until);
         }
+        Claim::Counted { count, entries }
+    }
+}
+
+fn mark(log: &mut GuildLog, key: &str, until: i64) {
+    if let Some(previous) = log.handled.insert(key.to_owned(), until) {
+        log.expiring.remove(&(previous, key.to_owned()));
+    }
+    log.expiring.insert((until, key.to_owned()));
+    while log.handled.len() > MAX_HANDLED_PER_GUILD {
+        let Some((_, oldest)) = log.expiring.pop_first() else {
+            break;
+        };
+        log.handled.remove(&oldest);
     }
 }
 
@@ -527,5 +613,102 @@ mod tests {
         }
         assert!(!actions.already_handled(guild(1), "key0", 0));
         assert!(actions.already_handled(guild(1), "key1", 0));
+    }
+
+    fn burst_of<'a>(filter: &'a RecentFilter, handled_key: &'a str) -> Burst<'a> {
+        Burst {
+            kind: "msg",
+            subject: Some(1),
+            within: WITHIN,
+            filter,
+            handled_key,
+            handled_until: 200,
+        }
+    }
+
+    /// Counts the entries of a window when they add up to at least three.
+    fn three_or_more(entries: &[&Recent]) -> Option<u64> {
+        let total: u64 = entries.iter().map(|entry| u64::from(entry.count)).sum();
+        (total >= 3).then_some(total)
+    }
+
+    #[test]
+    fn a_claim_returns_what_it_took_and_keeps_the_rest() {
+        let actions = recent_actions();
+        actions.record(guild(1), action("msg", 1, Some("a"), 100));
+        actions.record(guild(1), action("msg", 1, Some("b"), 100));
+        actions.record(guild(1), action("msg", 1, Some("a"), 101));
+        let in_a = RecentFilter {
+            group: Some("a".to_owned()),
+            ..RecentFilter::default()
+        };
+        let claim = actions.claim_burst(guild(1), 102, &burst_of(&in_a, "k"), |entries| {
+            u64::try_from(entries.len()).ok()
+        });
+        assert_eq!(
+            claim,
+            Claim::Counted {
+                count: 2,
+                entries: vec![
+                    action("msg", 1, Some("a"), 100),
+                    action("msg", 1, Some("a"), 101)
+                ],
+            }
+        );
+        assert_eq!(actions.sum(guild(1), "msg", None, WITHIN, 102, &any()), 1);
+        assert!(actions.already_handled(guild(1), "k", 102));
+    }
+
+    #[test]
+    fn a_claim_that_is_too_small_takes_and_marks_nothing() {
+        let actions = recent_actions();
+        actions.record(guild(1), action("msg", 1, None, 100));
+        let filter = any();
+        let claim = actions.claim_burst(guild(1), 101, &burst_of(&filter, "k"), three_or_more);
+        assert_eq!(claim, Claim::Short);
+        assert_eq!(actions.sum(guild(1), "msg", None, WITHIN, 101, &any()), 1);
+        assert!(!actions.already_handled(guild(1), "k", 101));
+    }
+
+    #[test]
+    fn inspecting_a_burst_changes_nothing() {
+        let actions = recent_actions();
+        for at in 100..103 {
+            actions.record(guild(1), action("msg", 1, None, at));
+        }
+        let filter = any();
+        let burst = burst_of(&filter, "k");
+        let inspected = actions.inspect_burst(guild(1), 103, &burst, three_or_more);
+        assert!(matches!(inspected, Claim::Counted { count: 3, .. }));
+        assert_eq!(actions.sum(guild(1), "msg", None, WITHIN, 103, &any()), 3);
+        assert!(!actions.already_handled(guild(1), "k", 103));
+    }
+
+    #[test]
+    fn exactly_one_of_many_threads_claims_a_burst() {
+        let actions = recent_actions();
+        for at in 100..103 {
+            actions.record(guild(1), action("msg", 1, None, at));
+        }
+        let filter = any();
+        let burst = burst_of(&filter, "k");
+        let claims: Vec<Claim> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| actions.claim_burst(guild(1), 103, &burst, three_or_more)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        let counted = claims
+            .iter()
+            .filter(|claim| matches!(claim, Claim::Counted { .. }))
+            .count();
+        let handled = claims
+            .iter()
+            .filter(|claim| **claim == Claim::Handled)
+            .count();
+        assert_eq!((counted, handled), (1, 7));
     }
 }

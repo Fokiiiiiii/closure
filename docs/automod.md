@@ -184,7 +184,8 @@ are the same). Empty messages are never the same as each other.
 What a burst does:
 
 - **It fires once.** The first trip takes the messages it counted out of the window, and marks the
-  member as handled for the window (`within`).
+  member as handled for the window (`within`). Two messages that trip it at the same moment still
+  fire it once.
 - **Its messages are deleted.** A trip deletes every message the window counted (in one bulk
   delete per channel, or single deletes), whatever the actions of the rule are.
 - **Later messages join the burst.** While the member is handled, each of their messages is
@@ -263,7 +264,9 @@ continue_after_match: true # the rules after this one still run when it trips
 
 A cooldown is per rule and per member; a skipped rule lets the next rule look at the message. It is
 kept in the module's storage, so it survives a restart, and it is not started by a dry run or by a
-message that only joined a burst. At most 30 days.
+message that only joined a burst. It is taken before the actions run, so two messages of one member
+that trip the rule at once fire it once. A cooldown that is taken stays taken when an action then
+fails. At most 30 days.
 
 ### Actions
 

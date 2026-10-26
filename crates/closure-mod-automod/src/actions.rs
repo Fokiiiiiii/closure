@@ -55,24 +55,32 @@ enum Ran {
     Punished,
 }
 
+/// What the actions of a rule left behind. The counter changes they made are stored, so their
+/// triggers are returned whatever happened after them; the first error is returned beside them.
+#[derive(Debug, Default)]
+pub struct Applied {
+    pub fired: Vec<Context>,
+    pub error: Option<ModuleError>,
+}
+
 /// Runs the rule's actions in order, for each member of the hit. A failing one does not stop the
-/// next; the first error is returned at the end. When nothing punished a member, the hit is recorded
-/// as an `automod` case for each of them, so that a deletion still shows in the log. A later message
-/// of a burst only has its messages deleted. The counter triggers that the actions fired are
-/// returned, for the engine to run.
-pub async fn apply(
-    deps: &Deps<'_>,
-    rule: &Rule,
-    hit: &Hit,
-    context: &Context,
-) -> Result<Vec<Context>, ModuleError> {
+/// next; the first error is kept. When nothing punished a member, the hit is recorded as an `automod`
+/// case for each of them, so that a deletion still shows in the log. A later message of a burst only
+/// has its messages deleted. The counter triggers that the actions fired are returned, for the engine
+/// to run.
+pub async fn apply(deps: &Deps<'_>, rule: &Rule, hit: &Hit, context: &Context) -> Applied {
     let ctx = deps.ctx;
-    let bot = Moderator::bot(ctx, BOT_NAME)?;
+    let mut applied = Applied::default();
+    let bot = match Moderator::bot(ctx, BOT_NAME) {
+        Ok(bot) => bot,
+        Err(error) => {
+            applied.error = Some(error);
+            return applied;
+        }
+    };
     let punisher = Punisher::new(ctx, bot.clone(), settings(deps.config));
-    let mut first_error = None;
     let mut ran = false;
     let mut did_punish = false;
-    let mut fired = Vec::new();
     for action in &rule.actions {
         if hit.join && !matches!(action, Action::Delete(_)) {
             continue;
@@ -82,11 +90,11 @@ pub async fn apply(
             Ok((outcome, more)) => {
                 ran = true;
                 did_punish |= outcome == Ran::Punished;
-                fired.extend(more);
+                applied.fired.extend(more);
             }
             Err(error) => {
                 if !suppressed(deps, rule, &error) {
-                    first_error.get_or_insert(error);
+                    applied.error.get_or_insert(error);
                 }
             }
         }
@@ -95,11 +103,11 @@ pub async fn apply(
         for target in &hit.targets {
             let reason = reason_for(ctx, rule, hit, context, Some(*target), None);
             if let Err(error) = record(ctx, &bot, *target, &reason).await {
-                first_error.get_or_insert(error);
+                applied.error.get_or_insert(error);
             }
         }
     }
-    first_error.map_or(Ok(fired), Err)
+    applied
 }
 
 /// A missing permission is reported once a minute per rule; the other times it is not an error.

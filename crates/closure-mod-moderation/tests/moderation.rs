@@ -3566,15 +3566,30 @@ fn the_module_listens_for_joins_with_the_members_intent() {
 
 // ---- an undo button of an older punishment ----
 
-/// Case #1 of the member is revoked by the lift #3, and case #2 still stands.
-async fn assert_only_the_older_case_revoked(harness: &Harness) {
+/// Case #1 of the member is revoked with its button, case #2 still stands, and Discord is not
+/// called: `discord` is what it was before the press.
+async fn assert_only_the_older_case_revoked(harness: &Harness, discord: &[&str]) {
+    assert_eq!(sequence(harness), discord, "Discord is not called");
     let first = harness.cases().get(1).await.unwrap().unwrap();
     assert_eq!(
         first.revoked.map(|revoked| revoked.reason),
-        Some(Some("removed by case #3".to_owned()))
+        Some(Some("Undone with its button.".to_owned()))
     );
     let second = harness.cases().get(2).await.unwrap().unwrap();
     assert!(second.revoked.is_none(), "{second:?}");
+    assert_eq!(
+        cases_of(harness, MEMBER).await.len(),
+        2,
+        "no lift is recorded"
+    );
+}
+
+/// The result of an older punishment's button: the message says that a newer one still applies.
+fn superseded_text(replies: &[Reply]) -> String {
+    edit_of(replies)
+        .expect("the message is replaced")
+        .content
+        .clone()
 }
 
 #[tokio::test]
@@ -3590,8 +3605,23 @@ async fn pressing_undo_on_an_older_timeout_revokes_only_that_one() {
         .await
         .unwrap();
 
-    press(&harness, &undo_id_of_case("timeout", MEMBER, 1)).await;
-    assert_only_the_older_case_revoked(&harness).await;
+    let discord = sequence(&harness);
+    let replies = press(&harness, &undo_id_of_case("timeout", MEMBER, 1)).await;
+    assert!(
+        superseded_text(&replies)
+            .starts_with("-# ↩ Undone by <@100>.\nCase #1 revoked. A newer one still applies."),
+        "{replies:?}"
+    );
+    assert_only_the_older_case_revoked(&harness, &discord).await;
+
+    // The newest timeout is still lifted by its own button.
+    press(&harness, &undo_id_of_case("timeout", MEMBER, 2)).await;
+    assert_eq!(sequence(&harness).last(), Some(&"untimeout"));
+    let second = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(
+        second.revoked.map(|revoked| revoked.reason),
+        Some(Some("removed by case #3".to_owned()))
+    );
 }
 
 #[tokio::test]
@@ -3607,14 +3637,29 @@ async fn pressing_undo_on_an_older_ban_revokes_only_that_one() {
         .await
         .unwrap();
 
-    press_as(
+    let discord = sequence(&harness);
+    let replies = press_as(
         &harness,
         &undo_id_of_case("ban", MEMBER, 1),
         MODERATOR,
         &[ADMIN_ROLE],
     )
     .await;
-    assert_only_the_older_case_revoked(&harness).await;
+    assert!(
+        superseded_text(&replies)
+            .starts_with("-# ↩ Undone by <@100>.\nCase #1 revoked. A newer one still applies."),
+        "{replies:?}"
+    );
+    assert_only_the_older_case_revoked(&harness, &discord).await;
+
+    press_as(
+        &harness,
+        &undo_id_of_case("ban", MEMBER, 2),
+        MODERATOR,
+        &[ADMIN_ROLE],
+    )
+    .await;
+    assert_eq!(sequence(&harness).last(), Some(&"unban"));
 }
 
 #[tokio::test]
@@ -3630,8 +3675,17 @@ async fn pressing_undo_on_an_older_voice_mute_revokes_only_that_one() {
         .await
         .unwrap();
 
-    press(&harness, &undo_id_of_case("vcmute", MEMBER, 1)).await;
-    assert_only_the_older_case_revoked(&harness).await;
+    let discord = sequence(&harness);
+    let replies = press(&harness, &undo_id_of_case("vcmute", MEMBER, 1)).await;
+    assert!(
+        superseded_text(&replies)
+            .starts_with("-# ↩ Undone by <@100>.\nCase #1 revoked. A newer one still applies."),
+        "{replies:?}"
+    );
+    assert_only_the_older_case_revoked(&harness, &discord).await;
+
+    press(&harness, &undo_id_of_case("vcmute", MEMBER, 2)).await;
+    assert_eq!(sequence(&harness).last(), Some(&"vcunmute"));
 }
 
 // ---- durations as a date and time ----

@@ -95,6 +95,8 @@ fn summary_text(summary: Option<LatencySummary>) -> String {
 }
 
 async fn ping(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    // Read before the measured calls, which would otherwise count in the delay.
+    let received_ms = now_ms();
     let config: Config = cx.config()?;
     let mut samples = Vec::with_capacity(PINGS);
     let mut last_error = None;
@@ -144,7 +146,7 @@ async fn ping(cx: CommandCx, (): ()) -> Result<(), UserError> {
             format!("{}\n{calls}", summary_text(LatencySummary::of(&samples))),
             true,
         );
-    if let Some(delay) = delay(cx.invocation().interaction_id.get(), now_ms()) {
+    if let Some(delay) = delay(cx.invocation().interaction_id.get(), received_ms) {
         let text = match delay {
             Delay::ClockBehind => cx.t("ping-clock-behind", &Args::new()),
             Delay::After(ms) => format!("{ms} ms"),

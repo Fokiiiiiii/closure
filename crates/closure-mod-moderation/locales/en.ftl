@@ -137,6 +137,7 @@ undo-by = -# ↩ Undone by { $user }.
 undo-reason = Undone from case #{ $case }.
 undone-by-button = Undone with its button.
 undo-not-needed = That is already over.
+undo-superseded = Case #{ $number } revoked. A newer one still applies.
 history-line = -# Before this: { $warnings }, { $cases }.
 history-warnings = { $count ->
     [one] 1 active warning

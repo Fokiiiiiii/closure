@@ -225,10 +225,12 @@ impl Link {
     }
 }
 
-const LINK_STARTS: [&str; 3] = ["https://", "http://", "www."];
+const SCHEMES: [&str; 2] = ["https://", "http://"];
+const WWW: &str = "www.";
 
-/// The web links in `text`: `http://` and `https://` URLs and `www.` addresses, including the
-/// `<...>` form that hides the preview. Each whitespace-delimited run gives at most one link.
+/// The web links in `text`, in order: `http://` and `https://` URLs and `www.` addresses,
+/// including the `<...>` form that hides the preview. A link ends at whitespace, at one of
+/// `<>)]"'|`, or where another scheme starts; a `www.` inside a link does not start one.
 ///
 /// ```
 /// let found = closure_sdk::text::links("<https://Shop.Example.com/x>, www.example.org.");
@@ -238,33 +240,57 @@ const LINK_STARTS: [&str; 3] = ["https://", "http://", "www."];
 /// ```
 #[must_use]
 pub fn links(text: &str) -> Vec<Link> {
-    text.split(|ch: char| ch.is_whitespace() || ch == '<' || ch == '>')
-        .filter_map(link_in)
-        .collect()
+    let lower = text.to_ascii_lowercase();
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(start) = next_link_start(&lower, from) {
+        let end = link_end(&lower, start);
+        found.extend(link_in(&text[start..end]));
+        from = end;
+    }
+    found
 }
 
-fn link_in(token: &str) -> Option<Link> {
-    let lower = token.to_ascii_lowercase();
-    let start = link_start(&lower)?;
-    let url = token[start..].trim_end_matches(is_trailing_punctuation);
+/// Ending a link at the next scheme keeps a long run of schemes linear: each link is short.
+fn link_end(lower: &str, start: usize) -> usize {
+    lower[start..]
+        .char_indices()
+        .skip(1)
+        .find(|&(offset, ch)| is_link_delimiter(ch) || is_scheme_start(lower, start + offset))
+        .map_or(lower.len(), |(offset, _)| start + offset)
+}
+
+fn next_link_start(lower: &str, from: usize) -> Option<usize> {
+    lower[from..]
+        .char_indices()
+        .map(|(offset, _)| from + offset)
+        .find(|&at| is_link_start(lower, at))
+}
+
+/// A link start is never in the middle of a word, so `awww.` is not one.
+fn is_link_start(lower: &str, at: usize) -> bool {
+    is_scheme_start(lower, at) || (!preceded_by_word(lower, at) && lower[at..].starts_with(WWW))
+}
+
+fn is_scheme_start(lower: &str, at: usize) -> bool {
+    !preceded_by_word(lower, at) && SCHEMES.iter().any(|scheme| lower[at..].starts_with(scheme))
+}
+
+fn preceded_by_word(lower: &str, at: usize) -> bool {
+    lower[..at].ends_with(char::is_alphanumeric)
+}
+
+fn is_link_delimiter(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '<' | '>' | ')' | ']' | '"' | '\'' | '|')
+}
+
+fn link_in(raw: &str) -> Option<Link> {
+    let url = raw.trim_end_matches(is_trailing_punctuation);
     let host = host_of(url)?;
     Some(Link {
         url: url.to_owned(),
         host,
     })
-}
-
-/// The position of the first link start that is not in the middle of a word.
-fn link_start(lower: &str) -> Option<usize> {
-    LINK_STARTS
-        .iter()
-        .filter_map(|marker| {
-            lower
-                .match_indices(marker)
-                .map(|(at, _)| at)
-                .find(|&at| !lower[..at].ends_with(char::is_alphanumeric))
-        })
-        .min()
 }
 
 fn is_trailing_punctuation(ch: char) -> bool {
@@ -730,9 +756,64 @@ mod tests {
     }
 
     #[test]
-    fn a_long_run_of_schemes_is_one_link_in_linear_time() {
-        let text = "https://".repeat(1_250);
-        assert_eq!(links(&text).len(), 1);
+    fn a_long_run_of_schemes_is_linear_and_keeps_its_one_real_link() {
+        let text = format!("{}https://tail.example.com", "https://".repeat(1_250));
+        let found = links(&text);
+        assert_eq!(hosts(&found), ["tail.example.com"]);
+    }
+
+    fn hosts(found: &[Link]) -> Vec<&str> {
+        found.iter().map(|link| link.host.as_str()).collect()
+    }
+
+    #[test]
+    fn adjacent_links_are_all_found_in_order() {
+        let found = links("[ok](https://allowed.example/)[bad](https://blocked.example/)");
+        assert_eq!(hosts(&found), ["allowed.example", "blocked.example"]);
+        assert_eq!(
+            urls(&found),
+            ["https://allowed.example/", "https://blocked.example/"]
+        );
+    }
+
+    #[test]
+    fn a_scheme_inside_a_path_starts_a_second_link_and_a_www_does_not() {
+        let found = links("a.com/https://b.com");
+        assert_eq!(hosts(&found), ["b.com"]);
+        let found = links("https://a.com/https://b.com");
+        assert_eq!(hosts(&found), ["a.com", "b.com"]);
+        assert_eq!(urls(&found), ["https://a.com/", "https://b.com"]);
+        assert_eq!(hosts(&links("https://a.com/www.b.com")), ["a.com"]);
+    }
+
+    #[test]
+    fn a_link_starts_after_a_closing_bracket_or_parenthesis() {
+        assert_eq!(
+            hosts(&links("x)www.b.com]https://c.com")),
+            ["www.b.com", "c.com"]
+        );
+        assert_eq!(hosts(&links("(www.a.com)")), ["www.a.com"]);
+    }
+
+    #[test]
+    fn ten_links_in_one_line_are_all_found() {
+        let line = (0..10).fold(String::new(), |line, i| {
+            format!("{line}[x](https://h{i}.example/)")
+        });
+        let found = links(&line);
+        assert_eq!(found.len(), 10);
+        assert_eq!(found[9].host, "h9.example");
+    }
+
+    #[test]
+    fn a_link_also_ends_at_pipes_and_quotes() {
+        let found = links("https://a.example|https://b.example\"www.c.example'");
+        assert_eq!(hosts(&found), ["a.example", "b.example", "www.c.example"]);
+    }
+
+    #[test]
+    fn a_long_line_of_bare_schemes_is_linear_and_has_no_links() {
+        assert!(links(&"http://".repeat(14_286)).is_empty());
     }
 
     #[test]

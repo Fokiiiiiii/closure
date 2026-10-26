@@ -219,7 +219,10 @@ let done = punisher.ban(user, Some(Duration::from_secs(86_400)), 0, reason).awai
 
 The methods are `warn`, `timeout`, `lift_timeout`, `kick`, `ban`, `unban`, `voice_mute` and
 `voice_unmute`. Each records one case and returns it; a lift also revokes the newest case of its kind
-that still stands, or after `undoing(case)` the case it names. A punishment that could not do all of it (the direct message did not arrive, the
+that still stands, or after `undoing(case)` the case it names. While a newer case of that kind stands, a lift
+after `undoing(case)` does nothing and returns the named case still standing, for the caller to revoke. A timer
+waits while a newer case of its kind stands against the member: a role lift is set again for the latest end of
+the others, and a ban lift does nothing. A punishment that could not do all of it (the direct message did not arrive, the
 timer could not be set) still goes through, and `notes` says so. Escalating on counts of warnings is
 the module's own decision.
 
@@ -570,9 +573,9 @@ Values are kept between `0` and `2^31 - 1`; `add` and `set` clamp into that rang
   last written. It is applied when the value is read or changed, so no job runs. A period that has
   not passed yet is kept for later.
 - A `TriggerDef` has a `Condition` such as `>= 5` (`>`, `<`, `=`, `!=`, `<=` too) and a reverse,
-  such as `< 5`. A change from an old value to a new one fires a trigger when the condition did not
-  hold for the old value and holds for the new one. Its reverse fires when the condition held for
-  the old value and the reverse holds for the new one. So a value that jumps over the reverse's
+  such as `< 5`. A change fires a trigger when the condition did not hold for the value as last
+  written (before decay) and holds for the new one. Its reverse fires when the condition held for
+  the stored value and the reverse holds for the new one. So a value that jumps over the reverse's
   range fires nothing; a later step across it does. `reset` and `reset_all` fire nothing.
 - Each change is a compare-and-set write of the scope's entry through the module's `Store`. A
   conflict is retried up to five times, then reported as `CounterError::Conflict`. Needs the

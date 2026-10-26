@@ -9,8 +9,8 @@ use closure_core::event::CommandOptionValue;
 use closure_sdk::punish::{self, Done, Method, Moderator, Punisher, Settings};
 use closure_sdk::testing::{Harness, Invocation, Reply};
 use closure_sdk::{
-    Capability, Case, Command, CommandArgs, CommandCx, Locale, ModuleBuilder, ModuleError,
-    UserError, UserId,
+    Capability, Case, CaseKind, Command, CommandArgs, CommandCx, Locale, ModuleBuilder,
+    ModuleError, NewCase, UserError, UserId,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -1399,19 +1399,19 @@ async fn undoing_a_timeout_revokes_only_the_case_it_names() {
         .unwrap();
 
     let replies = harness
-        .invoke(undo_of("undo_untimeout", MEMBER, 1))
+        .invoke(undo_of("undo_untimeout", MEMBER, 2))
         .await
         .unwrap();
     assert!(text(&replies).contains("case #3"), "{replies:?}");
     assert_eq!(sequence(&harness).last(), Some(&"untimeout"));
 
     let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert!(first.revoked.is_none(), "{first:?}");
+    let second = harness.cases().get(2).await.unwrap().unwrap();
     assert_eq!(
-        revoked_reason(&first).as_deref(),
+        revoked_reason(&second).as_deref(),
         Some("removed by case #3")
     );
-    let second = harness.cases().get(2).await.unwrap().unwrap();
-    assert!(second.revoked.is_none(), "{second:?}");
 }
 
 #[tokio::test]
@@ -1451,18 +1451,18 @@ async fn undoing_an_unban_revokes_only_the_ban_it_names() {
         .unwrap();
 
     harness
-        .invoke(undo_of("undo_unban", MEMBER, 1))
+        .invoke(undo_of("undo_unban", MEMBER, 2))
         .await
         .unwrap();
     assert_eq!(sequence(&harness).last(), Some(&"unban"));
 
     let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert!(first.revoked.is_none(), "{first:?}");
+    let second = harness.cases().get(2).await.unwrap().unwrap();
     assert_eq!(
-        revoked_reason(&first).as_deref(),
+        revoked_reason(&second).as_deref(),
         Some("removed by case #3")
     );
-    let second = harness.cases().get(2).await.unwrap().unwrap();
-    assert!(second.revoked.is_none(), "{second:?}");
 }
 
 #[tokio::test]
@@ -1502,18 +1502,18 @@ async fn undoing_a_voice_unmute_revokes_only_the_mute_it_names() {
         .unwrap();
 
     harness
-        .invoke(undo_of("undo_vcunmute", MEMBER, 1))
+        .invoke(undo_of("undo_vcunmute", MEMBER, 2))
         .await
         .unwrap();
     assert_eq!(sequence(&harness).last(), Some(&"vcunmute"));
 
     let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert!(first.revoked.is_none(), "{first:?}");
+    let second = harness.cases().get(2).await.unwrap().unwrap();
     assert_eq!(
-        revoked_reason(&first).as_deref(),
+        revoked_reason(&second).as_deref(),
         Some("removed by case #3")
     );
-    let second = harness.cases().get(2).await.unwrap().unwrap();
-    assert!(second.revoked.is_none(), "{second:?}");
 }
 
 #[tokio::test]
@@ -1536,5 +1536,400 @@ async fn without_undoing_a_voice_unmute_revokes_the_newest_mute_that_stands() {
     assert_eq!(
         revoked_reason(&second).as_deref(),
         Some("removed by case #3")
+    );
+}
+
+// ---- a lift does not end a newer punishment that still stands ----
+
+/// A case another module writes against `user` through `cases()`, as the module would.
+async fn other_module_case(
+    harness: &Harness,
+    kind: &str,
+    user: u64,
+    expires_at: Option<i64>,
+) -> Case {
+    harness
+        .cases()
+        .create(NewCase {
+            kind: CaseKind::new(kind).unwrap(),
+            target: Id::new(user),
+            moderator: Id::new(BOT),
+            reason: None,
+            expires_at,
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_role_timeout_lift_waits_while_a_newer_timeout_of_another_module_stands() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30" }));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "10m"))
+        .await
+        .unwrap();
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    other_module_case(&harness, "timeout", MEMBER, Some(first.created_at + 3_600)).await;
+
+    harness.advance(Duration::from_secs(600));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert!(
+        !role_changed(&harness, 30, false),
+        "the newer timeout still holds the role"
+    );
+}
+
+#[tokio::test]
+async fn a_role_timeout_lift_goes_on_when_only_its_own_timeout_stands() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30" }));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "10m"))
+        .await
+        .unwrap();
+
+    harness.advance(Duration::from_secs(600));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert!(role_changed(&harness, 30, false));
+}
+
+#[tokio::test]
+async fn a_role_timeout_lift_goes_on_when_the_other_timeout_has_run_out() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30" }));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "10m"))
+        .await
+        .unwrap();
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    other_module_case(&harness, "timeout", MEMBER, Some(first.created_at + 300)).await;
+
+    harness.advance(Duration::from_secs(600));
+    harness.run_due_jobs().await;
+    assert!(role_changed(&harness, 30, false));
+}
+
+#[tokio::test]
+async fn a_voice_role_lift_waits_while_a_newer_mute_of_another_module_stands() {
+    let harness = harness();
+    harness.set_config(json!({ "voice": "role", "voice_role": "31" }));
+    harness
+        .invoke(mute_of(MEMBER, Some("10m"), None))
+        .await
+        .unwrap();
+    other_module_case(&harness, "vcmute", MEMBER, None).await;
+
+    harness.advance(Duration::from_secs(600));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert!(!role_changed(&harness, 31, false));
+}
+
+#[tokio::test]
+async fn a_voice_role_lift_goes_on_when_only_its_own_mute_stands() {
+    let harness = harness();
+    harness.set_config(json!({ "voice": "role", "voice_role": "31" }));
+    harness
+        .invoke(mute_of(MEMBER, Some("10m"), None))
+        .await
+        .unwrap();
+
+    harness.advance(Duration::from_secs(600));
+    harness.run_due_jobs().await;
+    assert!(role_changed(&harness, 31, false));
+}
+
+#[tokio::test]
+async fn a_voice_lift_by_discord_waits_while_a_newer_mute_of_another_module_stands() {
+    let harness = harness();
+    harness
+        .invoke(mute_of(MEMBER, Some("10m"), None))
+        .await
+        .unwrap();
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    other_module_case(&harness, "vcmute", MEMBER, Some(first.created_at + 3_600)).await;
+
+    harness.advance(Duration::from_secs(600));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert!(
+        !sequence(&harness).contains(&"vcunmute"),
+        "{:?}",
+        sequence(&harness)
+    );
+}
+
+#[tokio::test]
+async fn a_voice_lift_by_discord_goes_on_when_only_its_own_mute_stands() {
+    let harness = harness();
+    harness
+        .invoke(mute_of(MEMBER, Some("10m"), None))
+        .await
+        .unwrap();
+
+    harness.advance(Duration::from_secs(600));
+    harness.run_due_jobs().await;
+    assert_eq!(sequence(&harness).last(), Some(&"vcunmute"));
+}
+
+#[tokio::test]
+async fn a_timed_ban_lift_waits_while_a_permanent_ban_of_another_module_stands() {
+    let harness = harness();
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), Some("1d"), None))
+        .await
+        .unwrap();
+    other_module_case(&harness, "ban", MEMBER, None).await;
+
+    harness.advance(Duration::from_secs(DAY));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert!(
+        !sequence(&harness).contains(&"unban"),
+        "{:?}",
+        sequence(&harness)
+    );
+}
+
+#[tokio::test]
+async fn a_timed_ban_lift_goes_on_when_only_its_own_ban_stands() {
+    let harness = harness();
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), Some("1d"), None))
+        .await
+        .unwrap();
+
+    harness.advance(Duration::from_secs(DAY));
+    harness.run_due_jobs().await;
+    assert_eq!(sequence(&harness).last(), Some(&"unban"));
+}
+
+// ---- a role lift follows the newer punishment that still holds the member ----
+
+#[tokio::test]
+async fn a_role_timeout_lift_moves_to_the_end_of_a_newer_timeout_that_stands() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30" }));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "10m"))
+        .await
+        .unwrap();
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    other_module_case(&harness, "timeout", MEMBER, Some(first.created_at + 3_600)).await;
+
+    harness.advance(Duration::from_secs(600));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert!(
+        !role_changed(&harness, 30, false),
+        "the newer timeout holds the role"
+    );
+    assert_eq!(
+        harness.jobs(),
+        1,
+        "the lift is set for the newer timeout's end"
+    );
+
+    harness.advance(Duration::from_secs(3_000));
+    harness.run_due_jobs().await;
+    assert!(role_changed(&harness, 30, false));
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_role_timeout_lift_does_nothing_while_an_open_ended_timeout_stands() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30" }));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "10m"))
+        .await
+        .unwrap();
+    other_module_case(&harness, "timeout", MEMBER, None).await;
+
+    harness.advance(Duration::from_secs(600));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert_eq!(harness.jobs(), 0, "nothing is set again");
+    harness.advance(Duration::from_secs(10 * DAY));
+    harness.run_due_jobs().await;
+    assert!(
+        !role_changed(&harness, 30, false),
+        "the open-ended timeout keeps the role"
+    );
+}
+
+#[tokio::test]
+async fn a_role_timeout_lift_follows_the_latest_end_as_more_timeouts_follow() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30" }));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "10m"))
+        .await
+        .unwrap();
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    other_module_case(&harness, "timeout", MEMBER, Some(first.created_at + 3_600)).await;
+
+    harness.advance(Duration::from_secs(600));
+    harness.run_due_jobs().await;
+    assert_eq!(harness.jobs(), 1, "set for 3600");
+
+    // A later one is made before the lift is due, and ends after the first.
+    harness.advance(Duration::from_secs(1_200));
+    other_module_case(&harness, "timeout", MEMBER, Some(first.created_at + 5_400)).await;
+    harness.advance(Duration::from_secs(1_800));
+    harness.run_due_jobs().await;
+    assert!(
+        !role_changed(&harness, 30, false),
+        "the later timeout holds the role"
+    );
+    assert_eq!(harness.jobs(), 1, "set again for 5400");
+
+    harness.advance(Duration::from_secs(1_800));
+    harness.run_due_jobs().await;
+    assert!(role_changed(&harness, 30, false));
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_voice_role_lift_moves_to_the_end_of_a_newer_discord_mute_that_stands() {
+    let harness = harness();
+    harness.set_config(json!({ "voice": "role", "voice_role": "31" }));
+    harness
+        .invoke(mute_of(MEMBER, Some("10m"), None))
+        .await
+        .unwrap();
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    other_module_case(&harness, "vcmute", MEMBER, Some(first.created_at + 3_600)).await;
+
+    harness.advance(Duration::from_secs(600));
+    harness.run_due_jobs().await;
+    assert!(
+        !role_changed(&harness, 31, false),
+        "the newer mute holds the role"
+    );
+    assert_eq!(
+        harness.jobs(),
+        1,
+        "the lift is set for the newer mute's end"
+    );
+
+    harness.advance(Duration::from_secs(3_000));
+    harness.run_due_jobs().await;
+    assert!(role_changed(&harness, 31, false));
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_voice_lift_by_discord_moves_to_the_end_of_a_newer_role_mute_that_stands() {
+    let harness = harness();
+    harness
+        .invoke(mute_of(MEMBER, Some("10m"), None))
+        .await
+        .unwrap();
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    other_module_case(&harness, "vcmute", MEMBER, Some(first.created_at + 3_600)).await;
+
+    harness.advance(Duration::from_secs(600));
+    harness.run_due_jobs().await;
+    assert!(
+        !sequence(&harness).contains(&"vcunmute"),
+        "{:?}",
+        sequence(&harness)
+    );
+    assert_eq!(
+        harness.jobs(),
+        1,
+        "the lift is set for the newer mute's end"
+    );
+
+    harness.advance(Duration::from_secs(3_000));
+    harness.run_due_jobs().await;
+    assert_eq!(sequence(&harness).last(), Some(&"vcunmute"));
+    assert_eq!(harness.jobs(), 0);
+}
+
+// ---- undoing an older case while a newer one stands ----
+
+#[tokio::test]
+async fn undoing_an_older_timeout_lifts_nothing_while_a_newer_one_stands() {
+    let harness = harness();
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    let before = sequence(&harness);
+
+    let replies = harness
+        .invoke(undo_of("undo_untimeout", MEMBER, 1))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert_eq!(sequence(&harness), before, "Discord is not called");
+    assert_eq!(
+        cases_of(&harness, MEMBER).await.len(),
+        2,
+        "no lift recorded"
+    );
+    let first = harness.cases().get(1).await.unwrap().unwrap();
+    assert!(first.revoked.is_none(), "the caller revokes it: {first:?}");
+}
+
+#[tokio::test]
+async fn undoing_an_older_ban_lifts_nothing_while_a_newer_one_stands() {
+    let harness = harness();
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), Some("1d"), None))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
+    let before = sequence(&harness);
+
+    harness
+        .invoke(undo_of("undo_unban", MEMBER, 1))
+        .await
+        .unwrap();
+    assert_eq!(sequence(&harness), before, "Discord is not called");
+    assert_eq!(
+        cases_of(&harness, MEMBER).await.len(),
+        2,
+        "no lift recorded"
+    );
+}
+
+#[tokio::test]
+async fn undoing_an_older_voice_mute_lifts_nothing_while_a_newer_one_stands() {
+    let harness = harness();
+    harness
+        .invoke(mute_of(MEMBER, Some("1h"), Some("noisy")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3));
+    harness
+        .invoke(mute_of(MEMBER, Some("1h"), Some("noisy")))
+        .await
+        .unwrap();
+    let before = sequence(&harness);
+
+    harness
+        .invoke(undo_of("undo_vcunmute", MEMBER, 1))
+        .await
+        .unwrap();
+    assert_eq!(sequence(&harness), before, "Discord is not called");
+    assert_eq!(
+        cases_of(&harness, MEMBER).await.len(),
+        2,
+        "no lift recorded"
     );
 }

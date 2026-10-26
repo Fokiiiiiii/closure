@@ -9,11 +9,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use closure_core::permission::Actor;
 use closure_sdk::recent::{RecentActions, RecentLimits};
 use closure_sdk::{
-    Event, EventContext, Flow, GuildId, Level, ModuleError, UserId, parse_module_config,
+    Event, EventContext, Expect, Flow, GuildId, Level, ModuleError, StorageError, UserId,
+    parse_module_config,
 };
 use serde_json::Value;
 
-use crate::actions::{self, Deps};
+use crate::actions::{self, Applied, Deps};
 use crate::config::{Config, Rule, Scope, Setup};
 use crate::context::{Context, Source};
 use crate::memory::Memory;
@@ -206,17 +207,19 @@ async fn process(
         let Some(hit) = first_hit(&scan, rule, &context) else {
             continue;
         };
-        match act(state, ctx, loaded, rule, &hit, &context).await {
-            Ok(fired) => queue.extend(fired.into_iter().map(|context| Work {
-                context,
-                depth: depth + 1,
-            })),
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
+        // Taken before the actions, so that a second evaluation of the same member and rule (in
+        // another channel, say) finds it taken and does nothing.
+        if !loaded.config.dry_run && !hit.join && !reserve_cooldown(ctx, rule, &context).await? {
+            continue;
         }
-        if !loaded.config.dry_run && !hit.join {
-            start_cooldown(ctx, rule, &context).await?;
+        let applied = act(state, ctx, loaded, rule, &hit, &context).await;
+        // The counter changes are stored already, so their triggers run even if an action failed.
+        queue.extend(applied.fired.into_iter().map(|context| Work {
+            context,
+            depth: depth + 1,
+        }));
+        if let Some(error) = applied.error {
+            first_error.get_or_insert(error);
         }
         if !rule.continue_after_match {
             break;
@@ -238,10 +241,13 @@ async fn act(
     rule: &Rule,
     hit: &Hit,
     context: &Context,
-) -> Result<Vec<Context>, ModuleError> {
+) -> Applied {
     if loaded.config.dry_run {
-        actions::report(ctx, rule, hit, context).await?;
-        return Ok(Vec::new());
+        let error = actions::report(ctx, rule, hit, context).await.err();
+        return Applied {
+            fired: Vec::new(),
+            error,
+        };
     }
     let deps = Deps {
         ctx,
@@ -334,16 +340,29 @@ async fn on_cooldown(
     Ok(found.is_some())
 }
 
-async fn start_cooldown(
+/// Takes the cooldown of the rule for the member, unless another evaluation has it. The write expects
+/// nothing stored, so two evaluations cannot both take it. A taken cooldown stays taken when the
+/// actions then fail, as a rule that matched has fired.
+async fn reserve_cooldown(
     ctx: &EventContext,
     rule: &Rule,
     context: &Context,
-) -> Result<(), ModuleError> {
+) -> Result<bool, ModuleError> {
     let Some(cooldown) = rule.cooldown else {
-        return Ok(());
+        return Ok(true);
     };
-    ctx.store()
-        .set_for(&cooldown_key(rule, context), &true, cooldown)
+    match ctx
+        .store()
+        .replace(
+            &cooldown_key(rule, context),
+            &true,
+            Expect::Missing,
+            Some(cooldown),
+        )
         .await
-        .map_err(|error| ModuleError::other(error.to_string()))
+    {
+        Ok(_) => Ok(true),
+        Err(StorageError::Conflict) => Ok(false),
+        Err(error) => Err(ModuleError::other(error.to_string())),
+    }
 }

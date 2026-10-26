@@ -134,6 +134,7 @@ undo-by = -# ↩ { $user } が取り消しました。
 undo-reason = ケース #{ $case } から取り消しました。
 undone-by-button = 取り消しボタンで取り消しました。
 undo-not-needed = すでに終わっています。
+undo-superseded = ケース #{ $number } を取り消しました。新しい方の処分はまだ有効です。
 history-line = -# 今回より前: { $warnings }、{ $cases }。
 history-warnings = 有効な警告 { $count } 件
 history-cases = ケース { $count } 件
