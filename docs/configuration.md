@@ -93,9 +93,9 @@ change:
 timezone: UTC-5    # America/New_York in winter; use UTC-4 from March to November
 ```
 
-`prefix` is 1 to 10 characters without spaces, such as `!` or `>>`. Text commands read it; the
-commands themselves are not part of this version. An empty prefix is refused: leave the key out to turn
-text commands off.
+`prefix` is 1 to 10 characters without spaces, such as `!` or `>>`. A message starting with it runs
+the slash command of the same name (`!warn @user spam`); see [text commands](writing-modules.md#text-commands).
+An empty prefix is refused: leave the key out to turn text commands off.
 
 `success_emoji` and `error_emoji` go in front of the text of a success or an error reply, followed by a
 space, so `✅ Warned user 7` reads as the success it is. The default is `✅` and `❌`. Each is a Unicode
@@ -212,3 +212,55 @@ bot: it ignores a revision lower than the one it already holds.
 Both YAML and JSON are accepted as the request body (JSON is YAML). Bodies are limited to 64 KiB,
 YAML aliases are capped, and a parsed document may not exceed 128 KiB, so a hostile document
 cannot exhaust memory. Text containing the NUL character is refused with a `422`.
+
+## Simple and advanced views
+
+The same document can be read and written in two views. The **basic** view holds the settings a
+simple form edits: `preset`, `language`, `timezone`, `prefix`, `success_emoji`, `error_emoji`,
+`log_channel`, `moderator_roles`, each module's `enabled` switch, and the settings a module marks
+basic (`"x-ui": { "level": "basic" }`, see [writing modules](writing-modules.md#simple-and-advanced-settings-xuilevel)).
+The **advanced** view is everything, as before. Without a `view` parameter a request is advanced.
+
+| Request | Basic view | Advanced view (default) |
+| --- | --- | --- |
+| `GET /v1/schema?view=basic` | the schema of the basic settings only | the whole schema |
+| `GET /v1/guilds/{id}/config?view=basic` | only the basic part of the stored document | the whole document |
+| `PUT /v1/guilds/{id}/config?view=basic` | a patch on top of the stored document | the whole document, replaced |
+| `POST /v1/guilds/{id}/config/validate?view=basic` | the patch merged onto the stored document, then checked | the body checked on its own |
+| `GET /v1/guilds/{id}/config/effective` | ignores `view`: the complete configuration in both | the same |
+
+A `view` other than `basic` or `advanced` is a `400`.
+
+A basic write is a patch. Keys present are set, keys absent keep their stored value, and `null`
+clears the key, as it does in a full document. A key outside the basic view (`limits`,
+`permissions`, a module's `capabilities`, or a module setting that is not marked basic) is refused
+with a `422` whose issue names the key with the code `not_basic`; nothing is stored. Advanced values
+are never changed by a basic write. The merged document then goes through the same validation,
+storage, history and audit path as a full write, and the `If-Match` rule is unchanged: the patch
+applies to the revision it names, and a stale one is refused with `412`.
+
+```bash
+# the simple settings only; the same ETag and revision rules as the full document
+curl -s -H "Authorization: Bearer $API_ADMIN_TOKEN" \
+     "http://127.0.0.1:8080/v1/guilds/$GUILD/config?view=basic"
+
+# change two simple settings; the limits and the advanced module settings stay as they are
+curl -i -X PUT -H "Authorization: Bearer $API_ADMIN_TOKEN" \
+     -H 'If-Match: "3"' --data-binary $'preset: large\nmodules:\n  diagnostics:\n    config: { ephemeral: false }\n' \
+     "http://127.0.0.1:8080/v1/guilds/$GUILD/config?view=basic"
+
+# the form for the simple settings
+curl -s -H "Authorization: Bearer $API_ADMIN_TOKEN" \
+     "http://127.0.0.1:8080/v1/schema?view=basic"
+```
+
+A dashboard shows its simple form from the basic view and offers the full editor from the
+advanced one. Switching is only a change of the `view` parameter: both views edit the same stored
+document, so nothing is lost by going back and forth.
+
+Two decisions of this design:
+
+- The format stamp `version` is accepted in both views, since a YAML document read in one view
+  carries it. It is not a setting.
+- A basic write is recorded in the history and the audit trail like any other write. The API has
+  no user identity of its own (one admin token), so the actor is not recorded, as for a full write.

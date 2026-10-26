@@ -8,6 +8,7 @@ use serde_json::{Map, Value, json};
 
 use crate::error::ConfigError;
 use crate::model::GuildOverrides;
+use crate::view::{self, BASIC_KEYS, View};
 
 /// The JSON Schema of the whole configuration document, with every registered module's own
 /// config schema embedded. Dashboards generate their forms from it and editors use it for
@@ -19,6 +20,12 @@ use crate::model::GuildOverrides;
 /// refuses, because the compiler judges the result of merging the override into the defaults
 /// and the schema only sees the override.
 pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> {
+    document_schema_for(registry, View::Advanced)
+}
+
+/// [`document_schema`] for one view: the basic one keeps only the settings a simple form edits
+/// (see [`view`]), and is still a schema of an override, so the same contract holds for it.
+pub fn document_schema_for(registry: &ModuleRegistry, view: View) -> Result<Value, ConfigError> {
     let mut schema = serde_json::to_value(schemars::schema_for!(GuildOverrides))
         .map_err(|error| ConfigError::Serialize(error.to_string()))?;
     // The numbers of the document; what is an id (a string or a number) is not one of them.
@@ -49,44 +56,7 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
     let mut languages = vec![json!("auto")];
     languages.extend(Locale::ALL.iter().map(|locale| json!(locale.tag())));
 
-    let mut module_properties = Map::new();
-    for module in registry.iter() {
-        let manifest = module.manifest();
-        let module_id = manifest.id.to_string();
-        let refuse = |message: String| ConfigError::BadModuleSchema {
-            module: module_id.clone(),
-            message,
-        };
-        check_supported(&manifest.config_schema).map_err(refuse)?;
-        let config_schema = published_config_schema(&module_id, &manifest.config_schema);
-        let capabilities: Vec<&str> = manifest
-            .capabilities
-            .iter()
-            .map(Capability::as_str)
-            .collect();
-        module_properties.insert(
-            module_id.clone(),
-            // A module's entry may be `null` as well: it stands for no override at all.
-            json!({
-                "type": ["object", "null"],
-                "description": manifest.description,
-                "additionalProperties": false,
-                "properties": {
-                    // The parser also reads `"yes"` and the like as a boolean.
-                    "enabled": or_null(json!({
-                        "type": ["boolean", "string"],
-                        "default": manifest.default_enabled
-                    })),
-                    // Repeats are taken as one capability, so they are no mistake.
-                    "capabilities": or_null(json!({
-                        "type": "array",
-                        "items": unit_variant_forms(&json!({ "enum": capabilities }))
-                    })),
-                    "config": config_schema
-                }
-            }),
-        );
-    }
+    let module_properties = module_entries(registry, view)?;
 
     if let Some(Value::Object(properties)) = schema.pointer_mut("/properties") {
         properties.insert(
@@ -111,11 +81,77 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
             })),
         );
     }
+    if view == View::Basic
+        && let Some(Value::Object(properties)) = schema.pointer_mut("/properties")
+    {
+        properties.retain(|key, _| BASIC_KEYS.contains(&key.as_str()) || key == "modules");
+    }
     // The whole document may be `null` too: an empty one.
     if let Value::Object(root) = &mut schema {
         root.insert("type".into(), json!(["object", "null"]));
     }
     Ok(schema)
+}
+
+/// The published entry of each module, keyed by id. The basic view has no capabilities in it, and
+/// only the config a module has basic settings in.
+fn module_entries(
+    registry: &ModuleRegistry,
+    view: View,
+) -> Result<Map<String, Value>, ConfigError> {
+    let mut module_properties = Map::new();
+    for module in registry.iter() {
+        let manifest = module.manifest();
+        let module_id = manifest.id.to_string();
+        let refuse = |message: String| ConfigError::BadModuleSchema {
+            module: module_id.clone(),
+            message,
+        };
+        check_supported(&manifest.config_schema).map_err(refuse)?;
+        let mut properties = Map::new();
+        // The parser also reads `"yes"` and the like as a boolean.
+        properties.insert(
+            "enabled".into(),
+            or_null(json!({
+                "type": ["boolean", "string"],
+                "default": manifest.default_enabled
+            })),
+        );
+        if view == View::Advanced {
+            let capabilities: Vec<&str> = manifest
+                .capabilities
+                .iter()
+                .map(Capability::as_str)
+                .collect();
+            // Repeats are taken as one capability, so they are no mistake.
+            properties.insert(
+                "capabilities".into(),
+                or_null(json!({
+                    "type": "array",
+                    "items": unit_variant_forms(&json!({ "enum": capabilities }))
+                })),
+            );
+        }
+        let config = match view {
+            View::Advanced => Some(published_config_schema(&module_id, &manifest.config_schema)),
+            View::Basic => view::basic_schema(&manifest.config_schema, false)
+                .map(|basic| published_config_schema(&module_id, &basic)),
+        };
+        if let Some(config) = config {
+            properties.insert("config".into(), config);
+        }
+        module_properties.insert(
+            module_id,
+            // A module's entry may be `null` as well: it stands for no override at all.
+            json!({
+                "type": ["object", "null"],
+                "description": manifest.description,
+                "additionalProperties": false,
+                "properties": properties
+            }),
+        );
+    }
+    Ok(module_properties)
 }
 
 /// Where the document wants a number or a boolean, the parser also takes the text of one (`"1"`,
@@ -304,7 +340,31 @@ pub(crate) fn check_supported(schema: &Value) -> Result<(), String> {
             "only JSON Schema draft 2020-12 is supported, not {declared}"
         ));
     }
-    scan(schema, true)
+    scan(schema, true)?;
+    check_levels(schema, false, "")
+}
+
+/// A setting inside a basic one is basic too: the basic view takes a basic node whole, so an
+/// advanced marker below it could not be honoured.
+fn check_levels(schema: &Value, inherited: bool, path: &str) -> Result<(), String> {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let basic = view::marked(schema).unwrap_or(inherited);
+    for (name, child) in properties {
+        let child_path = if path.is_empty() {
+            name.clone()
+        } else {
+            format!("{path}.{name}")
+        };
+        if basic && view::marked(child) == Some(false) {
+            return Err(format!(
+                "`{child_path}` is marked advanced inside a basic setting"
+            ));
+        }
+        check_levels(child, basic, &child_path)?;
+    }
+    Ok(())
 }
 
 /// The widgets a dashboard can draw for a setting.
@@ -329,6 +389,10 @@ fn check_ui_hints(hints: &Value) -> Result<(), String> {
             "group" => text_within(value, 40),
             "help" => text_within(value, 200),
             "order" => value.as_u64().is_some_and(|order| order <= 1000),
+            // Which view a setting belongs to; see the `view` module.
+            "level" => value
+                .as_str()
+                .is_some_and(|level| matches!(level, "basic" | "advanced")),
             _ => false,
         };
         if !valid {
@@ -1736,5 +1800,137 @@ mod tests {
         let config = json!({ "root": over });
         assert!(!compiler_accepts(&registry, &config));
         assert!(validator_of(&registry).is_valid(&document(&config)));
+    }
+
+    /// A module whose basic settings are a top-level key and a nested one under an advanced object.
+    fn layered_registry() -> ModuleRegistry {
+        registry_with(json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer", "x-ui": { "level": "basic" } },
+                "advanced": { "type": "integer" },
+                "outer": {
+                    "type": "object",
+                    "required": ["inner", "other"],
+                    "properties": {
+                        "inner": { "type": "integer", "x-ui": { "level": "basic" } },
+                        "other": { "type": "integer" }
+                    }
+                }
+            },
+            "required": ["limit", "advanced"],
+            "additionalProperties": false
+        }))
+    }
+
+    fn basic_document_schema(registry: &ModuleRegistry) -> Value {
+        document_schema_for(registry, View::Basic).unwrap()
+    }
+
+    #[test]
+    fn the_basic_schema_keeps_the_guild_wide_basic_keys_and_module_switches_only() {
+        let schema = basic_document_schema(&layered_registry());
+        let properties = schema["properties"].as_object().unwrap();
+        for key in [
+            "version",
+            "preset",
+            "language",
+            "log_channel",
+            "moderator_roles",
+            "timezone",
+            "prefix",
+            "success_emoji",
+            "error_emoji",
+            "modules",
+        ] {
+            assert!(properties.contains_key(key), "{key}");
+        }
+        for key in ["limits", "permissions"] {
+            assert!(!properties.contains_key(key), "{key}");
+        }
+        let warn = &schema["properties"]["modules"]["anyOf"][0]["properties"]["warn"]["properties"];
+        assert!(warn["enabled"].is_object(), "{warn}");
+        assert!(warn.get("capabilities").is_none(), "{warn}");
+    }
+
+    #[test]
+    fn the_basic_schema_prunes_module_settings_and_keeps_their_parents() {
+        let schema = basic_document_schema(&layered_registry());
+        let config = &schema["properties"]["modules"]["anyOf"][0]["properties"]["warn"]["properties"]
+            ["config"]["anyOf"][0];
+        let properties = config["properties"].as_object().unwrap();
+        assert!(properties.contains_key("limit"), "{config}");
+        assert!(properties.contains_key("outer"), "{config}");
+        assert!(!properties.contains_key("advanced"), "{config}");
+        // Each property is published as `anyOf` with `null`, so the object is one level down.
+        let outer = &config["properties"]["outer"]["anyOf"][0];
+        assert!(outer["properties"]["inner"].is_object(), "{outer}");
+        assert!(outer["properties"].get("other").is_none(), "{outer}");
+    }
+
+    #[test]
+    fn a_module_without_basic_settings_has_no_config_in_the_basic_schema() {
+        let registry = registry_with(json!({
+            "type": "object",
+            "properties": { "limit": { "type": "integer" } }
+        }));
+        let schema = basic_document_schema(&registry);
+        let warn = &schema["properties"]["modules"]["anyOf"][0]["properties"]["warn"]["properties"];
+        assert!(warn.get("config").is_none(), "{warn}");
+        assert!(warn["enabled"].is_object());
+    }
+
+    #[test]
+    fn the_basic_schema_accepts_a_basic_document_and_refuses_an_advanced_key() {
+        let registry = layered_registry();
+        let validator = jsonschema::validator_for(&basic_document_schema(&registry)).unwrap();
+        let basic = json!({
+            "language": "ja",
+            "modules": { "warn": { "enabled": true, "config": { "limit": 3, "outer": { "inner": 1 } } } }
+        });
+        assert!(validator.is_valid(&basic), "{basic}");
+        assert!(!validator.is_valid(&json!({ "limits": { "concurrency": 2 } })));
+        assert!(!validator.is_valid(&json!({
+            "modules": { "warn": { "config": { "advanced": 1 } } }
+        })));
+        assert!(!validator.is_valid(&json!({
+            "modules": { "warn": { "capabilities": ["send_messages"] } }
+        })));
+    }
+
+    #[test]
+    fn the_advanced_view_is_the_published_schema_as_before() {
+        let registry = layered_registry();
+        assert_eq!(
+            document_schema_for(&registry, View::Advanced).unwrap(),
+            document_schema(&registry).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_marker_must_name_a_level_and_not_undo_a_basic_parent() {
+        for hint in [json!({ "level": "simple" }), json!({ "level": 1 })] {
+            let schema = json!({ "properties": { "a": { "x-ui": hint } } });
+            let error = check_supported(&schema).expect_err(&schema.to_string());
+            assert!(error.contains("x-ui"), "{error}");
+        }
+        let schema = json!({
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "x-ui": { "level": "basic" },
+                    "properties": { "b": { "x-ui": { "level": "advanced" } } }
+                }
+            }
+        });
+        let error = check_supported(&schema).expect_err("an advanced key below a basic one");
+        assert!(error.contains("a.b"), "{error}");
+        check_supported(&json!({
+            "properties": {
+                "a": { "type": "object", "x-ui": { "level": "advanced" },
+                       "properties": { "b": { "x-ui": { "level": "basic" } } } }
+            }
+        }))
+        .unwrap();
     }
 }

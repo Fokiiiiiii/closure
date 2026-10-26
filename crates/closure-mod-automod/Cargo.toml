@@ -14,6 +14,7 @@ closure-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 twilight-model.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 closure-config.workspace = true

@@ -45,8 +45,23 @@ fn warn_module() -> Arc<dyn Module> {
     Arc::new(StubModule(manifest))
 }
 
+/// A module with one basic setting and one advanced list, for the views.
+fn layered_module() -> Arc<dyn Module> {
+    let mut manifest = ModuleManifest::new(ModuleId::new("layered").unwrap(), "layered", "0.1.0");
+    manifest.config_schema = json!({
+        "type": "object",
+        "properties": {
+            "dry_run": { "type": "boolean", "x-ui": { "level": "basic" } },
+            "rules": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+    });
+    manifest.default_config = json!({ "dry_run": false, "rules": [] });
+    Arc::new(StubModule(manifest))
+}
+
 fn app_with(pool: PgPool, gateway: GatewayStatus) -> App {
-    let registry = Arc::new(ModuleRegistry::new(vec![warn_module()]).unwrap());
+    let registry = Arc::new(ModuleRegistry::new(vec![warn_module(), layered_module()]).unwrap());
     let store = Arc::new(SettingsStore::new(ConfigCompiler::new(registry).unwrap()));
     let db = Db::from_pool(pool);
     let state = ApiState::new(
@@ -595,4 +610,255 @@ async fn internal_failures_do_not_leak_details(pool: PgPool) {
         "{}",
         response.text
     );
+}
+
+/// A full document with a basic and an advanced part, saved at revision 1.
+async fn seed_both_parts(app: &App) {
+    let saved = send(
+        &app.router,
+        put(
+            GUILD,
+            "\"0\"",
+            "language: ja\nlimits:\n  concurrency: 12\nmodules:\n  layered:\n    enabled: true\n    config: { dry_run: true, rules: [a] }\n",
+        ),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.text);
+}
+
+fn basic_put(if_match: &str, body: &str) -> Call {
+    call(Method::PUT, "/v1/guilds/42/config?view=basic")
+        .header("if-match", if_match)
+        .body(body)
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn the_basic_read_returns_only_the_basic_part(pool: PgPool) {
+    let app = app(pool).await;
+    seed_both_parts(&app).await;
+    let basic = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/config?view=basic"),
+    )
+    .await;
+    assert_eq!(basic.status, StatusCode::OK, "{}", basic.text);
+    assert_eq!(basic.etag(), "\"1\"");
+    assert_eq!(
+        basic.json(),
+        json!({
+            "language": "ja",
+            "modules": { "layered": { "enabled": true, "config": { "dry_run": true } } }
+        })
+    );
+
+    let full = send(&app.router, call(Method::GET, "/v1/guilds/42/config")).await;
+    assert_eq!(full.json()["limits"]["concurrency"], 12);
+    let unspecified = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/config?view=advanced"),
+    )
+    .await;
+    assert_eq!(unspecified.json(), full.json(), "advanced is the default");
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_basic_write_sets_keeps_and_clears_only_what_it_names(pool: PgPool) {
+    let app = app(pool).await;
+    seed_both_parts(&app).await;
+    let saved = send(
+        &app.router,
+        basic_put(
+            "\"1\"",
+            "preset: large\nlanguage: null\nmodules:\n  layered:\n    config: { dry_run: false }\n",
+        ),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.text);
+    assert_eq!(saved.etag(), "\"2\"");
+
+    let full = send(&app.router, call(Method::GET, "/v1/guilds/42/config")).await;
+    let body = full.json();
+    assert_eq!(body["preset"], "large");
+    assert!(body.get("language").is_none(), "{body}");
+    assert_eq!(
+        body["limits"]["concurrency"], 12,
+        "advanced value untouched"
+    );
+    assert_eq!(
+        body["modules"]["layered"]["enabled"], true,
+        "absent key kept"
+    );
+    assert_eq!(body["modules"]["layered"]["config"]["dry_run"], false);
+    assert_eq!(body["modules"]["layered"]["config"]["rules"], json!(["a"]));
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_basic_write_refuses_an_advanced_key_by_name_and_stores_nothing(pool: PgPool) {
+    let app = app(pool).await;
+    seed_both_parts(&app).await;
+    for (body, path) in [
+        ("limits:\n  concurrency: 2\n", "limits"),
+        (
+            "modules:\n  layered:\n    config: { rules: [x] }\n",
+            "modules.layered.config.rules",
+        ),
+        (
+            "modules:\n  layered:\n    capabilities: [send_messages]\n",
+            "modules.layered.capabilities",
+        ),
+    ] {
+        let response = send(&app.router, basic_put("\"1\"", body)).await;
+        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(response.json()["error"]["code"], "invalid_config");
+        let issues = response.json()["error"]["issues"].clone();
+        assert_eq!(issues[0]["path"], path, "{issues}");
+        assert_eq!(issues[0]["code"], "not_basic");
+    }
+    let stored = app.db.load_config(Id::new(GUILD)).await.unwrap().unwrap();
+    assert_eq!(stored.revision, 1);
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_basic_write_obeys_the_same_revision_rules_as_a_full_one(pool: PgPool) {
+    let app = app(pool).await;
+    seed_both_parts(&app).await;
+    let missing = send(
+        &app.router,
+        call(Method::PUT, "/v1/guilds/42/config?view=basic").body("preset: small"),
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::PRECONDITION_REQUIRED);
+
+    let stale = send(&app.router, basic_put("\"0\"", "preset: small")).await;
+    assert_eq!(stale.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(stale.etag(), "\"1\"");
+    assert_eq!(stale.json()["error"]["code"], "revision_conflict");
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_basic_write_is_recorded_in_the_history_and_the_audit_trail(pool: PgPool) {
+    let app = app(pool).await;
+    seed_both_parts(&app).await;
+    send(&app.router, basic_put("\"1\"", "preset: small\n")).await;
+
+    let history = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/config/history?limit=5"),
+    )
+    .await
+    .json();
+    assert_eq!(history[0]["revision"], 2);
+    assert_eq!(history[0]["document"]["preset"], "small");
+    assert_eq!(history[0]["document"]["limits"]["concurrency"], 12);
+
+    let trail = app.db.recent_audit(Id::new(GUILD), 10).await.unwrap();
+    assert_eq!(
+        trail.iter().filter(|e| e.action == "config.update").count(),
+        2
+    );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn validating_a_basic_document_checks_it_merged_onto_the_stored_one(pool: PgPool) {
+    let app = app(pool).await;
+    seed_both_parts(&app).await;
+    let checked = send(
+        &app.router,
+        call(Method::POST, "/v1/guilds/42/config/validate?view=basic")
+            .body("modules:\n  layered:\n    config: { dry_run: false }\n"),
+    )
+    .await;
+    assert_eq!(checked.status, StatusCode::OK, "{}", checked.text);
+    let config = &checked.json()["effective"]["modules"]["layered"]["config"];
+    assert_eq!(config["dry_run"], false);
+    assert_eq!(
+        config["rules"],
+        json!(["a"]),
+        "the stored advanced value is used"
+    );
+    assert_eq!(
+        app.db
+            .load_config(Id::new(GUILD))
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        1,
+        "nothing stored"
+    );
+
+    let refused = send(
+        &app.router,
+        call(Method::POST, "/v1/guilds/42/config/validate?view=basic")
+            .body("limits: {concurrency: 1}\n"),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn the_schema_of_a_view_only_prunes_the_one_it_is_asked_for(pool: PgPool) {
+    let app = app(pool).await;
+    let basic = send(&app.router, call(Method::GET, "/v1/schema?view=basic")).await;
+    assert_eq!(basic.status, StatusCode::OK, "{}", basic.text);
+    let properties = &basic.json()["properties"];
+    assert!(properties.get("limits").is_none());
+    assert!(properties.get("language").is_some());
+    let layered = &properties["modules"]["anyOf"][0]["properties"]["layered"]["properties"];
+    assert!(layered.get("capabilities").is_none());
+    let config = &layered["config"]["anyOf"][0]["properties"];
+    assert!(config.get("dry_run").is_some(), "{config}");
+    assert!(config.get("rules").is_none(), "{config}");
+
+    let default = send(&app.router, call(Method::GET, "/v1/schema"))
+        .await
+        .json();
+    let advanced = send(&app.router, call(Method::GET, "/v1/schema?view=advanced"))
+        .await
+        .json();
+    assert_eq!(default, advanced);
+    assert!(default["properties"].get("limits").is_some());
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn an_unknown_view_is_a_bad_request_everywhere(pool: PgPool) {
+    let app = app(pool).await;
+    let uris = [
+        (Method::GET, "/v1/schema?view=simple"),
+        (Method::GET, "/v1/guilds/42/config?view=simple"),
+        (Method::GET, "/v1/guilds/42/config/effective?view=simple"),
+        (Method::POST, "/v1/guilds/42/config/validate?view=simple"),
+    ];
+    for (method, uri) in uris {
+        let response = send(&app.router, call(method, uri).body("preset: small")).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(response.json()["error"]["code"], "bad_request", "{uri}");
+    }
+    let write = send(
+        &app.router,
+        call(Method::PUT, "/v1/guilds/42/config?view=simple")
+            .header("if-match", "\"0\"")
+            .body("preset: small"),
+    )
+    .await;
+    assert_eq!(write.status, StatusCode::BAD_REQUEST);
+    assert_eq!(app.db.load_config(Id::new(GUILD)).await.unwrap(), None);
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn the_effective_view_ignores_the_view_parameter(pool: PgPool) {
+    let app = app(pool).await;
+    seed_both_parts(&app).await;
+    let plain = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/config/effective"),
+    )
+    .await;
+    let basic = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/config/effective?view=basic"),
+    )
+    .await;
+    assert_eq!(basic.status, StatusCode::OK);
+    assert_eq!(basic.json(), plain.json());
 }

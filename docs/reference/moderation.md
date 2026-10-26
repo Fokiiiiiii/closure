@@ -213,9 +213,9 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | `require_reason` | boolean | `false` | - | Whether a warning needs a reason. |
 | `templates` | object | `{}` | - | Templates a moderator picks from when a command leaves out the reason or the duration. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
-| `timeout_role` | string or null | `null` | - | The id of the role a timeout gives, when timeout_method is role. |
+| `timeout_role` | string or null | `null` | role | The id of the role a timeout gives, when timeout_method is role. |
 | `voice_mute_method` | string | `"discord"` | - | How a voice mute is given: Discord's voice mute, or a role that is taken off when its time is up. |
-| `voice_mute_role` | string or null | `null` | - | The id of the role a voice mute gives, when voice_mute_method is role. |
+| `voice_mute_role` | string or null | `null` | role | The id of the role a voice mute gives, when voice_mute_method is role. |
 | `warn_expire_days` | integer | `30` | - | After how many days a warning expires. |
 
 Default configuration:

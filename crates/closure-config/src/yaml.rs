@@ -46,6 +46,28 @@ pub fn parse_overrides(yaml: &str) -> Result<GuildOverrides, ConfigError> {
     })
 }
 
+/// Parses a YAML document as plain data, for a patch that is merged into a stored document. The
+/// same size and alias limits apply as to [`parse_overrides`].
+pub(crate) fn parse_value(yaml: &str) -> Result<serde_json::Value, ConfigError> {
+    if yaml.len() > MAX_YAML_BYTES {
+        return Err(ConfigError::TooLarge {
+            size: yaml.len(),
+            limit: MAX_YAML_BYTES,
+        });
+    }
+    if yaml.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_saphyr::from_str_with_options(yaml, options()).map_err(|error| {
+        let location = error.location();
+        ConfigError::Syntax {
+            message: error.to_string(),
+            line: location.map(|location| location.line()),
+            column: location.map(|location| location.column()),
+        }
+    })
+}
+
 /// Writes overrides as YAML, always stamping the schema version so the document stays readable
 /// after the format evolves.
 pub fn overrides_to_yaml(overrides: &GuildOverrides) -> Result<String, ConfigError> {

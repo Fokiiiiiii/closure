@@ -19,6 +19,7 @@ Automatic moderation: rules that check every message, and act on the first one t
 - `schedule`
 - `cases`
 - `send_direct_messages`
+- `message_history`
 
 ## Permissions
 
@@ -51,7 +52,7 @@ Set under `modules.automod.config` in a server's configuration; see [configurati
 | `dm_on_action` | boolean | `true` | - | Whether the member gets a direct message about a punishment. |
 | `dry_run` | boolean | `false` | - | Act on nothing: post what would have happened to the log channel. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
-| `rules` | array | `[]` | - | The rules, each checked on every message; the first one that hits acts. |
+| `rules` | object | `{}` | - | The rules, keyed by id. Each one is checked on every message; the rules are checked in the order of their ids, and the first one that trips acts unless it says to continue. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
 | `timeout_role` | string or null | `null` | - | The id of the role a timeout gives, when timeout_method is role. |
 | `warn_expire_days` | integer | `30` | - | After how many days a warning of a rule expires. |
@@ -62,7 +63,7 @@ Default configuration:
 {
   "dm_on_action": true,
   "dry_run": false,
-  "rules": [],
+  "rules": {},
   "timeout_method": "discord",
   "timeout_role": null,
   "warn_expire_days": 30

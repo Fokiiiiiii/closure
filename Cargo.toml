@@ -40,6 +40,7 @@ jsonschema = { version = "0.60", default-features = false }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 proptest = "1"
+regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 schemars = "1"
 secrecy = "0.10"

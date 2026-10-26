@@ -22,12 +22,13 @@ template language (`closure_sdk::template`); see [writing modules](writing-modul
 | M9d | Direct messages to a user (`Action::SendDirectMessage`), with the refusals Discord gives | warn/ban notices |
 | — | **`moderation` module**: ban, kick, timeout, warn, cases, log (all done: warn, note, cases, log, timeout, kick, ban with timed bans and unban, and escalation of warnings; see [moderation](moderation.md)) | first real module |
 | — | **Moderation, stage 1** (done): embed replies and the `replies` setting for every module, timeouts and voice mutes by Discord or by a role, templates when a reason or duration is left out, undo buttons, a history line, rejoin re-application. Still to come: autocomplete of templates and context-menu commands (M11) | the owner rewrites the moderation commands later; the platform parts stay |
-| — | **Automod skeleton** (done): the `automod` module with the frame its rules run in: nine checks, scope, actions, dry run, notify and `/automod status` (see [automod](automod.md)). Next: the owner specifies the detailed rules; strikes; the message history and cache of M10 | the rules come later, the frame stays |
+| — | **Automod, part 1** (done): triggers (words, regex, links, invites, attachments, caps, repeat, stickers, spam windows), actions (delete, purge, warn, timeout, kick, ban, reply, alert), cooldown, `continue_after_match`, scope with member age, templates, dry run and `/automod status` (see [automod](automod.md)). Next: part 2, the member, role, thread and case events, counters and antiraid levels | the rules are the server's; the frame stays |
 | M10 | Message kit: richer `MessageInfo`, text matching helpers, the content intent: **done** (see [writing modules](writing-modules.md#reading-messages)). Message history: **done** (see [writing modules](writing-modules.md#message-history)). Still to do: optional bounded cache | automod and logging |
 | M11 | Interaction surface: **done** (below; the clearing of expired buttons is not) | convenience for every module |
 | M12 | Events and actions that Discord has and we do not (below) | breadth |
 | M13 | Services: user profile, templates, audit trail for modules, HTTP client, metrics, feature switches | breadth |
 | M14 | Tooling: compile-fail tests for the macro, button expiry, `/permissions explain`; done: docs generator (`cargo run -p closure-xtask -- docs`), module scaffold (`new-module`), x-ui hints | quality |
+| — | Simple and advanced views of the configuration: the API is done (`view=basic` on the schema, the document and validation; see [configuration](configuration.md#simple-and-advanced-views)); the dashboard form that uses it comes later | a route between easy and advanced settings |
 | later | Workflow, module-to-module calls, hot reload (Lua/WASM); real time zones with daylight saving (a server sets a fixed offset for now) | designed, not started |
 
 ## Gaps by area (checked against the code)

@@ -746,21 +746,25 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 365,
-                    "description": "After how many days a warning expires."
+                    "description": "After how many days a warning expires.",
+                    "x-ui": { "level": "basic" }
                 },
                 "dm_on_action": {
                     "type": "boolean",
-                    "description": "Whether the warned member gets a direct message."
+                    "description": "Whether the warned member gets a direct message.",
+                    "x-ui": { "level": "basic" }
                 },
                 "require_reason": {
                     "type": "boolean",
-                    "description": "Whether a warning needs a reason."
+                    "description": "Whether a warning needs a reason.",
+                    "x-ui": { "level": "basic" }
                 },
                 "ban_delete_days": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 7,
-                    "description": "How many days of the messages of a banned member are deleted."
+                    "description": "How many days of the messages of a banned member are deleted.",
+                    "x-ui": { "level": "basic" }
                 },
                 "escalation": {
                     "type": "array",
@@ -792,22 +796,26 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                 "timeout_method": {
                     "type": "string",
                     "enum": ["discord", "role"],
-                    "description": "How a timeout is given: Discord's timeout, or a role that is taken off when its time is up."
+                    "description": "How a timeout is given: Discord's timeout, or a role that is taken off when its time is up.",
+                    "x-ui": { "level": "basic" }
                 },
                 "timeout_role": {
                     "type": ["string", "null"],
                     "pattern": "^[0-9]{1,20}$",
-                    "description": "The id of the role a timeout gives, when timeout_method is role."
+                    "description": "The id of the role a timeout gives, when timeout_method is role.",
+                    "x-ui": { "level": "basic", "widget": "role" }
                 },
                 "voice_mute_method": {
                     "type": "string",
                     "enum": ["discord", "role"],
-                    "description": "How a voice mute is given: Discord's voice mute, or a role that is taken off when its time is up."
+                    "description": "How a voice mute is given: Discord's voice mute, or a role that is taken off when its time is up.",
+                    "x-ui": { "level": "basic" }
                 },
                 "voice_mute_role": {
                     "type": ["string", "null"],
                     "pattern": "^[0-9]{1,20}$",
-                    "description": "The id of the role a voice mute gives, when voice_mute_method is role."
+                    "description": "The id of the role a voice mute gives, when voice_mute_method is role.",
+                    "x-ui": { "level": "basic", "widget": "role" }
                 },
                 "templates": templates::schema()
             },

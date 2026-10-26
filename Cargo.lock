@@ -563,6 +563,7 @@ dependencies = [
  "closure-core",
  "closure-i18n",
  "closure-sdk",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

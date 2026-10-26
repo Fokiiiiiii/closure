@@ -24,6 +24,7 @@ use twilight_http::Client;
 
 use crate::convert;
 use crate::dispatcher::Dispatcher;
+use crate::text_commands;
 
 /// How long a hook may take before the gateway moves on without it.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -500,7 +501,9 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
             ModuleEvent::GuildRemoved { guild_id } => Some(HookJob::Removed { guild: *guild_id }),
             _ => None,
         };
-        context.dispatcher.dispatch(converted);
+        context.dispatcher.dispatch_message(converted, |message| {
+            text_commands::invoker_permissions(&context.cache, message)
+        });
         if let Some(job) = hook {
             context.hooks.push(job);
         }

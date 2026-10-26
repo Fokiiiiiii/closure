@@ -48,18 +48,19 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | Zeppelin | closure |
 | --- | --- |
 | rule record, OR triggers, action map | list of rules, one check each, ordered actions |
-| `cooldown`, `allow_further_rules`, `presets`, `conditions.member_age`, `affects_bots/self` | `scope` (channels, roles, bots, moderators) only; first hit always stops |
-| `match_words` | `words` (contains / whole word); no case, normalize, loose, markdown, embeds, names |
-| `match_links`, `match_invites` | `links`, `invites`: any/allow/block lists; no regex, words, guild or custom-code rules |
-| windowed spam triggers | `flood` (whole minutes); mentions, emoji, repeat are per message. The window library `closure_sdk::recent` exists (groups, distinct counts, take, handled keys); no rule uses it yet |
-| `match_regex`, attachment type, MIME type | not yet (`attachments` counts and extensions) |
+| `cooldown`, `allow_further_rules`, `conditions.member_age`, `affects_bots/self` | `cooldown` (per rule and member), `continue_after_match`, `scope` (channels, roles, bots, moderators, `member_age`). No `presets` |
+| `match_words` | `words`: whole word or contains, case, `normalize`, `strip_markdown`, message or username targets. No loose matching, no embeds |
+| `match_links`, `match_invites` | `links`: any, allowlist, blocklist, subdomains, bare domains, include and exclude regexes. `invites`: allowed and blocked codes. No guild rules |
+| windowed spam triggers | `spam`: messages, mentions, links, attachments, emojis, lines, characters, stickers, duplicates; `within`, `per_channel`, `distinct_channels`, identical-text options, burst handled once. No `distinct_users`, no thread-parent channels |
+| `match_regex`, attachment type, MIME type | `regex` (linear time, size-limited), `attachments` (count, extensions, MIME types with `type/*`) |
 | `role_added`, `role_removed` | available as `RolesChanged` (needs the `GUILD_MEMBERS` intent) |
 | `thread_create`, `thread_archive`, `thread_unarchive`, `thread_delete` | available as `ThreadCreated`, `ThreadArchived`, `ThreadUnarchived`, `ThreadDeleted` |
 | `ban`, `unban`, `kick`, `warn`, `mute`, `unmute` | available as `CaseCreated` for the cases the moderation modules record (`timeout` and `untimeout` stand for mute and unmute); `note` is not recorded yet |
 | `member_join`, `member_leave`, `member_join_spam`, counter and antiraid triggers | not yet |
-| 19 actions | `delete`, `warn`, `timeout`, `kick`, `ban`, `notify` |
+| 19 actions | `delete`, `purge`, `warn`, `timeout`, `kick`, `ban`, `reply` (with `auto_delete`), `alert`. Templates with `{user}`, `{rule}`, `{detail}` and more. No roles, nicknames, threads, counters |
 | counters | `closure_sdk::counters` (values per scope, lazy decay, triggers and reverses, compare-and-set writes); no module uses it yet. Antiraid levels: not yet |
 | message history for spam, `clean`, logs | available as the `message_history` capability: messages kept for `--message-history-days` (7 by default), with edits and deletions (see [writing modules](writing-modules.md#message-history)) |
 | `Logs` event log | ModLog of cases only |
 | Mutes / ModActions / Warnings message templates | fixed texts; `{user}` `{moderator}` `{server}` in templates. `closure_sdk::template` has `{name}` and `{a.b}` only, with no functions (Zeppelin's `if`, `plural`, `round`... are not ported) |
 | config overrides | closure-config has overrides |
+| text commands with a prefix (`!warn @user spam`) | `prefix` per guild; the words fill the options of the slash command of the same name, which runs with the same handler and checks (see [text commands](writing-modules.md#text-commands)) |

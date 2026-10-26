@@ -353,9 +353,29 @@ its form. The bot checks its shape at start-up and accepts no other keys in it:
 
 - `widget`: one of `role`, `channel`, `duration`, `textarea` or `user`;
 - `group` (at most 40 characters) and `help` (at most 200): text for the form;
-- `order`: an integer from 0 to 1000.
+- `order`: an integer from 0 to 1000;
+- `level`: `basic` or `advanced`, which view the setting belongs to (see below).
 
 Other `x-` keywords are passed on unchanged. The module reference in `docs/reference` shows the widget.
+
+### Simple and advanced settings (`x-ui.level`)
+
+A module marks the few settings a simple form should show with `"level": "basic"`:
+
+```json
+"timeout_role": { "type": ["string", "null"], "x-ui": { "level": "basic", "widget": "role" } }
+```
+
+- A setting without a level is advanced. A setting under a basic one is basic too, and a basic
+  setting may not have an advanced one below it (the bot refuses that at start-up).
+- Only properties written inline under `properties` are looked at. A property that is a `$ref` is
+  one setting as a whole, and a marker inside a definition under `$defs` is not read.
+- The guild-wide keys (`language`, `timezone`, `prefix`, `preset` and the others in
+  `closure_config::BASIC_KEYS`) and each module's `enabled` switch are basic without a marker.
+- Keep a marked setting a simple, scalar choice that a form can show alone. Templates, escalation
+  rules and similar lists stay advanced.
+
+The API serves both views (see [configuration](configuration.md#simple-and-advanced-views)).
 
 ## 2. Handle events
 
@@ -586,6 +606,38 @@ Besides moderation, a module's `ApiClient` can do the following. Each call needs
 - Webhooks: create, list, delete [`manage_webhooks`]; post through one [`send_messages`]. A webhook token is redacted from debug output.
 - Members and guild: search and list members [`read_guild`]; prune [`kick_members`]; edit the guild [`manage_guild`]; reorder roles [`manage_roles`] or channels [`manage_channels`]; open a direct message channel [`send_direct_messages`].
 - Scheduled events: list [`read_guild`]; create, edit, delete [`manage_events`]. Emoji: list [`read_guild`]; create, delete [`manage_emojis`].
+
+## Text commands
+
+A message that starts with the guild's `prefix` (see [configuration](configuration.md)) runs the
+slash command of the same name, with the same handler, checks, cooldowns and limits. Nothing is
+registered for it: a module needs no extra code.
+
+- **Syntax.** `!warn @user spam`: the prefix, the command name (case-insensitive), then the words.
+  A subcommand or group is named by the next one or two words: `!automod rule add name`.
+- **Options** take the words in their declared order. A user, role, channel or mentionable is written
+  as a mention (`<@5>`, `<@!5>`, `<@&9>`, `<#7>`) or as a bare id. Integers, numbers and booleans
+  (`true`, `yes`, `on`, `1` and their negatives) are parsed by kind. Choices, ranges and lengths are
+  enforced; a choice is given to the handler in its own spelling, whatever the case typed.
+- **Quotes** keep spaces inside one value: `!timeout @user "2 hours" being rude`. A backslash takes
+  the next character literally. A quote that is never closed runs to the end of the line.
+- **Rest of the line.** The last option of a command, when it is a string and not quoted, takes
+  everything that is left, verbatim: `!warn @user being rude` gives the reason `being rude`. So a
+  duration or span with spaces needs quotes unless it is the last option.
+- **Attachments** come with the message, in order; a text command takes no words for them.
+- **Usage.** Words that do not fit (a missing required option, a bad value, extra words) are answered
+  with a short usage line such as `Usage: !warn <user> [reason]`, in the guild's language, and nothing
+  runs. A command word that names no enabled command is ignored: the message is just chat.
+- **Replies.** A reply is sent as a reply to the message that asked, with no mentions. `defer` sends
+  nothing, and the first `edit_response` sends the reply; later edits change it (for 15 minutes).
+  An `ephemeral` reply cannot be private in a channel: it is deleted after 30 seconds.
+- **Forms.** A modal cannot be shown to a text command. The module gets its answer, and the author is
+  told in the guild's language to use the slash command.
+- **What the host does not know.** The invoker's permissions are computed from the cache: the owner
+  and administrators are known, and channel overwrites are applied, but the roles come from the
+  message, so a message without member data counts as holding only `@everyone`. A thread is judged by
+  its own overwrites, not its parent's. Text commands read the message content, which needs the
+  `MESSAGE_CONTENT` intent; automod declares it, so it is requested whenever automod is loaded.
 
 ## Later: scripts
 

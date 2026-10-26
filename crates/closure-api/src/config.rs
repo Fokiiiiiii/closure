@@ -3,7 +3,10 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use closure_config::{GuildOverrides, effective_to_yaml, overrides_to_yaml, parse_overrides};
+use closure_config::{
+    GuildOverrides, View, basic_view, effective_to_yaml, merge_basic, overrides_to_yaml,
+    parse_overrides,
+};
 use closure_core::event::GuildId;
 use closure_db::AuditEvent;
 use serde::{Deserialize, Serialize};
@@ -79,22 +82,51 @@ fn expected_revision(headers: &HeaderMap) -> Result<Option<i64>, ApiError> {
     Ok((revision > 0).then_some(revision))
 }
 
+/// The `view` query parameter: which settings a read shows or a write takes.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ViewQuery {
+    view: Option<String>,
+}
+
+/// Advanced unless asked otherwise, so a request that names no view behaves as it always did.
+pub(crate) fn view_of(query: &ViewQuery) -> Result<View, ApiError> {
+    match query.view.as_deref() {
+        None => Ok(View::Advanced),
+        Some(name) => View::parse(name)
+            .ok_or_else(|| ApiError::BadRequest("view must be `basic` or `advanced`".into())),
+    }
+}
+
 /// Documents may be sent as YAML or JSON (JSON is YAML), whatever the content type says.
+fn body_text(body: &Bytes) -> Result<&str, ApiError> {
+    std::str::from_utf8(body)
+        .map_err(|_| ApiError::BadRequest("the body must be UTF-8 text".into()))
+}
+
 fn parse_body(body: &Bytes) -> Result<GuildOverrides, ApiError> {
-    let text = std::str::from_utf8(body)
-        .map_err(|_| ApiError::BadRequest("the body must be UTF-8 text".into()))?;
-    Ok(parse_overrides(text)?)
+    Ok(parse_overrides(body_text(body)?)?)
+}
+
+/// The stored document and its revision; a guild without one is the empty document at revision 0.
+async fn stored(state: &ApiState, guild: GuildId) -> Result<(i64, GuildOverrides), ApiError> {
+    Ok(match state.inner.db.load_config(guild).await? {
+        Some(stored) => (stored.revision, stored.overrides),
+        None => (0, GuildOverrides::default()),
+    })
 }
 
 pub(crate) async fn get_config(
     State(state): State<ApiState>,
     Path(guild): Path<u64>,
+    Query(query): Query<ViewQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let guild = guild_id(guild)?;
-    let (revision, overrides) = match state.inner.db.load_config(guild).await? {
-        Some(stored) => (stored.revision, stored.overrides),
-        None => (0, GuildOverrides::default()),
+    let view = view_of(&query)?;
+    let (revision, overrides) = stored(&state, guild).await?;
+    let overrides = match view {
+        View::Advanced => overrides,
+        View::Basic => basic_view(&overrides, state.inner.settings.compiler().registry())?,
     };
     let response = match negotiate(&headers) {
         Format::Yaml => yaml_response(overrides_to_yaml(&overrides)?),
@@ -106,12 +138,38 @@ pub(crate) async fn get_config(
 pub(crate) async fn put_config(
     State(state): State<ApiState>,
     Path(guild): Path<u64>,
+    Query(query): Query<ViewQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let guild = guild_id(guild)?;
+    let view = view_of(&query)?;
     let expected = expected_revision(&headers)?;
-    let overrides = parse_body(&body)?;
+    let overrides = match view {
+        View::Advanced => parse_body(&body)?,
+        View::Basic => {
+            // The patch applies to the revision the client edited, or it is a stale edit.
+            let (revision, current) = stored(&state, guild).await?;
+            if revision != expected.unwrap_or(0) {
+                return Err(ApiError::PreconditionFailed { current: revision });
+            }
+            merge_basic(
+                &current,
+                body_text(&body)?,
+                state.inner.settings.compiler().registry(),
+            )?
+        }
+    };
+    save(&state, guild, expected, overrides).await
+}
+
+/// The write both views share: validate, check the server, store, install and audit.
+async fn save(
+    state: &ApiState,
+    guild: GuildId,
+    expected: Option<i64>,
+    overrides: GuildOverrides,
+) -> Result<Response, ApiError> {
     // Validate before touching the database: an invalid document must never be stored.
     let settings = state.inner.settings.compiler().compile(&overrides)?;
     // Only servers the bot is in can be configured; this keeps stray ids out of the database.
@@ -149,15 +207,23 @@ pub(crate) async fn put_config(
 pub(crate) async fn validate(
     State(state): State<ApiState>,
     Path(guild): Path<u64>,
+    Query(query): Query<ViewQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    guild_id(guild)?;
-    let settings = state
-        .inner
-        .settings
-        .compiler()
-        .compile(&parse_body(&body)?)?;
+    let guild = guild_id(guild)?;
+    let overrides = match view_of(&query)? {
+        View::Advanced => parse_body(&body)?,
+        View::Basic => {
+            let (_, current) = stored(&state, guild).await?;
+            merge_basic(
+                &current,
+                body_text(&body)?,
+                state.inner.settings.compiler().registry(),
+            )?
+        }
+    };
+    let settings = state.inner.settings.compiler().compile(&overrides)?;
     Ok(match negotiate(&headers) {
         Format::Yaml => yaml_response(effective_to_yaml(&settings.effective)?),
         Format::Json => {
@@ -170,13 +236,13 @@ pub(crate) async fn validate(
 pub(crate) async fn effective(
     State(state): State<ApiState>,
     Path(guild): Path<u64>,
+    Query(query): Query<ViewQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let guild = guild_id(guild)?;
-    let (revision, overrides) = match state.inner.db.load_config(guild).await? {
-        Some(stored) => (stored.revision, stored.overrides),
-        None => (0, GuildOverrides::default()),
-    };
+    // Checked, then ignored: the complete configuration is the same in both views.
+    view_of(&query)?;
+    let (revision, overrides) = stored(&state, guild).await?;
     let settings = state.inner.settings.compiler().compile(&overrides)?;
     let response = match negotiate(&headers) {
         Format::Yaml => yaml_response(effective_to_yaml(&settings.effective)?),

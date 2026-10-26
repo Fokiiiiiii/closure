@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+use crate::config::{ViewQuery, view_of};
 use crate::error::ApiError;
 use crate::{ApiState, GatewayStatus};
 
@@ -48,10 +49,13 @@ pub(crate) async fn metrics(State(state): State<ApiState>) -> Response {
     response
 }
 
-/// The JSON Schema of the configuration document, including every module's own section.
+/// The JSON Schema of the configuration document, including every module's own section. With
+/// `?view=basic` only the simple settings are in it.
 pub(crate) async fn schema(
     State(state): State<ApiState>,
+    Query(query): Query<ViewQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let view = view_of(&query)?;
     let registry = state.inner.settings.compiler().registry();
-    Ok(Json(closure_config::document_schema(registry)?))
+    Ok(Json(closure_config::document_schema_for(registry, view)?))
 }

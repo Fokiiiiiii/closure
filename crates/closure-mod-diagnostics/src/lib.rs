@@ -183,7 +183,8 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                     "properties": {
                         "ephemeral": {
                             "type": "boolean",
-                            "description": "Only show replies to the person who ran the command."
+                            "description": "Only show replies to the person who ran the command.",
+                            "x-ui": { "level": "basic" }
                         }
                     },
                     "additionalProperties": false

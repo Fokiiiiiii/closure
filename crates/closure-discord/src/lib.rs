@@ -16,6 +16,7 @@ mod error;
 mod gateway;
 pub mod hierarchy;
 mod jobs;
+mod text_commands;
 
 pub use api::{RetryPolicy, TwilightApi, joined_guilds};
 pub use breaker::BreakerConfig;

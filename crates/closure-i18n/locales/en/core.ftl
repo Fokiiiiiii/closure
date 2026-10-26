@@ -81,3 +81,5 @@ sdk-expired = This has expired, use the command again.
 span-not-understood = Unknown time (e.g. 1h, tomorrow 18:00).
 span-past = That time has passed ({ $zone }).
 span-too-far = More than ten years away ({ $zone }).
+text-command-usage = Usage: { $usage }
+text-command-forms = Forms are not available for text commands. Use the slash command instead.

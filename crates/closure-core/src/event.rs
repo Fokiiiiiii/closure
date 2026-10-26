@@ -161,7 +161,30 @@ impl InteractionToken {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// The token of a text command. Discord never issued it: the reply goes to the invoking
+    /// message instead. Discord tokens contain no `:`, so the two cannot be confused.
+    #[must_use]
+    pub fn for_text_command(channel: ChannelId, message: MessageId) -> Self {
+        Self(format!(
+            "{TEXT_COMMAND_PREFIX}{}:{}",
+            channel.get(),
+            message.get()
+        ))
+    }
+
+    /// The channel and the invoking message, when this is the token of a text command.
+    #[must_use]
+    pub fn text_command_message(&self) -> Option<(ChannelId, MessageId)> {
+        let (channel, message) = self.0.strip_prefix(TEXT_COMMAND_PREFIX)?.split_once(':')?;
+        Some((
+            Id::new_checked(channel.parse().ok()?)?,
+            Id::new_checked(message.parse().ok()?)?,
+        ))
+    }
 }
+
+const TEXT_COMMAND_PREFIX: &str = "message:";
 
 impl fmt::Debug for InteractionToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -865,6 +888,28 @@ mod tests {
         assert_eq!(event.guild_id(), Id::new(1));
         assert_eq!(event.channel_id(), None);
         assert_eq!(EventKind::CaseCreated.required_intents(), Intents::empty());
+    }
+
+    #[test]
+    fn a_text_command_token_names_its_message_and_nothing_else_does() {
+        let token = InteractionToken::for_text_command(Id::new(3), Id::new(44));
+        assert_eq!(
+            token.text_command_message(),
+            Some((Id::new(3), Id::new(44)))
+        );
+        for forged in [
+            "message:0:44",
+            "message:3",
+            "message:x:4",
+            "message:3:4:5",
+            "tok",
+        ] {
+            assert_eq!(
+                InteractionToken::new(forged).text_command_message(),
+                None,
+                "{forged}"
+            );
+        }
     }
 
     #[test]

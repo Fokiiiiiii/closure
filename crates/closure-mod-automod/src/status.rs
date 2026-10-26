@@ -4,9 +4,7 @@
 use closure_sdk::embed::{Color, EmbedBuilder, truncate};
 use closure_sdk::{Args, CommandCx, InteractionReply, UserError};
 
-use crate::actions::action_key;
-use crate::checks::kind_key;
-use crate::config::{Config, Entry, Problem, Rule, parse_rules};
+use crate::config::{Config, Entry, Problem, Rule, action_key, parse_rules, trigger_key};
 
 /// An embed's description holds at most 4096 characters; a little is kept back.
 const DESCRIPTION_CHARS: usize = 3_900;
@@ -83,12 +81,28 @@ pub async fn status(cx: CommandCx, (): ()) -> Result<(), UserError> {
 }
 
 fn rule_line(cx: &CommandCx, rule: &Rule) -> String {
+    let triggers = rule
+        .triggers
+        .iter()
+        .map(|trigger| cx.t(trigger_key(trigger), &Args::new()))
+        .collect::<Vec<_>>()
+        .join(", ");
     let actions = rule
         .actions
         .iter()
         .map(|action| cx.t(action_key(action), &Args::new()))
         .collect::<Vec<_>>()
         .join(", ");
+    let cooldown = match rule.cooldown {
+        Some(cooldown) => format!(
+            " {}",
+            cx.t(
+                "status-cooldown",
+                &Args::new().with("time", cx.format_duration(cooldown)),
+            )
+        ),
+        None => String::new(),
+    };
     let key = if rule.enabled {
         "status-rule"
     } else {
@@ -99,8 +113,9 @@ fn rule_line(cx: &CommandCx, rule: &Rule) -> String {
         &Args::new()
             .with("id", rule.id.as_str())
             .with("name", rule.name.as_str())
-            .with("check", cx.t(kind_key(&rule.check), &Args::new()))
-            .with("actions", actions),
+            .with("triggers", triggers)
+            .with("actions", actions)
+            .with("cooldown", cooldown),
     )
 }
 

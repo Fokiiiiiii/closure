@@ -1468,6 +1468,15 @@ impl Action {
             | Self::AddThreadMember { thread_id, .. }
             | Self::RemoveThreadMember { thread_id, .. }
             | Self::ListThreadMembers { thread_id, .. } => vec![*thread_id],
+            // A text command's reply goes into the channel of its message: that channel must be
+            // in the guild, like any other target.
+            Self::Respond { token, .. }
+            | Self::Followup { token, .. }
+            | Self::EditResponse { token, .. } => token
+                .text_command_message()
+                .map(|(channel, _)| channel)
+                .into_iter()
+                .collect(),
             Self::SendMessage { channel_id, .. }
             | Self::EditMessage { channel_id, .. }
             | Self::GetMessage { channel_id, .. }
@@ -1523,9 +1532,6 @@ impl Action {
             | Self::DeleteAutoModRule { .. }
             | Self::GetAuditLog { .. }
             | Self::SendDirectMessage { .. }
-            | Self::Respond { .. }
-            | Self::Followup { .. }
-            | Self::EditResponse { .. }
             | Self::SetVoiceDeafen { .. }
             | Self::DisconnectMember { .. }
             | Self::ListInvites { .. }

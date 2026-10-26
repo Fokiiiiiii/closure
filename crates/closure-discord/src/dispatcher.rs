@@ -21,13 +21,14 @@ use closure_core::cases::{Case, CaseBackend, CaseError, Cases, MemoryCases, NewC
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
 use closure_core::event::{
-    AutocompleteInvocation, ContextTarget, Event, GuildId, InteractionRef, UserId,
+    AutocompleteInvocation, CommandInvocation, ContextTarget, Event, GuildId, InteractionRef,
+    MessageInfo, UserId,
 };
 use closure_core::history::{HistoryBackend, MemoryHistory, MessageHistory};
 use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::{Args, Locale, Translator};
-use closure_core::module::{ContextKind, EventContext, Module, ModuleId};
+use closure_core::module::{CommandSpec, ContextKind, EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
 use closure_core::schedule::{MemoryScheduler, ScheduledJob, Scheduler, SchedulerBackend};
 use closure_core::settings::{ModuleSettings, SettingsProvider};
@@ -43,8 +44,11 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use twilight_model::guild::Permissions;
+use twilight_model::id::Id;
 
 use crate::breaker::{Breaker, BreakerConfig, Ticket};
+use crate::text_commands::{Reader, Reading, TextCommandApi};
 
 /// How long `shutdown` waits for lanes to stop once they were told to abort.
 const HARD_STOP_WAIT: Duration = Duration::from_secs(2);
@@ -434,6 +438,12 @@ impl Dispatcher {
         }
 
         let interactions = Arc::new(InteractionGuilds::with_limits(config.interaction_limits));
+        let api: Arc<dyn DiscordApi> = Arc::new(TextCommandApi::new(
+            api,
+            Arc::clone(&interactions),
+            Arc::clone(&settings),
+            Arc::clone(&translator),
+        ));
         // The case backend needs the shared state it is part of, so it holds a weak reference.
         let shared = Arc::new_cyclic(|weak| Shared {
             registry,
@@ -465,6 +475,78 @@ impl Dispatcher {
     /// waiting or running, the event is dropped and counted.
     pub fn dispatch(&self, event: Event) {
         self.enqueue(event, None);
+    }
+
+    /// [`Self::dispatch`], and a message that is a text command also runs as that command (see
+    /// [`crate::text_commands`]). `permissions` is asked for only when a command runs.
+    pub fn dispatch_message(
+        &self,
+        event: Event,
+        permissions: impl FnOnce(&MessageInfo) -> Permissions,
+    ) {
+        let reading = match &event {
+            Event::MessageCreated(message) => self.read_text_command(message, permissions),
+            _ => Reading::Ignore,
+        };
+        self.enqueue(event, None);
+        match reading {
+            Reading::Ignore => {}
+            Reading::Run(invocation) => {
+                self.enqueue(Event::Command(invocation), None);
+            }
+            Reading::Usage { invocation, text } => self.answer_usage(invocation, text),
+        }
+    }
+
+    fn read_text_command(
+        &self,
+        message: &MessageInfo,
+        permissions: impl FnOnce(&MessageInfo) -> Permissions,
+    ) -> Reading {
+        // The application a text command runs as is the bot; without its id, nothing runs.
+        let Some(bot) = self.shared.config.bot_id else {
+            return Reading::Ignore;
+        };
+        let guild = message.guild_id;
+        let policy = self.shared.settings.policy(guild);
+        let Some(prefix) = policy.prefix.as_deref() else {
+            return Reading::Ignore;
+        };
+        if !message.content.starts_with(prefix) {
+            return Reading::Ignore;
+        }
+        let commands: Vec<&CommandSpec> = self
+            .shared
+            .registry
+            .commands()
+            .filter(|(module, _)| {
+                self.shared
+                    .settings
+                    .module(guild, module)
+                    .is_some_and(|settings| settings.enabled)
+            })
+            .map(|(_, spec)| spec)
+            .collect();
+        Reader {
+            prefix,
+            application: Id::new(bot.get()),
+            locale: self.shared.settings.locale(guild),
+            commands: &commands,
+            translator: self.shared.translator.as_ref(),
+        }
+        .read(message, permissions)
+    }
+
+    /// Says what a text command should have looked like. The answer is ephemeral, so it does not
+    /// stay in the channel.
+    fn answer_usage(&self, invocation: CommandInvocation, text: String) {
+        if self.shared.closing.load(Ordering::Acquire) {
+            return;
+        }
+        let shared = Arc::clone(&self.shared);
+        self.shared.tracker.spawn(async move {
+            reply(&shared, &invocation, text).await;
+        });
     }
 
     /// Hands a due job to its module and says how it went. The job takes the same way an event
@@ -1174,8 +1256,13 @@ async fn reply(shared: &Shared, invocation: &dyn InteractionRef, message: String
             Ok(())
         }
     };
+    // A text command's reply is refused in a channel the bot may not write to: nothing to act on.
+    let text_command = invocation.token().text_command_message().is_some();
     match tokio::time::timeout(REPLY_TIMEOUT, attempt).await {
         Ok(Ok(())) => {}
+        Ok(Err(error)) if text_command => {
+            tracing::debug!(%error, "could not reply to a text command");
+        }
         Ok(Err(error)) => tracing::warn!(%error, "could not tell the user a command failed"),
         Err(_) => tracing::warn!("timed out telling the user a command failed"),
     }

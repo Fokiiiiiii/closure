@@ -69,3 +69,5 @@ sdk-expired = 期限が切れました。コマンドをもう一度使ってく
 span-not-understood = 理解できない期間です（例: 1h, 明日 18:00）。
 span-past = その日時は過去です（{ $zone }）。
 span-too-far = 10年より先の日時です（{ $zone }）。
+text-command-usage = 使い方: { $usage }
+text-command-forms = テキストコマンドではフォームを使えません。スラッシュコマンドを使ってください。

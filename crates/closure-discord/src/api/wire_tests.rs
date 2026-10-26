@@ -938,6 +938,125 @@ fn method_paths(discord: &FakeDiscord) -> Vec<String> {
         .collect()
 }
 
+/// The token of a text command sent in channel 1 by message 44.
+fn text_token() -> InteractionToken {
+    InteractionToken::for_text_command(Id::new(1), Id::new(44))
+}
+
+fn text_reply(content: &str) -> closure_core::action::InteractionReply {
+    closure_core::action::InteractionReply {
+        content: Some(content.into()),
+        ..closure_core::action::InteractionReply::default()
+    }
+}
+
+#[tokio::test]
+async fn a_text_command_reply_replies_to_the_invoker_and_pings_nobody() {
+    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON)]).await;
+    discord
+        .api()
+        .execute(Action::Respond {
+            interaction_id: Id::new(44),
+            token: text_token(),
+            response: InteractionResponse::Message {
+                reply: text_reply("<@5> <@&9> @everyone"),
+            },
+        })
+        .await
+        .unwrap();
+    let request = &discord.requests()[0];
+    assert_eq!(request.method, "POST");
+    assert!(
+        request.path.ends_with("/channels/1/messages"),
+        "{}",
+        request.path
+    );
+    let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["content"], "<@5> <@&9> @everyone");
+    assert_eq!(body["message_reference"]["message_id"], "44");
+    assert_eq!(body["message_reference"]["fail_if_not_exists"], false);
+    assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
+    // Left out when false, which is Discord's default for the replied-to author.
+    assert_ne!(body["allowed_mentions"]["replied_user"], true);
+}
+
+#[tokio::test]
+async fn a_deferred_text_command_is_sent_by_its_first_edit_and_edited_after_that() {
+    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON)]).await;
+    let api = discord.api();
+    api.execute(Action::Respond {
+        interaction_id: Id::new(44),
+        token: text_token(),
+        response: InteractionResponse::Defer { ephemeral: false },
+    })
+    .await
+    .unwrap();
+    assert!(discord.requests().is_empty(), "a deferral sends nothing");
+
+    for content in ["first", "second"] {
+        api.execute(Action::EditResponse {
+            token: text_token(),
+            reply: text_reply(content),
+        })
+        .await
+        .unwrap();
+    }
+    let requests = discord.requests();
+    let methods: Vec<&str> = requests
+        .iter()
+        .map(|request| request.method.as_str())
+        .collect();
+    assert_eq!(methods, ["POST", "PATCH"]);
+    assert!(
+        requests[1].path.ends_with("/channels/1/messages/5"),
+        "{}",
+        requests[1].path
+    );
+    let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(body["content"], "second");
+}
+
+#[tokio::test]
+async fn an_ephemeral_text_command_reply_is_deleted_after_its_lifetime() {
+    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (204, "")]).await;
+    let mut api = discord.api();
+    api.text.ephemeral_lifetime = Duration::from_millis(20);
+    api.execute(Action::Respond {
+        interaction_id: Id::new(44),
+        token: text_token(),
+        response: InteractionResponse::Message {
+            reply: closure_core::action::InteractionReply {
+                ephemeral: true,
+                ..text_reply("only you")
+            },
+        },
+    })
+    .await
+    .unwrap();
+
+    // The deletion runs on its own task; wait for it, with a bound.
+    for _ in 0..500 {
+        if discord
+            .requests()
+            .iter()
+            .any(|request| request.method == "DELETE")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let requests = discord.requests();
+    let deletion = requests
+        .iter()
+        .find(|request| request.method == "DELETE")
+        .expect("the ephemeral reply is deleted");
+    assert!(
+        deletion.path.ends_with("/channels/1/messages/5"),
+        "{}",
+        deletion.path
+    );
+}
+
 #[tokio::test]
 async fn messages_are_read_one_by_one_and_as_history_from_a_cursor() {
     let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (200, "[]")]).await;

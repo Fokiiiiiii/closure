@@ -79,6 +79,8 @@ pub struct TwilightApi {
     /// Lookups of a channel's guild that are under way, so concurrent first lookups of one
     /// channel make one request.
     lookups: Mutex<HashMap<ChannelId, LookupCell>>,
+    /// What the bot said in reply to text commands.
+    text: interactions::TextReplies,
 }
 
 /// How many channel-to-guild answers from Discord are remembered.
@@ -104,6 +106,7 @@ impl TwilightApi {
             clock: Arc::new(system_clock),
             known_channels: Mutex::new(HashMap::new()),
             lookups: Mutex::new(HashMap::new()),
+            text: interactions::TextReplies::default(),
         }
     }
 

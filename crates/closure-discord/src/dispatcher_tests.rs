@@ -8,19 +8,24 @@ use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{
-    ChannelId, CommandInvocation, Event, EventKind, InteractionToken, MessageInfo, UserInfo,
+    ChannelId, CommandInvocation, CommandOption, CommandOptionValue, Event, EventKind,
+    InteractionToken, MessageInfo, UserInfo,
 };
 use closure_core::history::{HistoryBackend, MemoryHistory, SavedMessage};
 use closure_core::interaction::InteractionGuilds;
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Locale;
-use closure_core::module::{CommandSpec, EventContext, Module, ModuleId, ModuleManifest};
+use closure_core::module::{
+    CommandSpec, EventContext, Module, ModuleId, ModuleManifest, OptionKind, OptionSpec,
+};
 use closure_core::settings::{GuildPolicy, RuntimeLimits, SettingsProvider};
 use closure_core::subscription::Subscription;
 use closure_core::testing::{MockApi, StaticSettings};
 use closure_i18n::TranslatorBuilder;
 use serde_json::json;
 use tokio::sync::{Barrier, Semaphore};
+use twilight_model::channel::message::Component;
+use twilight_model::channel::message::component::{ActionRow, TextInput, TextInputStyle};
 use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 
@@ -69,6 +74,12 @@ enum Behavior {
     RecordCaseOnMessage,
     /// Logs the content of the kept message it was told about, or why it cannot read it.
     ReadHistoryOfMessage,
+    /// Logs the command, subcommand and options of a command it gets.
+    LogCommand,
+    /// Asks for a form in answer to the command.
+    AskForForm,
+    /// Answers the command with a message and logs whether Discord took the answer.
+    AnswerCommand,
 }
 
 struct Probe {
@@ -382,6 +393,58 @@ impl Module for Probe {
                     Err(error) => format!("history:error:{error}"),
                 };
                 self.log.lock().unwrap().push(line);
+                Ok(())
+            }
+            Behavior::LogCommand => {
+                if let Event::Command(invocation) = event {
+                    self.log.lock().unwrap().push(format!(
+                        "command:{}:{:?}:{:?}",
+                        invocation.command, invocation.subcommand, invocation.options
+                    ));
+                }
+                Ok(())
+            }
+            Behavior::AskForForm => {
+                let Event::Command(invocation) = event else {
+                    return Ok(());
+                };
+                // `label` is deprecated, but a text input has to be built with it.
+                #[allow(deprecated)]
+                let input = Component::ActionRow(ActionRow {
+                    id: None,
+                    components: vec![Component::TextInput(TextInput {
+                        id: None,
+                        custom_id: "warn:reason".into(),
+                        label: None,
+                        max_length: None,
+                        min_length: None,
+                        placeholder: None,
+                        required: None,
+                        style: TextInputStyle::Short,
+                        value: None,
+                    })],
+                });
+                let spec = closure_core::action::ModalSpec {
+                    custom_id: "warn:form".into(),
+                    title: "Warn".into(),
+                    components: vec![input],
+                };
+                Ok(ctx.api.modal(invocation, spec).await?)
+            }
+            Behavior::AnswerCommand => {
+                let Event::Command(invocation) = event else {
+                    return Ok(());
+                };
+                let reply = InteractionReply {
+                    content: Some("done".into()),
+                    ..InteractionReply::default()
+                };
+                let outcome = match ctx.api.respond(invocation, reply).await {
+                    Ok(()) => "ok",
+                    Err(DiscordError::Forbidden(_)) => "forbidden",
+                    Err(_) => "other",
+                };
+                self.log.lock().unwrap().push(format!("answered:{outcome}"));
                 Ok(())
             }
             Behavior::ReadPolicy => {
@@ -2040,6 +2103,278 @@ async fn a_client_kept_from_one_guild_cannot_answer_an_interaction_of_another() 
         ["load", "msg:1", "command", "plain:true forged:true"]
     );
     assert_eq!(h.api.actions(), [], "nothing was sent to Discord");
+}
+
+/// A message of the guild in channel 3 by user 7, with `content`.
+fn text_message(id: u64, content: &str) -> Event {
+    let Event::MessageCreated(mut info) = message(3, id) else {
+        unreachable!("`message` makes a message");
+    };
+    info.content = content.into();
+    Event::MessageCreated(info)
+}
+
+/// A module that listens to messages and owns the `warn` command: a user, then a reason.
+fn warn_module(behavior: Behavior) -> Arc<Probe> {
+    let mut module = Probe::new(
+        "warn",
+        &[EventKind::MessageCreated],
+        &[Capability::RespondToInteractions],
+    );
+    Arc::get_mut(&mut module)
+        .unwrap()
+        .manifest
+        .commands
+        .push(CommandSpec {
+            name: "warn".into(),
+            description: "d".into(),
+            options: vec![
+                OptionSpec::new("user", "d", OptionKind::User).required(),
+                OptionSpec::new("reason", "d", OptionKind::String),
+            ],
+            subcommands: vec![],
+            default_member_permissions: None,
+        });
+    module.set(behavior);
+    module
+}
+
+/// [`harness`] for text commands: the guild's prefix (`None` turns them off), its language, and
+/// the bot's id, which text commands run as.
+async fn text_harness(
+    probes: &[(&Arc<Probe>, bool)],
+    prefix: Option<&str>,
+    locale: Locale,
+) -> Harness {
+    let registry = Arc::new(
+        ModuleRegistry::new(
+            probes
+                .iter()
+                .map(|(probe, _)| Arc::clone(*probe) as Arc<dyn Module>)
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let mut settings = StaticSettings::new(probes.iter().map(|(probe, enabled)| {
+        (
+            probe.manifest.id.clone(),
+            ModuleSettings {
+                enabled: *enabled,
+                config: Arc::new(json!({})),
+                granted: probe.manifest.capabilities.clone(),
+            },
+        )
+    }));
+    settings.policy = Arc::new(GuildPolicy {
+        prefix: prefix.map(str::to_owned),
+        ..GuildPolicy::default()
+    });
+    settings.locale = locale;
+    settings.limits = limits(64, 4);
+    let api = Arc::new(MockApi::default());
+    api.add_channel(Id::new(3), Some(Id::new(GUILD)));
+    let config = DispatcherConfig {
+        bot_id: Some(Id::new(9)),
+        ..DispatcherConfig::default()
+    };
+    let dispatcher = Dispatcher::start(
+        registry,
+        Arc::new(settings),
+        Arc::clone(&api) as Arc<dyn DiscordApi>,
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+        config,
+    )
+    .await
+    .unwrap();
+    Harness { dispatcher, api }
+}
+
+/// The log entries of the commands a module got.
+fn commands_seen(module: &Probe) -> Vec<String> {
+    module
+        .log()
+        .into_iter()
+        .filter(|entry| entry.starts_with("command:"))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_text_command_runs_with_the_options_its_slash_form_gets() {
+    let module = warn_module(Behavior::LogCommand);
+    let h = text_harness(&[(&module, true)], Some("!"), Locale::En).await;
+
+    h.dispatcher
+        .dispatch_message(text_message(44, "!warn <@5>   being rude"), |_| {
+            Permissions::empty()
+        });
+    h.dispatcher.flush().await;
+
+    let slash = CommandInvocation {
+        options: vec![
+            CommandOption {
+                name: "user".into(),
+                value: CommandOptionValue::User(Id::new(5)),
+            },
+            CommandOption {
+                name: "reason".into(),
+                value: CommandOptionValue::String("being rude".into()),
+            },
+        ],
+        ..match command("warn", None) {
+            Event::Command(invocation) => invocation,
+            _ => unreachable!("`command` makes a command"),
+        }
+    };
+    h.dispatcher.dispatch(Event::Command(slash));
+    h.dispatcher.flush().await;
+
+    let seen = commands_seen(&module);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0], seen[1]);
+}
+
+#[tokio::test]
+async fn a_text_command_with_missing_words_is_answered_with_its_usage_and_runs_nothing() {
+    let module = warn_module(Behavior::LogCommand);
+    let h = text_harness(&[(&module, true)], Some("!"), Locale::Ja).await;
+
+    h.dispatcher
+        .dispatch_message(text_message(44, "!warn"), |_| Permissions::empty());
+    h.dispatcher.flush().await;
+    // The usage answer is sent on its own task, which `flush` does not wait for.
+    for _ in 0..500 {
+        if !h.api.actions().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    assert!(commands_seen(&module).is_empty(), "nothing ran");
+    let actions = h.api.actions();
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        reply_text(&actions[0]),
+        ("使い方: !warn <user> [reason]".to_owned(), true)
+    );
+}
+
+#[tokio::test]
+async fn without_a_prefix_a_message_is_never_a_text_command() {
+    let module = warn_module(Behavior::LogCommand);
+    let h = text_harness(&[(&module, true)], None, Locale::En).await;
+
+    h.dispatcher
+        .dispatch_message(text_message(44, "!warn <@5>"), |_| Permissions::empty());
+    h.dispatcher.flush().await;
+
+    assert_eq!(module.log(), ["load", "msg:44"]);
+    assert!(h.api.actions().is_empty());
+}
+
+#[tokio::test]
+async fn a_text_command_of_a_module_that_is_off_is_ignored() {
+    let module = warn_module(Behavior::LogCommand);
+    let h = text_harness(&[(&module, false)], Some("!"), Locale::En).await;
+
+    h.dispatcher
+        .dispatch_message(text_message(44, "!warn <@5>"), |_| Permissions::empty());
+    h.dispatcher.flush().await;
+
+    assert_eq!(module.log(), ["load"]);
+    assert!(h.api.actions().is_empty());
+}
+
+#[tokio::test]
+async fn the_messages_of_bots_never_run_a_text_command() {
+    let module = warn_module(Behavior::LogCommand);
+    let h = text_harness(&[(&module, true)], Some("!"), Locale::En).await;
+    let Event::MessageCreated(mut bot) = text_message(44, "!warn <@5>") else {
+        unreachable!("`text_message` makes a message");
+    };
+    bot.author.bot = true;
+
+    h.dispatcher
+        .dispatch_message(Event::MessageCreated(bot), |_| Permissions::empty());
+    h.dispatcher.flush().await;
+
+    assert_eq!(module.log(), ["load", "msg:44"]);
+    assert!(h.api.actions().is_empty());
+}
+
+#[tokio::test]
+async fn a_refused_text_command_is_explained_in_the_guilds_language() {
+    let module = warn_module(Behavior::Forbidden);
+    let h = text_harness(&[(&module, true)], Some("!"), Locale::En).await;
+
+    h.dispatcher
+        .dispatch_message(text_message(44, "!warn <@5> spam"), |_| {
+            Permissions::empty()
+        });
+    h.dispatcher.flush().await;
+
+    let actions = h.api.actions();
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        reply_text(&actions[0]),
+        ("I don't have permission to do that.".to_owned(), true)
+    );
+}
+
+#[tokio::test]
+async fn a_form_asked_for_by_a_text_command_becomes_a_notice_in_the_guilds_language() {
+    let module = warn_module(Behavior::AskForForm);
+    let h = text_harness(&[(&module, true)], Some("!"), Locale::Ja).await;
+
+    h.dispatcher
+        .dispatch_message(text_message(44, "!warn <@5>"), |_| Permissions::empty());
+    h.dispatcher.flush().await;
+
+    let actions = h.api.actions();
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        reply_text(&actions[0]),
+        (
+            "テキストコマンドではフォームを使えません。スラッシュコマンドを使ってください。"
+                .to_owned(),
+            true
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_text_command_is_answered_as_a_reply_to_its_message() {
+    let module = warn_module(Behavior::AnswerCommand);
+    let h = text_harness(&[(&module, true)], Some("!"), Locale::En).await;
+
+    h.dispatcher
+        .dispatch_message(text_message(44, "!warn <@5>"), |_| Permissions::empty());
+    h.dispatcher.flush().await;
+
+    assert_eq!(module.log().last().map(String::as_str), Some("answered:ok"));
+    let actions = h.api.actions();
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    let Action::Respond { token, .. } = &actions[0] else {
+        panic!("expected a response, got {:?}", actions[0]);
+    };
+    assert_eq!(token.expose(), "message:3:44");
+}
+
+#[tokio::test]
+async fn a_text_command_cannot_answer_in_a_channel_of_another_guild() {
+    let module = warn_module(Behavior::AnswerCommand);
+    let h = text_harness(&[(&module, true)], Some("!"), Locale::En).await;
+    // The channel the command was sent in now belongs to another guild.
+    h.api.add_channel(Id::new(3), Some(Id::new(2)));
+
+    h.dispatcher
+        .dispatch_message(text_message(44, "!warn <@5>"), |_| Permissions::empty());
+    h.dispatcher.flush().await;
+
+    assert_eq!(
+        module.log().last().map(String::as_str),
+        Some("answered:forbidden")
+    );
+    assert!(h.api.actions().is_empty(), "nothing was sent");
 }
 
 /// A command of `guild` that carries its own interaction token.
