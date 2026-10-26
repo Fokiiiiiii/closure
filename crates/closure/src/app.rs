@@ -9,6 +9,7 @@ use closure::modules;
 use closure_api::{ApiState, GatewayStatus, Readiness, ServerLimits, router};
 use closure_config::{ConfigCompiler, SettingsStore, parse_overrides};
 use closure_core::cases::CaseBackend;
+use closure_core::event::{Event as ModuleEvent, GuildId};
 use closure_core::history::HistoryBackend;
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Translator;
@@ -26,6 +27,7 @@ use closure_discord::{
 use closure_i18n::TranslatorBuilder;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use secrecy::SecretString;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use twilight_http::Client;
@@ -223,6 +225,7 @@ struct Started {
     gateway: Option<GatewayHandle>,
     api_task: Option<JoinHandle<()>>,
     jobs_task: Option<JoinHandle<()>>,
+    changes_task: Option<JoinHandle<()>>,
 }
 
 /// Starts everything that talks to Discord and waits until the process is asked to stop.
@@ -235,6 +238,7 @@ async fn serve(
     metrics: PrometheusHandle,
     shutdown: &CancellationToken,
     started: &mut Started,
+    (config_changes_tx, config_changes_rx): (UnboundedSender<GuildId>, UnboundedReceiver<GuildId>),
 ) -> Result<bool> {
     let application_id = Id::new(args.application_id.get());
     let http = Arc::new(Client::new(args.discord_token.clone()));
@@ -273,6 +277,11 @@ async fn serve(
         dispatcher.clone(),
         shutdown.clone(),
     )));
+    started.changes_task = Some(tokio::spawn(forward_config_changes(
+        config_changes_rx,
+        dispatcher.clone(),
+        shutdown.clone(),
+    )));
 
     publish_commands(args, &http, application_id, core).await?;
 
@@ -288,6 +297,7 @@ async fn serve(
         db.clone(),
         Arc::clone(&core.store),
         args.message_history_days,
+        config_changes_tx,
     ));
     let gateway = started.gateway.insert(
         start_gateway(
@@ -319,6 +329,25 @@ async fn serve(
         () = termination() => false,
         () = gateway.closed() => true,
     })
+}
+
+/// Hands the modules of a guild that its configuration changed, until shutdown. The event is
+/// dispatched like any other, so it reaches only the modules that are enabled in the guild.
+async fn forward_config_changes(
+    mut changes: UnboundedReceiver<GuildId>,
+    dispatcher: Dispatcher,
+    shutdown: CancellationToken,
+) {
+    loop {
+        let guild_id = tokio::select! {
+            () = shutdown.cancelled() => return,
+            guild = changes.recv() => match guild {
+                Some(guild) => guild,
+                None => return,
+            },
+        };
+        dispatcher.dispatch(ModuleEvent::ConfigChanged { guild_id });
+    }
 }
 
 /// Waits for a background task that was told to stop. One that does not stop in time is aborted:
@@ -353,13 +382,28 @@ pub async fn run(args: Args) -> Result<()> {
         .context("could not apply the database migrations")?;
 
     let shutdown = CancellationToken::new();
-    let sync_task = sync::start(db.clone(), Arc::clone(&core.store), shutdown.clone())
-        .await
-        .context("could not load guild configurations")?;
+    let config_changes = tokio::sync::mpsc::unbounded_channel();
+    let sync_task = sync::start(
+        db.clone(),
+        Arc::clone(&core.store),
+        shutdown.clone(),
+        config_changes.0.clone(),
+    )
+    .await
+    .context("could not load guild configurations")?;
 
     let upkeep_task = start_storage_upkeep(db.clone(), args.message_history_days, shutdown.clone());
     let mut started = Started::default();
-    let outcome = serve(&args, &core, &db, metrics, &shutdown, &mut started).await;
+    let outcome = serve(
+        &args,
+        &core,
+        &db,
+        metrics,
+        &shutdown,
+        &mut started,
+        config_changes,
+    )
+    .await;
     match &outcome {
         Ok(false) => tracing::info!("shutting down"),
         Ok(true) => tracing::error!("the gateway stopped on its own"),
@@ -378,6 +422,9 @@ pub async fn run(args: Args) -> Result<()> {
         tracing::warn!("the gateway did not stop in time");
     }
     // The jobs go first: the dispatcher must not be asked to run any once it is shutting down.
+    if let Some(task) = started.changes_task {
+        stop_task(task, "configuration changes").await;
+    }
     if let Some(task) = started.jobs_task {
         stop_task(task, "scheduled jobs").await;
     }
@@ -449,7 +496,7 @@ mod tests {
         let mut catalogs = TranslatorBuilder::new().unwrap();
         catalogs.add_registry(&registry).unwrap();
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
-        assert_eq!(commands.len(), 15);
+        assert_eq!(commands.len(), 14);
         for command in commands {
             // A name Discord would refuse (uppercase, too long) is dropped with only a log line,
             // so it is looked for here.

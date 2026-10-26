@@ -46,10 +46,10 @@ fn scoped_to(mut invocation: Invocation, user: Option<u64>, channel: Option<u64>
     invocation
 }
 
-/// `/automod-counters <sub> <counter>` run by a moderator.
+/// `/automod counters <sub> <counter>` run by a moderator.
 fn command(sub: &str, counter: &str) -> Invocation {
-    Invocation::new("automod-counters")
-        .subcommand(sub)
+    Invocation::new("automod")
+        .subcommand(&format!("counters {sub}"))
         .option("counter", CommandOptionValue::String(counter.to_owned()))
         .roles([MODERATOR_ROLE])
 }
@@ -480,4 +480,16 @@ async fn a_counter_trigger_fired_before_a_failing_action_still_runs_its_rule() {
         1,
         "the counter change was stored, so its trigger runs its rule"
     );
+}
+
+#[tokio::test]
+async fn the_counters_are_a_group_of_automod_and_the_old_command_is_gone() {
+    let harness = with(json!({ "strikes": { "per_user": true } }), json!({}));
+    let old = Invocation::new("automod-counters")
+        .subcommand("view")
+        .option("counter", CommandOptionValue::String("strikes".to_owned()))
+        .roles([MODERATOR_ROLE]);
+    let replies = harness.invoke(old).await.unwrap();
+    assert!(replies.is_empty(), "the old top-level name is not answered");
+    assert_eq!(value(&harness, "strikes", Some(MEMBER), None).await, 0);
 }

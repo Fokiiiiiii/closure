@@ -22,7 +22,7 @@ template language (`closure_sdk::template`); see [writing modules](writing-modul
 | M9d | Direct messages to a user (`Action::SendDirectMessage`), with the refusals Discord gives | warn/ban notices |
 | — | **`moderation` module**: ban, kick, timeout, warn, cases, log (all done: warn, note, cases, log, timeout, kick, ban with timed bans and unban, and escalation of warnings; see [moderation](moderation.md)) | first real module |
 | — | **Moderation, stage 1** (done): embed replies and the `replies` setting for every module, timeouts and voice mutes by Discord or by a role, templates when a reason or duration is left out, undo buttons, a history line, rejoin re-application. Still to come: autocomplete of templates and context-menu commands (M11) | the owner rewrites the moderation commands later; the platform parts stay |
-| — | **Automod, parts 1 and 2** (done): message triggers and spam windows, the member, role, thread and case events, counters with `/automod-counters`, actions (delete, purge, warn, timeout, kick, ban, reply, alert, roles, nicknames, slowmode, counters), cooldown, `continue_after_match`, scope with member age, templates, dry run and `/automod status` (see [automod](automod.md) and [Zeppelin parity](zeppelin-parity.md)). Next: antiraid levels | the rules are the server's; the frame stays |
+| — | **Automod, parts 1 and 2** (done): message triggers and spam windows, the member, role, thread and case events, counters with `/automod counters`, actions (delete, purge, warn, timeout, kick, ban, reply, alert, roles, nicknames, slowmode, counters), cooldown, `continue_after_match`, scope with member age, templates, dry run and `/automod status` (see [automod](automod.md) and [Zeppelin parity](zeppelin-parity.md)). Next: antiraid levels | the rules are the server's; the frame stays |
 | M10 | Message kit: richer `MessageInfo`, text matching helpers, the content intent: **done** (see [writing modules](writing-modules.md#reading-messages)). Message history: **done** (see [writing modules](writing-modules.md#message-history)). Still to do: optional bounded cache | automod and logging |
 | M11 | Interaction surface: **done** (below; the clearing of expired buttons is not) | convenience for every module |
 | M12 | Events and actions that Discord has and we do not (below) | breadth |
@@ -77,6 +77,8 @@ Done: a generator of the command, permission and configuration reference from th
 (`docs/reference`, checked by `docs --check` in CI); a scaffold for a new module (`new-module`); hints
 in the configuration schema for the dashboard's forms (`x-ui`). Still to do: tests that a wrong use
 of the macro does not compile; the explanation of why a permission was granted or refused.
+
+- Dedicated roles for the role method: `Timed out` and `Voice muted` created on first use with no permissions, set up in every channel by a sync job, with `remove_roles_on_mute` and `restore_roles_on_mute` taking roles off and giving them back. Known limit: another role's allow overwrite in a channel wins over the deny (counted in the sync note).
 
 ## What a piece must have before it counts as done
 Tests that fail first and pass after, the same tests failing when the code is broken on purpose,

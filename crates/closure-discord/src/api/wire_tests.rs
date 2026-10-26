@@ -424,6 +424,19 @@ async fn permanent_read_failures_are_not_retried() {
     assert_eq!(discord.requests().len(), 1);
 }
 
+#[tokio::test]
+async fn listing_channels_is_a_read_of_the_guild() {
+    let discord = FakeDiscord::start(vec![(502, "{}"), (200, "[]")]).await;
+    let list = Action::ListChannels {
+        guild_id: Id::new(10),
+    };
+    assert_eq!(
+        discord.api().execute(list).await,
+        Ok(Outcome::Channels(vec![]))
+    );
+    assert_eq!(discord.requests().len(), 2, "a read is retried once");
+}
+
 /// A cache that believes the bot (user 2, role 10) ranks below the target (user 3, role 11).
 struct BelievesBotRanksLower;
 

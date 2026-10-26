@@ -46,14 +46,14 @@ Show whether dry run is on and which rules run
 - Japanese name: `状態`
 - Japanese description: ドライランの設定と、動いているルールを表示します
 
-### `/automod-counters`
+#### `/automod counters`
 
 Look at and change the counters of automod
 
-- Japanese name: `automod-counters`
+- Japanese name: `カウンター`
 - Japanese description: automod のカウンターを見る・変更する
 
-#### `/automod-counters view`
+##### `/automod counters view`
 
 Show the value of a counter
 
@@ -66,7 +66,7 @@ Show the value of a counter
 | `user` | user | user | no | - | The member the counter is kept for |
 | `channel` | channel | channel | no | - | The channel the counter is kept for |
 
-#### `/automod-counters set`
+##### `/automod counters set`
 
 Set the value of a counter
 
@@ -80,7 +80,7 @@ Set the value of a counter
 | `user` | user | user | no | - | The member the counter is kept for |
 | `channel` | channel | channel | no | - | The channel the counter is kept for |
 
-#### `/automod-counters add`
+##### `/automod counters add`
 
 Add to a counter
 
@@ -94,7 +94,7 @@ Add to a counter
 | `user` | user | user | no | - | The member the counter is kept for |
 | `channel` | channel | channel | no | - | The channel the counter is kept for |
 
-#### `/automod-counters reset`
+##### `/automod counters reset`
 
 Put a counter back to its start
 
@@ -116,7 +116,9 @@ Set under `modules.automod.config` in a server's configuration; see [configurati
 | `counters` | object | `{}` | - | The counters, keyed by name: the numbers the rules add to, set, and react to. |
 | `dm_on_action` | boolean | `true` | - | Whether the member gets a direct message about a punishment. |
 | `dry_run` | boolean | `false` | - | Act on nothing: post what would have happened to the log channel. |
+| `remove_roles_on_mute` | any | `false` | - | Which roles a role timeout takes off the member: false, true for every role that can be taken off, or a list of role ids. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
+| `restore_roles_on_mute` | any | `true` | - | Which of the roles taken off come back when the timeout ends: the same forms as remove_roles_on_mute. true by default. |
 | `rules` | object | `{}` | - | The rules, keyed by id. Each one is checked on every message; the rules are checked in the order of their ids, and the first one that trips acts unless it says to continue. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
 | `timeout_role` | string or null | `null` | - | The id of the role a timeout gives, when timeout_method is role. |
@@ -129,6 +131,8 @@ Default configuration:
   "counters": {},
   "dm_on_action": true,
   "dry_run": false,
+  "remove_roles_on_mute": false,
+  "restore_roles_on_mute": true,
   "rules": {},
   "timeout_method": "discord",
   "timeout_role": null,

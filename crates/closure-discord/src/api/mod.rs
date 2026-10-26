@@ -198,6 +198,7 @@ fn is_read(action: &Action) -> bool {
             | Action::GetMember { .. }
             | Action::ListBans { .. }
             | Action::GetChannel { .. }
+            | Action::ListChannels { .. }
             | Action::ListRoles { .. }
             | Action::ListAutoModRules { .. }
             | Action::GetAuditLog { .. }
@@ -757,6 +758,7 @@ impl TwilightApi {
             } => self.list_bans(*guild_id, *after, *limit).await,
 
             Action::GetChannel { channel_id } => self.get_channel(*channel_id).await,
+            Action::ListChannels { guild_id } => self.list_channels(*guild_id).await,
             Action::CreateChannel {
                 guild_id,
                 spec,

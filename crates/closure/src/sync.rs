@@ -8,46 +8,104 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use closure_config::SettingsStore;
+use closure_config::{GuildOverrides, SettingsStore};
 use closure_core::event::GuildId;
-use closure_db::{ConfigEvent, Db, DbError, StoredConfig};
+use closure_db::{ConfigEvent, Db, DbError};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
+/// What installing a stored document did to a guild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Applied {
+    /// Not installed: the store holds a newer revision, or the document no longer validates.
+    Kept,
+    /// Installed, with the effective configuration the guild already had.
+    Same,
+    /// Installed, and the effective configuration is different now.
+    Changed,
+}
+
 /// Compiles a stored document and installs it, unless the store already holds a newer revision.
 /// A document that no longer validates (say, a module was removed) is reported and skipped, so
 /// the guild keeps its previous settings instead of one bad record stopping everyone.
-fn apply(store: &SettingsStore, guild: GuildId, stored: &StoredConfig) -> bool {
-    match store.compiler().compile(&stored.overrides) {
-        Ok(settings) => store.install(guild, stored.revision, settings),
+fn apply(
+    store: &SettingsStore,
+    guild: GuildId,
+    revision: i64,
+    overrides: &GuildOverrides,
+) -> Applied {
+    match store.compiler().compile(overrides) {
+        Ok(settings) => {
+            let changed = store.settings(guild).effective != settings.effective;
+            if !store.install(guild, revision, settings) {
+                Applied::Kept
+            } else if changed {
+                Applied::Changed
+            } else {
+                Applied::Same
+            }
+        }
         Err(error) => {
-            tracing::warn!(%guild, revision = stored.revision, %error, "stored configuration is no longer valid; keeping the previous settings");
-            false
+            tracing::warn!(%guild, revision, %error, "stored configuration is no longer valid; keeping the previous settings");
+            Applied::Kept
         }
     }
 }
 
-/// Loads every configuration. Returns how many were installed.
+/// Tells the dispatcher that the guild's configuration changed. A closed channel only means the
+/// process is shutting down.
+fn report(changes: Option<&UnboundedSender<GuildId>>, guild: GuildId) {
+    if let Some(changes) = changes {
+        let _ = changes.send(guild);
+    }
+}
+
+/// Loads every configuration at start-up, which reports no change. Returns how many were installed.
 pub async fn load_all(db: &Db, store: &SettingsStore) -> Result<usize, DbError> {
+    load_reporting(db, store, None).await
+}
+
+/// Loads every configuration, reporting each guild whose effective configuration changed.
+async fn load_reporting(
+    db: &Db,
+    store: &SettingsStore,
+    changes: Option<&UnboundedSender<GuildId>>,
+) -> Result<usize, DbError> {
     let mut installed = 0;
     db.for_each_config(|guild, result| match result {
-        Ok(stored) => {
-            if apply(store, guild, &stored) {
+        Ok(stored) => match apply(store, guild, stored.revision, &stored.overrides) {
+            Applied::Kept => {}
+            Applied::Same => installed += 1,
+            Applied::Changed => {
                 installed += 1;
+                report(changes, guild);
             }
-        }
+        },
         Err(error) => tracing::warn!(%guild, %error, "skipping an unreadable stored configuration"),
     })
     .await?;
     Ok(installed)
 }
 
-/// Reloads one guild, e.g. after a change notification or when the bot rejoins it.
+/// Reloads one guild when the bot rejoins it, which reports no change.
 pub async fn reload_one(db: &Db, store: &SettingsStore, guild: GuildId) -> Result<(), DbError> {
-    if let Some(stored) = db.load_config(guild).await? {
-        apply(store, guild, &stored);
+    reload_reporting(db, store, guild, None).await
+}
+
+/// Reloads one guild after a change notification, reporting it when its configuration changed.
+async fn reload_reporting(
+    db: &Db,
+    store: &SettingsStore,
+    guild: GuildId,
+    changes: Option<&UnboundedSender<GuildId>>,
+) -> Result<(), DbError> {
+    if let Some(stored) = db.load_config(guild).await?
+        && apply(store, guild, stored.revision, &stored.overrides) == Applied::Changed
+    {
+        report(changes, guild);
     }
     Ok(())
 }
@@ -56,15 +114,18 @@ pub async fn reload_one(db: &Db, store: &SettingsStore, guild: GuildId) -> Resul
 ///
 /// Returns after the first load, so the caller can start accepting events knowing that stored
 /// settings are in place. Subscribing happens before loading so no edit can fall in between.
+///
+/// Every later change of a guild's effective configuration is sent to `changes`.
 pub async fn start(
     db: Db,
     store: Arc<SettingsStore>,
     shutdown: CancellationToken,
+    changes: UnboundedSender<GuildId>,
 ) -> Result<JoinHandle<()>, DbError> {
     let listener = db.listen_config().await?;
     let installed = load_all(&db, &store).await?;
     tracing::info!(installed, "loaded guild configurations");
-    Ok(tokio::spawn(follow(db, store, listener, shutdown)))
+    Ok(tokio::spawn(follow(db, store, listener, shutdown, changes)))
 }
 
 async fn follow(
@@ -72,14 +133,15 @@ async fn follow(
     store: Arc<SettingsStore>,
     mut listener: closure_db::ConfigListener,
     shutdown: CancellationToken,
+    changes: UnboundedSender<GuildId>,
 ) {
     loop {
         // The listener is moved in and gone when this returns, which hands its connection back
         // to the pool before `resync` needs connections of its own.
-        if !apply_notifications(&db, &store, listener, &shutdown).await {
+        if !apply_notifications(&db, &store, listener, &shutdown, &changes).await {
             return;
         }
-        match resync(&db, &store, &shutdown).await {
+        match resync(&db, &store, &shutdown, &changes).await {
             Some(fresh) => listener = fresh,
             None => return,
         }
@@ -92,6 +154,7 @@ async fn apply_notifications(
     store: &SettingsStore,
     mut listener: closure_db::ConfigListener,
     shutdown: &CancellationToken,
+    changes: &UnboundedSender<GuildId>,
 ) -> bool {
     loop {
         let event = tokio::select! {
@@ -99,8 +162,10 @@ async fn apply_notifications(
             event = listener.next() => event,
         };
         let outcome = match event {
-            Ok(ConfigEvent::Changed { guild, .. }) => reload_one(db, store, guild).await,
-            Ok(ConfigEvent::Resync) => load_all(db, store).await.map(drop),
+            Ok(ConfigEvent::Changed { guild, .. }) => {
+                reload_reporting(db, store, guild, Some(changes)).await
+            }
+            Ok(ConfigEvent::Resync) => load_reporting(db, store, Some(changes)).await.map(drop),
             Err(error) => Err(error),
         };
         if let Err(error) = outcome {
@@ -118,10 +183,11 @@ async fn resync(
     db: &Db,
     store: &SettingsStore,
     shutdown: &CancellationToken,
+    changes: &UnboundedSender<GuildId>,
 ) -> Option<closure_db::ConfigListener> {
     retry_until_ok(RECONNECT_DELAY, shutdown, || async {
         let listener = db.listen_config().await?;
-        load_all(db, store).await?;
+        load_reporting(db, store, Some(changes)).await?;
         Ok::<_, DbError>(listener)
     })
     .await
@@ -213,6 +279,25 @@ mod tests {
         assert_eq!(value, None);
     }
 
+    #[test]
+    fn a_document_counts_as_changed_only_when_its_effective_config_changes() {
+        let store = store();
+        let guild = Id::new(5);
+        let doc = |yaml: &str| parse_overrides(yaml).unwrap();
+        // An empty document is the defaults already, so installing it changes nothing.
+        assert_eq!(apply(&store, guild, 1, &doc("")), Applied::Same);
+        assert_eq!(apply(&store, guild, 2, &doc("")), Applied::Same);
+        assert_eq!(
+            apply(&store, guild, 3, &doc("prefix: \"?\"\n")),
+            Applied::Changed
+        );
+        assert_eq!(
+            apply(&store, guild, 2, &doc("")),
+            Applied::Kept,
+            "an older revision is kept out"
+        );
+    }
+
     #[tokio::test]
     async fn an_attempt_that_hangs_does_not_hold_up_shutdown() {
         let shutdown = CancellationToken::new();
@@ -259,9 +344,14 @@ mod tests {
         save(&writer, 1, "language: ja").await;
 
         let shutdown = CancellationToken::new();
-        let task = start(app, Arc::clone(&store), shutdown.clone())
-            .await
-            .unwrap();
+        let task = start(
+            app,
+            Arc::clone(&store),
+            shutdown.clone(),
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
 
         // A notification whose reload fails (the stored document is unreadable) sends the task
         // into a resync while its old listener is still alive.
@@ -356,9 +446,14 @@ mod tests {
         save(&db, 1, "language: ja").await;
 
         let shutdown = CancellationToken::new();
-        let task = start(db.clone(), Arc::clone(&store), shutdown.clone())
-            .await
-            .unwrap();
+        let task = start(
+            db.clone(),
+            Arc::clone(&store),
+            shutdown.clone(),
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             language_of(&store, 1),
             closure_core::locale::Locale::Ja,

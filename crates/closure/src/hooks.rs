@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use closure::message_history::{MessageRecorder, unix_now};
@@ -7,6 +8,7 @@ use closure_core::event::{Event as ModuleEvent, GuildId};
 use closure_core::locale::Locale;
 use closure_db::Db;
 use closure_discord::GuildHooks;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::sync;
 
@@ -16,11 +18,41 @@ pub struct AppHooks {
     db: Db,
     store: Arc<SettingsStore>,
     messages: MessageRecorder,
+    /// Where the guilds whose configuration to announce are sent (see [`crate::app`]).
+    changes: UnboundedSender<GuildId>,
+    announced: Announced,
+}
+
+/// The guilds whose configuration the modules have been told about since the bot joined them.
+#[derive(Debug, Default)]
+struct Announced(Mutex<HashSet<GuildId>>);
+
+impl Announced {
+    /// Whether `guild` was not announced yet; it is recorded as announced either way.
+    fn first(&self, guild: GuildId) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(guild)
+    }
+
+    /// Forgets `guild`, so that its next arrival is announced again.
+    fn forget(&self, guild: GuildId) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&guild);
+    }
 }
 
 impl AppHooks {
     /// `message_history_days` is how long kept messages stay (see [`MessageRecorder`]).
-    pub fn new(db: Db, store: Arc<SettingsStore>, message_history_days: u32) -> Self {
+    pub fn new(
+        db: Db,
+        store: Arc<SettingsStore>,
+        message_history_days: u32,
+        changes: UnboundedSender<GuildId>,
+    ) -> Self {
         let messages = MessageRecorder::new(
             Arc::new(db.clone()),
             Arc::clone(&store),
@@ -30,6 +62,8 @@ impl AppHooks {
             db,
             store,
             messages,
+            changes,
+            announced: Announced::default(),
         }
     }
 }
@@ -59,11 +93,16 @@ impl GuildHooks for AppHooks {
         {
             tracing::warn!(%guild, %error, "could not load the guild's configuration");
         }
+        // Once per arrival, after the guild's event: the modules set up what their settings need.
+        if self.store.is_configured(guild) && self.announced.first(guild) {
+            let _ = self.changes.send(guild);
+        }
     }
 
     async fn guild_removed(&self, guild: GuildId) {
         tracing::info!(%guild, "removed from guild");
         self.store.remove_guild(guild);
+        self.announced.forget(guild);
         if let Err(error) = self.db.mark_guild_left(guild).await {
             tracing::warn!(%guild, %error, "could not record that the bot left the guild");
         }
@@ -140,7 +179,12 @@ mod tests {
         store
             .set_guild_yaml(Id::new(2), "modules:\n  reader:\n    enabled: true\n")
             .unwrap();
-        let hooks = AppHooks::new(db, Arc::clone(&store), 7);
+        let hooks = AppHooks::new(
+            db,
+            Arc::clone(&store),
+            7,
+            tokio::sync::mpsc::unbounded_channel().0,
+        );
 
         assert!(!hooks.wants_messages(Id::new(1)));
         assert!(hooks.wants_messages(Id::new(2)));
@@ -159,7 +203,12 @@ mod tests {
     async fn a_new_guild_is_recorded_and_its_discord_language_remembered(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
         let store = store();
-        let hooks = AppHooks::new(db, Arc::clone(&store), 7);
+        let hooks = AppHooks::new(
+            db,
+            Arc::clone(&store),
+            7,
+            tokio::sync::mpsc::unbounded_channel().0,
+        );
 
         hooks
             .guild_available(Id::new(5), "Test", Some(Locale::Ja))
@@ -178,7 +227,12 @@ mod tests {
     async fn leaving_and_rejoining_restores_the_stored_configuration(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
         let store = store();
-        let hooks = AppHooks::new(db.clone(), Arc::clone(&store), 7);
+        let hooks = AppHooks::new(
+            db.clone(),
+            Arc::clone(&store),
+            7,
+            tokio::sync::mpsc::unbounded_channel().0,
+        );
         let guild = Id::new(5);
         db.save_config(guild, None, &parse_overrides("language: ja").unwrap(), None)
             .await
@@ -230,11 +284,27 @@ mod tests {
     #[sqlx::test(migrations = "../closure-db/migrations")]
     async fn database_failures_do_not_panic_or_block(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
-        let hooks = AppHooks::new(db, store(), 7);
+        let hooks = AppHooks::new(db, store(), 7, tokio::sync::mpsc::unbounded_channel().0);
         pool.close().await;
         hooks
             .guild_available(Id::new(5), "Test", Some(Locale::Ja))
             .await;
         hooks.guild_removed(Id::new(5)).await;
+    }
+
+    #[test]
+    fn a_guild_is_announced_once_per_arrival() {
+        let announced = Announced::default();
+        let guild = Id::new(5);
+        assert!(announced.first(guild));
+        assert!(
+            !announced.first(guild),
+            "a second availability is not announced"
+        );
+        announced.forget(guild);
+        assert!(
+            announced.first(guild),
+            "a rejoined guild is announced again"
+        );
     }
 }

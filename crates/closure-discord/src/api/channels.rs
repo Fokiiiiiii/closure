@@ -12,7 +12,7 @@ use twilight_model::channel::permission_overwrite::{
 use twilight_model::http::channel_position::Position;
 use twilight_model::http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType};
 
-use super::{TwilightApi, read, run};
+use super::{TwilightApi, read, read_list, run};
 
 fn channel_type(kind: ChannelKind) -> ChannelType {
     match kind {
@@ -54,6 +54,12 @@ fn channel_overwrite(spec: &OverwriteSpec) -> ChannelOverwrite {
 }
 
 impl TwilightApi {
+    pub(super) async fn list_channels(&self, guild: GuildId) -> Result<Outcome, DiscordError> {
+        read_list(self.http.guild_channels(guild))
+            .await
+            .map(Outcome::Channels)
+    }
+
     pub(super) async fn get_channel(&self, channel: ChannelId) -> Result<Outcome, DiscordError> {
         read(self.http.channel(channel))
             .await

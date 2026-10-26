@@ -80,7 +80,12 @@ fn harness() -> Harness {
     });
     harness.api().set_roles(
         Id::new(GUILD),
-        vec![role(MODERATOR_ROLE, 5), role(ADMIN_ROLE, 9)],
+        vec![
+            role(MODERATOR_ROLE, 5),
+            role(ADMIN_ROLE, 9),
+            role(TIMEOUT_ROLE, 1),
+            role(VOICE_ROLE, 1),
+        ],
     );
     for user in [MEMBER, FREE, ABOVE] {
         harness
@@ -595,7 +600,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_and_no_required_reason()
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "require_reason": false, "ban_delete_days": 0, "escalation": [], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "templates": {} })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "require_reason": false, "ban_delete_days": 0, "escalation": [], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "templates": {} })
     );
 }
 
@@ -1679,7 +1684,7 @@ async fn a_timeout_by_role_adds_the_role_and_a_timer_removes_it_when_due() {
 }
 
 #[tokio::test]
-async fn a_timeout_by_role_does_nothing_without_a_usable_role() {
+async fn a_timeout_by_role_creates_the_role_when_none_is_configured() {
     let harness = harness();
     for config in [
         json!({ "timeout_method": "role" }),
@@ -1691,11 +1696,10 @@ async fn a_timeout_by_role_does_nothing_without_a_usable_role() {
             .invoke(timeout(MEMBER, "1h", Some("spam")))
             .await
             .unwrap();
-        assert!(text(&replies).contains("timeout_role"), "{replies:?}");
+        assert!(text(&replies).contains("case #"), "{replies:?}");
     }
-    assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
-    assert!(cases_of(&harness, MEMBER).await.is_empty());
-    assert_eq!(harness.jobs(), 0);
+    assert_eq!(sequence(&harness), ["role+", "dm", "role+", "dm"]);
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 2);
 }
 
 #[tokio::test]
@@ -1751,13 +1755,329 @@ async fn an_untimeout_by_role_removes_the_role_and_cancels_the_timer() {
 }
 
 #[tokio::test]
-async fn an_untimeout_by_role_needs_the_role_too() {
+async fn an_untimeout_by_role_works_without_a_configured_role() {
     let harness = harness();
     harness.set_config(json!({ "timeout_method": "role" }));
     let replies = harness.invoke(untimeout(MEMBER, None)).await.unwrap();
-    assert!(text(&replies).contains("timeout_role"), "{replies:?}");
-    assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
-    assert!(cases_of(&harness, MEMBER).await.is_empty());
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["role-"]);
+}
+
+/// A role of the guild that Discord manages itself, such as a bot's or a boost role.
+fn managed_role(id: u64, position: i64) -> Role {
+    let mut role = role(id, position);
+    role.managed = true;
+    role
+}
+
+/// The roles the commands take off: a member with a plain role, a managed one, and one above the
+/// bot's top role (at position 3), all below the moderator's (at position 5).
+fn strip_setup(harness: &Harness) {
+    harness.set_bot_id(Some(Id::new(BOT)));
+    harness.api().set_roles(
+        Id::new(GUILD),
+        vec![
+            role(GUILD, 0),
+            role(MODERATOR_ROLE, 5),
+            role(ADMIN_ROLE, 9),
+            role(TIMEOUT_ROLE, 1),
+            role(VOICE_ROLE, 1),
+            role(60, 2),
+            managed_role(61, 1),
+            role(62, 4),
+            role(63, 3),
+        ],
+    );
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(BOT, &[63], true));
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(MEMBER, &[GUILD, 60, 61, 62], false));
+}
+
+fn removed(harness: &Harness) -> Vec<u64> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::RemoveRole { role_id, .. } => Some(role_id.get()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The stripped roles given back: the dedicated role's own additions are left out.
+fn given_back(harness: &Harness) -> Vec<u64> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::AddRole { role_id, .. } if [60, 61, 62].contains(&role_id.get()) => {
+                Some(role_id.get())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_role_timeout_takes_off_the_roles_it_may_and_gives_them_back_when_lifted() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.set_config(json!({ "timeout_method": "role", "remove_roles_on_mute": true }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    // @everyone, the managed role and the role above the bot stay; the dedicated role is not
+    // among the member's roles, and is given, not taken.
+    assert_eq!(removed(&harness), [60]);
+    harness
+        .invoke(untimeout(MEMBER, Some("sorry")))
+        .await
+        .unwrap();
+    assert_eq!(given_back(&harness).last(), Some(&60));
+}
+
+fn created_role_names(harness: &Harness) -> Vec<String> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::CreateRole { spec, .. } => Some(spec.name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_role_method_creates_its_roles_when_the_configuration_changes() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "voice_mute_method": "role" }));
+    harness.config_changed().await.unwrap();
+    assert_eq!(created_role_names(&harness), ["Timed out", "Voice muted"]);
+    harness.config_changed().await.unwrap();
+    assert_eq!(
+        created_role_names(&harness).len(),
+        2,
+        "a second change creates nothing new"
+    );
+}
+
+#[tokio::test]
+async fn a_discord_method_or_an_explicit_role_creates_nothing_on_a_change() {
+    let harness = harness();
+    harness.set_config(json!({
+        "timeout_method": "role",
+        "timeout_role": "30",
+        "voice_mute_method": "discord"
+    }));
+    harness.config_changed().await.unwrap();
+    assert!(
+        created_role_names(&harness).is_empty(),
+        "the configured role is the admin's"
+    );
+}
+
+#[tokio::test]
+async fn a_channel_created_later_gets_the_overwrites_of_the_dedicated_roles() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "voice_mute_method": "role" }));
+    harness.config_changed().await.unwrap();
+    harness.api().add_channel(Id::new(77), Some(Id::new(GUILD)));
+    harness.channel_created(77).await.unwrap();
+    let overwrites = harness
+        .api()
+        .actions()
+        .iter()
+        .filter(|action| matches!(action, Action::SetPermissionOverwrite { channel_id, .. } if channel_id.get() == 77))
+        .count();
+    assert_eq!(overwrites, 2, "one overwrite for each dedicated role");
+}
+
+#[tokio::test]
+async fn listed_roles_are_taken_off_and_only_the_listed_ones_come_back() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.set_config(json!({
+        "timeout_method": "role",
+        "remove_roles_on_mute": ["60", "61"],
+        "restore_roles_on_mute": ["60"]
+    }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(
+        removed(&harness),
+        [60, 61],
+        "the role 62 is not on the list"
+    );
+    harness
+        .invoke(untimeout(MEMBER, Some("sorry")))
+        .await
+        .unwrap();
+    assert_eq!(
+        given_back(&harness).last(),
+        Some(&60),
+        "61 is dropped, not given back"
+    );
+    assert!(!given_back(&harness).contains(&61));
+}
+
+#[tokio::test]
+async fn a_voice_mute_takes_roles_off_and_gives_them_back_on_unmute() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.set_config(json!({ "voice_mute_method": "role", "remove_roles_on_mute": true }));
+    harness
+        .invoke(voice_mute(MEMBER, None, Some("noisy")))
+        .await
+        .unwrap();
+    assert_eq!(removed(&harness), [60]);
+    harness.invoke(voice_unmute(MEMBER, None)).await.unwrap();
+    assert_eq!(given_back(&harness).last(), Some(&60));
+}
+
+#[tokio::test]
+async fn the_roles_come_back_when_the_timer_lifts_the_timeout() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.set_config(json!({ "timeout_method": "role", "remove_roles_on_mute": true }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3_601));
+    harness.run_due_jobs().await;
+    assert_eq!(given_back(&harness).last(), Some(&60));
+}
+
+#[tokio::test]
+async fn nothing_is_taken_off_unless_the_setting_asks_for_it() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.set_config(json!({ "timeout_method": "role" }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert!(removed(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn the_roles_come_back_only_when_the_last_timeout_is_lifted() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.set_config(json!({ "timeout_method": "role", "remove_roles_on_mute": true }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("first")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(1_800));
+    harness
+        .invoke(timeout(MEMBER, "2h", Some("second")))
+        .await
+        .unwrap();
+    // The first timer is due at one hour; the second still stands, so nothing comes back yet.
+    harness.advance(Duration::from_secs(1_860));
+    harness.run_due_jobs().await;
+    assert!(
+        given_back(&harness).is_empty(),
+        "the second timeout still stands"
+    );
+    // The second timer is due at two and a half hours.
+    harness.advance(Duration::from_secs(5_400));
+    harness.run_due_jobs().await;
+    assert_eq!(given_back(&harness).last(), Some(&60));
+}
+
+#[tokio::test]
+async fn a_role_that_cannot_be_taken_off_is_counted_in_the_reply() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.api().fail_role(
+        Id::new(60),
+        DiscordError::Forbidden("Missing Permissions".into()),
+    );
+    harness.set_config(json!({ "timeout_method": "role", "remove_roles_on_mute": true }));
+    let replies = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert!(
+        text(&replies).contains("1 of the member's roles could not be taken off"),
+        "{replies:?}"
+    );
+}
+
+#[tokio::test]
+async fn at_most_250_roles_are_taken_off_and_remembered() {
+    let harness = harness();
+    strip_setup(&harness);
+    let ids: Vec<u64> = (0..300).map(|n| 1_000 + n).collect();
+    let mut roles: Vec<Role> = ids.iter().map(|id| role(*id, 1)).collect();
+    roles.extend([
+        role(GUILD, 0),
+        role(MODERATOR_ROLE, 5),
+        role(ADMIN_ROLE, 9),
+        role(TIMEOUT_ROLE, 1),
+        role(VOICE_ROLE, 1),
+        role(63, 3),
+    ]);
+    harness.api().set_roles(Id::new(GUILD), roles);
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(MEMBER, &ids, false));
+    harness.set_config(json!({ "timeout_method": "role", "remove_roles_on_mute": true }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(removed(&harness).len(), 250);
+}
+
+#[tokio::test]
+async fn the_roles_of_a_voice_mute_come_back_when_its_timer_lifts_it() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.set_config(json!({ "voice_mute_method": "role", "remove_roles_on_mute": true }));
+    harness
+        .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(3_601));
+    harness.run_due_jobs().await;
+    assert_eq!(given_back(&harness).last(), Some(&60));
+}
+
+#[test]
+fn the_role_settings_take_false_true_or_role_ids_and_nothing_else() {
+    let registry = Arc::new(
+        ModuleRegistry::new(vec![Arc::new(module().unwrap()) as Arc<dyn Module>]).unwrap(),
+    );
+    let compiler = ConfigCompiler::new(registry).unwrap();
+    let accepted = |config: serde_json::Value| {
+        let yaml = format!(
+            "modules:\n  moderation:\n    config: {}\n",
+            serde_json::to_string(&config).unwrap()
+        );
+        compiler.compile(&parse_overrides(&yaml).unwrap()).is_ok()
+    };
+    assert!(accepted(json!({ "remove_roles_on_mute": true })));
+    assert!(accepted(json!({ "remove_roles_on_mute": false })));
+    assert!(accepted(json!({ "remove_roles_on_mute": ["60", "61"] })));
+    assert!(accepted(json!({ "restore_roles_on_mute": [] })));
+    assert!(!accepted(json!({ "remove_roles_on_mute": "all" })));
+    assert!(!accepted(json!({ "remove_roles_on_mute": ["role"] })));
+    assert!(!accepted(json!({ "restore_roles_on_mute": vec!["1"; 51] })));
+    assert!(!accepted(
+        json!({ "remove_roles_on_mute": { "all": true } })
+    ));
 }
 
 #[tokio::test]
@@ -1876,17 +2196,20 @@ async fn a_voice_mute_by_role_adds_the_voice_role_and_lifts_it_when_due() {
 }
 
 #[tokio::test]
-async fn a_voice_mute_by_role_needs_its_role() {
+async fn a_voice_mute_by_role_creates_the_role_when_none_is_configured() {
     let harness = harness();
     harness.set_config(json!({ "voice_mute_method": "role" }));
     let replies = harness
         .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
-    assert!(text(&replies).contains("voice_mute_role"), "{replies:?}");
-    assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
-    assert!(cases_of(&harness, MEMBER).await.is_empty());
-    assert_eq!(harness.jobs(), 0);
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["role+", "dm"]);
+    assert_eq!(
+        harness.jobs(),
+        2,
+        "the lift timer and the sync of the new role"
+    );
 }
 
 #[tokio::test]
@@ -1932,7 +2255,7 @@ async fn a_voice_unmute_the_discord_refuses_leaves_the_mute_standing() {
 }
 
 #[tokio::test]
-async fn a_voice_unmute_by_role_removes_the_role_and_needs_it() {
+async fn a_voice_unmute_by_role_removes_the_role() {
     let harness = harness();
     harness.set_config(json!({ "voice_mute_method": "role", "voice_mute_role": "31" }));
     harness
@@ -1941,12 +2264,6 @@ async fn a_voice_unmute_by_role_removes_the_role_and_needs_it() {
         .unwrap();
     harness.advance(Duration::from_secs(3));
     harness.invoke(voice_unmute(MEMBER, None)).await.unwrap();
-    assert_eq!(sequence(&harness), ["role+", "dm", "role-"]);
-
-    harness.set_config(json!({ "voice_mute_method": "role" }));
-    harness.advance(Duration::from_secs(3));
-    let replies = harness.invoke(voice_unmute(MEMBER, None)).await.unwrap();
-    assert!(text(&replies).contains("voice_mute_role"), "{replies:?}");
     assert_eq!(sequence(&harness), ["role+", "dm", "role-"]);
 }
 
@@ -3500,7 +3817,7 @@ async fn a_bot_is_not_given_anything_again() {
 }
 
 #[tokio::test]
-async fn a_missing_or_invalid_role_gives_nothing_and_no_error() {
+async fn a_rejoin_without_a_usable_configured_role_creates_one_and_gives_it() {
     let harness = harness();
     harness
         .invoke(timeout(MEMBER, "1h", Some("spam")))
@@ -3520,10 +3837,18 @@ async fn a_missing_or_invalid_role_gives_nothing_and_no_error() {
         }),
     ] {
         harness.set_config(config);
-        let before = harness.api().actions().len();
         rejoin(&harness, MEMBER).await.unwrap();
-        assert_eq!(harness.api().actions().len(), before);
     }
+    let adds = harness
+        .api()
+        .actions()
+        .iter()
+        .filter(|action| matches!(action, Action::AddRole { .. }))
+        .count();
+    assert_eq!(
+        adds, 4,
+        "both punishments are given again, each time with a role"
+    );
 }
 
 #[tokio::test]

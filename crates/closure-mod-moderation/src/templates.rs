@@ -436,7 +436,7 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
     let duration = punishment.duration(cx)?;
     // Counted before the action, so that the case of the action is left out of the history line.
     let before = history::before(cx, user).await;
-    let punisher = punisher_for(cx, config);
+    let punisher = punisher_for(cx, config).await?;
     let done = match punishment.kind {
         Kind::Timeout => {
             let duration = duration.ok_or_else(|| UserError::message("duration-required"))?;

@@ -14,6 +14,7 @@ Warn members, note about them, and look at and revoke the cases of a server.
 - `timeout_members`
 - `mute_members`
 - `manage_roles`
+- `manage_channels`
 - `respond_to_interactions`
 - `storage`
 - `schedule`
@@ -209,8 +210,10 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | `ban_delete_days` | integer | `0` | - | How many days of the messages of a banned member are deleted. |
 | `dm_on_action` | boolean | `true` | - | Whether the warned member gets a direct message. |
 | `escalation` | array | `[]` | - | What a warning brings about when a member reaches a number of active warnings. |
+| `remove_roles_on_mute` | any | `false` | - | Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `require_reason` | boolean | `false` | - | Whether a warning needs a reason. |
+| `restore_roles_on_mute` | any | `true` | - | Which of the roles taken off come back when the punishment ends: the same forms as remove_roles_on_mute. true by default. |
 | `templates` | object | `{}` | - | Templates a moderator picks from when a command leaves out the reason or the duration. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
 | `timeout_role` | string or null | `null` | role | The id of the role a timeout gives, when timeout_method is role. |
@@ -225,7 +228,9 @@ Default configuration:
   "ban_delete_days": 0,
   "dm_on_action": true,
   "escalation": [],
+  "remove_roles_on_mute": false,
   "require_reason": false,
+  "restore_roles_on_mute": true,
   "templates": {},
   "timeout_method": "discord",
   "timeout_role": null,

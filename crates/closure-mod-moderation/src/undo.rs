@@ -121,7 +121,7 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
     let config: Config = cx.config()?;
     // Discord is called next, so the click is acknowledged first.
     cx.defer_update().await?;
-    let punisher = punisher_for(&cx, &config).undoing(number);
+    let punisher = punisher_for(&cx, &config).await?.undoing(number);
     let body = match kind {
         Kind::Timeout => {
             let lifted = punisher

@@ -714,6 +714,10 @@ pub enum Action {
     GetChannel {
         channel_id: ChannelId,
     },
+    /// Every channel of the guild, with its permission overwrites.
+    ListChannels {
+        guild_id: GuildId,
+    },
     CreateChannel {
         guild_id: GuildId,
         spec: NewChannel,
@@ -802,6 +806,7 @@ pub enum Outcome {
     Guild(Box<Guild>),
     Member(Box<Member>),
     Channel(Box<Channel>),
+    Channels(Vec<Channel>),
     Role(Box<Role>),
     Roles(Vec<Role>),
     Bans(Vec<Ban>),
@@ -1324,6 +1329,7 @@ impl Action {
             Self::GetGuild { .. }
             | Self::GetMember { .. }
             | Self::GetChannel { .. }
+            | Self::ListChannels { .. }
             | Self::ListRoles { .. }
             | Self::ListAutoModRules { .. }
             | Self::SearchMembers { .. }
@@ -1383,6 +1389,7 @@ impl Action {
             | Self::RemoveRole { guild_id, .. }
             | Self::ListBans { guild_id, .. }
             | Self::CreateChannel { guild_id, .. }
+            | Self::ListChannels { guild_id }
             | Self::ListRoles { guild_id }
             | Self::CreateRole { guild_id, .. }
             | Self::EditRole { guild_id, .. }
@@ -1524,6 +1531,7 @@ impl Action {
             | Self::AddRole { .. }
             | Self::RemoveRole { .. }
             | Self::ListBans { .. }
+            | Self::ListChannels { .. }
             | Self::ListRoles { .. }
             | Self::CreateRole { .. }
             | Self::EditRole { .. }
@@ -1581,6 +1589,7 @@ impl Action {
             | Self::RemoveRole { .. }
             | Self::ListBans { .. }
             | Self::GetChannel { .. }
+            | Self::ListChannels { .. }
             | Self::CreateChannel { .. }
             | Self::EditChannel { .. }
             | Self::DeleteChannel { .. }
@@ -1702,6 +1711,7 @@ impl Action {
             Self::RemoveRole { .. } => "remove_role",
             Self::ListBans { .. } => "list_bans",
             Self::GetChannel { .. } => "get_channel",
+            Self::ListChannels { .. } => "list_channels",
             Self::CreateChannel { .. } => "create_channel",
             Self::EditChannel { .. } => "edit_channel",
             Self::DeleteChannel { .. } => "delete_channel",
@@ -1835,6 +1845,7 @@ impl Action {
             | Self::AddRole { .. }
             | Self::RemoveRole { .. }
             | Self::GetChannel { .. }
+            | Self::ListChannels { .. }
             | Self::DeleteChannel { .. }
             | Self::SetPermissionOverwrite { .. }
             | Self::DeletePermissionOverwrite { .. }
@@ -2019,6 +2030,17 @@ mod tests {
             reason: reason(),
         };
         assert_eq!(delete.guild_id(), None);
+    }
+
+    #[test]
+    fn listing_channels_names_its_guild_and_needs_read_guild() {
+        let list = Action::ListChannels {
+            guild_id: id::<7, _>(),
+        };
+        assert_eq!(list.guild_id(), Some(id::<7, _>()));
+        assert_eq!(list.capability(), Capability::ReadGuild);
+        assert!(list.channels().is_empty());
+        assert_eq!(list.name(), "list_channels");
     }
 
     #[test]

@@ -99,7 +99,7 @@ field-member = メンバー
 field-check = 判定
 field-would-run = 実行される動作
 
-command-automod-counters = automod-counters
+subcommand-automod-counters = カウンター
     .description = automod のカウンターを見る・変更する
 subcommand-automod-counters-view = view
     .description = カウンターの値を表示する

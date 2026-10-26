@@ -60,7 +60,7 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | `counter_trigger` | `counter` (a trigger of a counter fired, or its reverse) |
 | `antiraid_level` | not yet: antiraid is the next stage |
 | 19 actions | `delete`, `purge`, `warn`, `timeout`, `kick`, `ban`, `reply` (with `auto_delete`), `alert`, `addRoles` (`add_roles`), `removeRoles` (`remove_roles`), `changeNickname` (`set_nickname`), `setSlowmode` (`slowmode`), `addToCounter` (`add_to_counter`), `setCounter` (`set_counter`). Templates with `{user}`, `{rule}`, `{detail}` and more |
-| counters | the module's `counters`: per member, per channel or overall, lazy decay, triggers and reverses, changed by actions and by `/automod-counters`. Zeppelin's counter commands are `/automod-counters view\|set\|add\|reset` here |
+| counters | the module's `counters`: per member, per channel or overall, lazy decay, triggers and reverses, changed by actions and by `/automod counters`. Zeppelin's counter commands are `/automod counters view\|set\|add\|reset` here |
 | message history for spam, `clean`, logs | available as the `message_history` capability: messages kept for `--message-history-days` (7 by default), with edits and deletions (see [writing modules](writing-modules.md#message-history)) |
 | `Logs` event log | ModLog of cases only |
 | Mutes / ModActions / Warnings message templates | fixed texts; `{user}` `{moderator}` `{server}` in templates. `closure_sdk::template` has `{name}` and `{a.b}` only, with no functions (Zeppelin's `if`, `plural`, `round`... are not ported) |

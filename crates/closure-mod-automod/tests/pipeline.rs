@@ -107,6 +107,8 @@ fn the_settings_default_to_no_rules_and_no_dry_run() {
             "dm_on_action": true,
             "timeout_method": "discord",
             "timeout_role": null,
+            "remove_roles_on_mute": false,
+            "restore_roles_on_mute": true,
             "counters": {},
             "rules": {}
         })

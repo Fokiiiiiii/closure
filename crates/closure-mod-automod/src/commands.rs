@@ -1,4 +1,4 @@
-//! `/automod-counters`: looks at and changes the counters, privately. A change made here runs the
+//! `/automod counters`: looks at and changes the counters, privately. A change made here runs the
 //! counter triggers it fires, as an action's change would.
 
 use std::sync::Arc;

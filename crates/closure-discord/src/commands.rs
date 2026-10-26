@@ -622,4 +622,48 @@ subcommand-warn-list = 一覧
         assert_eq!(add.kind, CommandOptionType::SubCommand);
         assert_eq!(add.options.as_ref().unwrap()[0].name, "user");
     }
+
+    #[test]
+    fn plain_subcommands_and_groups_are_published_in_one_command_in_order() {
+        let spec = CommandSpec {
+            options: vec![],
+            subcommands: vec![
+                SubcommandSpec {
+                    name: "status".into(),
+                    description: "Show status".into(),
+                    options: vec![],
+                    subcommands: vec![],
+                },
+                SubcommandSpec {
+                    name: "counters".into(),
+                    description: "Look at counters".into(),
+                    options: vec![],
+                    subcommands: vec![SubcommandSpec {
+                        name: "view".into(),
+                        description: "Show one".into(),
+                        options: vec![option_spec("counter", OptionKind::String, true)],
+                        subcommands: vec![],
+                    }],
+                },
+            ],
+            ..warn_spec()
+        };
+        let command = built(spec, EN, JA);
+        let shape: Vec<(CommandOptionType, &str)> = command
+            .options
+            .iter()
+            .map(|option| (option.kind, option.name.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (CommandOptionType::SubCommand, "status"),
+                (CommandOptionType::SubCommandGroup, "counters"),
+            ]
+        );
+        let view = &command.options[1].options.as_ref().unwrap()[0];
+        assert_eq!(view.kind, CommandOptionType::SubCommand);
+        assert_eq!(view.name, "view");
+        assert_eq!(view.options.as_ref().unwrap()[0].name, "counter");
+    }
 }

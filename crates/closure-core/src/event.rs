@@ -491,6 +491,11 @@ pub enum Event {
     /// Answering [`crate::subscription::Flow::Stop`] says the module cannot handle it and never
     /// will: the job is dropped (a repeating one stops) instead of being finished.
     Scheduled(ScheduledJob),
+    /// The configuration of the guild was reloaded and changed, or the guild came up at start-up.
+    /// Every enabled module of the guild gets it; it needs no Discord intent.
+    ConfigChanged {
+        guild_id: GuildId,
+    },
 }
 
 /// Payload-free discriminant of [`Event`], used for subscriptions and metrics labels.
@@ -528,6 +533,7 @@ pub enum EventKind {
     Autocomplete,
     ContextCommand,
     Scheduled,
+    ConfigChanged,
 }
 
 impl EventKind {
@@ -565,6 +571,7 @@ impl EventKind {
             | Self::Modal
             | Self::Autocomplete
             | Self::ContextCommand
+            | Self::ConfigChanged
             | Self::Scheduled => Intents::empty(),
         }
     }
@@ -603,6 +610,7 @@ impl EventKind {
             Self::Autocomplete => "autocomplete",
             Self::ContextCommand => "context_command",
             Self::Scheduled => "scheduled",
+            Self::ConfigChanged => "config_changed",
         }
     }
 }
@@ -642,6 +650,7 @@ impl Event {
             Self::Autocomplete(_) => EventKind::Autocomplete,
             Self::ContextCommand(_) => EventKind::ContextCommand,
             Self::Scheduled(_) => EventKind::Scheduled,
+            Self::ConfigChanged { .. } => EventKind::ConfigChanged,
         }
     }
 
@@ -716,6 +725,7 @@ impl Event {
         match self {
             Self::GuildAvailable { guild_id, .. }
             | Self::GuildRemoved { guild_id }
+            | Self::ConfigChanged { guild_id }
             | Self::MemberLeft { guild_id, .. }
             | Self::MessageDeleted { guild_id, .. }
             | Self::MessagesBulkDeleted { guild_id, .. }
@@ -888,6 +898,18 @@ mod tests {
         assert_eq!(event.guild_id(), Id::new(1));
         assert_eq!(event.channel_id(), None);
         assert_eq!(EventKind::CaseCreated.required_intents(), Intents::empty());
+    }
+
+    #[test]
+    fn a_config_change_belongs_to_its_guild_and_needs_no_intent() {
+        let event = Event::ConfigChanged {
+            guild_id: GuildId::new(7),
+        };
+        assert_eq!(event.kind(), EventKind::ConfigChanged);
+        assert_eq!(event.guild_id(), GuildId::new(7));
+        assert_eq!(event.channel_id(), None);
+        assert!(event.kind().required_intents().is_empty());
+        assert_eq!(EventKind::ConfigChanged.as_str(), "config_changed");
     }
 
     #[test]

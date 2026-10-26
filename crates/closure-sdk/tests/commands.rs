@@ -4,11 +4,12 @@
 use std::time::Duration;
 
 use closure_core::event::CommandOptionValue;
+use closure_core::module::Module;
 use closure_sdk::testing::{Harness, Invocation, Reply, ReplyKind};
 use closure_sdk::{
-    Args, Attachment, Capability, Command, CommandArgs, Cooldown, Event, EventKind, Flow, Intents,
-    Level, Locale, Mentionable, ModuleBuilder, OptionKind, PermissionKey, PermissionSpec,
-    SubcommandGroup, Subscription, UserError, UserId, UserInfo,
+    Args, Attachment, BoundCommand, Capability, Command, CommandArgs, Cooldown, Event, EventKind,
+    Flow, Intents, Level, Locale, Mentionable, ModuleBuilder, OptionKind, PermissionKey,
+    PermissionSpec, SubcommandGroup, Subscription, UserError, UserId, UserInfo,
 };
 use twilight_model::id::Id;
 
@@ -781,4 +782,164 @@ fn a_group_is_refused_when_none_is_empty_or_two_routes_share_a_name() {
         ],
     );
     assert!(twice.build().is_err(), "`list all` declared twice");
+}
+
+/// A plain subcommand that answers with its own name.
+fn plain(name: &str) -> BoundCommand {
+    let reply = name.to_owned();
+    Command::<()>::new(name, "Plain").handler(move |cx, ()| {
+        let reply = reply.clone();
+        async move { cx.reply(reply).await }
+    })
+}
+
+/// A subcommand `sub` inside the group `group`, answering with `group sub`.
+fn grouped(group: &str, sub: &str) -> SubcommandGroup {
+    SubcommandGroup::new(group, "Grouped").subcommand(plain(sub))
+}
+
+/// The command `warn`: a plain `status`, which needs `tree.edit`, and the group `list` with `all`
+/// and the group `clear` with `all`, in whichever order the calls are made.
+fn tree(first_groups: bool) -> ModuleBuilder {
+    let base = ModuleBuilder::new("tree", "Tree", "0.1.0")
+        .unwrap()
+        .permission(PermissionSpec::new("tree.edit", Level::MODERATOR, "Edit the tree").unwrap());
+    let plain_call = |builder: ModuleBuilder| {
+        builder.group(
+            "warn",
+            "Warnings",
+            [Command::<()>::new("status", "Plain")
+                .requires("tree.edit")
+                .handler(|cx, ()| async move { cx.reply("status").await })],
+        )
+    };
+    let groups_call = |builder: ModuleBuilder| {
+        builder.groups(
+            "warn",
+            "Warnings",
+            [grouped("list", "all"), grouped("clear", "all")],
+        )
+    };
+    if first_groups {
+        plain_call(groups_call(base))
+    } else {
+        groups_call(plain_call(base))
+    }
+}
+
+#[tokio::test]
+async fn plain_subcommands_and_groups_share_one_command_in_either_order() {
+    for first_groups in [false, true] {
+        let module = tree(first_groups).build().unwrap();
+        let commands = &module.manifest().commands;
+        assert_eq!(commands.len(), 1, "one command named warn is published");
+        let mut names: Vec<&str> = commands[0]
+            .subcommands
+            .iter()
+            .map(|sub| sub.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["clear", "list", "status"],
+            "first_groups={first_groups}"
+        );
+
+        let harness = Harness::new(tree(first_groups)).unwrap();
+        harness.permissions(|permissions| {
+            permissions
+                .role_levels
+                .insert(Id::new(10), Level::MODERATOR);
+        });
+        let plain = Invocation::new("warn").subcommand("status").user(7);
+        assert_ne!(
+            texts(&harness.invoke(plain.clone()).await.unwrap()),
+            ["status"],
+            "the plain subcommand needs its permission"
+        );
+        assert_eq!(
+            texts(&harness.invoke(plain.roles([10])).await.unwrap()),
+            ["status"]
+        );
+        let grouped = Invocation::new("warn").subcommand("list all").user(8);
+        assert_eq!(
+            texts(&harness.invoke(grouped).await.unwrap()),
+            ["all"],
+            "a group's subcommand is routed by both names"
+        );
+    }
+}
+
+#[test]
+fn a_plain_name_and_a_group_name_cannot_clash_nor_a_command_with_options() {
+    let base = || ModuleBuilder::new("tree", "Tree", "0.1.0").unwrap();
+    let with_options = base().command(
+        Command::<Kind>::new("warn", "Warnings").handler(|_cx, _args| async move { Ok(()) }),
+    );
+    assert!(
+        with_options
+            .group("warn", "Warnings", [plain("status")])
+            .build()
+            .is_err(),
+        "a command with options cannot take subcommands"
+    );
+    let no_options = base().command(plain("warn"));
+    assert!(
+        no_options
+            .group("warn", "Warnings", [plain("status")])
+            .build()
+            .is_err(),
+        "a plain command cannot take subcommands"
+    );
+    let command_after = base()
+        .group("warn", "Warnings", [plain("status")])
+        .command(plain("warn"));
+    assert!(
+        command_after.build().is_err(),
+        "a command with subcommands cannot become a plain command"
+    );
+    let plain_then_group = base().group("warn", "Warnings", [plain("list")]).groups(
+        "warn",
+        "Warnings",
+        [grouped("list", "all")],
+    );
+    assert!(
+        plain_then_group.build().is_err(),
+        "a subcommand and a group share a name"
+    );
+    let group_then_plain = base()
+        .groups("warn", "Warnings", [grouped("list", "all")])
+        .group("warn", "Warnings", [plain("list")]);
+    assert!(group_then_plain.build().is_err());
+    let groups_twice = base()
+        .groups("warn", "Warnings", [grouped("list", "all")])
+        .groups("warn", "Warnings", [grouped("list", "clear")]);
+    assert!(groups_twice.build().is_err(), "a group named twice");
+    let plain_twice = base().group("warn", "Warnings", [plain("status")]).group(
+        "warn",
+        "Warnings",
+        [plain("status")],
+    );
+    assert!(plain_twice.build().is_err(), "a subcommand named twice");
+}
+
+/// `plain` plain subcommands and `groups` groups in one command, split over two calls.
+fn many(plain_count: usize, groups_count: usize) -> ModuleBuilder {
+    let base = ModuleBuilder::new("tree", "Tree", "0.1.0").unwrap();
+    base.group(
+        "warn",
+        "Warnings",
+        (0..plain_count).map(|i| plain(&format!("p{i}"))),
+    )
+    .groups(
+        "warn",
+        "Warnings",
+        (0..groups_count).map(|i| grouped(&format!("g{i}"), "all")),
+    )
+}
+
+#[test]
+fn a_command_takes_at_most_25_subcommands_and_groups() {
+    assert!(many(12, 13).build().is_ok(), "25 is the limit");
+    assert!(many(13, 13).build().is_err(), "26 is too many for Discord");
 }

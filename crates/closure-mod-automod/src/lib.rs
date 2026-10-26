@@ -22,13 +22,18 @@ mod triggers;
 use std::sync::Arc;
 
 use closure_sdk::punish;
+use closure_sdk::punish::{Method, RestrictionRole, ensure_role};
 use closure_sdk::{
-    Capability, Command, CoreError, Event, EventContext, EventKind, Intents, Level, Locale,
-    ModuleBuilder, PermissionSpec, SdkModule, Subscription,
+    Capability, Command, CoreError, Event, EventContext, EventKind, Flow, Intents, Level, Locale,
+    ModuleBuilder, ModuleError, PermissionSpec, SdkModule, SubcommandGroup, Subscription,
+    parse_module_config,
 };
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
+
+/// `/automod` is made by two calls (its status and its counters), which both give this text.
+const AUTOMOD_DESCRIPTION: &str = "Automatic moderation: its rules and state";
 
 /// The events the rules read: messages, members, roles, cases and threads.
 const EVENTS: [EventKind; 10] = [
@@ -43,6 +48,41 @@ const EVENTS: [EventKind; 10] = [
     EventKind::ThreadUnarchived,
     EventKind::ThreadDeleted,
 ];
+
+/// The events of the role method: a configuration change sets the timeout role up, and a new channel
+/// gets its overwrites.
+fn with_role_events(builder: ModuleBuilder) -> ModuleBuilder {
+    builder
+        .on(Subscription::new(EventKind::ConfigChanged), config_changed)
+        .on(
+            Subscription::new(EventKind::ChannelCreated),
+            channel_created,
+        )
+}
+
+/// Sets the timeout role up when the configuration changes, so that it exists before the first
+/// punishment, as moderation does.
+async fn config_changed(ctx: EventContext, _event: Event) -> Result<Flow, ModuleError> {
+    let config: config::Config = parse_module_config(&ctx)?;
+    if config.timeout_method == Method::Role {
+        ensure_role(
+            &ctx,
+            RestrictionRole::Timeout,
+            config::role_of(config.timeout_role.as_deref()),
+        )
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    }
+    Ok(Flow::Continue)
+}
+
+/// A channel created later gets the overwrites of the timeout role, so it keeps the restriction.
+async fn channel_created(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
+    if let Event::ChannelCreated(channel) = event {
+        punish::channel_created(&ctx, channel.id).await?;
+    }
+    Ok(Flow::Continue)
+}
 
 /// The module, still open for a test to build on.
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
@@ -82,6 +122,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
     for kind in EVENTS {
         builder = builder.on(Subscription::new(kind), on_event.clone());
     }
+    builder = with_role_events(builder);
     let builder = builder
         .permission(PermissionSpec::new(
             "automod.view",
@@ -96,41 +137,50 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .config(schema, defaults)
         .group(
             "automod",
-            "Automatic moderation: its rules and state",
+            AUTOMOD_DESCRIPTION,
             [
                 Command::<()>::new("status", "Show whether dry run is on and which rules run")
                     .requires("automod.view")
                     .handler(status::status),
             ],
         )
-        .group(
-            "automod-counters",
-            "Look at and change the counters of automod",
+        .groups(
+            "automod",
+            AUTOMOD_DESCRIPTION,
             [
-                Command::<commands::View>::new("view", "Show the value of a counter")
-                    .requires("automod.counters")
-                    .handler({
-                        let state = Arc::clone(&state);
-                        move |cx, args| commands::view(Arc::clone(&state), cx, args)
-                    }),
-                Command::<commands::Set>::new("set", "Set the value of a counter")
-                    .requires("automod.counters")
-                    .handler({
-                        let state = Arc::clone(&state);
-                        move |cx, args| commands::set(Arc::clone(&state), cx, args)
-                    }),
-                Command::<commands::Add>::new("add", "Add to a counter")
-                    .requires("automod.counters")
-                    .handler({
-                        let state = Arc::clone(&state);
-                        move |cx, args| commands::add(Arc::clone(&state), cx, args)
-                    }),
-                Command::<commands::Reset>::new("reset", "Put a counter back to its start")
-                    .requires("automod.counters")
-                    .handler({
-                        let state = Arc::clone(&state);
-                        move |cx, args| commands::reset(Arc::clone(&state), cx, args)
-                    }),
+                SubcommandGroup::new("counters", "Look at and change the counters of automod")
+                    .subcommand(
+                        Command::<commands::View>::new("view", "Show the value of a counter")
+                            .requires("automod.counters")
+                            .handler({
+                                let state = Arc::clone(&state);
+                                move |cx, args| commands::view(Arc::clone(&state), cx, args)
+                            }),
+                    )
+                    .subcommand(
+                        Command::<commands::Set>::new("set", "Set the value of a counter")
+                            .requires("automod.counters")
+                            .handler({
+                                let state = Arc::clone(&state);
+                                move |cx, args| commands::set(Arc::clone(&state), cx, args)
+                            }),
+                    )
+                    .subcommand(
+                        Command::<commands::Add>::new("add", "Add to a counter")
+                            .requires("automod.counters")
+                            .handler({
+                                let state = Arc::clone(&state);
+                                move |cx, args| commands::add(Arc::clone(&state), cx, args)
+                            }),
+                    )
+                    .subcommand(
+                        Command::<commands::Reset>::new("reset", "Put a counter back to its start")
+                            .requires("automod.counters")
+                            .handler({
+                                let state = Arc::clone(&state);
+                                move |cx, args| commands::reset(Arc::clone(&state), cx, args)
+                            }),
+                    ),
             ],
         )
         .job(actions::CLEANUP_JOB, actions::cleanup);

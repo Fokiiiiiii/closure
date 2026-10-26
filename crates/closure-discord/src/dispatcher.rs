@@ -356,7 +356,9 @@ fn ordering_key(event: &Event) -> u64 {
         Event::Component(click) => click.user.id.get(),
         Event::Modal(submission) => submission.user.id.get(),
         Event::Scheduled(job) => u64::try_from(job.id).unwrap_or(0),
-        Event::GuildAvailable { .. } | Event::GuildRemoved { .. } => 0,
+        Event::GuildAvailable { .. } | Event::GuildRemoved { .. } | Event::ConfigChanged { .. } => {
+            0
+        }
     }
 }
 

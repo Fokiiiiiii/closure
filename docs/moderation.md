@@ -41,9 +41,11 @@ modules:
       ban_delete_days: 0     # 0 to 7; the days of messages a ban deletes unless the command says otherwise
       escalation: []         # rules: what a warning brings about at a number of active warnings
       timeout_method: discord    # discord or role: how a timeout is given
-      timeout_role: null         # the id of the role a timeout gives, needed for timeout_method role
+      timeout_role: null         # optional: the id of the role a timeout gives; left out, Closure creates one
       voice_mute_method: discord # discord or role: how a voice mute is given
-      voice_mute_role: null      # the id of the role a voice mute gives, needed for voice_mute_method role
+      voice_mute_role: null      # optional: the id of the role a voice mute gives; left out, Closure creates one
+      remove_roles_on_mute: false   # false, true (every role that can be taken off), or role ids: taken off by a role timeout or voice mute
+      restore_roles_on_mute: true   # the same forms: which of the taken-off roles come back when the punishment ends
       templates: {}              # the templates a moderator picks from when a reason or duration is missing
 ```
 
@@ -60,8 +62,38 @@ well, to show the replies of this module to the invoking user only or to everyon
   channel: when the member is not, Discord refuses it, the command replies with that error and no
   case is recorded.
 - **`role`**: the member gets the role in `timeout_role` (or `voice_mute_role`), and a timer takes it
-  off when the time is up. There is no 28-day limit. The server decides what the role denies: set it to deny Send Messages, Add Reactions, Create Threads and
-  Speak, in the channels or categories it should apply to. The bot's highest role must be above it.
+  off when the time is up. There is no 28-day limit. Without a configured role, Closure creates one
+  the first time it is needed, and reuses it afterwards:
+
+  - The roles are named `Timed out` and `Voice muted`. A role with that name (without regard to case)
+    that already exists is used instead, so two modules of one server share one role.
+  - The role has **no permissions at all**. It is not hoisted and not mentionable. It only denies.
+  - In every channel, category and voice channel of the server (up to 500 channels), the role gets a
+    deny overwrite. A timeout denies Send Messages, Send Messages in Threads, Create Public Threads,
+    Create Private Threads, Add Reactions, Speak, Stream and Request to Speak. A voice mute denies
+    Speak, Stream and Use Voice Activity. A channel that already has an overwrite for the role is left
+    alone. The sync runs as a job, ten channels per run; a channel where Discord refuses the change is
+    skipped and counted.
+  - A channel created later gets the same overwrites. A sync is started when the role is created, and
+    again when an earlier one did not finish. A sync that is running is not started again by a later
+    punishment, for ten minutes at a time: a lost job is started again after that.
+  - When the configuration changes, the roles that its methods need are created at once, so the first
+    punishment finds them ready.
+  - When the sync is done, the log channel gets a note with three counts: the channels that could not
+    be set up, the channels where another role still allows speaking, and the channels that were not
+    checked (more than 500 channels).
+  - A role named in `timeout_role` or `voice_mute_role` is never touched: no overwrites are set, and the
+    server owns its permissions. A configured role that no longer exists is replaced by a created one.
+
+  The bot needs **Manage Roles** and **Manage Channels**. The bot's highest role must be above the role;
+  Discord puts a new role at the bottom, so this holds unless the server moves it. If the role cannot be
+  had, the punishment is refused with a message before anything is done.
+
+  **Known limit.** Discord adds up the permissions of all the roles of a member in a channel, and an
+  allow that another role gives in that channel wins over the deny of this role. In a channel where
+  another role, @everyone included, allows Send Messages (or Speak for a voice mute), the member can
+  still speak. The sync's note counts these channels. Remove that allow overwrite, or use `discord` for
+  the method, which Discord enforces itself.
   If the timer cannot be set, the timeout still holds and the reply says so.
 
 A voice mute without a duration stays until `/vcunmute`. With a duration, a timer lifts it. A timer for
@@ -83,6 +115,26 @@ Known limits:
   taken off by its timer; a voice mute's timer is cancelled by `/vcunmute` under `discord`, so only
   the command under `role` lifts its role.
 - A voice mute by Discord needs the member in voice, both when it is made and when it is lifted.
+
+## Taking roles off
+
+With `role`, `remove_roles_on_mute` says which of the member's roles a timeout or a voice mute takes off
+when the dedicated role is given, and `restore_roles_on_mute` says which of them come back when the
+punishment ends.
+
+- `false` (the default for removing): no role is taken off. `true`: every role that can be taken off,
+  which excludes @everyone, managed roles (a bot's or a boost role), roles at or above the bot's highest
+  role, and the dedicated role itself. A list of role ids: the listed roles the member has.
+- The taken-off roles are remembered for the member and the kind of punishment, up to 250 roles, until
+  they come back. `restore_roles_on_mute` defaults to `true`, which gives back all of them; a list gives
+  back only the listed ones, and the others are dropped.
+- Roles come back when the punishment is lifted by a command or by its timer, but only when no other
+  punishment of the same kind still stands for the member.
+- A role that Discord refuses to take off or give back is skipped, and the reply says how many roles
+  stayed on the member. Remembering the roles uses the module's storage: without it, nothing is taken off.
+- Rejoining gives the dedicated role again, and takes nothing off. The roles taken off before the
+  leave come back when the punishment ends.
+- Discord's own timeout takes no roles off, so this applies to `role` only.
 
 ## Rejoining members
 
@@ -288,7 +340,7 @@ lift it with `/unban` or ban it again with a duration.
 ## What the bot needs from Discord
 
 - Permissions: **Kick Members**, **Ban Members**, **Moderate Members** (for timeouts), **Mute Members**
-  (for voice mutes), **Manage Roles** (for the `role` methods), and **Send Messages** in the log
+  (for voice mutes), **Manage Roles** and **Manage Channels** (for the `role` methods), and **Send Messages** in the log
   channel. The module does not need View Audit Log.
 - Gateway intent: **Server Members**, a privileged intent for the [rejoining members](#rejoining-members).
   Switch it on for the bot under *Bot* → *Privileged Gateway Intents* in the developer portal. The

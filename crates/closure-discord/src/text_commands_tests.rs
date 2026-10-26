@@ -593,6 +593,48 @@ fn subcommands_and_groups_resolve_to_their_path() {
 }
 
 #[test]
+fn a_plain_subcommand_and_a_group_of_one_command_both_read_as_text() {
+    let all = [spec(
+        "tree",
+        vec![],
+        vec![
+            sub("status", vec![]),
+            group(
+                "counters",
+                vec![sub("view", vec![required("counter", OptionKind::String)])],
+            ),
+        ],
+    )];
+    let enabled: Vec<&CommandSpec> = all.iter().collect();
+    let translator = TranslatorBuilder::new().unwrap().build();
+    let reader = Reader {
+        prefix: PREFIX,
+        application: Id::new(60),
+        locale: Locale::En,
+        commands: &enabled,
+        translator: &translator,
+    };
+    let at = |content: &str| reader.read(&message(content), |_| Permissions::SEND_MESSAGES);
+
+    let Reading::Run(status) = at("!tree status") else {
+        panic!("the plain subcommand runs");
+    };
+    assert_eq!(status.subcommand.as_deref(), Some("status"));
+
+    let Reading::Run(view) = at("!tree counters view strikes") else {
+        panic!("the subcommand of the group runs");
+    };
+    assert_eq!(view.subcommand.as_deref(), Some("counters view"));
+    assert_eq!(
+        view.options,
+        [CommandOption {
+            name: "counter".into(),
+            value: text("strikes"),
+        }]
+    );
+}
+
+#[test]
 fn a_missing_or_unknown_subcommand_answers_with_the_choices() {
     assert_eq!(usage("!auto"), "Usage: !auto <status|rule>");
     assert_eq!(usage("!auto nope"), "Usage: !auto <status|rule>");

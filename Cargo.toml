@@ -62,7 +62,9 @@ syn = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 twilight-cache-inmemory = "0.17"
-twilight-gateway = "0.17"
+# zlib instead of the default zstd: the zstd-safe it pulls in has two open advisories
+# (RUSTSEC-2026-0398, -0403) and Discord supports zlib-stream just as well.
+twilight-gateway = { version = "0.17", default-features = false, features = ["rustls-platform-verifier", "twilight-http", "zlib"] }
 twilight-http = "0.17"
 twilight-model = "0.17"
 twilight-standby = "0.17"

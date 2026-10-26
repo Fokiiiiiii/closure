@@ -6,7 +6,7 @@ use std::time::Duration;
 use closure_core::action::Action;
 use closure_core::error::DiscordError;
 use closure_core::event::CommandOptionValue;
-use closure_sdk::punish::{self, Done, Method, Moderator, Punisher, Settings};
+use closure_sdk::punish::{self, Done, Method, Moderator, Punisher, Settings, Strip};
 use closure_sdk::testing::{Harness, Invocation, Reply};
 use closure_sdk::{
     Capability, Case, CaseKind, Command, CommandArgs, CommandCx, Locale, ModuleBuilder,
@@ -46,6 +46,7 @@ impl Setup {
             timeout_role: role(&self.timeout_role),
             voice: self.voice,
             voice_role: role(&self.voice_role),
+            strip: Strip::default(),
         }
     }
 }
@@ -1341,6 +1342,7 @@ fn the_settings_default_to_a_direct_message_and_discord() {
             timeout_role: None,
             voice: Method::Discord,
             voice_role: None,
+            strip: Strip::default(),
         }
     );
     assert_eq!(Method::default(), Method::Discord);

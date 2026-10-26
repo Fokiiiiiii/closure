@@ -14,6 +14,21 @@ const COUNTER_NAME: &str = "^[a-z0-9_-]{1,32}$";
 const CONDITION: &str = "^\\s*(>=|<=|!=|>|<|=)\\s*[0-9]{1,10}\\s*$";
 const MAX_COUNTER_VALUE: i64 = 2_147_483_647;
 
+const REMOVE_ROLES_DOC: &str = "Which roles a role timeout takes off the member: false, true for every role that can be taken off, or a list of role ids.";
+const RESTORE_ROLES_DOC: &str = "Which of the roles taken off come back when the timeout ends: the same forms as remove_roles_on_mute. true by default.";
+
+/// The schema of a setting that takes roles: `false`, `true`, or a list of role ids.
+fn role_list_setting(description: &str) -> Value {
+    json!({
+        "oneOf": [
+            { "type": "boolean" },
+            { "type": "array", "maxItems": 50, "items": { "type": "string", "pattern": SNOWFLAKE } }
+        ],
+        "description": description,
+        "x-ui": { "level": "advanced" }
+    })
+}
+
 /// The schema and the defaults of the module's section.
 pub fn settings() -> (Value, Value) {
     (
@@ -47,6 +62,8 @@ pub fn settings() -> (Value, Value) {
                     "pattern": SNOWFLAKE,
                     "description": "The id of the role a timeout gives, when timeout_method is role."
                 },
+                "remove_roles_on_mute": role_list_setting(REMOVE_ROLES_DOC),
+                "restore_roles_on_mute": role_list_setting(RESTORE_ROLES_DOC),
                 "counters": {
                     "type": "object",
                     "maxProperties": 10,
@@ -70,6 +87,8 @@ pub fn settings() -> (Value, Value) {
             "dm_on_action": true,
             "timeout_method": "discord",
             "timeout_role": null,
+            "remove_roles_on_mute": false,
+            "restore_roles_on_mute": true,
             "counters": {},
             "rules": {}
         }),

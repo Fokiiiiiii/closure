@@ -234,6 +234,30 @@ Declare the capabilities of what the module carries out: `Cases`, `SendMessages`
 `SendDirectMessages`, `KickMembers`, `BanMembers`, `TimeoutMembers`, `ManageRoles`, `MuteMembers` and
 `ReadGuild`. `punish::jobs` adds `Schedule`.
 
+`Settings::strip` (`punish::Strip`) takes the member's roles off when the dedicated role is given, and gives
+the ones taken off back when the punishment ends (`RoleSelection::{None, All, Some(ids)}`). Its roles are
+remembered with the module's `Storage` capability; without it nothing is taken off.
+
+Dedicated roles of the role method: `punish::ensure_role(ctx, RestrictionRole::Timeout | Voice, configured)`
+returns the role a restriction gives. A configured role that exists is used as it is and never touched.
+Otherwise the remembered or a same-named role (`Timed out`, `Voice muted`) is used, or a new role is created
+with no permissions. A created role gets a deny overwrite in every channel by a job that `punish::jobs`
+registers (`restriction_sync`), and a module that wants the overwrites on new channels calls
+`punish::channel_created(ctx, channel)` on `Event::ChannelCreated`. The role needs the capabilities
+`ManageRoles` and `ManageChannels`, and the job needs `Schedule`.
+
+### Configuration changes
+
+`Event::ConfigChanged { guild_id }` (kind `config_changed`, no Discord intent) reaches every enabled
+module of a guild right after the guild's configuration was reloaded and changed, and once for each
+guild that has a configuration when the bot sees the guild at start-up or when it is added. An identical
+reload sends nothing. Use it to prepare what the settings need, such as the roles of the role method.
+
+### Listing channels
+
+`Action::ListChannels { guild_id }` answers `Outcome::Channels(Vec<Channel>)`, the channels of the guild
+with their permission overwrites. It needs `ReadGuild`.
+
 ### Replies
 
 A reply is one embed whose description is the text. `reply` and `reply_private` use the `Info`
@@ -282,6 +306,12 @@ ModuleBuilder::new("warn", "Warnings", env!("CARGO_PKG_VERSION"))?
             .subcommand(Command::<()>::new("all", "Every warning").handler(list_all)),
     ])
 ```
+
+A command may take plain subcommands and groups together: call `group` and `groups` with the same
+name, in either order (`/warn status` next to `/warn list all`). The calls add to one command, and
+the description of the first one stands. The build refuses a name used twice among a command's
+subcommands and groups, a plain command with options or without them that also takes subcommands,
+and more than 25 subcommands and groups.
 
 Autocomplete: mark a text or number option with `#[arg(autocomplete)]` (or name it in
 `ModuleBuilder::autocomplete("warn", "reason", handler)`, which marks it too). The handler gets an

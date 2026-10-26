@@ -9,11 +9,15 @@ use std::time::Duration;
 use closure_sdk::duration::{TimeStyle, parse as parse_duration, timestamp};
 use closure_sdk::embed::{escape, truncate};
 use closure_sdk::modlog;
-use closure_sdk::punish::{self, Done, Method, Moderator, Punisher, Settings};
+use closure_sdk::punish::{
+    self, Done, Method, Moderator, Punisher, RestrictionRole, RoleSetting, Settings, Strip,
+    ensure_role,
+};
 use closure_sdk::{
     Args, Capability, Case, CaseError, CaseKind, Cases, Command, CommandArgs, CommandCx, Cooldown,
-    CoreError, Cx, EventKind, InteractionRef, InteractionReply, Level, Locale, ModuleBuilder,
-    NewCase, PermissionSpec, SdkModule, Span, Subscription, Tone, UserError, UserId,
+    CoreError, Cx, Event, EventContext, EventKind, Flow, InteractionRef, InteractionReply, Level,
+    Locale, ModuleBuilder, ModuleError, NewCase, PermissionSpec, SdkModule, Span, Subscription,
+    Tone, UserError, UserId,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -70,6 +74,12 @@ pub(crate) struct Config {
     voice_mute_method: Method,
     /// The id of the role a voice mute gives, when `voice_mute_method` is `role`.
     voice_mute_role: Option<String>,
+    /// Which roles a role timeout or voice mute takes off the member: `false`, `true` (every role
+    /// that can be taken off), or role ids.
+    remove_roles_on_mute: RoleSetting,
+    /// Which of the roles taken off come back when the punishment ends: the same forms, `true`
+    /// by default.
+    restore_roles_on_mute: RoleSetting,
     /// The templates a moderator picks from when a timeout, kick, ban or voice mute lacks a reason
     /// or a duration.
     templates: templates::Templates,
@@ -87,6 +97,8 @@ impl Default for Config {
             timeout_role: None,
             voice_mute_method: Method::Discord,
             voice_mute_role: None,
+            remove_roles_on_mute: RoleSetting::Flag(false),
+            restore_roles_on_mute: RoleSetting::Flag(true),
             templates: templates::Templates::default(),
         }
     }
@@ -321,21 +333,84 @@ fn punishment_reason(config: &Config, text: Option<String>) -> Result<Option<Str
 }
 
 /// The punisher of a command or a click: the user who runs it, the server's settings, and notes in
-/// the language of the reply.
-fn punisher_for<'a, I: InteractionRef + 'static>(cx: &'a Cx<I>, config: &Config) -> Punisher<'a> {
-    Punisher::new(cx.ctx(), Moderator::of(cx.user()), punish_settings(config))
-        .reply_locale(cx.locale())
+/// the language of the reply. A role method gets its role here, created when it is missing.
+async fn punisher_for<'a, I: InteractionRef + 'static>(
+    cx: &'a Cx<I>,
+    config: &Config,
+) -> Result<Punisher<'a>, UserError> {
+    let settings = punish_settings(cx.ctx(), config).await?;
+    Ok(Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings).reply_locale(cx.locale()))
 }
 
-/// What the server chose for the punishments, as the SDK takes it.
-fn punish_settings(config: &Config) -> Settings {
-    Settings {
+/// What the server chose for the punishments, as the SDK takes it. A role method's role is the
+/// configured one, or the one Closure finds or creates (see [`ensure_role`]).
+async fn punish_settings(ctx: &EventContext, config: &Config) -> Result<Settings, UserError> {
+    let timeout_role = match config.timeout_method {
+        Method::Role => Some(
+            ensure_role(
+                ctx,
+                RestrictionRole::Timeout,
+                restrict::role_of(config.timeout_role.as_deref()),
+            )
+            .await?,
+        ),
+        Method::Discord => None,
+    };
+    let voice_role = match config.voice_mute_method {
+        Method::Role => Some(
+            ensure_role(
+                ctx,
+                RestrictionRole::Voice,
+                restrict::role_of(config.voice_mute_role.as_deref()),
+            )
+            .await?,
+        ),
+        Method::Discord => None,
+    };
+    Ok(Settings {
         dm: config.dm_on_action,
         timeout: config.timeout_method,
-        timeout_role: restrict::role_of(config.timeout_role.as_deref()),
+        timeout_role,
         voice: config.voice_mute_method,
-        voice_role: restrict::role_of(config.voice_mute_role.as_deref()),
+        voice_role,
+        strip: Strip {
+            remove: config.remove_roles_on_mute.selection(),
+            restore: config.restore_roles_on_mute.selection(),
+        },
+    })
+}
+
+/// Sets the dedicated roles up when the configuration changes, so that they exist and are set up
+/// in every channel before the first punishment.
+async fn config_changed(ctx: EventContext, _event: Event) -> Result<Flow, ModuleError> {
+    let config: Config = closure_sdk::parse_module_config(&ctx)?;
+    if config.timeout_method == Method::Role {
+        ensure_role(
+            &ctx,
+            RestrictionRole::Timeout,
+            restrict::role_of(config.timeout_role.as_deref()),
+        )
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
     }
+    if config.voice_mute_method == Method::Role {
+        ensure_role(
+            &ctx,
+            RestrictionRole::Voice,
+            restrict::role_of(config.voice_mute_role.as_deref()),
+        )
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    }
+    Ok(Flow::Continue)
+}
+
+/// A channel created later gets the overwrites of the dedicated roles, so it keeps the restrictions.
+async fn channel_created(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
+    if let Event::ChannelCreated(channel) = event {
+        punish::channel_created(&ctx, channel.id).await?;
+    }
+    Ok(Flow::Continue)
 }
 
 /// The case of a punishment and its notes, the notes in the language of the reply.
@@ -413,7 +488,7 @@ async fn escalate(
             .with("count", count(active))
             .with("case", warning),
     );
-    let punisher = punisher_for(cx, config);
+    let punisher = punisher_for(cx, config).await?;
     let done = match escalation {
         Escalation::Timeout(duration) => punisher.timeout(user, duration, Some(reason)).await?,
         Escalation::Kick => punisher.kick(user, Some(reason)).await?,
@@ -484,7 +559,7 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
     let expires_at = now + i64::from(config.warn_expire_days) * DAY;
     // The warning is stored already: a member who cannot be messaged keeps it, and the reply says
     // that the message did not arrive instead of failing.
-    let punisher = punisher_for(&cx, &config);
+    let punisher = punisher_for(&cx, &config).await?;
     let done = punisher.warn(args.user, reason, Some(expires_at)).await?;
     let active = active_cases(cx.cases(), args.user, "warn", now, usize::MAX)
         .await?
@@ -667,6 +742,7 @@ async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let case = punisher_for(&cx, &config)
+        .await?
         .lift_timeout(args.user, reason_of(args.reason))
         .await?;
     cx.say_private_t(
@@ -723,6 +799,7 @@ async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let case = punisher_for(&cx, &config)
+        .await?
         .unban(args.user, reason_of(args.reason))
         .await?;
     cx.say_private_t(
@@ -736,6 +813,21 @@ async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 }
 
 /// The module, still open for a test to build on.
+const REMOVE_ROLES_DOC: &str = "Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids.";
+const RESTORE_ROLES_DOC: &str = "Which of the roles taken off come back when the punishment ends: the same forms as remove_roles_on_mute. true by default.";
+
+/// The schema of a setting that takes roles: `false`, `true`, or a list of role ids.
+fn role_list_setting(description: &str) -> serde_json::Value {
+    json!({
+        "oneOf": [
+            { "type": "boolean" },
+            { "type": "array", "maxItems": 50, "items": { "type": "string", "pattern": "^[0-9]{1,20}$" } }
+        ],
+        "description": description,
+        "x-ui": { "level": "advanced" }
+    })
+}
+
 /// The settings a server can change: their schema, and their defaults.
 fn settings() -> (serde_json::Value, serde_json::Value) {
     (
@@ -817,6 +909,8 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "description": "The id of the role a voice mute gives, when voice_mute_method is role.",
                     "x-ui": { "level": "basic", "widget": "role" }
                 },
+                "remove_roles_on_mute": role_list_setting(REMOVE_ROLES_DOC),
+                "restore_roles_on_mute": role_list_setting(RESTORE_ROLES_DOC),
                 "templates": templates::schema()
             },
             "additionalProperties": false
@@ -831,6 +925,8 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "timeout_role": null,
             "voice_mute_method": "discord",
             "voice_mute_role": null,
+            "remove_roles_on_mute": false,
+            "restore_roles_on_mute": true,
             "templates": {}
         }),
     )
@@ -898,11 +994,18 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .capability(Capability::TimeoutMembers)
         .capability(Capability::ManageRoles)
         .capability(Capability::MuteMembers)
+        .capability(Capability::ManageChannels)
+        .capability(Capability::Schedule)
         .capability(Capability::Storage)
         // A privileged intent: it must be switched on for the bot in the Discord developer portal,
         // or Discord refuses the gateway connection altogether.
         .intents(Intents::GUILD_MEMBERS)
         .on(Subscription::new(EventKind::MemberJoined), rejoin::on_join)
+        .on(Subscription::new(EventKind::ConfigChanged), config_changed)
+        .on(
+            Subscription::new(EventKind::ChannelCreated),
+            channel_created,
+        )
         .permission(PermissionSpec::new(
             "moderation.warn",
             Level::MODERATOR,

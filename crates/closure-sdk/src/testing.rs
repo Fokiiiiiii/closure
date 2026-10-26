@@ -981,6 +981,25 @@ impl Harness {
         .await
     }
 
+    /// Delivers a change of the guild's configuration, as the host announces it.
+    pub async fn config_changed(&self) -> Result<Option<Flow>, ModuleError> {
+        self.emit(Event::ConfigChanged {
+            guild_id: Id::new(GUILD),
+        })
+        .await
+    }
+
+    /// Delivers a channel created in the guild.
+    pub async fn channel_created(&self, channel: u64) -> Result<Option<Flow>, ModuleError> {
+        self.emit(Event::ChannelCreated(closure_core::event::ChannelInfo {
+            id: Id::new(channel),
+            guild_id: Id::new(GUILD),
+            name: Some(format!("channel-{channel}")),
+            parent_id: None,
+        }))
+        .await
+    }
+
     /// Delivers a case recorded in the guild, as the dispatcher announces it to every module.
     pub async fn case_created(&self, case: Case) -> Result<Option<Flow>, ModuleError> {
         self.emit(Event::CaseCreated(case)).await

@@ -16,11 +16,16 @@ use crate::dm::{self, DirectMessage, Sent};
 use crate::duration::format_in;
 use crate::embed::escape;
 use crate::modlog;
+
+mod roles;
+
 use crate::{
     Args, Case, CaseError, CaseKind, Cases, DiscordError, EventContext, JobCx, Locale,
     ModuleBuilder, ModuleError, NewCase, Reason, RoleId, ScheduleError, UserError, UserId,
     UserInfo,
 };
+pub use roles::{RestrictionRole, RoleError, channel_created, ensure_role};
+use roles::{restore, strip};
 
 /// Discord's longest timeout, 28 days in seconds.
 const MAX_TIMEOUT_SECONDS: u32 = 28 * 86_400;
@@ -34,6 +39,8 @@ const PAGE: usize = 25;
 /// How many cases back an active warning is looked for. shortcut: a member with more cases than
 /// this has the older warnings left out of the count, upgrade with an index on the target.
 const SCAN: usize = 100;
+/// How many role ids a member's stripped roles are remembered with, at most.
+pub(super) const STRIP_LIMIT: usize = 250;
 
 /// How a timeout or a voice mute is given.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -46,8 +53,63 @@ pub enum Method {
     Role,
 }
 
+/// Which roles a role punishment takes off a member, or gives back when it ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RoleSelection {
+    /// No role.
+    #[default]
+    None,
+    /// Every role that can be taken off: not @everyone, not managed roles, and none at or above the
+    /// bot's top role.
+    All,
+    /// The listed roles, those the member has.
+    Some(Vec<RoleId>),
+}
+
+/// A role setting as a server writes it: `false`, `true` for every role that can be taken off, or a
+/// list of role ids.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum RoleSetting {
+    Flag(bool),
+    Ids(Vec<String>),
+}
+
+impl RoleSetting {
+    /// The selection the setting stands for. Ids that are no role id are left out.
+    #[must_use]
+    pub fn selection(&self) -> RoleSelection {
+        match self {
+            Self::Flag(false) => RoleSelection::None,
+            Self::Flag(true) => RoleSelection::All,
+            Self::Ids(ids) => RoleSelection::Some(
+                ids.iter()
+                    .filter_map(|id| id.parse::<u64>().ok().and_then(RoleId::new_checked))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// What a role punishment does with the roles of the member: `remove` takes them off when the
+/// dedicated role is given, and `restore` gives back the ones taken off when the punishment ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Strip {
+    pub remove: RoleSelection,
+    pub restore: RoleSelection,
+}
+
+impl Default for Strip {
+    fn default() -> Self {
+        Self {
+            remove: RoleSelection::None,
+            restore: RoleSelection::All,
+        }
+    }
+}
+
 /// What the server chose for the punishments of a module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// Whether the member is messaged about the punishment.
     pub dm: bool,
@@ -57,6 +119,8 @@ pub struct Settings {
     pub voice: Method,
     /// The role a voice mute gives, when `voice` is [`Method::Role`].
     pub voice_role: Option<RoleId>,
+    /// What a role punishment does with the member's other roles.
+    pub strip: Strip,
 }
 
 impl Default for Settings {
@@ -67,6 +131,7 @@ impl Default for Settings {
             timeout_role: None,
             voice: Method::Discord,
             voice_role: None,
+            strip: Strip::default(),
         }
     }
 }
@@ -111,13 +176,22 @@ pub enum Note {
     NoTimeoutTimer,
     /// A role voice mute has no timer, so it does not end by itself.
     NoVoiceTimer,
+    /// Some roles of the member could not be taken off, or given back.
+    RolesNotStripped(u32),
 }
 
 impl Note {
     /// The note in `locale`.
     #[must_use]
     pub fn text(self, ctx: &EventContext, locale: Locale) -> String {
-        ctx.t_core(locale, self.key(), &Args::new())
+        match self {
+            Self::RolesNotStripped(count) => ctx.t_core(
+                locale,
+                self.key(),
+                &Args::new().with("count", i64::from(count)),
+            ),
+            _ => ctx.t_core(locale, self.key(), &Args::new()),
+        }
     }
 
     fn key(self) -> &'static str {
@@ -126,6 +200,7 @@ impl Note {
             Self::NoUnbanTimer => "punish-ban-no-timer",
             Self::NoTimeoutTimer => "punish-timeout-no-timer",
             Self::NoVoiceTimer => "punish-vc-no-timer",
+            Self::RolesNotStripped(_) => "punish-roles-not-stripped",
         }
     }
 }
@@ -238,6 +313,9 @@ impl<'a> Punisher<'a> {
                 .then_some(Note::NoTimeoutTimer),
             None => None,
         };
+        let stripped = self
+            .strip_for(target, role, RestrictionRole::Timeout)
+            .await?;
         let note = self
             .notify(
                 target,
@@ -249,7 +327,7 @@ impl<'a> Punisher<'a> {
             .await;
         Ok(Done {
             case,
-            notes: [note, timer].into_iter().flatten().collect(),
+            notes: [note, timer, stripped].into_iter().flatten().collect(),
         })
     }
 
@@ -278,6 +356,8 @@ impl<'a> Punisher<'a> {
                     .remove_role(guild, target, role, self.audit(reason.as_deref()))
                     .await?;
                 let _ = self.ctx.scheduler().cancel(&untimeout_key(target)).await;
+                self.restore_if_last(target, RestrictionRole::Timeout, "timeout")
+                    .await?;
             }
         }
         let case = self.record("untimeout", target, reason, None).await?;
@@ -403,6 +483,7 @@ impl<'a> Punisher<'a> {
         let now = self.ctx.now();
         let reason_text = dm_reason(self.ctx, reason.as_deref());
         let role = self.mute_in_voice(target, reason.as_deref()).await?;
+        let stripped = self.strip_for(target, role, RestrictionRole::Voice).await?;
         let expires_at = duration.map(|duration| now + secs(duration));
         let case = self.record("vcmute", target, reason, expires_at).await?;
         // A new mute replaces the timer of an earlier one, which would lift this mute too early.
@@ -437,7 +518,7 @@ impl<'a> Punisher<'a> {
         };
         Ok(Done {
             case,
-            notes: [note, timer].into_iter().flatten().collect(),
+            notes: [note, timer, stripped].into_iter().flatten().collect(),
         })
     }
 
@@ -464,6 +545,8 @@ impl<'a> Punisher<'a> {
                 self.ctx
                     .api
                     .remove_role(guild, target, role, self.audit(reason.as_deref()))
+                    .await?;
+                self.restore_if_last(target, RestrictionRole::Voice, "vcmute")
                     .await?;
             }
         }
@@ -501,6 +584,45 @@ impl<'a> Punisher<'a> {
             .await?
             .ok_or(CaseError::NotFound)?;
         Ok(Some(case))
+    }
+
+    /// Takes the member's roles off as the settings say, when the dedicated role was given.
+    /// Returns the note of the roles that stayed on.
+    async fn strip_for(
+        &self,
+        target: UserId,
+        role: Option<RoleId>,
+        which: RestrictionRole,
+    ) -> Result<Option<Note>, UserError> {
+        let Some(role) = role else {
+            return Ok(None);
+        };
+        match strip(self.ctx, target, which, role, &self.settings.strip.remove).await {
+            Ok(skipped) => Ok((skipped > 0).then_some(Note::RolesNotStripped(skipped))),
+            // Nothing was taken off when the strip could not be remembered: logged, not refused.
+            Err(error) => {
+                tracing::warn!(user = %target, %error, "could not take the roles off a punished member");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Gives back what the role punishment took off, but only when the lift is the last standing
+    /// case of its kind. A failure is logged: the punishment is lifted either way.
+    async fn restore_if_last(
+        &self,
+        target: UserId,
+        which: RestrictionRole,
+        kind: &str,
+    ) -> Result<(), UserError> {
+        let standing = active_cases(self.ctx.cases(), target, kind, self.ctx.now(), 2).await?;
+        if standing.len() > 1 {
+            return Ok(());
+        }
+        if let Err(error) = restore(self.ctx, target, which, &self.settings.strip.restore).await {
+            tracing::warn!(user = %target, %error, "could not give back the roles of a lifted punishment");
+        }
+        Ok(())
     }
 
     fn timeout_role(&self) -> Result<RoleId, UserError> {
@@ -582,6 +704,7 @@ impl<'a> Punisher<'a> {
             user: target.get(),
             case,
             role: role.get(),
+            restore: self.settings.strip.restore.clone(),
         };
         self.ctx
             .scheduler()
@@ -604,6 +727,7 @@ impl<'a> Punisher<'a> {
             via: self.settings.voice,
             role: role.map(RoleId::get),
             due: self.ctx.now() + secs(duration),
+            restore: self.settings.strip.restore.clone(),
         };
         self.ctx
             .scheduler()
@@ -699,6 +823,9 @@ struct RoleTimeout {
     user: u64,
     case: i64,
     role: u64,
+    /// Rows scheduled before roles were stripped have none, and restore none.
+    #[serde(default)]
+    restore: RoleSelection,
 }
 
 /// The payload of a `vc_unmute` job. `due` is when the mute was due: a lift that Discord keeps
@@ -710,6 +837,8 @@ struct VoiceLift {
     via: Method,
     role: Option<u64>,
     due: i64,
+    #[serde(default)]
+    restore: RoleSelection,
 }
 
 fn unban_key(user: UserId) -> String {
@@ -884,6 +1013,7 @@ pub fn jobs(builder: ModuleBuilder) -> ModuleBuilder {
         .job("unban", lift_ban)
         .job("untimeout", end_timeout)
         .job("vc_unmute", end_voice_mute)
+        .job("restriction_sync", roles::restriction_sync)
 }
 
 /// Lifts a timed ban when its time is up. A member who was unbanned by hand is done already, so
@@ -925,7 +1055,10 @@ async fn end_timeout(cx: JobCx) -> Result<(), ModuleError> {
         .remove_role(cx.guild_id(), user, role, reason)
         .await
     {
-        Ok(()) | Err(DiscordError::NotFound) => Ok(()),
+        Ok(()) | Err(DiscordError::NotFound) => {
+            restore(cx.ctx(), user, RestrictionRole::Timeout, &payload.restore).await?;
+            Ok(())
+        }
         Err(error) => Err(ModuleError::Discord(error)),
     }
 }
@@ -961,6 +1094,10 @@ async fn end_voice_mute(cx: JobCx) -> Result<(), ModuleError> {
             return Err(ModuleError::other("a voice mute job names no role"));
         }
     };
+    if matches!(payload.via, Method::Role) && matches!(result, Ok(()) | Err(DiscordError::NotFound))
+    {
+        restore(cx.ctx(), user, RestrictionRole::Voice, &payload.restore).await?;
+    }
     match result {
         Err(DiscordError::NotInVoice) if cx.now() - payload.due <= DAY => cx
             .scheduler()

@@ -30,25 +30,12 @@ pub(crate) fn role_of(setting: Option<&str>) -> Option<RoleId> {
     setting?.parse::<u64>().ok().and_then(RoleId::new_checked)
 }
 
-/// The role a timeout gives. A missing or unusable one is refused before anything is done.
-pub(crate) fn timeout_role(config: &Config) -> Result<RoleId, UserError> {
-    role_of(config.timeout_role.as_deref())
-        .ok_or_else(|| UserError::message("timeout-role-missing"))
-}
-
-/// The role a voice mute gives.
-pub(crate) fn voice_role(config: &Config) -> Result<RoleId, UserError> {
-    role_of(config.voice_mute_role.as_deref())
-        .ok_or_else(|| UserError::message("voice-role-missing"))
-}
-
-/// Refuses a timeout that the configured method cannot give, before anything is done. Discord's
-/// own timeout lasts 28 days at most; a role has no such limit. A timeout whose duration is not
-/// known yet is checked for its role only.
+/// Refuses a timeout that Discord's own timeout cannot give: it lasts 28 days at most. A role has
+/// no such limit, and its role is found or created when the punishment runs.
 pub(crate) fn check_timeout(config: &Config, duration: Option<Duration>) -> Result<(), UserError> {
     match config.timeout_method {
         Method::Discord => duration.map_or(Ok(()), |duration| timeout_seconds(duration).map(drop)),
-        Method::Role => timeout_role(config).map(drop),
+        Method::Role => Ok(()),
     }
 }
 
@@ -75,6 +62,7 @@ pub(crate) async fn voice_unmute(cx: CommandCx, args: MemberReason) -> Result<()
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let case = punisher_for(&cx, &config)
+        .await?
         .voice_unmute(args.user, reason_of(args.reason))
         .await?;
     cx.say_private_t(

@@ -531,6 +531,20 @@ impl ModuleBuilder {
     /// Adds a command that has no subcommands.
     #[must_use]
     pub fn command(mut self, command: BoundCommand) -> Self {
+        if self
+            .manifest
+            .commands
+            .iter()
+            .any(|spec| spec.name == command.name)
+        {
+            self.problem.get_or_insert(
+                self.invalid(
+                    &command.name,
+                    "is declared twice: a command with subcommands cannot also be a plain command"
+                        .to_owned(),
+                ),
+            );
+        }
         let spec = CommandSpec {
             name: command.name.clone(),
             description: command.description.clone(),
@@ -544,7 +558,9 @@ impl ModuleBuilder {
         self
     }
 
-    /// Adds a command made of subcommands (`/warn add`, `/warn list`).
+    /// Adds a command made of subcommands (`/warn add`, `/warn list`). Calls with the same name
+    /// add to one command, which may mix plain subcommands and groups; the description of the first
+    /// call stands.
     #[must_use]
     pub fn group(
         mut self,
@@ -571,19 +587,13 @@ impl ModuleBuilder {
             let sub_name = sub.name.clone();
             self.route(&name, Some(sub_name), sub);
         }
-        let spec = CommandSpec {
-            name,
-            description: description.into(),
-            options: Vec::new(),
-            subcommands: specs,
-            default_member_permissions: None,
-        };
-        self.manifest = self.manifest.command(spec);
+        self.add_subcommands(&name, description.into(), specs);
         self
     }
 
     /// Adds a command made of groups of subcommands, two levels deep (`/warn list all`). The
-    /// route of a subcommand is its group and its name, separated by a space.
+    /// route of a subcommand is its group and its name, separated by a space. Like [`Self::group`],
+    /// it adds to a command of the same name.
     #[must_use]
     pub fn groups(
         mut self,
@@ -629,15 +639,58 @@ impl ModuleBuilder {
                 subcommands: leaves,
             });
         }
-        let spec = CommandSpec {
-            name,
-            description: description.into(),
-            options: Vec::new(),
-            subcommands: specs,
-            default_member_permissions: None,
-        };
-        self.manifest = self.manifest.command(spec);
+        self.add_subcommands(&name, description.into(), specs);
         self
+    }
+
+    /// Adds subcommands to the command `name`, which may already have some. A name is used once
+    /// among a command's subcommands and groups, and a command holds at most 25 of them.
+    fn add_subcommands(
+        &mut self,
+        name: &str,
+        description: String,
+        subcommands: Vec<SubcommandSpec>,
+    ) {
+        if self.routes.contains_key(&(name.to_owned(), None)) {
+            self.problem.get_or_insert(self.invalid(
+                name,
+                "is a command without subcommands: it cannot take subcommands as well".to_owned(),
+            ));
+        }
+        let commands = &mut self.manifest.commands;
+        let index = if let Some(index) = commands.iter().position(|spec| spec.name == name) {
+            index
+        } else {
+            commands.push(CommandSpec {
+                name: name.to_owned(),
+                description,
+                options: Vec::new(),
+                subcommands: Vec::new(),
+                default_member_permissions: None,
+            });
+            commands.len() - 1
+        };
+        let spec = &mut commands[index];
+        let mut clash = false;
+        for sub in subcommands {
+            clash |= spec.subcommands.iter().any(|known| known.name == sub.name);
+            spec.subcommands.push(sub);
+        }
+        let too_many = spec.subcommands.len() > 25;
+        if clash {
+            self.problem.get_or_insert(CoreError::InvalidCommand {
+                module: self.manifest.id.clone(),
+                command: name.to_owned(),
+                reason: "a subcommand or group name is used twice".to_owned(),
+            });
+        }
+        if too_many {
+            self.problem.get_or_insert(CoreError::InvalidCommand {
+                module: self.manifest.id.clone(),
+                command: name.to_owned(),
+                reason: "at most 25 subcommands and groups".to_owned(),
+            });
+        }
     }
 
     /// Adds a context-menu command (see [`ContextCommand`]).

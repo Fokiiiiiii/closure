@@ -4,13 +4,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use twilight_model::channel::Message;
+use twilight_model::channel::{Channel, Message};
 use twilight_model::guild::{Guild, Member, Role};
 
 use crate::action::{Action, Outcome};
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
-use crate::event::{ChannelId, Event, GuildId, UserId};
+use crate::event::{ChannelId, Event, GuildId, RoleId, UserId};
 use crate::locale::Locale;
 use crate::module::{EventContext, Module, ModuleId, ModuleManifest};
 use crate::permission::GuildPermissions;
@@ -35,6 +35,17 @@ fn sent_message(channel: ChannelId, id: u64) -> Option<Message> {
         "edited_timestamp": null, "tts": false, "type": 0
     }))
     .ok()
+}
+
+/// A role as Discord answers its creation: no permissions, not hoisted, not managed.
+fn created_role(id: u64, name: &str) -> Role {
+    serde_json::from_value(serde_json::json!({
+        "id": id.to_string(), "name": name, "color": 0, "hoist": false,
+        "managed": false, "mentionable": false, "permissions": "0", "position": 1,
+        "flags": 0, "icon": null, "unicode_emoji": null, "tags": null,
+        "colors": { "primary_color": 0, "secondary_color": null, "tertiary_color": null }
+    }))
+    .unwrap_or_else(|error| panic!("a test role: {error}"))
 }
 
 /// A guild with the given id and name and nothing else of note.
@@ -76,12 +87,15 @@ pub struct MockApi {
     failure: Mutex<Option<DiscordError>>,
     /// The call that fails once, counted from the moment it was set (1 is the next call).
     failing_call: Mutex<Option<(usize, DiscordError)>>,
+    /// The errors of the role changes of one role, which the pretend Discord refuses.
+    failing_roles: Mutex<HashMap<RoleId, DiscordError>>,
     /// Which guild each known channel belongs to (`None`: a direct message channel).
     channels: Mutex<HashMap<ChannelId, Option<GuildId>>>,
     owners: Mutex<HashMap<GuildId, UserId>>,
     /// Members the pretend Discord knows, by guild and user; `None` is a user who is not one.
     members: Mutex<HashMap<(GuildId, UserId), Option<Member>>>,
     roles: Mutex<HashMap<GuildId, Vec<Role>>>,
+    guild_channels: Mutex<HashMap<GuildId, Vec<Channel>>>,
     guild_names: Mutex<HashMap<GuildId, String>>,
     lookups: Mutex<usize>,
 }
@@ -98,9 +112,25 @@ impl MockApi {
                     None => Ok(Outcome::None),
                 }
             }
-            Action::ListRoles { guild_id } => Ok(lock(&self.roles)
-                .get(guild_id)
-                .map_or(Outcome::None, |roles| Outcome::Roles(roles.clone()))),
+            Action::ListRoles { guild_id } => Ok(Outcome::Roles(
+                lock(&self.roles).get(guild_id).cloned().unwrap_or_default(),
+            )),
+            // A created role gets the next id, so a test can tell the roles it made apart.
+            Action::CreateRole { guild_id, spec, .. } => {
+                let id = 500 + u64::try_from(lock(&self.actions).len()).unwrap_or(0);
+                let role = created_role(id, &spec.name);
+                lock(&self.roles)
+                    .entry(*guild_id)
+                    .or_default()
+                    .push(role.clone());
+                Ok(Outcome::Role(Box::new(role)))
+            }
+            Action::ListChannels { guild_id } => Ok(Outcome::Channels(
+                lock(&self.guild_channels)
+                    .get(guild_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )),
             Action::GetGuild { guild_id } => Ok(lock(&self.guild_names)
                 .get(guild_id)
                 .map_or(Outcome::None, |name| {
@@ -186,6 +216,19 @@ impl MockApi {
         lock(&self.roles).insert(guild, roles);
     }
 
+    /// Makes every role change of `role` fail with `error`, as Discord does for a role above the bot's.
+    pub fn fail_role(&self, role: RoleId, error: DiscordError) {
+        lock(&self.failing_roles).insert(role, error);
+    }
+
+    /// Declares the channels of `guild`, with their permission overwrites.
+    pub fn set_channels(&self, guild: GuildId, channels: Vec<Channel>) {
+        for channel in &channels {
+            lock(&self.channels).insert(channel.id, Some(guild));
+        }
+        lock(&self.guild_channels).insert(guild, channels);
+    }
+
     /// Declares the name of `guild`, which the pretend Discord gives when the guild is asked for.
     pub fn set_guild_name(&self, guild: GuildId, name: &str) {
         lock(&self.guild_names).insert(guild, name.to_owned());
@@ -213,6 +256,16 @@ impl DiscordApi for MockApi {
             }
         };
         if let Some(error) = injected {
+            return Err(error);
+        }
+        let role_failure = match &action {
+            Action::AddRole { role_id, .. } | Action::RemoveRole { role_id, .. } => {
+                lock(&self.failing_roles).get(role_id).cloned()
+            }
+            _ => None,
+        };
+        if let Some(error) = role_failure {
+            lock(&self.actions).push(action);
             return Err(error);
         }
         let answer = self.answer(&action);

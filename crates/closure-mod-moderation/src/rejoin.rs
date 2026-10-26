@@ -2,7 +2,7 @@
 //! takes a role off, and a timeout is lost the same way, so a rejoin would end a punishment early.
 //! Only what still stands is given again: a case that was revoked or ran out is not.
 
-use closure_sdk::punish::Method;
+use closure_sdk::punish::{Method, RestrictionRole, RoleError, ensure_role};
 use closure_sdk::{
     Args, Case, DiscordError, Event, EventContext, Flow, ModuleError, Reason, UserId,
 };
@@ -56,9 +56,17 @@ async fn give_timeout_again(
     let reason = rejoin_reason(ctx, "rejoin-timeout", case.number);
     let result = match config.timeout_method {
         Method::Role => {
-            // A missing or unusable role gives nothing; the setting is the server's to fix.
-            let Ok(role) = restrict::timeout_role(config) else {
-                return Ok(());
+            let role = match ensure_role(
+                ctx,
+                RestrictionRole::Timeout,
+                restrict::role_of(config.timeout_role.as_deref()),
+            )
+            .await
+            {
+                Ok(role) => role,
+                Err(RoleError::Discord(error)) => return Err(error),
+                // The role is set up again by the next punishment: nothing is given now.
+                Err(_) => return Ok(()),
             };
             ctx.api.add_role(ctx.guild_id, user, role, reason).await
         }
@@ -92,8 +100,16 @@ async fn give_voice_mute_again(
     match config.voice_mute_method {
         Method::Discord => Ok(()),
         Method::Role => {
-            let Ok(role) = restrict::voice_role(config) else {
-                return Ok(());
+            let role = match ensure_role(
+                ctx,
+                RestrictionRole::Voice,
+                restrict::role_of(config.voice_mute_role.as_deref()),
+            )
+            .await
+            {
+                Ok(role) => role,
+                Err(RoleError::Discord(error)) => return Err(error),
+                Err(_) => return Ok(()),
             };
             let reason = rejoin_reason(ctx, "rejoin-voice", case.number);
             tolerate_gone(ctx.api.add_role(ctx.guild_id, user, role, reason).await)

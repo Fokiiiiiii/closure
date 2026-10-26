@@ -1218,6 +1218,32 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_subcommand_and_a_grouped_one_of_one_command_are_both_named() {
+        let plain = gateway_command(&json!([
+            { "name": "status", "type": 1, "options": [] }
+        ]));
+        let Some(Event::Command(invocation)) = event(&plain) else {
+            panic!("expected a command event");
+        };
+        assert_eq!(invocation.subcommand.as_deref(), Some("status"));
+
+        let grouped = gateway_command(&json!([
+            { "name": "counters", "type": 2, "options": [{
+                "name": "view", "type": 1,
+                "options": [{ "name": "counter", "type": 3, "value": "strikes" }]
+            }] }
+        ]));
+        let Some(Event::Command(invocation)) = event(&grouped) else {
+            panic!("expected a command event");
+        };
+        assert_eq!(invocation.subcommand.as_deref(), Some("counters view"));
+        assert_eq!(
+            invocation.option("counter"),
+            Some(&CommandOptionValue::String("strikes".into()))
+        );
+    }
+
+    #[test]
     fn unknown_locales_are_left_unset() {
         let mut interaction = command_json(&json!([]));
         interaction["locale"] = json!("fr");

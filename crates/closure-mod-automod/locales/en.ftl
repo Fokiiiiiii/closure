@@ -99,7 +99,7 @@ field-member = Member
 field-check = Check
 field-would-run = Would run
 
-command-automod-counters = automod-counters
+subcommand-automod-counters = counters
     .description = Look at and change the counters of automod
 subcommand-automod-counters-view = view
     .description = Show the value of a counter

@@ -12,7 +12,9 @@ use closure_core::event::MessageId;
 use closure_sdk::counters::CounterDef;
 use closure_sdk::embed::{Color, EmbedBuilder, truncate};
 use closure_sdk::modlog;
-use closure_sdk::punish::{Done, Method, Moderator, Punisher, Settings};
+use closure_sdk::punish::{
+    Done, Method, Moderator, Punisher, RestrictionRole, Settings, Strip, ensure_role,
+};
 use closure_sdk::template::{Template, Values};
 use closure_sdk::{
     Args, CaseKind, ChannelId, EventContext, JobCx, MessageInfo, ModuleError, NewCase, RoleId,
@@ -78,7 +80,14 @@ pub async fn apply(deps: &Deps<'_>, rule: &Rule, hit: &Hit, context: &Context) -
             return applied;
         }
     };
-    let punisher = Punisher::new(ctx, bot.clone(), settings(deps.config));
+    let settings = match punish_settings(ctx, deps.config, rule).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            applied.error = Some(error);
+            return applied;
+        }
+    };
+    let punisher = Punisher::new(ctx, bot.clone(), settings);
     let mut ran = false;
     let mut did_punish = false;
     for action in &rule.actions {
@@ -780,14 +789,39 @@ async fn send(ctx: &EventContext, channel: ChannelId, embed: Embed) -> Result<()
         .map_err(ModuleError::from)
 }
 
-fn settings(config: &Config) -> Settings {
-    Settings {
+/// The settings the punishments run with. A role timeout gets its role as moderation does: the
+/// configured one, or the one Closure finds or creates (see [`ensure_role`]). Only a rule that
+/// times out asks for it.
+async fn punish_settings(
+    ctx: &EventContext,
+    config: &Config,
+    rule: &Rule,
+) -> Result<Settings, ModuleError> {
+    let times_out = rule
+        .actions
+        .iter()
+        .any(|action| matches!(action, Action::Timeout { .. }));
+    let timeout_role = if config.timeout_method == Method::Role && times_out {
+        let configured = crate::config::role_of(config.timeout_role.as_deref());
+        Some(
+            ensure_role(ctx, RestrictionRole::Timeout, configured)
+                .await
+                .map_err(|error| ModuleError::other(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    Ok(Settings {
         dm: config.dm_on_action,
         timeout: config.timeout_method,
-        timeout_role: crate::config::role_of(config.timeout_role.as_deref()),
+        timeout_role,
         voice: Method::Discord,
         voice_role: None,
-    }
+        strip: Strip {
+            remove: config.remove_roles_on_mute.selection(),
+            restore: config.restore_roles_on_mute.selection(),
+        },
+    })
 }
 
 fn mention(user: UserId) -> String {

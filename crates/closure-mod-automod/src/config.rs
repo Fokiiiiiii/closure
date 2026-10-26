@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use closure_sdk::counters::{Condition, CounterDef, Counters, Decay, TriggerDef};
 use closure_sdk::duration;
-use closure_sdk::punish::Method;
+use closure_sdk::punish::{Method, RoleSetting};
 use closure_sdk::template::Template;
 use closure_sdk::{ChannelId, RoleId, Store};
 use regex::{Regex, RegexBuilder};
@@ -63,8 +63,13 @@ pub struct Config {
     pub dm_on_action: bool,
     /// How a timeout is given: Discord's timeout, or a role that a timer takes off again.
     pub timeout_method: Method,
-    /// The id of the role a timeout gives, when `timeout_method` is `role`.
+    /// The id of the role a timeout gives, when `timeout_method` is `role`; left out, Closure creates one.
     pub timeout_role: Option<String>,
+    /// Which roles a role timeout takes off the member: `false`, `true` (every role that can be taken
+    /// off), or role ids.
+    pub remove_roles_on_mute: RoleSetting,
+    /// Which of the roles taken off come back when the timeout ends: the same forms, `true` by default.
+    pub restore_roles_on_mute: RoleSetting,
     /// The counters, keyed by name. They are read as a whole, see [`setup`].
     pub counters: BTreeMap<String, CounterConfig>,
     /// The rules as written, keyed by id. Each one is read on its own, see [`parse_rules`].
@@ -79,6 +84,8 @@ impl Default for Config {
             dm_on_action: true,
             timeout_method: Method::Discord,
             timeout_role: None,
+            remove_roles_on_mute: RoleSetting::Flag(false),
+            restore_roles_on_mute: RoleSetting::Flag(true),
             counters: BTreeMap::new(),
             rules: BTreeMap::new(),
         }

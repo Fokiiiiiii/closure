@@ -311,6 +311,16 @@ impl CommandSpec {
                 "a command has either options or subcommands, not both",
             ));
         }
+        // A name is used once among a command's subcommands and groups, so a command with both
+        // kinds cannot publish two of the same name.
+        let mut names = BTreeSet::new();
+        if !self
+            .subcommands
+            .iter()
+            .all(|sub| names.insert(sub.name.as_str()))
+        {
+            return Err(invalid("a subcommand or group name is used twice"));
+        }
         if self.options.len() > 25 || self.subcommands.len() > 25 {
             return Err(invalid("at most 25 options or subcommands"));
         }
@@ -343,7 +353,11 @@ impl CommandSpec {
                 return Err(invalid("required options must come before optional ones"));
             }
             // Discord has two levels below a command: groups, then subcommands of a group.
+            let mut leaves = BTreeSet::new();
             for leaf in &sub.subcommands {
+                if !leaves.insert(leaf.name.as_str()) {
+                    return Err(invalid("a subcommand of a group is named twice"));
+                }
                 if !name_ok(&leaf.name)
                     || !text_ok(&leaf.description)
                     || leaf.options.len() > 25
@@ -838,4 +852,85 @@ pub trait Module: Send + Sync + 'static {
 
     /// Called once during graceful shutdown.
     async fn on_unload(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(name: &str) -> SubcommandSpec {
+        SubcommandSpec {
+            name: name.into(),
+            description: "d".into(),
+            options: vec![],
+            subcommands: vec![],
+        }
+    }
+
+    fn group(name: &str, leaves: Vec<SubcommandSpec>) -> SubcommandSpec {
+        SubcommandSpec {
+            name: name.into(),
+            description: "d".into(),
+            options: vec![],
+            subcommands: leaves,
+        }
+    }
+
+    /// Whether a manifest whose only command `warn` holds `subcommands` is accepted.
+    fn accepted(subcommands: Vec<SubcommandSpec>) -> bool {
+        ModuleManifest::new(ModuleId::new("warn").unwrap(), "warn", "0.1.0")
+            .command(CommandSpec {
+                name: "warn".into(),
+                description: "d".into(),
+                options: vec![],
+                subcommands,
+                default_member_permissions: None,
+            })
+            .validate()
+            .is_ok()
+    }
+
+    #[test]
+    fn subcommands_and_groups_mix_in_one_command_in_either_order() {
+        assert!(accepted(vec![
+            leaf("status"),
+            group("list", vec![leaf("all")]),
+        ]));
+        assert!(accepted(vec![
+            group("list", vec![leaf("all")]),
+            leaf("status"),
+        ]));
+    }
+
+    #[test]
+    fn a_name_is_used_once_among_the_subcommands_and_groups_of_a_command() {
+        assert!(!accepted(vec![leaf("status"), leaf("status")]));
+        assert!(!accepted(vec![
+            leaf("list"),
+            group("list", vec![leaf("all")]),
+        ]));
+        assert!(!accepted(vec![
+            group("list", vec![leaf("all")]),
+            group("list", vec![leaf("clear")]),
+        ]));
+    }
+
+    #[test]
+    fn a_name_may_repeat_in_another_group() {
+        assert!(accepted(vec![
+            group("list", vec![leaf("all")]),
+            group("clear", vec![leaf("all")]),
+        ]));
+    }
+
+    #[test]
+    fn a_command_takes_at_most_25_subcommands_and_groups() {
+        let many = |count: usize| {
+            (0..count)
+                .map(|i| leaf(&format!("s{i}")))
+                .collect::<Vec<_>>()
+        };
+        assert!(accepted(many(25)));
+        assert!(!accepted(many(26)));
+    }
 }
