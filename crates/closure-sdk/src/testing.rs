@@ -23,6 +23,7 @@ use closure_core::event::{
     MessageInfo, ModalSubmission, UserId, UserInfo,
 };
 use closure_core::interaction::InteractionGuilds;
+use closure_core::latency::GatewayLatency;
 use closure_core::locale::{Locale, Translator};
 use closure_core::module::{EventContext, Module};
 use closure_core::permission::GuildPermissions;
@@ -497,6 +498,7 @@ pub struct Harness {
     locale: Mutex<Locale>,
     next: AtomicU64,
     bot: Mutex<Option<UserId>>,
+    gateway: Arc<GatewayLatency>,
 }
 
 impl std::fmt::Debug for Harness {
@@ -570,6 +572,7 @@ impl Harness {
             locale: Mutex::new(Locale::DEFAULT),
             next: AtomicU64::new(1),
             bot: Mutex::new(Some(Id::new(BOT))),
+            gateway: Arc::default(),
             module,
         })
     }
@@ -613,6 +616,11 @@ impl Harness {
     /// Changes, or with `None` removes, the bot's own user id.
     pub fn set_bot_id(&self, bot: Option<UserId>) {
         *self.bot.lock().unwrap_or_else(PoisonError::into_inner) = bot;
+    }
+
+    /// Records one heartbeat round trip of `shard`, as the Gateway does for a live connection.
+    pub fn set_gateway_latency(&self, shard: u64, latency: Duration) {
+        self.gateway.record(shard, latency);
     }
 
     /// Lets time pass for the cooldowns.
@@ -749,6 +757,7 @@ impl Harness {
             Arc::clone(&self.translator),
         )
         .with_permissions(Arc::new(permissions))
+        .with_gateway_latency(Arc::clone(&self.gateway))
         .with_scheduler(Scheduler::new(
             Arc::clone(&self.scheduler) as Arc<dyn SchedulerBackend>,
             &manifest.capabilities,

@@ -1,7 +1,7 @@
 # Writing a module
 
 A module is a Rust crate that implements `closure_core::module::Module`. The smallest complete
-example is [`crates/closure-mod-diagnostics`](../crates/closure-mod-diagnostics/src/lib.rs); the
+example, written with the SDK, is [`crates/closure-mod-diagnostics`](../crates/closure-mod-diagnostics/src/lib.rs); the
 example that uses the SDK in full (permissions, a cooldown, cases, the log, direct messages,
 timers, two languages) is [`crates/closure-mod-moderation`](../crates/closure-mod-moderation/src/lib.rs)
 with its [tests](../crates/closure-mod-moderation/tests/moderation.rs). Read them alongside this page.
@@ -152,6 +152,14 @@ Anything else is refused with the usual bad-argument message before the handler 
 parser is `closure_sdk::duration::parse`. To show a length, use `cx.format_duration(duration)`
 (in the user's language, the two largest units, e.g. "2 days 3 hours"). To show a moment that
 Discord renders in each reader's own time zone, use `duration::timestamp(unix, TimeStyle::Relative)`.
+
+A `Span` field is a command option that takes a length as above or a moment, such as `2026-11-01 18:00`
+or `18時`: `#[derive(CommandArgs)] struct Mute { user: UserId, until: Span }`. The text is checked when
+the command arrives, so a typo is refused as a bad argument. The handler resolves it with
+`span.resolve(&cx)?`, which reads the clock of the command and returns the length from now, or
+`UserError` (not understood, in the past, more than ten years away). A moment without a zone is read at
+UTC+09:00 on a Japanese server and at UTC otherwise (see the moderation guide). `Span::resolve_at(now,
+offset)` is the same without a `Cx`, for tests. `Span::from_duration` makes a span from a `Duration`.
 
 An embed (the box under a message) is built with `EmbedBuilder`, which checks Discord's limits when
 you call `build()` (characters, not bytes; the whole embed at most 6000), so a too-long embed is an
@@ -417,9 +425,9 @@ You do not need Discord or a database:
 - `EventContext::new(...)` builds the context a handler receives;
 - `Dispatcher` (in `closure-discord`) can run modules end to end against a `MockApi`.
 
-See the `tests` module of the diagnostics crate for a complete set: replies in each language,
-configuration, ignoring unrelated events, invalid configuration, manifest validity and catalog
-parity.
+See the `tests` module of the diagnostics crate for a complete set written with the SDK's
+`testing::Harness`: replies in each language, configuration, failed calls, manifest validity and
+catalog parity.
 
 ## Reading messages
 

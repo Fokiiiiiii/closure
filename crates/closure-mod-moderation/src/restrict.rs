@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use closure_sdk::punish::Method;
-use closure_sdk::{Args, CommandArgs, CommandCx, RoleId, UserError, UserId};
+use closure_sdk::{Args, CommandArgs, CommandCx, RoleId, Span, UserError, UserId};
 
 use crate::templates;
 use crate::{Config, MemberReason, mention, punisher_for, reason_of, timeout_seconds};
@@ -18,8 +18,8 @@ use crate::{Config, MemberReason, mention, punisher_for, reason_of, timeout_seco
 pub(crate) struct VoiceMute {
     /// Member to mute in voice channels
     user: UserId,
-    /// How long, such as 1h or 7d; until lifted when left out
-    duration: Option<Duration>,
+    /// How long, such as 1h or 7d, or until a date and time; until lifted when left out
+    duration: Option<Span>,
     /// Why
     #[arg(max_length = 512)]
     reason: Option<String>,
@@ -55,6 +55,9 @@ pub(crate) fn check_timeout(config: &Config, duration: Option<Duration>) -> Resu
 /// `/vcmute`: mutes a member in voice, for `duration` or until `/vcunmute`. Without a reason, a
 /// template is asked for.
 pub(crate) async fn voice_mute(cx: CommandCx, args: VoiceMute) -> Result<(), UserError> {
+    if let Some(span) = &args.duration {
+        span.resolve(&cx)?;
+    }
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let punishment = templates::Punishment::new(

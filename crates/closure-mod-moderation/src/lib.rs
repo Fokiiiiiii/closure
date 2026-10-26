@@ -13,7 +13,7 @@ use closure_sdk::punish::{self, Done, Method, Moderator, Punisher, Settings};
 use closure_sdk::{
     Args, Capability, Case, CaseError, CaseKind, Cases, Command, CommandArgs, CommandCx, Cooldown,
     CoreError, Cx, EventKind, InteractionRef, InteractionReply, Level, Locale, ModuleBuilder,
-    NewCase, PermissionSpec, SdkModule, Subscription, UserError, UserId,
+    NewCase, PermissionSpec, SdkModule, Span, Subscription, UserError, UserId,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -204,8 +204,8 @@ pub(crate) struct MemberReason {
 struct TimeoutArgs {
     /// Member to time out
     user: UserId,
-    /// How long, such as 1h or 7d; at most 28 days. A template may give it when left out.
-    duration: Option<Duration>,
+    /// How long, such as 1h or 7d, or until a date and time; at most 28 days. A template may give it.
+    duration: Option<Span>,
     /// Why
     #[arg(max_length = 512)]
     reason: Option<String>,
@@ -218,8 +218,8 @@ struct BanArgs {
     /// Why
     #[arg(max_length = 512)]
     reason: Option<String>,
-    /// How long the ban lasts, such as 7d; forever when left out
-    duration: Option<Duration>,
+    /// How long the ban lasts, such as 7d, or until a date and time; forever when left out
+    duration: Option<Span>,
     /// How many days of the member's messages to delete, 0 to 7
     #[arg(min = 0, max = 7)]
     delete_days: Option<i64>,
@@ -638,9 +638,15 @@ async fn case_revoke(cx: CommandCx, args: Revoke) -> Result<(), UserError> {
 /// template is asked for. The member stays in the server, so the direct message comes after the
 /// timeout.
 async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
+    // Resolved first: a moment that has passed is refused before anything else is asked.
+    let duration = args
+        .duration
+        .as_ref()
+        .map(|span| span.resolve(&cx))
+        .transpose()?;
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
-    restrict::check_timeout(&config, args.duration)?;
+    restrict::check_timeout(&config, duration)?;
     let punishment = templates::Punishment::new(
         templates::Kind::Timeout,
         args.user,
@@ -686,6 +692,9 @@ async fn kick(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 /// up. The direct message comes first, as with a kick. Without a reason, or a duration on a ban
 /// that a template may give, a template is asked for.
 async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
+    if let Some(span) = &args.duration {
+        span.resolve(&cx)?;
+    }
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     // Refused here, before a template is asked for: the ban would refuse the same days.

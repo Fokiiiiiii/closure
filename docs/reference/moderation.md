@@ -122,7 +122,7 @@ Time a member out
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member to time out |
-| `duration` | 期間 | string | no | - | How long, such as 1h or 7d; at most 28 days. A template may give it when left out. |
+| `duration` | 期間 | string | no | - | How long, such as 1h or 7d, or until a date and time; at most 28 days. A template may give it. |
 | `reason` | 理由 | string | no | max_length 512 | Why |
 
 ### `/untimeout`
@@ -160,7 +160,7 @@ Ban a member, for good or for a while
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member to ban |
 | `reason` | 理由 | string | no | max_length 512 | Why |
-| `duration` | 期間 | string | no | - | How long the ban lasts, such as 7d; forever when left out |
+| `duration` | 期間 | string | no | - | How long the ban lasts, such as 7d, or until a date and time; forever when left out |
 | `delete_days` | 削除日数 | integer | no | min 0; max 7 | How many days of the member's messages to delete, 0 to 7 |
 
 ### `/unban`
@@ -185,7 +185,7 @@ Mute a member in voice channels
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member to mute in voice channels |
-| `duration` | 期間 | string | no | - | How long, such as 1h or 7d; until lifted when left out |
+| `duration` | 期間 | string | no | - | How long, such as 1h or 7d, or until a date and time; until lifted when left out |
 | `reason` | 理由 | string | no | max_length 512 | Why |
 
 ### `/vcunmute`

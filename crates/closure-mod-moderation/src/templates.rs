@@ -9,13 +9,13 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use closure_sdk::duration::parse as parse_duration;
+use closure_sdk::duration::{TimeStyle, parse as parse_duration, timestamp};
 use closure_sdk::embed::truncate;
 use closure_sdk::punish::Method;
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{
     Args, Color, CommandCx, ComponentCx, Cx, EmbedBuilder, InteractionRef, InteractionReply,
-    ModuleError, Reason, UserError, UserId,
+    ModuleError, Reason, Span, UserError, UserId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -119,13 +119,14 @@ impl Kind {
 }
 
 /// A punishment as far as it is known: what a command gave, or what a picked template filled in.
-/// While a moderator picks a template, it waits in the store under [`pending_key`].
+/// While a moderator picks a template, it waits in the store under [`pending_key`]. The duration
+/// stays as typed, so a moment is resolved when the punishment runs, not when it waits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Punishment {
     kind: Kind,
     user: u64,
     reason: Option<String>,
-    duration_secs: Option<u64>,
+    duration: Option<Span>,
     delete_days: Option<i64>,
 }
 
@@ -134,26 +135,27 @@ impl Punishment {
         kind: Kind,
         user: UserId,
         reason: Option<String>,
-        duration: Option<Duration>,
+        duration: Option<Span>,
         delete_days: Option<i64>,
     ) -> Self {
         Self {
             kind,
             user: user.get(),
             reason,
-            duration_secs: duration.map(|duration| duration.as_secs()),
+            duration,
             delete_days,
         }
     }
 
-    /// A punishment needs a reason; a timeout needs a duration too. A ban or a voice mute may go on
-    /// without one.
-    fn is_complete(&self) -> bool {
-        self.reason.is_some() && (self.kind != Kind::Timeout || self.duration_secs.is_some())
-    }
-
-    fn duration(&self) -> Option<Duration> {
-        self.duration_secs.map(Duration::from_secs)
+    /// The duration as it is now, or `None` when the punishment has none.
+    fn duration(
+        &self,
+        cx: &Cx<impl InteractionRef + 'static>,
+    ) -> Result<Option<Duration>, UserError> {
+        self.duration
+            .as_ref()
+            .map(|span| span.resolve(cx))
+            .transpose()
     }
 
     fn member(&self) -> Result<UserId, UserError> {
@@ -168,9 +170,10 @@ impl Punishment {
             kind: self.kind,
             user: self.user,
             reason: self.reason.clone().or(Some(template.reason.clone())),
-            duration_secs: self
-                .duration_secs
-                .or(template.duration.map(|duration| duration.as_secs())),
+            duration: self
+                .duration
+                .clone()
+                .or(template.duration.map(Span::from_duration)),
             delete_days: self.delete_days,
         }
     }
@@ -245,19 +248,27 @@ fn describe<I: InteractionRef + 'static>(cx: &Cx<I>, template: &Usable) -> Strin
     format!("{}{suffix}", truncate(&template.reason, room))
 }
 
-/// Asks the moderator for a template when the command leaves out what the punishment needs. The
-/// punishment waits in the store until the pick; when nothing is missing it is returned at once.
+/// Asks the moderator for a template when the command leaves out the reason, or a timeout's duration,
+/// and a usable template can give it. The punishment waits in the store until the pick. Without a
+/// template it runs as it is: without a reason, unless the server requires one.
 async fn offer(
     cx: &CommandCx,
     config: &Config,
     punishment: Punishment,
 ) -> Result<Option<Punishment>, UserError> {
-    if punishment.is_complete() {
+    let needs_duration = punishment.kind == Kind::Timeout && punishment.duration.is_none();
+    if punishment.reason.is_some() && !needs_duration {
         return Ok(Some(punishment));
     }
     let templates = usable(config, punishment.kind);
     if templates.is_empty() {
-        return Err(UserError::message("template-required"));
+        if needs_duration {
+            return Err(UserError::message("duration-required"));
+        }
+        if config.require_reason {
+            return Err(UserError::message("reason-required"));
+        }
+        return Ok(Some(punishment));
     }
     // The command's interaction is unique to it, so it names the waiting punishment.
     let token = cx.invocation().interaction_id.get().to_string();
@@ -410,13 +421,13 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
     punishment: Punishment,
 ) -> Result<Carried, UserError> {
     let user = punishment.member()?;
-    let duration = punishment.duration();
+    let duration = punishment.duration(cx)?;
     // Counted before the action, so that the case of the action is left out of the history line.
     let before = history::before(cx, user).await;
     let punisher = punisher_for(cx, config);
     let done = match punishment.kind {
         Kind::Timeout => {
-            let duration = duration.ok_or_else(|| UserError::message("template-required"))?;
+            let duration = duration.ok_or_else(|| UserError::message("duration-required"))?;
             punisher.timeout(user, duration, punishment.reason).await?
         }
         Kind::Kick => punisher.kick(user, punishment.reason).await?,
@@ -440,7 +451,14 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
         .with("user", mention(user))
         .with("number", case.number);
     if let Some(duration) = duration {
-        words = words.with("duration", cx.format_duration(duration));
+        let mut shown = cx.format_duration(duration);
+        // A moment given as a date shows its end too, as a Discord timestamp.
+        if punishment.duration.as_ref().is_some_and(Span::is_moment) {
+            let seconds = i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
+            let end = timestamp(cx.now().saturating_add(seconds), TimeStyle::LongDateTime);
+            shown = format!("{shown} ({end})");
+        }
+        words = words.with("duration", shown);
     }
     let mut text = with_notes(
         cx.t(punishment.kind.reply_key(duration.is_some()), &words),

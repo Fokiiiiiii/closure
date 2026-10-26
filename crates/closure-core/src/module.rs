@@ -14,6 +14,7 @@ use crate::cases::Cases;
 use crate::client::ApiClient;
 use crate::error::{CoreError, ModuleError};
 use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId, UserId};
+use crate::latency::{GatewayLatency, LatencySummary};
 use crate::locale::{Args, Catalog, Locale, Translator};
 use crate::permission::{GuildPermissions, PermissionSpec};
 use crate::schedule::Scheduler;
@@ -601,6 +602,7 @@ pub struct EventContext {
     translator: Arc<dyn Translator>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     bot: Option<UserId>,
+    gateway: Arc<GatewayLatency>,
 }
 
 impl fmt::Debug for EventContext {
@@ -638,7 +640,21 @@ impl EventContext {
             translator,
             clock: Arc::new(system_unix_now),
             bot: None,
+            gateway: Arc::default(),
         }
+    }
+
+    /// Gives the context the Gateway's heartbeat round trips; without it nothing is measured.
+    #[must_use]
+    pub fn with_gateway_latency(mut self, latency: Arc<GatewayLatency>) -> Self {
+        self.gateway = latency;
+        self
+    }
+
+    /// The heartbeat round trips of the Gateway, or `None` before the first one.
+    #[must_use]
+    pub fn gateway_latency(&self) -> Option<LatencySummary> {
+        self.gateway.summary()
     }
 
     /// Gives the context the bot's own user id, which is its application id.

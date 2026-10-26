@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use closure_config::{ConfigCompiler, parse_overrides};
 use closure_core::action::Action;
@@ -176,7 +176,7 @@ async fn a_moderator_warns_and_the_warning_is_a_case_that_expires_in_thirty_days
     let harness = harness();
     let replies = harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
     assert!(text(&replies).contains("case #1"), "{replies:?}");
-    assert!(text(&replies).contains("Active warnings: 1"), "{replies:?}");
+    assert!(text(&replies).contains("1 active."), "{replies:?}");
     assert!(replies[0].ephemeral, "answered to the moderator alone");
 
     let case = harness.cases().get(1).await.unwrap().unwrap();
@@ -200,7 +200,7 @@ async fn a_second_warning_counts_the_active_ones_and_the_cooldown_holds_the_firs
     harness.advance(Duration::from_secs(3));
     let replies = harness.invoke(warn(MEMBER, Some("b"))).await.unwrap();
     assert!(text(&replies).contains("case #2"), "{replies:?}");
-    assert!(text(&replies).contains("Active warnings: 2"), "{replies:?}");
+    assert!(text(&replies).contains("2 active."), "{replies:?}");
 }
 
 #[tokio::test]
@@ -1390,7 +1390,7 @@ async fn a_timeout_rule_that_is_too_long_or_unreadable_is_skipped() {
         let replies = harness.invoke(warn(MEMBER, Some("x"))).await.unwrap();
         assert!(text(&replies).contains("case #1"), "{replies:?}");
         assert!(
-            text(&replies).contains("is not valid and was skipped"),
+            text(&replies).contains("is invalid; skipped"),
             "{replies:?}"
         );
         assert!(!text(&replies).contains("Escalation:"), "{replies:?}");
@@ -1415,9 +1415,7 @@ async fn a_failed_escalation_leaves_the_warning_and_no_escalation_case() {
     let replies = warn_times(&harness, MEMBER, 1).await;
     assert!(text(&replies).contains("case #3"), "{replies:?}");
     assert!(
-        text(&replies).contains(
-            "Escalation to timed out for 1 hour failed, so only the warning was recorded."
-        ),
+        text(&replies).contains("Escalation to timed out for 1 hour failed; the warning stands."),
         "{replies:?}"
     );
     assert_eq!(cases_of(&harness, MEMBER).await.len(), 3);
@@ -2328,7 +2326,7 @@ async fn a_timeout_with_a_reason_and_a_duration_asks_nothing() {
 }
 
 #[tokio::test]
-async fn without_a_usable_template_each_punishment_is_refused_and_nothing_is_done() {
+async fn without_a_usable_template_a_punishment_runs_without_a_reason() {
     let configs = [
         json!({}),
         json!({ "templates": { "timeout": [], "kick": [], "ban": [], "vcmute": [] } }),
@@ -2350,13 +2348,39 @@ async fn without_a_usable_template_each_punishment_is_refused_and_nothing_is_don
         ] {
             harness.advance(Duration::from_secs(3));
             let replies = harness.invoke(invocation).await.unwrap();
-            assert!(text(&replies).contains("Give a reason"), "{replies:?}");
             assert!(menu_of(&replies[0]).is_none(), "{replies:?}");
         }
     }
+    let cases = cases_of(&harness, MEMBER).await;
+    assert_eq!(cases.len(), 12, "{cases:?}");
+    assert!(cases.iter().all(|case| case.reason.is_none()), "{cases:?}");
+}
+
+#[tokio::test]
+async fn a_timeout_without_a_duration_or_a_usable_template_needs_one() {
+    let harness = harness();
+    let replies = harness
+        .invoke(timeout_of(MEMBER, None, Some("spam")))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("Give a duration"), "{replies:?}");
+    assert!(menu_of(&replies[0]).is_none(), "{replies:?}");
     assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
     assert!(cases_of(&harness, MEMBER).await.is_empty());
     assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn with_require_reason_a_punishment_without_a_reason_or_template_is_refused() {
+    let harness = harness();
+    harness.set_config(json!({ "require_reason": true }));
+    let replies = harness.invoke(kick(MEMBER, None)).await.unwrap();
+    assert!(
+        text(&replies).contains("A reason is required"),
+        "{replies:?}"
+    );
+    assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
 }
 
 #[tokio::test]
@@ -2443,7 +2467,7 @@ async fn a_second_pick_and_a_pick_after_ten_minutes_say_the_selection_expired() 
     let id = picker_id(&replies);
     assert!(edit_of(&pick(&harness, &id, "spam").await).is_some());
     let again = pick(&harness, &id, "spam").await;
-    assert!(again[0].content.contains("expired"), "{again:?}");
+    assert!(again[0].content.contains("Expired"), "{again:?}");
     assert_eq!(sequence(&harness), ["dm", "kick"], "the kick happened once");
 
     let late = crate::harness();
@@ -2454,7 +2478,7 @@ async fn a_second_pick_and_a_pick_after_ten_minutes_say_the_selection_expired() 
     let replies = late.invoke(kick(MEMBER, None)).await.unwrap();
     late.advance(Duration::from_secs(601));
     let expired = pick(&late, &picker_id(&replies), "spam").await;
-    assert!(expired[0].content.contains("expired"), "{expired:?}");
+    assert!(expired[0].content.contains("Expired"), "{expired:?}");
     assert!(sequence(&late).is_empty());
     assert!(cases_of(&late, MEMBER).await.is_empty());
 }
@@ -2469,7 +2493,7 @@ async fn a_template_removed_before_the_pick_is_gone_and_nothing_is_done() {
     let replies = harness.invoke(kick(MEMBER, None)).await.unwrap();
     harness.set_config(json!({}));
     let gone = pick(&harness, &picker_id(&replies), "spam").await;
-    assert!(gone[0].content.contains("no longer set up"), "{gone:?}");
+    assert!(gone[0].content.contains("was removed"), "{gone:?}");
     assert!(sequence(&harness).is_empty());
     assert!(cases_of(&harness, MEMBER).await.is_empty());
 }
@@ -3579,4 +3603,152 @@ async fn pressing_undo_on_an_older_voice_mute_revokes_only_that_one() {
 
     press(&harness, &undo_id_of_case("vcmute", MEMBER, 1)).await;
     assert_only_the_older_case_revoked(&harness).await;
+}
+
+// ---- durations as a date and time ----
+
+const DAY_SECONDS: i64 = 86_400;
+
+fn is_leap(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// `unix` written as `YYYY-MM-DD HH:MM` in UTC, which an English server reads without a zone.
+fn utc_text(unix: i64) -> String {
+    let mut days = unix.div_euclid(DAY_SECONDS);
+    let seconds = unix.rem_euclid(DAY_SECONDS);
+    let mut year = 1970;
+    while days >= if is_leap(year) { 366 } else { 365 } {
+        days -= if is_leap(year) { 366 } else { 365 };
+        year += 1;
+    }
+    let february = if is_leap(year) { 29 } else { 28 };
+    let lengths = [31, february, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 0;
+    while days >= lengths[month] {
+        days -= lengths[month];
+        month += 1;
+    }
+    format!(
+        "{year:04}-{:02}-{:02} {:02}:{:02}",
+        month + 1,
+        days + 1,
+        seconds / 3_600,
+        seconds % 3_600 / 60
+    )
+}
+
+/// The minute `days` from now, which [`utc_text`] names exactly.
+fn minute_in(days: i64) -> i64 {
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    (now + days * DAY_SECONDS).div_euclid(60) * 60
+}
+
+#[tokio::test]
+async fn a_timeout_to_a_date_lasts_until_it() {
+    let harness = harness();
+    let target = minute_in(3);
+    let replies = harness
+        .invoke(timeout_of(MEMBER, Some(&utc_text(target)), Some("spam")))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert_eq!(sequence(&harness), ["timeout", "dm"]);
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.expires_at, Some(target));
+    let seconds = u32::try_from(target - case.created_at).unwrap();
+    let applied: Vec<u32> = harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::Timeout {
+                duration_seconds: Some(seconds),
+                ..
+            } => Some(*seconds),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(applied, [seconds]);
+}
+
+#[tokio::test]
+async fn a_timed_ban_to_a_date_is_lifted_at_that_moment() {
+    let harness = harness();
+    let target = minute_in(3);
+    let replies = harness
+        .invoke(ban(MEMBER, Some("raid"), Some(&utc_text(target)), None))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    assert_eq!(harness.jobs(), 1);
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.expires_at, Some(target));
+
+    let until = u64::try_from(target - case.created_at).unwrap();
+    harness.advance(Duration::from_secs(until - 1));
+    assert!(harness.run_due_jobs().await.is_empty(), "not due yet");
+    harness.advance(Duration::from_secs(1));
+    let ended = harness.run_due_jobs().await;
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert!(ended[0].is_ok(), "{ended:?}");
+    assert_eq!(sequence(&harness), ["dm", "ban", "unban"]);
+}
+
+#[tokio::test]
+async fn a_voice_mute_to_a_date_expires_at_that_moment() {
+    let harness = harness();
+    let target = minute_in(2);
+    let replies = harness
+        .invoke(voice_mute(MEMBER, Some(&utc_text(target)), Some("loud")))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    let case = harness.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.expires_at, Some(target));
+}
+
+#[tokio::test]
+async fn a_date_that_has_passed_is_refused_before_anything_is_asked_of_discord() {
+    let harness = harness();
+    let past = minute_in(0) - 3_600;
+    let replies = harness
+        .invoke(timeout_of(MEMBER, Some(&utc_text(past)), Some("spam")))
+        .await
+        .unwrap();
+    let shown = replies[0].embeds[0].description.clone().unwrap_or_default();
+    assert!(shown.contains("passed"), "{shown:?}");
+    // Only the answer itself is recorded: no lookup or change happens on Discord.
+    assert!(
+        harness
+            .api()
+            .actions()
+            .iter()
+            .all(|action| matches!(action, Action::Respond { .. })),
+        "{:?}",
+        harness.api().actions()
+    );
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_date_more_than_twenty_eight_days_away_is_refused_for_a_discord_timeout() {
+    let harness = harness();
+    let replies = harness
+        .invoke(timeout_of(
+            MEMBER,
+            Some(&utc_text(minute_in(40))),
+            Some("spam"),
+        ))
+        .await
+        .unwrap();
+    assert!(text(&replies).contains("28 days"), "{replies:?}");
+    assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
 }

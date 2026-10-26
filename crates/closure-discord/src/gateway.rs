@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use closure_core::event::{Event as ModuleEvent, GuildId};
+use closure_core::latency::GatewayLatency;
 use closure_core::locale::Locale;
 use closure_core::registry::ModuleRegistry;
 use tokio::sync::Notify;
@@ -64,6 +65,8 @@ pub enum GatewayError {
 pub struct GatewayConfig {
     pub token: String,
     pub intents: Intents,
+    /// Where the heartbeat round trips go; the same value the dispatcher hands the modules.
+    pub latency: Arc<GatewayLatency>,
 }
 
 impl fmt::Debug for GatewayConfig {
@@ -164,6 +167,7 @@ struct ShardContext {
     dispatcher: Dispatcher,
     hooks: Arc<HookQueue>,
     health: Arc<GatewayHealth>,
+    latency: Arc<GatewayLatency>,
     shutdown: CancellationToken,
 }
 
@@ -315,6 +319,7 @@ pub async fn start_gateway(
         dispatcher,
         hooks: Arc::clone(&hook_queue),
         health: Arc::clone(&health),
+        latency: config.latency,
         shutdown,
     });
     let tracker = TaskTracker::new();
@@ -382,6 +387,7 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
     {
         metrics::gauge!("closure_gateway_latency_seconds", "shard" => id.number().to_string())
             .set(latency.as_secs_f64());
+        context.latency.record(u64::from(id.number()), latency);
     }
 
     let Some(converted) = convert::event(event) else {
@@ -571,6 +577,7 @@ mod tests {
             dispatcher,
             hooks: Arc::clone(&queue),
             health: Arc::new(GatewayHealth::new(2)),
+            latency: Arc::default(),
             shutdown: CancellationToken::new(),
         });
         let second = Arc::clone(&context);
@@ -586,6 +593,7 @@ mod tests {
         let config = GatewayConfig {
             token: "super-secret".into(),
             intents: Intents::GUILDS,
+            latency: Arc::default(),
         };
         assert!(!format!("{config:?}").contains("super-secret"));
     }

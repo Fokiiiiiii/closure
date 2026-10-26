@@ -8,6 +8,7 @@ use closure::modules;
 use closure_api::{ApiState, GatewayStatus, Readiness, ServerLimits, router};
 use closure_config::{ConfigCompiler, SettingsStore, parse_overrides};
 use closure_core::cases::CaseBackend;
+use closure_core::latency::GatewayLatency;
 use closure_core::locale::Translator;
 use closure_core::registry::ModuleRegistry;
 use closure_core::schedule::SchedulerBackend;
@@ -224,6 +225,8 @@ async fn serve(
     let application_id = Id::new(args.application_id.get());
     let http = Arc::new(Client::new(args.discord_token.clone()));
     let cache = new_cache();
+    // Shared by the Gateway task, which writes it, and the dispatcher, which hands it to modules.
+    let latency = Arc::new(GatewayLatency::default());
     let api = Arc::new(
         TwilightApi::new(Arc::clone(&http), application_id)
             .with_cache(Arc::new(InMemoryCacheView(Arc::clone(&cache)))),
@@ -239,6 +242,7 @@ async fn serve(
                 // A bot's user id is its application id.
                 DispatcherConfig {
                     bot_id: Some(Id::new(args.application_id.get())),
+                    gateway_latency: Arc::clone(&latency),
                     ..DispatcherConfig::default()
                 },
                 Arc::new(db.clone()) as Arc<dyn StorageBackend>,
@@ -272,6 +276,7 @@ async fn serve(
             GatewayConfig {
                 token: args.discord_token.clone(),
                 intents: gateway_intents(&core.registry),
+                latency,
             },
             cache,
             dispatcher,

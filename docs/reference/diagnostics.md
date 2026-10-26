@@ -40,6 +40,7 @@ Set under `modules.diagnostics.config` in a server's configuration; see [configu
 | Key | Type | Default | Widget | Description |
 |---|---|---|---|---|
 | `ephemeral` | boolean | `true` | - | Only show replies to the person who ran the command. |
+| `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 
 Default configuration:
 

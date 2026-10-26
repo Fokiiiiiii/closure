@@ -11,6 +11,7 @@ use closure_core::event::{
     ChannelId, CommandInvocation, Event, EventKind, InteractionToken, MessageInfo, UserInfo,
 };
 use closure_core::interaction::InteractionGuilds;
+use closure_core::latency::GatewayLatency;
 use closure_core::locale::Locale;
 use closure_core::module::{CommandSpec, EventContext, Module, ModuleId, ModuleManifest};
 use closure_core::settings::{GuildPolicy, RuntimeLimits, SettingsProvider};
@@ -52,6 +53,8 @@ enum Behavior {
     ReadPolicy,
     /// Logs the bot's own user id as the context carries it.
     ReadBot,
+    /// Logs the Gateway latency summary the context carries, if any.
+    ReadGatewayLatency,
     /// Counts the events it sees in its own storage and logs the total.
     CountEvents,
     /// Answers the click it got, then tries a token it was never given.
@@ -368,6 +371,16 @@ impl Module for Probe {
                     .lock()
                     .unwrap()
                     .push(format!("bot:{:?}", ctx.bot().map(Id::get)));
+                Ok(())
+            }
+            Behavior::ReadGatewayLatency => {
+                let summary = ctx
+                    .gateway_latency()
+                    .map(|summary| (summary.samples, summary.mean.as_millis()));
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("latency:{summary:?}"));
                 Ok(())
             }
             Behavior::HoldThenReplay => {
@@ -1020,6 +1033,36 @@ async fn the_bot_id_reaches_the_events_commands_and_jobs_of_a_module() {
             "bot:Some(60)",
         ]
     );
+}
+
+#[tokio::test]
+async fn a_module_sees_the_gateway_latency_the_dispatcher_was_given() {
+    let mut module = Probe::new("tools", &[], &[]);
+    Arc::get_mut(&mut module)
+        .unwrap()
+        .manifest
+        .commands
+        .push(CommandSpec {
+            name: "ping".into(),
+            description: "d".into(),
+            options: vec![],
+            subcommands: vec![],
+            default_member_permissions: None,
+        });
+    module.set(Behavior::ReadGatewayLatency);
+    let latency = Arc::new(GatewayLatency::default());
+    latency.record(0, Duration::from_millis(20));
+    latency.record(1, Duration::from_millis(40));
+    let config = DispatcherConfig {
+        gateway_latency: Arc::clone(&latency),
+        ..DispatcherConfig::default()
+    };
+    let h = harness(&[(&module, true)], limits(64, 4), config).await;
+
+    h.dispatcher.dispatch(command("ping", None));
+    h.dispatcher.flush().await;
+
+    assert_eq!(module.log(), ["load", "command", "latency:Some((2, 30))"]);
 }
 
 #[tokio::test]

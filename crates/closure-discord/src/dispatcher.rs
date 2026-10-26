@@ -23,6 +23,7 @@ use closure_core::event::{
     AutocompleteInvocation, ContextTarget, Event, GuildId, InteractionRef, UserId,
 };
 use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
+use closure_core::latency::GatewayLatency;
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{ContextKind, EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
@@ -57,7 +58,7 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// and each dropped event would otherwise be a line.
 const QUEUE_FULL_LOG_EVERY: Duration = Duration::from_secs(10);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DispatcherConfig {
     pub breaker: BreakerConfig,
     /// A guild with nothing pending for this long releases its lanes.
@@ -69,6 +70,9 @@ pub struct DispatcherConfig {
     /// The bot's own user id (its application id), given to every module call. `None` when
     /// unknown, as in tests that do not need it.
     pub bot_id: Option<UserId>,
+    /// The Gateway's heartbeat round trips, given to every module call. Empty unless the
+    /// Gateway writes into the same value.
+    pub gateway_latency: Arc<GatewayLatency>,
 }
 
 impl Default for DispatcherConfig {
@@ -79,6 +83,7 @@ impl Default for DispatcherConfig {
             reap_every: Duration::from_secs(30),
             interaction_limits: InteractionLimits::default(),
             bot_id: None,
+            gateway_latency: Arc::default(),
         }
     }
 }
@@ -349,6 +354,7 @@ impl Dispatcher {
                 })?;
         }
 
+        let interactions = Arc::new(InteractionGuilds::with_limits(config.interaction_limits));
         let shared = Arc::new(Shared {
             registry,
             settings,
@@ -359,7 +365,7 @@ impl Dispatcher {
             cases,
             config,
             guilds: DashMap::new(),
-            interactions: Arc::new(InteractionGuilds::with_limits(config.interaction_limits)),
+            interactions,
             wedged: DashMap::new(),
             pending_total: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
@@ -906,7 +912,8 @@ fn context_for(
         &settings.granted,
         id.clone(),
         guild,
-    ));
+    ))
+    .with_gateway_latency(Arc::clone(&shared.config.gateway_latency));
     match shared.config.bot_id {
         Some(bot) => context.with_bot(bot),
         None => context,

@@ -66,3 +66,6 @@ punish-timeout-role-missing = ロールによるタイムアウトには、設�
 punish-voice-role-missing = ロールによるボイスミュートには、設定の voice_mute_role にロールが必要です。
 punish-ban-delete-days-range = 削除するメッセージの日数は 0 から 7 までです。
 sdk-expired = 期限が切れました。コマンドをもう一度使ってください。
+span-not-understood = 理解できない期間です（例: 1h, 明日 18:00）。
+span-past = その日時は過去です（{ $zone }）。
+span-too-far = 10年より先の日時です（{ $zone }）。

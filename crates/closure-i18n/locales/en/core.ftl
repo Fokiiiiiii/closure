@@ -78,3 +78,6 @@ punish-timeout-role-missing = Timeouts by role need a role: set timeout_role in 
 punish-voice-role-missing = Voice mutes by role need a role: set voice_mute_role in the moderation settings.
 punish-ban-delete-days-range = The days of messages to delete are 0 to 7.
 sdk-expired = This has expired, use the command again.
+span-not-understood = Unknown time (e.g. 1h, tomorrow 18:00).
+span-past = That time has passed ({ $zone }).
+span-too-far = More than ten years away ({ $zone }).

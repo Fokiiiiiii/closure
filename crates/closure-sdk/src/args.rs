@@ -8,6 +8,7 @@ use closure_core::event::{
 use closure_core::module::{OptionKind, OptionSpec};
 
 use crate::duration;
+use crate::span::Span;
 
 /// A file uploaded with the command: its id, name, size, type and where it is served.
 pub type Attachment = AttachmentInfo;
@@ -71,6 +72,18 @@ impl OptionType for Duration {
     fn from_value(value: &CommandOptionValue) -> Option<Self> {
         match value {
             CommandOptionValue::String(text) => duration::parse(text).ok(),
+            _ => None,
+        }
+    }
+}
+
+/// A length of time or a moment typed as words, see [`crate::Span`].
+impl OptionType for Span {
+    const KIND: OptionKind = OptionKind::String;
+
+    fn from_value(value: &CommandOptionValue) -> Option<Self> {
+        match value {
+            CommandOptionValue::String(text) => Span::parse(text).ok(),
             _ => None,
         }
     }

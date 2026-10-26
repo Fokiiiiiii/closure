@@ -45,6 +45,7 @@ mod error;
 pub mod modlog;
 mod module;
 pub mod punish;
+mod span;
 pub mod testing;
 pub mod text;
 pub mod ui;
@@ -78,5 +79,6 @@ pub use module::{
     BoundCommand, BoundContext, Choice, Command, ContextCommand, ModuleBuilder, SdkModule,
     SubcommandGroup,
 };
+pub use span::{Span, SpanError};
 pub use twilight_model::gateway::Intents;
 pub use ui::{CustomId, Pager};

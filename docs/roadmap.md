@@ -26,7 +26,7 @@ the reference module `closure-mod-moderation`.
 | M12 | Events and actions that Discord has and we do not (below) | breadth |
 | M13 | Services: user profile, templates, audit trail for modules, HTTP client, metrics, feature switches | breadth |
 | M14 | Tooling: compile-fail tests for the macro, button expiry, `/permissions explain`; done: docs generator (`cargo run -p closure-xtask -- docs`), module scaffold (`new-module`), x-ui hints | quality |
-| later | Workflow, module-to-module calls, hot reload (Lua/WASM) | designed, not started |
+| later | Workflow, module-to-module calls, hot reload (Lua/WASM); a per-server time zone for the dates typed in commands (now UTC, or UTC+09:00 on a Japanese server) | designed, not started |
 
 ## Gaps by area (checked against the code)
 

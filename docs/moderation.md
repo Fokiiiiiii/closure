@@ -15,12 +15,12 @@ them, keeps notes, and records every one of these as a case. The code is in
 | `/case view number` | Shows a case as the log shows it. | `moderation.cases` (moderator) |
 | `/case list user [before]` | Lists the cases of a member, newest first, 10 at a time. | `moderation.cases` (moderator) |
 | `/case revoke number [reason]` | Revokes a case, once. The log shows it grey. | `moderation.revoke` (moderator) |
-| `/timeout user [duration] [reason]` | Times a member out. `duration` such as `1h` or `7d`; at most 28 days with Discord's timeout (see [timeouts and voice mutes](#timeouts-and-voice-mutes)). Without a reason or a duration, a [template](#templates) is picked. | `moderation.timeout` (moderator) |
+| `/timeout user [duration] [reason]` | Times a member out. `duration` such as `1h` or `7d`, or a date and time (see [durations](#durations-as-a-date-and-time)); at most 28 days with Discord's timeout (see [timeouts and voice mutes](#timeouts-and-voice-mutes)). Without a reason, or without a duration, a [template](#templates) is picked when one is set up. | `moderation.timeout` (moderator) |
 | `/untimeout user [reason]` | Lifts the timeout of a member. | `moderation.timeout` (moderator) |
 | `/kick user [reason]` | Kicks a member from the server. | `moderation.kick` (moderator) |
 | `/ban user [reason] [duration] [delete_days]` | Bans a member, for good or for `duration`. `delete_days` (0 to 7) is how many days of their messages are deleted. | `moderation.ban` (admin) |
 | `/unban user [reason]` | Lifts the ban of a member. | `moderation.ban` (admin) |
-| `/vcmute user [duration] [reason]` | Mutes a member in voice channels, for `duration` or until `/vcunmute`. | `moderation.voice` (moderator) |
+| `/vcmute user [duration] [reason]` | Mutes a member in voice channels, for `duration` (or until a date and time) or until `/vcunmute`. | `moderation.voice` (moderator) |
 | `/vcunmute user [reason]` | Lifts the voice mute of a member. | `moderation.voice` (moderator) |
 
 A permission key can be changed per server with `permissions.keys` (see [configuration](configuration.md)).
@@ -37,7 +37,7 @@ modules:
     config:
       warn_expire_days: 30   # 1 to 365; after how many days a warning expires
       dm_on_action: true     # whether the member is sent a direct message about the action
-      require_reason: false  # whether warn needs a reason; the other punishments use templates
+      require_reason: false  # whether a punishment needs a reason when no template gives one
       ban_delete_days: 0     # 0 to 7; the days of messages a ban deletes unless the command says otherwise
       escalation: []         # rules: what a warning brings about at a number of active warnings
       timeout_method: discord    # discord or role: how a timeout is given
@@ -125,10 +125,10 @@ active warnings (the new one included), the rule's action follows, once:
 
 ## Templates
 
-`/timeout`, `/kick`, `/ban` and `/vcmute` need a reason, and `/timeout` a duration. When the command
-leaves one out, the bot does not act yet: it shows the moderator a menu of the **templates** of that
-punishment. The pick carries the punishment out as the command would have, and replaces the menu with
-its result.
+When `/timeout`, `/kick`, `/ban` or `/vcmute` leaves out the reason (or, for a timeout, the duration) and
+the server has a usable **template** for that punishment, the bot does not act yet: it shows the
+moderator a menu of the templates. The pick carries the punishment out as the command would have, and
+replaces the menu with its result.
 
 ```yaml
     config:
@@ -153,9 +153,11 @@ such as `1h` or `7d`.
   ban with a duration keeps it.
 - **A timeout needs a duration**, from the command or from its template. A ban or a voice mute without
   one lasts for good, or until `/vcunmute`.
-- **No usable template, no action.** When the command has no reason (or, for a timeout, no duration) and
-  the server has no usable template for it, the command is refused with a message that asks for a reason
-  and a duration, or for templates to be set up. Nothing is done.
+- **No usable template.** The punishment runs as the command gave it, without a reason if none was given.
+  A timeout without a duration is refused with "Give a duration." If `require_reason` is set, a
+  punishment without a reason is refused with "A reason is required." Nothing is done in either case.
+- **Templates take relative durations only** (such as `1h`). A date in the saved settings would be stale
+  when it is picked, so the template `duration` and the escalation rules do not accept dates.
 - **Only the moderator who ran the command may pick**, and the pick checks the permission of the
   punishment again. A pick waits for ten minutes and takes an entry of the module's storage while it
   waits. A second pick, or one after the ten minutes, says that the selection expired; a template that
@@ -172,8 +174,6 @@ Templates that cannot be used are not offered, and they do not refuse the rest o
   is skipped itself.
 
 A kick takes no duration, so a duration on a kick template is not used.
-
-`require_reason` now concerns only `/warn`. The four punishment commands use templates instead.
 
 - **Placeholders.** A template's `reason` may contain `{user}` (the member's mention), `{moderator}`
   (the moderator's name) and `{server}` (the server's name; "this server" when Discord cannot say). They
@@ -234,7 +234,40 @@ ban. The message is in the server's language and gives the reason.
   fail the action. The reply says that the message could not be delivered. A member who is not in
   the server gets no note: Discord answers that it cannot find the member.
 - Discord limits how many direct messages a bot may send, so a burst of actions can miss some.
-- The duration in a message is worded in the language of the command, which the SDK chooses.
+- The duration in a message is worded in the language of the command, which the SDK chooses. The
+  direct message shows the length only; the reply of `/timeout`, `/ban` and `/vcmute` also shows the end as
+  a Discord timestamp when a date was given.
+
+## Durations as a date and time
+
+`/timeout`, `/ban` and `/vcmute` take a length (`1h30m`, `7d`) or a moment. The forms are read without
+regard to letter case, and extra spaces are allowed:
+
+| Form | Examples | Reads as |
+| --- | --- | --- |
+| date and time | `2026-11-01 18:00`, `2026/11/01 18:00:30`, `2026-11-01T18:00` | that moment; seconds are optional |
+| date only | `2026-11-01` | 00:00 of that day |
+| Japanese date | `2026年11月1日 18時30分`, `2026年11月1日18時` | that moment |
+| month and day | `11/01 18:00`, `11月1日 18:00` | the next such moment, in this or the next year |
+| time only | `18:00`, `9:05`, `18時`, `18時30分` | the next such time: today if still ahead, else tomorrow |
+| words | `today 18:00`, `tomorrow 18:00`, `今日 18:00`, `明日 18:00`, `明後日 9時` | that day at that time |
+| Discord timestamp | `<t:1767225600>`, `<t:1767225600:R>` | that moment, pasted from a message |
+
+A zone may end the text: `Z`, `UTC`, `JST`, `+09:00`, `+0900`, `+9` or `-05:00`. Without one, the zone is
+chosen by the **language of the server**: Japanese is UTC+09:00, every other language is UTC. This is a
+simplification; a per-server time zone setting is on the [roadmap](roadmap.md).
+
+A moment must be in the future and no more than ten years away. Years are 2000 to 2200, and the day must
+exist (no 2026-02-30, no 2100-02-29). Hours run from 0 to 23, minutes and seconds from 0 to 59. A moment
+that has passed is refused before anything is done, and so is a text that is no time: the reply says
+"Unknown time" and gives an example. A timeout that Discord refuses (more than 28 days) keeps its message
+even when the end is a date.
+
+```text
+/timeout user 2026-11-01 18:00 spam
+/ban user raid 2026-12-24 09:00 JST
+/vcmute user 18:00 loud
+```
 
 ## Timed bans
 
