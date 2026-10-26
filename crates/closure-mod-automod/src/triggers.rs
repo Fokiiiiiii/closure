@@ -2,20 +2,22 @@
 
 use closure_core::event::MessageId;
 use closure_sdk::text::{self, Link};
-use closure_sdk::{Args, ChannelId, EventContext, MessageInfo, duration};
+use closure_sdk::{Args, ChannelId, EventContext, MessageInfo, RoleId, UserId, duration};
 
 use crate::config::{
-    Attachments, Caps, Invites, LinkMode, Links, Patterns, Repeat, Rule, Stickers, Target, Trigger,
-    Words,
+    Attachments, Caps, CaseTrigger, CounterTrigger, Invites, LinkMode, Links, Patterns, Repeat,
+    RoleList, Rule, Stickers, Target, Trigger, Words,
 };
+use crate::context::{Context, Source, ThreadEvent};
 use crate::spam;
 
-/// What a trigger found: a sentence in the server's language, the messages it is about, and how
-/// many it counted.
+/// What a trigger found: a sentence in the server's language, the messages it is about, the members
+/// its punishments and role changes apply to, and how many it counted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
     pub detail: String,
     pub messages: Vec<(ChannelId, MessageId)>,
+    pub targets: Vec<UserId>,
     pub count: u64,
     /// A later message of a burst that already fired: only the deletions run for it.
     pub join: bool,
@@ -26,6 +28,23 @@ impl Hit {
         Self {
             detail,
             messages: vec![(message.channel_id, message.id)],
+            targets: vec![message.author.id],
+            count: 1,
+            join: false,
+        }
+    }
+
+    /// A hit about the member of an event, and the message of it when it is a message.
+    #[must_use]
+    pub fn about(detail: String, context: &Context) -> Self {
+        Self {
+            detail,
+            messages: context
+                .message
+                .iter()
+                .map(|message| (message.channel_id, message.id))
+                .collect(),
+            targets: context.user_id().into_iter().collect(),
             count: 1,
             join: false,
         }
@@ -42,10 +61,33 @@ pub struct Scan<'a> {
     pub created: bool,
 }
 
-/// Runs trigger number `index` of `rule` on `message`.
-pub fn check(scan: &Scan<'_>, rule: &Rule, index: usize, message: &MessageInfo) -> Option<Hit> {
+/// Runs trigger number `index` of `rule` on a context.
+pub fn check(scan: &Scan<'_>, rule: &Rule, index: usize, context: &Context) -> Option<Hit> {
     let ctx = scan.ctx;
     match &rule.triggers[index] {
+        Trigger::Spam(spam) => spam::evaluate(scan, &rule.id, index, spam, context),
+        Trigger::MemberJoinSpam(spam) => spam::evaluate_join(scan, &rule.id, index, spam, context),
+        Trigger::MemberJoin(join) => member_join(ctx, join.only_new, join.new_threshold, context),
+        Trigger::MemberLeave(_) => matches!(context.source, Source::Leave)
+            .then(|| Hit::about(say(ctx, "detail-leave", &Args::new()), context)),
+        Trigger::RoleAdded(list) => role_hit(ctx, list, context, true),
+        Trigger::RoleRemoved(list) => role_hit(ctx, list, context, false),
+        Trigger::Case(case) => case_hit(ctx, case, context, scan.ctx.bot()),
+        Trigger::ThreadCreated(_) => thread_hit(ctx, context, ThreadEvent::Created),
+        Trigger::ThreadArchived(_) => thread_hit(ctx, context, ThreadEvent::Archived),
+        Trigger::ThreadUnarchived(_) => thread_hit(ctx, context, ThreadEvent::Unarchived),
+        Trigger::ThreadDeleted(_) => thread_hit(ctx, context, ThreadEvent::Deleted),
+        Trigger::Counter(counter) => counter_hit(ctx, counter, context),
+        other => {
+            let message = context.message.as_ref()?;
+            message_check(ctx, other, message)
+        }
+    }
+}
+
+/// The triggers that read the text, the attachments and the stickers of a message.
+fn message_check(ctx: &EventContext, trigger: &Trigger, message: &MessageInfo) -> Option<Hit> {
+    match trigger {
         Trigger::AnyMessage(_) => Some(Hit::of(say(ctx, "detail-any", &Args::new()), message)),
         Trigger::Words(words) => words_hit(ctx, words, message),
         Trigger::Regex(patterns) => regex_hit(ctx, patterns, message),
@@ -55,8 +97,124 @@ pub fn check(scan: &Scan<'_>, rule: &Rule, index: usize, message: &MessageInfo) 
         Trigger::Caps(caps) => caps_hit(ctx, caps, message),
         Trigger::Repeat(repeat) => repeat_hit(ctx, repeat, message),
         Trigger::Stickers(stickers) => stickers_hit(ctx, stickers, message),
-        Trigger::Spam(spam) => spam::evaluate(scan, &rule.id, index, spam, message),
+        _ => None,
     }
+}
+
+/// A member joined. With `only_new`, the account must have been made within `threshold`.
+fn member_join(
+    ctx: &EventContext,
+    only_new: bool,
+    threshold: std::time::Duration,
+    context: &Context,
+) -> Option<Hit> {
+    if !matches!(context.source, Source::Join) {
+        return None;
+    }
+    if !only_new {
+        return Some(Hit::about(say(ctx, "detail-join", &Args::new()), context));
+    }
+    let made = account_made(context.user_id()?.get());
+    let age = ctx.now() - made;
+    let fresh = age >= 0 && u64::try_from(age).is_ok_and(|age| age < threshold.as_secs());
+    fresh.then(|| {
+        let args = Args::new().with(
+            "age",
+            duration::format_in(
+                ctx,
+                ctx.locale,
+                std::time::Duration::from_secs(u64::try_from(age).unwrap_or(0)),
+            ),
+        );
+        Hit::about(say(ctx, "detail-join-new", &args), context)
+    })
+}
+
+/// When the account with this user id was made, in Unix seconds. Discord's snowflakes carry it.
+pub fn account_made(user: u64) -> i64 {
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    i64::try_from(((user >> 22) + DISCORD_EPOCH_MS) / 1_000).unwrap_or(i64::MAX)
+}
+
+/// Roles added to (or removed from) the member, when one of the roles of the trigger is among them.
+fn role_hit(ctx: &EventContext, list: &RoleList, context: &Context, added: bool) -> Option<Hit> {
+    let Source::RoleChange {
+        added: gained,
+        removed: taken,
+    } = &context.source
+    else {
+        return None;
+    };
+    let changed = if added { gained } else { taken };
+    let role = changed.iter().find(|role| list.roles.contains(role))?;
+    let args = Args::new().with("role", role_mention(*role));
+    let key = if added {
+        "detail-role-added"
+    } else {
+        "detail-role-removed"
+    };
+    Some(Hit::about(say(ctx, key, &args), context))
+}
+
+fn role_mention(role: RoleId) -> String {
+    format!("<@&{}>", role.get())
+}
+
+/// A case of one of the kinds the trigger lists; the bot's own cases only with `include_own`.
+fn case_hit(
+    ctx: &EventContext,
+    trigger: &CaseTrigger,
+    context: &Context,
+    bot: Option<UserId>,
+) -> Option<Hit> {
+    let Source::Case(case) = &context.source else {
+        return None;
+    };
+    if !trigger.include_own && bot == Some(case.moderator) {
+        return None;
+    }
+    if !trigger.kinds.is_empty()
+        && !trigger
+            .kinds
+            .iter()
+            .any(|kind| kind.as_str() == case.kind.as_str())
+    {
+        return None;
+    }
+    let args = Args::new().with("kind", case.kind.as_str());
+    Some(Hit::about(say(ctx, "detail-case", &args), context))
+}
+
+fn thread_hit(ctx: &EventContext, context: &Context, event: ThreadEvent) -> Option<Hit> {
+    if !matches!(&context.source, Source::Thread(found) if *found == event) {
+        return None;
+    }
+    let key = match event {
+        ThreadEvent::Created => "detail-thread-created",
+        ThreadEvent::Archived => "detail-thread-archived",
+        ThreadEvent::Unarchived => "detail-thread-unarchived",
+        ThreadEvent::Deleted => "detail-thread-deleted",
+    };
+    Some(Hit::about(say(ctx, key, &Args::new()), context))
+}
+
+/// A counter trigger fired (or its reverse did), as the trigger names it.
+fn counter_hit(ctx: &EventContext, trigger: &CounterTrigger, context: &Context) -> Option<Hit> {
+    let Source::Counter {
+        counter,
+        trigger: fired,
+        reverse,
+    } = &context.source
+    else {
+        return None;
+    };
+    if *counter != trigger.counter || *fired != trigger.trigger || *reverse != trigger.reverse {
+        return None;
+    }
+    let args = Args::new()
+        .with("counter", counter.as_str())
+        .with("trigger", fired.as_str());
+    Some(Hit::about(say(ctx, "detail-counter", &args), context))
 }
 
 fn words_hit(ctx: &EventContext, words: &Words, message: &MessageInfo) -> Option<Hit> {

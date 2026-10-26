@@ -9,6 +9,10 @@ use serde_json::{Value, json};
 const DURATION: &str = "^([0-9]{1,10}[smhdw] ?)+$";
 const SNOWFLAKE: &str = "^[0-9]{1,20}$";
 const RULE_ID: &str = "^[a-z0-9_-]{1,32}$";
+/// Counter names and the names of their triggers are kept to plain characters, as rule ids are.
+const COUNTER_NAME: &str = "^[a-z0-9_-]{1,32}$";
+const CONDITION: &str = "^\\s*(>=|<=|!=|>|<|=)\\s*[0-9]{1,10}\\s*$";
+const MAX_COUNTER_VALUE: i64 = 2_147_483_647;
 
 /// The schema and the defaults of the module's section.
 pub fn settings() -> (Value, Value) {
@@ -43,6 +47,13 @@ pub fn settings() -> (Value, Value) {
                     "pattern": SNOWFLAKE,
                     "description": "The id of the role a timeout gives, when timeout_method is role."
                 },
+                "counters": {
+                    "type": "object",
+                    "maxProperties": 10,
+                    "description": "The counters, keyed by name: the numbers the rules add to, set, and react to.",
+                    "propertyNames": { "pattern": COUNTER_NAME },
+                    "additionalProperties": counter()
+                },
                 "rules": {
                     "type": "object",
                     "maxProperties": 100,
@@ -59,9 +70,50 @@ pub fn settings() -> (Value, Value) {
             "dm_on_action": true,
             "timeout_method": "discord",
             "timeout_role": null,
+            "counters": {},
             "rules": {}
         }),
     )
+}
+
+fn counter() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "per_channel": { "type": "boolean" },
+            "per_user": { "type": "boolean" },
+            "initial_value": { "type": "integer", "minimum": 0, "maximum": MAX_COUNTER_VALUE },
+            "decay": {
+                "type": "object",
+                "properties": {
+                    "amount": { "type": "integer", "minimum": -MAX_COUNTER_VALUE, "maximum": MAX_COUNTER_VALUE },
+                    "every": { "type": "string", "pattern": DURATION }
+                },
+                "required": ["amount", "every"],
+                "additionalProperties": false
+            },
+            "triggers": {
+                "type": "object",
+                "maxProperties": 10,
+                "propertyNames": { "pattern": COUNTER_NAME },
+                "additionalProperties": {
+                    "oneOf": [
+                        { "type": "string", "pattern": CONDITION },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "condition": { "type": "string", "pattern": CONDITION },
+                                "reverse_condition": { "type": "string", "pattern": CONDITION }
+                            },
+                            "required": ["condition"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            }
+        },
+        "additionalProperties": false
+    })
 }
 
 fn rule() -> Value {
@@ -189,6 +241,36 @@ fn trigger() -> Value {
             tagged("stickers", json!({
                 "max": { "type": "integer", "minimum": 0, "maximum": 10 }
             }), &["max"]),
+            tagged("member_join", json!({
+                "only_new": { "type": "boolean" },
+                "new_threshold": { "type": "string", "pattern": DURATION }
+            }), &[]),
+            tagged("member_join_spam", json!({
+                "amount": { "type": "integer", "minimum": 1, "maximum": 10000 },
+                "within": { "type": "string", "pattern": DURATION }
+            }), &["amount", "within"]),
+            tagged("member_leave", json!({}), &[]),
+            tagged("role_added", json!({ "roles": snowflakes(25) }), &["roles"]),
+            tagged("role_removed", json!({ "roles": snowflakes(25) }), &["roles"]),
+            tagged("case", json!({
+                "kinds": {
+                    "type": "array",
+                    "maxItems": 9,
+                    "items": { "type": "string", "enum": [
+                        "warn", "note", "timeout", "untimeout", "kick", "ban", "unban", "vcmute", "vcunmute"
+                    ] }
+                },
+                "include_own": { "type": "boolean" }
+            }), &[]),
+            tagged("thread_created", json!({}), &[]),
+            tagged("thread_archived", json!({}), &[]),
+            tagged("thread_unarchived", json!({}), &[]),
+            tagged("thread_deleted", json!({}), &[]),
+            tagged("counter", json!({
+                "counter": { "type": "string", "pattern": COUNTER_NAME },
+                "trigger": { "type": "string", "pattern": COUNTER_NAME },
+                "reverse": { "type": "boolean" }
+            }), &["counter", "trigger"]),
             tagged("spam", json!({
                 "measure": { "type": "string", "enum": [
                     "messages", "mentions", "links", "attachments", "emojis",
@@ -251,9 +333,36 @@ fn action() -> Value {
             }), &["text"]),
             action_tagged("alert", json!({
                 "channel": { "type": "string", "pattern": SNOWFLAKE },
-                "text": reason
+                "text": reason.clone()
             }), &["channel"]),
+            action_tagged("add_roles", json!({ "roles": snowflakes(25) }), &["roles"]),
+            action_tagged("remove_roles", json!({ "roles": snowflakes(25) }), &["roles"]),
+            action_tagged("set_nickname", json!({
+                "name": { "type": "string", "minLength": 1, "maxLength": 100 }
+            }), &["name"]),
+            action_tagged("slowmode", json!({
+                "duration": { "type": "string", "pattern": DURATION },
+                "channels": { "type": "array", "maxItems": 10, "items": { "type": "string", "pattern": SNOWFLAKE } }
+            }), &["duration"]),
+            action_tagged("add_to_counter", json!({
+                "counter": { "type": "string", "pattern": COUNTER_NAME },
+                "amount": { "type": "integer", "minimum": -MAX_COUNTER_VALUE, "maximum": MAX_COUNTER_VALUE }
+            }), &["counter", "amount"]),
+            action_tagged("set_counter", json!({
+                "counter": { "type": "string", "pattern": COUNTER_NAME },
+                "value": { "type": "integer", "minimum": 0, "maximum": MAX_COUNTER_VALUE }
+            }), &["counter", "value"]),
         ]
+    })
+}
+
+/// A list of Discord ids, at most `max` of them.
+fn snowflakes(max: u32) -> Value {
+    json!({
+        "type": "array",
+        "minItems": 1,
+        "maxItems": max,
+        "items": { "type": "string", "pattern": SNOWFLAKE }
     })
 }
 

@@ -107,6 +107,7 @@ fn the_settings_default_to_no_rules_and_no_dry_run() {
             "dm_on_action": true,
             "timeout_method": "discord",
             "timeout_role": null,
+            "counters": {},
             "rules": {}
         })
     );
@@ -771,4 +772,139 @@ async fn a_status_line_of_a_rule_names_its_triggers_and_actions() {
     let text = status_text(&harness).await;
     assert!(text.contains("repeat"), "{text}");
     assert!(text.contains("purge"), "{text}");
+}
+
+// ---- the events, actions and counters of part two ----
+
+#[test]
+fn the_manifest_subscribes_to_the_member_role_thread_and_case_events() {
+    let manifest = module().unwrap().manifest().clone();
+    for kind in [
+        EventKind::MemberJoined,
+        EventKind::MemberLeft,
+        EventKind::RolesChanged,
+        EventKind::ThreadCreated,
+        EventKind::ThreadArchived,
+        EventKind::ThreadUnarchived,
+        EventKind::ThreadDeleted,
+        EventKind::CaseCreated,
+    ] {
+        assert!(manifest.subscription(kind).is_some(), "{kind:?}");
+    }
+    assert!(manifest.intents.contains(Intents::GUILD_MEMBERS));
+    for capability in [
+        closure_sdk::Capability::ManageNicknames,
+        closure_sdk::Capability::ManageChannels,
+    ] {
+        assert!(manifest.capabilities.contains(capability), "{capability:?}");
+    }
+    let counters = manifest
+        .permissions
+        .iter()
+        .find(|spec| spec.key.as_str() == "automod.counters")
+        .expect("automod.counters is declared");
+    assert_eq!(counters.default_level, Level::MODERATOR);
+}
+
+#[test]
+fn the_schema_accepts_the_events_actions_and_counters_and_rejects_unknown_keys() {
+    let registry = Arc::new(
+        ModuleRegistry::new(vec![Arc::new(module().unwrap()) as Arc<dyn Module>]).unwrap(),
+    );
+    let compiler = ConfigCompiler::new(registry).unwrap();
+    let accepted = |config: Value| {
+        let yaml = format!(
+            "modules:\n  automod:\n    config: {}\n",
+            serde_json::to_string(&config).unwrap()
+        );
+        compiler.compile(&parse_overrides(&yaml).unwrap()).is_ok()
+    };
+    let example = json!({
+        "counters": {
+            "strikes": {
+                "per_channel": false,
+                "per_user": true,
+                "initial_value": 0,
+                "decay": { "amount": 1, "every": "1h" },
+                "triggers": {
+                    "high": ">= 3",
+                    "custom": { "condition": "> 10", "reverse_condition": "<= 5" }
+                }
+            }
+        },
+        "rules": {
+            "joins_1": {
+                "triggers": [
+                    { "type": "member_join", "only_new": true, "new_threshold": "1h" },
+                    { "type": "member_join_spam", "amount": 10, "within": "30s" },
+                    { "type": "member_leave" },
+                    { "type": "role_added", "roles": ["77"] },
+                    { "type": "role_removed", "roles": ["77", "78"] },
+                    { "type": "case", "kinds": ["warn", "ban"], "include_own": false },
+                    { "type": "thread_created" },
+                    { "type": "thread_archived" },
+                    { "type": "thread_unarchived" },
+                    { "type": "thread_deleted" },
+                    { "type": "counter", "counter": "strikes", "trigger": "high", "reverse": false }
+                ],
+                "actions": [
+                    { "do": "add_roles", "roles": ["77"] },
+                    { "do": "remove_roles", "roles": ["78"] },
+                    { "do": "set_nickname", "name": "{username}" },
+                    { "do": "slowmode", "duration": "10s", "channels": ["5"] },
+                    { "do": "slowmode", "duration": "0s" },
+                    { "do": "add_to_counter", "counter": "strikes", "amount": 1 },
+                    { "do": "set_counter", "counter": "strikes", "value": 0 }
+                ]
+            }
+        }
+    });
+    assert!(accepted(example.clone()));
+
+    let mut unknown_trigger_key = example.clone();
+    unknown_trigger_key["rules"]["joins_1"]["triggers"][0]["extra"] = json!(true);
+    assert!(!accepted(unknown_trigger_key));
+    let mut unknown_action_key = example.clone();
+    unknown_action_key["rules"]["joins_1"]["actions"][0]["extra"] = json!(true);
+    assert!(!accepted(unknown_action_key));
+    let mut unknown_counter_key = example.clone();
+    unknown_counter_key["counters"]["strikes"]["extra"] = json!(true);
+    assert!(!accepted(unknown_counter_key));
+    assert!(!accepted(
+        json!({ "rules": { "x": { "triggers": [{ "type": "case", "kinds": ["explode"] }], "actions": [{ "do": "delete" }] } } })
+    ));
+    assert!(!accepted(
+        json!({ "rules": { "x": { "triggers": [{ "type": "role_added", "roles": ["not an id"] }], "actions": [{ "do": "delete" }] } } })
+    ));
+}
+
+#[tokio::test]
+async fn status_lists_the_counters_and_the_events_the_enabled_rules_listen_to() {
+    let harness = configured(json!({
+        "counters": {
+            "strikes": { "per_user": true, "triggers": { "high": ">= 3" } }
+        },
+        "rules": {
+            "joins_1": {
+                "triggers": [{ "type": "member_join" }],
+                "actions": [{ "do": "add_to_counter", "counter": "strikes", "amount": 1 }]
+            },
+            "words_2": {
+                "triggers": [{ "type": "words", "words": ["x"] }],
+                "actions": [{ "do": "delete" }]
+            }
+        }
+    }));
+    let status = status_text(&harness).await;
+    assert!(status.contains("`strikes`"), "{status}");
+    assert!(status.contains("per user"), "{status}");
+    assert!(status.contains("high"), "{status}");
+    assert!(
+        status.contains("joins"),
+        "the join event is listed: {status}"
+    );
+    assert!(
+        status.contains("messages"),
+        "the message event is listed: {status}"
+    );
 }

@@ -1,25 +1,31 @@
 //! What a rule does once it hits: its actions in order, the record they leave, and the report of a
-//! dry run.
+//! dry run. An action runs for each member a hit names, and an action that needs a message or a
+//! channel that the context does not have is skipped without a word.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::time::Duration;
 
-use closure_core::action::{Action as Discord, MentionPolicy, Reason};
+use closure_core::action::{Action as Discord, ChannelPatch, MentionPolicy, Reason};
 use closure_core::error::DiscordError;
 use closure_core::event::MessageId;
+use closure_sdk::counters::CounterDef;
 use closure_sdk::embed::{Color, EmbedBuilder, truncate};
 use closure_sdk::modlog;
 use closure_sdk::punish::{Done, Method, Moderator, Punisher, Settings};
 use closure_sdk::template::{Template, Values};
 use closure_sdk::{
-    Args, CaseKind, ChannelId, EventContext, JobCx, MessageInfo, ModuleError, NewCase, UserError,
-    UserId,
+    Args, CaseKind, ChannelId, EventContext, JobCx, MessageInfo, ModuleError, NewCase, RoleId,
+    UserError, UserId,
 };
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Embed;
 use twilight_model::id::Id;
 
 use crate::config::{Action, Config, Rule, action_key};
+use crate::context::{Context, Source};
+use crate::counter::{self, Op};
+use crate::memory::Memory;
 use crate::triggers::Hit;
 
 const DAY_SECONDS: u32 = 86_400;
@@ -32,68 +38,77 @@ const CONTENT_CHARS: usize = 2_000;
 /// The job that removes a reply once its `auto_delete` time is up.
 pub const CLEANUP_JOB: &str = "automod_cleanup";
 
-/// What an action needs: the hit, the message it is about, and the values its templates read.
-struct Scene<'a> {
-    ctx: &'a EventContext,
-    rule: &'a Rule,
-    hit: &'a Hit,
-    message: &'a MessageInfo,
-    values: &'a Values,
+/// What the actions of a rule are given besides the rule, the hit and the context.
+pub struct Deps<'a> {
+    pub ctx: &'a EventContext,
+    pub memory: &'a Memory,
+    pub counters: &'a [CounterDef],
+    pub config: &'a Config,
 }
 
-/// Whether an action punished the member, or only touched the messages.
+/// Whether an action ran, and whether it punished a member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ran {
+    /// Nothing to act on in this context, so nothing was done.
+    Skipped,
     Other,
     Punished,
 }
 
-/// Runs the rule's actions in order. A failing one does not stop the next; the first error is
-/// returned at the end. When nothing punished the member, the hit is recorded as an `automod`
-/// case, so that a deletion still shows in the log. A later message of a burst only has its
-/// messages deleted.
+/// Runs the rule's actions in order, for each member of the hit. A failing one does not stop the
+/// next; the first error is returned at the end. When nothing punished a member, the hit is recorded
+/// as an `automod` case for each of them, so that a deletion still shows in the log. A later message
+/// of a burst only has its messages deleted. The counter triggers that the actions fired are
+/// returned, for the engine to run.
 pub async fn apply(
-    ctx: &EventContext,
+    deps: &Deps<'_>,
     rule: &Rule,
     hit: &Hit,
-    message: &MessageInfo,
-    config: &Config,
-) -> Result<(), ModuleError> {
-    let values = values(ctx, rule, hit, message);
-    let scene = Scene {
-        ctx,
-        rule,
-        hit,
-        message,
-        values: &values,
-    };
+    context: &Context,
+) -> Result<Vec<Context>, ModuleError> {
+    let ctx = deps.ctx;
     let bot = Moderator::bot(ctx, BOT_NAME)?;
-    let punisher = Punisher::new(ctx, bot.clone(), settings(config));
+    let punisher = Punisher::new(ctx, bot.clone(), settings(deps.config));
     let mut first_error = None;
     let mut ran = false;
     let mut did_punish = false;
+    let mut fired = Vec::new();
     for action in &rule.actions {
         if hit.join && !matches!(action, Action::Delete(_)) {
             continue;
         }
-        match run(&scene, &punisher, config, action).await {
-            Ok(Ran::Punished) => {
+        match run(deps, &punisher, rule, hit, context, action).await {
+            Ok((Ran::Skipped, _)) => {}
+            Ok((outcome, more)) => {
                 ran = true;
-                did_punish = true;
+                did_punish |= outcome == Ran::Punished;
+                fired.extend(more);
             }
-            Ok(Ran::Other) => ran = true,
             Err(error) => {
+                if !suppressed(deps, rule, &error) {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+    }
+    if ran && !did_punish && !hit.join {
+        for target in &hit.targets {
+            let reason = reason_for(ctx, rule, hit, context, Some(*target), None);
+            if let Err(error) = record(ctx, &bot, *target, &reason).await {
                 first_error.get_or_insert(error);
             }
         }
     }
-    if ran
-        && !did_punish
-        && !hit.join
-        && let Err(error) = record(ctx, &bot, message.author.id, &reason_of(&scene, None)).await
-    {
-        first_error.get_or_insert(error);
-    }
-    first_error.map_or(Ok(()), Err)
+    first_error.map_or(Ok(fired), Err)
+}
+
+/// A missing permission is reported once a minute per rule; the other times it is not an error.
+fn suppressed(deps: &Deps<'_>, rule: &Rule, error: &ModuleError) -> bool {
+    let forbidden = matches!(error, ModuleError::Discord(DiscordError::Forbidden(_)));
+    forbidden
+        && !deps
+            .memory
+            .should_report(deps.ctx.guild_id, &rule.id, deps.ctx.now())
 }
 
 /// A dry run: posts what the rule would have done to the log channel, and changes nothing. Without
@@ -102,7 +117,7 @@ pub async fn report(
     ctx: &EventContext,
     rule: &Rule,
     hit: &Hit,
-    message: &MessageInfo,
+    context: &Context,
 ) -> Result<(), ModuleError> {
     let Some(channel) = ctx.policy().log_channel else {
         return Ok(());
@@ -113,6 +128,12 @@ pub async fn report(
         .map(|action| text(ctx, action_key(action), &Args::new()))
         .collect::<Vec<_>>()
         .join(", ");
+    let member = hit
+        .targets
+        .first()
+        .copied()
+        .or_else(|| context.user_id())
+        .map_or_else(String::new, mention);
     let embed = EmbedBuilder::new()
         .title(text(ctx, "dry-run-title", &Args::new()))
         .color(Color::Info)
@@ -121,11 +142,7 @@ pub async fn report(
             rule.name.as_str(),
             true,
         )
-        .field(
-            text(ctx, "field-member", &Args::new()),
-            mention(message.author.id),
-            true,
-        )
+        .field(text(ctx, "field-member", &Args::new()), member, true)
         .field(
             text(ctx, "field-check", &Args::new()),
             hit.detail.as_str(),
@@ -137,49 +154,349 @@ pub async fn report(
     send(ctx, channel, embed).await
 }
 
+/// Runs one action. The result says whether it ran and punished, and what counter triggers it fired.
 async fn run(
-    scene: &Scene<'_>,
+    deps: &Deps<'_>,
     punisher: &Punisher<'_>,
-    config: &Config,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
     action: &Action,
-) -> Result<Ran, ModuleError> {
-    let target = scene.message.author.id;
+) -> Result<(Ran, Vec<Context>), ModuleError> {
+    let ctx = deps.ctx;
+    let targets = &hit.targets;
     match action {
-        Action::Delete(_) => delete(scene).await.map(|()| Ran::Other),
-        Action::Purge { within } => purge(scene, *within).await.map(|()| Ran::Other),
-        Action::Warn { reason } => {
-            let expires_at = scene.ctx.now() + i64::from(config.warn_expire_days) * 86_400;
-            let reason = Some(reason_of(scene, reason.as_deref()));
-            punished(punisher.warn(target, reason, Some(expires_at)).await)
+        Action::Delete(_) => delete_hit(deps, rule, hit, context).await,
+        Action::Purge { within } => {
+            if targets.is_empty() {
+                return Ok(skipped());
+            }
+            let reason = reason_for(ctx, rule, hit, context, targets.first().copied(), None);
+            purge(ctx, hit, targets, *within, &reason)
+                .await
+                .map(|()| other())
         }
-        Action::Timeout { duration, reason } => {
-            let reason = Some(reason_of(scene, reason.as_deref()));
-            punished(punisher.timeout(target, *duration, reason).await)
+        Action::Warn { .. } | Action::Timeout { .. } | Action::Kick { .. } | Action::Ban { .. } => {
+            punish(deps, punisher, rule, hit, context, action).await
         }
-        Action::Kick { reason } => {
-            let reason = Some(reason_of(scene, reason.as_deref()));
-            punished(punisher.kick(target, reason).await)
+        Action::Reply { text, auto_delete } => match context.message.as_ref() {
+            Some(message) => {
+                let values = values(ctx, rule, hit, context, None);
+                reply(ctx, message, text, *auto_delete, &values)
+                    .await
+                    .map(|()| other())
+            }
+            None => Ok(skipped()),
+        },
+        Action::Alert { channel, text } => {
+            alert(ctx, rule, hit, context, *channel, text.as_deref())
+                .await
+                .map(|()| other())
+        }
+        Action::AddRoles { roles } => roles_action(deps, rule, hit, context, roles, true).await,
+        Action::RemoveRoles { roles } => roles_action(deps, rule, hit, context, roles, false).await,
+        Action::SetNickname { name } => nickname(deps, rule, hit, context, name).await,
+        Action::Slowmode { duration, channels } => {
+            slowmode(deps, rule, hit, context, *duration, channels).await
+        }
+        Action::AddToCounter { counter, amount } => {
+            change_counter(deps, context, counter, Op::Add(*amount)).await
+        }
+        Action::SetCounter { counter, value } => {
+            change_counter(deps, context, counter, Op::Set(*value)).await
+        }
+    }
+}
+
+fn skipped() -> (Ran, Vec<Context>) {
+    (Ran::Skipped, Vec::new())
+}
+
+fn other() -> (Ran, Vec<Context>) {
+    (Ran::Other, Vec::new())
+}
+
+/// Deletes the messages of the hit, when there are any.
+async fn delete_hit(
+    deps: &Deps<'_>,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
+) -> Result<(Ran, Vec<Context>), ModuleError> {
+    if hit.messages.is_empty() {
+        return Ok(skipped());
+    }
+    let reason = reason_for(
+        deps.ctx,
+        rule,
+        hit,
+        context,
+        hit.targets.first().copied(),
+        None,
+    );
+    delete_all(deps.ctx, &hit.messages, &reason)
+        .await
+        .map(|()| other())
+}
+
+/// Warns, times out, kicks or bans each member of the hit.
+async fn punish(
+    deps: &Deps<'_>,
+    punisher: &Punisher<'_>,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
+    action: &Action,
+) -> Result<(Ran, Vec<Context>), ModuleError> {
+    let ctx = deps.ctx;
+    let targets = &hit.targets;
+    if targets.is_empty() {
+        return Ok(skipped());
+    }
+    let reason = |target: UserId, template: Option<&str>| {
+        reason_for(ctx, rule, hit, context, Some(target), template)
+    };
+    let result = match action {
+        Action::Warn { reason: template } => {
+            let expires_at = ctx.now() + i64::from(deps.config.warn_expire_days) * 86_400;
+            each(targets, |target| {
+                let text = reason(target, template.as_deref());
+                async move { punished(punisher.warn(target, Some(text), Some(expires_at)).await) }
+            })
+            .await
+        }
+        Action::Timeout {
+            duration,
+            reason: template,
+        } => {
+            each(targets, |target| {
+                let text = reason(target, template.as_deref());
+                async move { punished(punisher.timeout(target, *duration, Some(text)).await) }
+            })
+            .await
+        }
+        Action::Kick { reason: template } => {
+            each(targets, |target| {
+                let text = reason(target, template.as_deref());
+                async move { punished(punisher.kick(target, Some(text)).await) }
+            })
+            .await
         }
         Action::Ban {
             duration,
             delete_days,
-            reason,
+            reason: template,
         } => {
             let seconds = delete_days.saturating_mul(DAY_SECONDS);
-            let reason = Some(reason_of(scene, reason.as_deref()));
-            punished(punisher.ban(target, *duration, seconds, reason).await)
-        }
-        Action::Reply { text, auto_delete } => {
-            reply(scene, text, *auto_delete).await.map(|()| Ran::Other)
-        }
-        Action::Alert { channel, text } => alert(scene, *channel, text.as_deref())
+            each(targets, |target| {
+                let text = reason(target, template.as_deref());
+                async move { punished(punisher.ban(target, *duration, seconds, Some(text)).await) }
+            })
             .await
-            .map(|()| Ran::Other),
-    }
+        }
+        // Only the four punishments are sent here, by `run`.
+        _ => Ok(()),
+    };
+    result.map(|()| (Ran::Punished, Vec::new()))
 }
 
-fn punished(result: Result<Done, UserError>) -> Result<Ran, ModuleError> {
-    result.map(|_| Ran::Punished).map_err(module_error)
+/// Gives or takes the roles from each member of the hit.
+async fn roles_action(
+    deps: &Deps<'_>,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
+    roles: &[RoleId],
+    add: bool,
+) -> Result<(Ran, Vec<Context>), ModuleError> {
+    if hit.targets.is_empty() {
+        return Ok(skipped());
+    }
+    each(&hit.targets, |target| {
+        let reason = reason_for(deps.ctx, rule, hit, context, Some(target), None);
+        async move { change_roles(deps, target, roles, add, &reason).await }
+    })
+    .await
+    .map(|()| other())
+}
+
+/// Sets the nickname of each member of the hit, from a template.
+async fn nickname(
+    deps: &Deps<'_>,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
+    name: &str,
+) -> Result<(Ran, Vec<Context>), ModuleError> {
+    let ctx = deps.ctx;
+    if hit.targets.is_empty() {
+        return Ok(skipped());
+    }
+    each(&hit.targets, |target| {
+        let nickname = render(name, &values(ctx, rule, hit, context, Some(target)));
+        let reason = reason_for(ctx, rule, hit, context, Some(target), None);
+        async move {
+            ctx.api
+                .execute(Discord::SetNickname {
+                    guild_id: ctx.guild_id,
+                    user_id: target,
+                    nickname: Some(nickname),
+                    reason: Reason::truncated(&reason),
+                })
+                .await
+                .map(drop)
+                .map_err(ModuleError::from)
+        }
+    })
+    .await
+    .map(|()| other())
+}
+
+/// Sets the slowmode of the channels given, or of the channel of the event.
+async fn slowmode(
+    deps: &Deps<'_>,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
+    duration: Duration,
+    channels: &[ChannelId],
+) -> Result<(Ran, Vec<Context>), ModuleError> {
+    let channels: Vec<ChannelId> = if channels.is_empty() {
+        context.channel.into_iter().collect()
+    } else {
+        channels.to_vec()
+    };
+    if channels.is_empty() {
+        return Ok(skipped());
+    }
+    let seconds = u16::try_from(duration.as_secs()).unwrap_or(u16::MAX);
+    let reason = reason_for(
+        deps.ctx,
+        rule,
+        hit,
+        context,
+        hit.targets.first().copied(),
+        None,
+    );
+    set_slowmode(deps, &channels, seconds, &reason)
+        .await
+        .map(|()| other())
+}
+
+/// Runs `act` for each member, and keeps the first error: one member failing does not stop the others.
+async fn each<F, Fut>(targets: &[UserId], mut act: F) -> Result<(), ModuleError>
+where
+    F: FnMut(UserId) -> Fut,
+    Fut: Future<Output = Result<(), ModuleError>>,
+{
+    let mut first_error = None;
+    for target in targets.iter().copied() {
+        if let Err(error) = act(target).await {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Gives or takes each role of the list from the member. The bot's own change is remembered first,
+/// so that the role event Discord sends for it is not counted as someone else's.
+async fn change_roles(
+    deps: &Deps<'_>,
+    target: UserId,
+    roles: &[RoleId],
+    add: bool,
+    reason: &str,
+) -> Result<(), ModuleError> {
+    let ctx = deps.ctx;
+    let mut first_error = None;
+    for role in roles {
+        deps.memory
+            .ignore_role(ctx.guild_id, target, *role, ctx.now());
+        let result = if add {
+            ctx.api
+                .add_role(ctx.guild_id, target, *role, Reason::truncated(reason))
+                .await
+        } else {
+            ctx.api
+                .remove_role(ctx.guild_id, target, *role, Reason::truncated(reason))
+                .await
+        };
+        if let Err(error) = result {
+            first_error.get_or_insert(ModuleError::from(error));
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Sets the slowmode of each channel. A slowmode that was just set to the same value is not set
+/// again, since Discord limits how often a channel is edited.
+async fn set_slowmode(
+    deps: &Deps<'_>,
+    channels: &[ChannelId],
+    seconds: u16,
+    reason: &str,
+) -> Result<(), ModuleError> {
+    let ctx = deps.ctx;
+    let mut first_error = None;
+    for channel in channels {
+        if deps.memory.is_repeat_slowmode(*channel, seconds, ctx.now()) {
+            continue;
+        }
+        let patch = ChannelPatch {
+            slowmode_seconds: Some(seconds),
+            ..ChannelPatch::default()
+        };
+        let result = ctx
+            .api
+            .execute(Discord::EditChannel {
+                channel_id: *channel,
+                patch,
+                reason: Reason::truncated(reason),
+            })
+            .await;
+        match result {
+            Ok(_) => deps.memory.remember_slowmode(*channel, seconds, ctx.now()),
+            Err(error) => {
+                first_error.get_or_insert(ModuleError::from(error));
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Changes a counter for the member and the channel of the context. The triggers the change fired
+/// come back as contexts of their own.
+async fn change_counter(
+    deps: &Deps<'_>,
+    context: &Context,
+    name: &str,
+    op: Op,
+) -> Result<(Ran, Vec<Context>), ModuleError> {
+    let Some(def) = counter::find(deps.counters, name) else {
+        return Err(ModuleError::other(format!(
+            "there is no counter named `{name}`"
+        )));
+    };
+    let who = context.user.as_ref();
+    let user = who.map(|who| who.id);
+    let channel = context.channel;
+    if let Err(missing) = counter::check_scope(def, channel, user) {
+        return Err(ModuleError::other(format!(
+            "counter `{name}` is kept per {}, and this event has none",
+            match missing {
+                counter::Missing::Channel => "channel",
+                counter::Missing::User => "user",
+            }
+        )));
+    }
+    let change = counter::change(deps.ctx, deps.counters, name, channel, user, op).await?;
+    let fired = counter::fired(&change, name, channel, who);
+    Ok((Ran::Other, fired))
+}
+
+/// The result of a punishment as an action's, with the notes of it left out.
+fn punished(result: Result<Done, UserError>) -> Result<(), ModuleError> {
+    result.map(drop).map_err(module_error)
 }
 
 fn module_error(error: UserError) -> ModuleError {
@@ -190,30 +507,30 @@ fn module_error(error: UserError) -> ModuleError {
     }
 }
 
-/// Deletes the messages of the hit.
-async fn delete(scene: &Scene<'_>) -> Result<(), ModuleError> {
-    let reason = reason_of(scene, None);
-    delete_all(scene.ctx, &scene.hit.messages, &reason).await
-}
-
 /// Deletes what the member sent within `within`, from the history, and the messages of the hit.
-async fn purge(scene: &Scene<'_>, within: Duration) -> Result<(), ModuleError> {
-    let since = scene.ctx.now() - i64::try_from(within.as_secs()).unwrap_or(i64::MAX);
-    let saved = scene
-        .ctx
-        .history()
-        .by_author(scene.message.author.id, since, BULK_DELETE)
-        .await
-        .map_err(|error| ModuleError::other(format!("purge: {error}")))?;
-    let mut targets = scene.hit.messages.clone();
-    targets.extend(
-        saved
-            .iter()
-            .filter(|message| message.deleted_at.is_none())
-            .map(|message| (message.channel_id, message.id)),
-    );
-    let reason = reason_of(scene, None);
-    delete_all(scene.ctx, &targets, &reason).await
+async fn purge(
+    ctx: &EventContext,
+    hit: &Hit,
+    targets: &[UserId],
+    within: Duration,
+    reason: &str,
+) -> Result<(), ModuleError> {
+    let since = ctx.now() - i64::try_from(within.as_secs()).unwrap_or(i64::MAX);
+    let mut messages = hit.messages.clone();
+    for target in targets {
+        let saved = ctx
+            .history()
+            .by_author(*target, since, BULK_DELETE)
+            .await
+            .map_err(|error| ModuleError::other(format!("purge: {error}")))?;
+        messages.extend(
+            saved
+                .iter()
+                .filter(|message| message.deleted_at.is_none())
+                .map(|message| (message.channel_id, message.id)),
+        );
+    }
+    delete_all(ctx, &messages, reason).await
 }
 
 /// Deletes the messages: one bulk delete for each channel that has two or more of them (in
@@ -253,25 +570,22 @@ async fn delete_all(
     first_error.map_or(Ok(()), Err)
 }
 
-/// Sends the reply in the channel of the hit, optionally removing it again later.
+/// Sends the reply in the channel of the message, optionally removing it again later.
 async fn reply(
-    scene: &Scene<'_>,
+    ctx: &EventContext,
+    message: &MessageInfo,
     template: &str,
     auto_delete: Option<Duration>,
+    values: &Values,
 ) -> Result<(), ModuleError> {
-    let content = truncate(&render(template, scene.values), CONTENT_CHARS);
-    let sent = scene
-        .ctx
-        .api
-        .send_message(scene.message.channel_id, content)
-        .await?;
+    let content = truncate(&render(template, values), CONTENT_CHARS);
+    let sent = ctx.api.send_message(message.channel_id, content).await?;
     if let Some(after) = auto_delete {
         let payload = Cleanup {
-            channel: scene.message.channel_id.get(),
+            channel: message.channel_id.get(),
             message: sent.id.get(),
         };
-        let scheduled = scene
-            .ctx
+        let scheduled = ctx
             .scheduler()
             .job(CLEANUP_JOB, &payload)
             .map_err(|error| ModuleError::other(error.to_string()))?;
@@ -284,30 +598,51 @@ async fn reply(
 }
 
 /// Posts the text to the channel the rule names. Without a text, it says who, which rule and what
-/// was found.
+/// was found, with a link when there is a message.
 async fn alert(
-    scene: &Scene<'_>,
+    ctx: &EventContext,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
     channel: ChannelId,
     template: Option<&str>,
 ) -> Result<(), ModuleError> {
-    let content = match template {
-        Some(template) => render(template, scene.values),
-        None => text(
-            scene.ctx,
-            "alert-default",
-            &Args::new()
-                .with("rule", scene.rule.name.as_str())
-                .with("user", mention(scene.message.author.id))
-                .with("detail", scene.hit.detail.as_str())
-                .with("link", message_link(scene)),
-        ),
-    };
-    scene
-        .ctx
-        .api
-        .send_message(channel, truncate(&content, CONTENT_CHARS))
+    let body = alert_text(ctx, rule, hit, context, template);
+    ctx.api
+        .send_message(channel, truncate(&body, CONTENT_CHARS))
         .await?;
     Ok(())
+}
+
+/// The text of an alert: the template given, or the default that says who, which rule and what was
+/// found, with a link when there is a message.
+fn alert_text(
+    ctx: &EventContext,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
+    template: Option<&str>,
+) -> String {
+    if let Some(template) = template {
+        return render(template, &values(ctx, rule, hit, context, None));
+    }
+    let args = Args::new()
+        .with("rule", rule.name.as_str())
+        .with("user", context.user_id().map_or_else(String::new, mention))
+        .with("detail", hit.detail.as_str())
+        .with(
+            "link",
+            context
+                .message
+                .as_ref()
+                .map_or_else(String::new, |message| message_link_of(ctx, message)),
+        );
+    let key = match (&context.message, context.user_id()) {
+        (Some(_), _) => "alert-default",
+        (None, Some(_)) => "alert-default-member",
+        (None, None) => "alert-default-plain",
+    };
+    text(ctx, key, &args)
 }
 
 /// Records the hit as an `automod` case and posts it to the log. A log that cannot take it does not
@@ -335,32 +670,74 @@ async fn record(
 }
 
 /// The reason of a punishment or a deletion: the template given, or the rule and what it found.
-fn reason_of(scene: &Scene<'_>, template: Option<&str>) -> String {
+fn reason_for(
+    ctx: &EventContext,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
+    target: Option<UserId>,
+    template: Option<&str>,
+) -> String {
     match template {
-        Some(template) => render(template, scene.values),
+        Some(template) => render(template, &values(ctx, rule, hit, context, target)),
         None => text(
-            scene.ctx,
+            ctx,
             "reason-automod",
             &Args::new()
-                .with("rule", scene.rule.name.as_str())
-                .with("detail", scene.hit.detail.as_str()),
+                .with("rule", rule.name.as_str())
+                .with("detail", hit.detail.as_str()),
         ),
     }
 }
 
-/// The values the templates of the rule read.
-fn values(ctx: &EventContext, rule: &Rule, hit: &Hit, message: &MessageInfo) -> Values {
+/// The values the templates of the rule read, for the member `target` (the member of the context
+/// when none is given).
+fn values(
+    ctx: &EventContext,
+    rule: &Rule,
+    hit: &Hit,
+    context: &Context,
+    target: Option<UserId>,
+) -> Values {
+    let user = target.or_else(|| context.user_id());
+    let username = match (&context.user, user) {
+        (Some(who), Some(id)) if who.id == id => who.name.clone(),
+        (_, Some(id)) => id.get().to_string(),
+        (_, None) => String::new(),
+    };
     let count = u32::try_from(hit.count).unwrap_or(u32::MAX);
-    Values::new()
-        .with("user", mention(message.author.id))
-        .with("user_id", message.author.id.get().to_string())
-        .with("username", message.author.name.as_str())
-        .with("channel", format!("<#{}>", message.channel_id.get()))
+    let values = Values::new()
+        .with("user", user.map_or_else(String::new, mention))
+        .with(
+            "user_id",
+            user.map_or_else(String::new, |id| id.get().to_string()),
+        )
+        .with("username", username)
+        .with(
+            "channel",
+            context
+                .channel
+                .map_or_else(String::new, |channel| format!("<#{}>", channel.get())),
+        )
         .with("rule", rule.name.as_str())
         .with("detail", hit.detail.as_str())
-        .with("message_link", message_link_of(ctx, message))
+        .with(
+            "message_link",
+            context
+                .message
+                .as_ref()
+                .map_or_else(String::new, |message| message_link_of(ctx, message)),
+        )
         .with("guild", ctx.guild_id.get().to_string())
-        .with("count", f64::from(count))
+        .with("count", f64::from(count));
+    match &context.source {
+        Source::Counter {
+            counter, trigger, ..
+        } => values
+            .with("counter", counter.as_str())
+            .with("trigger", trigger.as_str()),
+        _ => values,
+    }
 }
 
 /// Renders a template. The configuration checked it when the rule was read, so a template that
@@ -370,10 +747,6 @@ fn render(template: &str, values: &Values) -> String {
         Ok(parsed) => parsed.render(values),
         Err(_) => template.to_owned(),
     }
-}
-
-fn message_link(scene: &Scene<'_>) -> String {
-    message_link_of(scene.ctx, scene.message)
 }
 
 fn message_link_of(ctx: &EventContext, message: &MessageInfo) -> String {

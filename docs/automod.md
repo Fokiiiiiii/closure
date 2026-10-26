@@ -14,8 +14,13 @@ leave, a dry run, and `/automod status`. The code is in
   repeat and text-based spam checks never match. Attachments, mentions and stickers, and the spam
   measures that count them, still work.
 - Permissions: **Manage Messages** (to delete), **Kick Members**, **Ban Members**,
-  **Moderate Members** (timeouts), **Manage Roles** (for the `role` timeout method), and **Send
-  Messages** in the log channel and in any `alert` or `reply` channel.
+  **Moderate Members** (timeouts), **Manage Roles** (for the `role` timeout method and the
+  `add_roles` and `remove_roles` actions), **Manage Nicknames** (`set_nickname`), **Manage
+  Channels** (`slowmode`), and **Send Messages** in the log channel and in any `alert` or `reply`
+  channel.
+- The **Server Members Intent** (privileged, under *Bot* → *Privileged Gateway Intents*) is what
+  the member events need: joins, leaves, role changes and join bursts. The module asks for it at
+  every start; without it those rules see no events.
 - The message history (`purge`) is kept for `--message-history-days` (7 by default). A `purge` that
   reaches further back finds nothing.
 - Role order: the bot's highest role must be above the members it acts on, as with the
@@ -47,6 +52,7 @@ Start with `dry_run: true`, read the log for a while, then turn it off.
 | `dm_on_action` | `true` | Whether the member is messaged about a punishment. |
 | `timeout_method` | `discord` | `discord`, or `role`: a role that a timer takes off again. |
 | `timeout_role` | none | The role id a `role` timeout gives. |
+| `counters` | `{}` | The counters, keyed by name, at most 10 (see [Counters](#counters)). |
 | `rules` | `{}` | An object of rules keyed by id, at most 100. |
 
 ### Rules
@@ -190,6 +196,48 @@ What a burst does:
 The windows live in memory, for an hour at most, and up to 20,000 per server; a restart starts them
 empty. A spam trigger counts only the messages the rule's scope lets through.
 
+### Events
+
+Not every trigger reads a message. These read the other events of the server; each one hits on its
+own event and on no other. A member the event does not name is left out of the actions.
+
+```yaml
+# member_join: every join; with only_new, only an account made within new_threshold (1h by default)
+{ type: member_join }
+{ type: member_join, only_new: true, new_threshold: 1d }
+
+# member_join_spam: members joined within a window; every member counted is punished, and a
+# member who joins while the burst is handled is punished on its own
+{ type: member_join_spam, amount: 10, within: 30s }
+
+# member_leave: a member left the server
+{ type: member_leave }
+
+# role_added, role_removed: one of the roles was given (or taken away)
+{ type: role_added, roles: ["333333333333333333"] }
+{ type: role_removed, roles: ["333333333333333333", "444444444444444444"] }
+
+# case: a case the moderation module (or another module) recorded; the kinds listed, or any kind when
+# none is listed. A case the bot itself recorded is left out unless include_own is set
+{ type: case, kinds: [warn, ban] }
+{ type: case, include_own: true }
+
+# thread_created, thread_archived, thread_unarchived, thread_deleted: a thread of the server
+{ type: thread_created }
+
+# counter: a trigger of a counter fired (or, with reverse, its reverse did), see Counters
+{ type: counter, counter: strikes, trigger: high }
+{ type: counter, counter: strikes, trigger: high, reverse: true }
+```
+
+A role change the bot made itself (an `add_roles` or `remove_roles` action) is left out for ten
+seconds after it was made, so that a rule does not trip on its own action. The roles of a member,
+and the time it joined, are looked up when a rule needs them and the event does not carry them.
+
+Where each event is about: a join, a leave and a role change are about the member; a case is about
+its target; a thread is about the parent channel, and about its owner when Discord gives one. A
+thread that was deleted has no owner, and a join has no channel.
+
 ### Scope
 
 ```yaml
@@ -229,6 +277,12 @@ message that only joined a burst. At most 30 days.
 | `{ do: ban, duration: 7d, delete_days: 1, reason: "…" }` | Bans the member; `duration` is optional (forever when left out), `delete_days` is 0 to 7. |
 | `{ do: reply, text: "…", auto_delete: 30s }` | A message in the channel of the hit. It mentions nobody. `auto_delete` removes it again after that time (at most 7 days). |
 | `{ do: alert, channel: "…", text: "…" }` | A message in the channel given. It mentions nobody. Without `text` it says who, which rule and what was found, with a link to the message. |
+| `{ do: add_roles, roles: ["…"] }` | Gives the roles to the member. The bot's own change is left out of the role events for ten seconds. |
+| `{ do: remove_roles, roles: ["…"] }` | Takes the roles away from the member, as above. |
+| `{ do: set_nickname, name: "{username} (checked)" }` | Sets the member's nickname from a template (at most 100 characters of template). |
+| `{ do: slowmode, duration: 30s, channels: ["…"] }` | Sets the slowmode of the channels given, or of the channel of the event when none are given. `0s` turns it off. At most six hours. The same value is not set again within ten minutes: Discord limits how often a channel is edited. |
+| `{ do: add_to_counter, counter: strikes, amount: 1 }` | Adds to a counter, for the member and the channel of the event, as the counter is kept (see [Counters](#counters)). |
+| `{ do: set_counter, counter: strikes, value: 0 }` | Sets a counter, as above. |
 
 The actions run in the order given. A failing action does not stop the next one; the first error is
 logged. Every punishment is recorded as its own case, as a moderator's command would record it.
@@ -237,6 +291,30 @@ When no action punished the member (only deletions, replies or alerts), the hit 
 
 Durations read like `30s`, `10m`, `1h 30m`, `7d`. A `purge` looks at the history: when the history
 cannot be read, that action is skipped with an error in the log, and the rest still run.
+
+### Which action works with which event
+
+An action that has nothing to act on in the event is skipped without a word, and the others still
+run. The table says what each action needs.
+
+| Action | Needs | Works with |
+| --- | --- | --- |
+| `delete` | a message, or the messages of a hit | the message triggers, spam windows |
+| `purge` | a member | every event with a member |
+| `warn`, `timeout`, `kick`, `ban` | a member; for a join burst, each member counted | every event with a member |
+| `reply` | a message | the message triggers |
+| `alert` | nothing | every event (the text may name the member, the rule and what was found) |
+| `add_roles`, `remove_roles`, `set_nickname` | a member | every event with a member |
+| `slowmode` | a channel: its `channels`, or the channel of the event | the message triggers, thread events, counter triggers that have a channel |
+| `add_to_counter`, `set_counter` | the member and the channel the counter is kept for | every event; a missing one is an error in the log |
+
+| Trigger | Member | Channel | Message |
+| --- | --- | --- | --- |
+| words, regex, links, invites, attachments, caps, repeat, stickers, any_message, spam | the author | the channel | yes |
+| member_join, member_join_spam, member_leave, role_added, role_removed | the member | none | none |
+| case | the target | none | none |
+| thread_created, thread_archived, thread_unarchived, thread_deleted | the owner, when Discord gives one | the parent channel | none |
+| counter | the member the change was for, if it had one | the channel of the change | none |
 
 ### Templates
 
@@ -254,9 +332,65 @@ the variable, and `{{` and `}}` are literal braces.
 | `{message_link}` | a link to the message |
 | `{guild}` | the server's id |
 | `{count}` | how many messages the hit counted (for a spam trip, the messages of the burst) |
+| `{counter}`, `{trigger}` | the counter and the trigger of a `counter` trigger (empty for the other events) |
+
+For an event without a message, `{message_link}` is empty, and `{channel}` is empty when the event
+has no channel. A join burst reports each member with its own `{user}` and `{user_id}`, while
+`{username}` is the name of the member whose join made the burst fire.
 
 A template with a broken brace is an invalid rule. A reason without a template reads as the rule and
 what was found: `spoilers: contains the word "spoiler"`.
+
+### Counters
+
+A counter is a number the rules keep, per server and, as it is defined, per member and per channel.
+Rules change it with `add_to_counter` and `set_counter`; a trigger of a counter fires a rule with a
+`counter` trigger. Counters are kept in the module's storage, so they survive a restart.
+
+```yaml
+counters:
+  strikes:
+    per_user: true              # one value per member (channel: per_channel)
+    initial_value: 0            # the value before any change; 0 by default
+    decay: { amount: 1, every: 1h }   # goes down by 1 every hour
+    triggers:
+      high: ">= 3"              # fires when the value newly is 3 or more
+      clean: { condition: "= 0", reverse_condition: "> 0" }   # fires when it reaches 0; the reverse when it rises above 0 again
+rules:
+  plus_1:
+    triggers: [{ type: words, words: ["spam"] }]
+    actions: [{ do: add_to_counter, counter: strikes, amount: 1 }]
+  too_many:
+    triggers: [{ type: counter, counter: strikes, trigger: high }]
+    actions: [{ do: timeout, duration: 1h }]
+```
+
+- A condition is a comparison with a number: `>= 5`, `> 10`, `= 0`, `!= 3`, `< 2` or `<= 7`. A
+  trigger written with just a condition has the opposite of it as its reverse.
+- A trigger fires when a change takes the value from not matching its condition to matching it. Its
+  reverse fires when a change takes the value from matching the condition to matching the reverse.
+  So a value that stays above the condition fires nothing again.
+- Decay is lazy: the value is brought down when it is read or changed, not at the time it passes.
+- The values are kept per member, per channel, both, or once for the server, as the counter says.
+  An event that has no member (a counter for a channel of a thread, say) cannot change a counter
+  kept per member: that is an error in the log.
+- A rule run because of a counter trigger may change another counter and fire another trigger. Three
+  levels of this are run; a trigger fired deeper is dropped and reported as an error.
+- At most 10 counters, each with at most 10 triggers.
+
+Counters are read and changed with `/automod-counters`, by a member with the `automod.counters`
+permission (moderators by default):
+
+```text
+/automod-counters view counter:strikes user:@member
+/automod-counters set counter:strikes value:0 user:@member
+/automod-counters add counter:strikes amount:2 user:@member
+/automod-counters reset counter:strikes              (every scope, back to initial_value)
+```
+
+`view` shows the current value, with the decay that has passed. A change made by a command runs the
+triggers it fires, as an action does, and it changes the counter in a dry run too: it is the
+moderator's own action. The reply is private.
 
 ### Dry run
 
@@ -268,8 +402,10 @@ a dry run does nothing at all.
 ## Status
 
 `/automod status` (privately) shows whether dry run is on, how many rules are enabled, disabled and
-invalid, each rule on a line (its triggers, its actions, its cooldown), and each invalid rule with
-the reason. Invalid rules never run.
+invalid, each rule on a line (its triggers, its actions, its cooldown), the events the enabled rules
+listen to, the counters with how each is kept and its triggers, and each invalid rule with the
+reason. Invalid rules never run. A counter that is not usable (a bad definition) is reported in
+place of the counters; a rule that names such a counter is invalid.
 
 A rule is invalid when its shape is wrong, a value is out of range (a window longer than an hour, a
 pattern that does not compile, a template with a broken brace, a cooldown of zero), or it has no
@@ -287,7 +423,13 @@ one got in some other way.
   Set `whole_words: false` for it.
 - Administrators are not known from a message. Only the moderator level counts for the exemption, so
   an administrator without a moderator role is checked like a member.
-- `threads`, `distinct_users`, and the member and role events (joins, leaves, role changes, bans,
-  antiraid levels) of the older automod are not in this version.
+- `distinct_users`, thread parents for spam, presets, `changePerms`, `startThread` and
+  `archiveThread`, `pauseInvites`, the antiraid levels and their trigger, coordinated spam, and the
+  `match_visible_names` and `match_custom_status` matchers of the older automod are not in this
+  version (see [the parity list](zeppelin-parity.md)).
+- The counter command is `/automod-counters`, not `/automod counters`: the command framework cannot
+  put a subcommand group and a plain subcommand under one command, and `/automod status` keeps its
+  name.
+- A slowmode is not set again to the same value within ten minutes; a different value is set at once.
 - The regexes are linear in the length of the text, and a rule's patterns are compiled once when it
   is read. The rules are read again whenever the configuration changes.

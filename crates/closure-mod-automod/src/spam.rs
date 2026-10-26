@@ -10,9 +10,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use closure_sdk::recent::{Recent, RecentFilter};
 use closure_sdk::text;
-use closure_sdk::{Args, MessageInfo};
+use closure_sdk::{Args, MessageInfo, UserId};
 
-use crate::config::{Measure, Rule, Spam, Trigger};
+use crate::config::{JoinSpam, Measure, Rule, Spam, Trigger};
+use crate::context::{Context, Source};
 use crate::triggers::{Hit, Scan, window_text};
 
 /// The kind a spam trigger is recorded under.
@@ -20,32 +21,56 @@ pub fn kind(rule: &str, index: usize) -> String {
     format!("{rule}#{index}")
 }
 
-/// Records what each windowed spam trigger of an in-scope rule measures in `message`.
-pub fn record(scan: &Scan<'_>, rule: &Rule, message: &MessageInfo, now: i64) {
+/// Records what each windowed spam trigger of an in-scope rule counts in the context: a message
+/// for the message triggers, a join for the join triggers.
+pub fn record(scan: &Scan<'_>, rule: &Rule, context: &Context, now: i64) {
+    let guild = scan.ctx.guild_id;
     for (index, trigger) in rule.triggers.iter().enumerate() {
-        let Trigger::Spam(spam) = trigger else {
-            continue;
-        };
-        // A single message is measured where it is; nothing needs keeping.
-        if spam.within.is_none() {
-            continue;
+        match trigger {
+            Trigger::Spam(spam) => {
+                // A single message is measured where it is; nothing needs keeping.
+                let Some(message) = context.message.as_ref() else {
+                    continue;
+                };
+                if spam.within.is_none() || !context.created {
+                    continue;
+                }
+                let count = measure(spam.measure, message);
+                if count == 0 {
+                    continue;
+                }
+                scan.recent.record(
+                    guild,
+                    Recent {
+                        kind: kind(&rule.id, index),
+                        subject: message.author.id.get(),
+                        group: Some(message.channel_id.get().to_string()),
+                        count,
+                        at: now,
+                        messages: vec![(message.channel_id, message.id)],
+                        tag: fingerprint(&message.content),
+                    },
+                );
+            }
+            Trigger::MemberJoinSpam(_) => {
+                let (Source::Join, Some(who)) = (&context.source, context.user.as_ref()) else {
+                    continue;
+                };
+                scan.recent.record(
+                    guild,
+                    Recent {
+                        kind: kind(&rule.id, index),
+                        subject: who.id.get(),
+                        group: None,
+                        count: 1,
+                        at: now,
+                        messages: Vec::new(),
+                        tag: None,
+                    },
+                );
+            }
+            _ => {}
         }
-        let count = measure(spam.measure, message);
-        if count == 0 {
-            continue;
-        }
-        scan.recent.record(
-            message.guild_id,
-            Recent {
-                kind: kind(&rule.id, index),
-                subject: message.author.id.get(),
-                group: Some(message.channel_id.get().to_string()),
-                count,
-                at: now,
-                messages: vec![(message.channel_id, message.id)],
-                tag: fingerprint(&message.content),
-            },
-        );
     }
 }
 
@@ -59,8 +84,9 @@ pub fn evaluate(
     rule: &str,
     index: usize,
     spam: &Spam,
-    message: &MessageInfo,
+    context: &Context,
 ) -> Option<Hit> {
+    let message = context.message.as_ref()?;
     if !scan.created {
         return None;
     }
@@ -77,6 +103,7 @@ pub fn evaluate(
         return Some(Hit {
             detail,
             messages: vec![(message.channel_id, message.id)],
+            targets: vec![message.author.id],
             count,
             join: false,
         });
@@ -90,6 +117,7 @@ pub fn evaluate(
         return Some(Hit {
             detail: ctx.t_in(ctx.locale, "detail-burst", &Args::new()),
             messages: vec![(message.channel_id, message.id)],
+            targets: vec![author],
             count: 1,
             join: true,
         });
@@ -141,6 +169,78 @@ pub fn evaluate(
     Some(Hit {
         detail: ctx.t_in(ctx.locale, "detail-spam", &args),
         messages,
+        targets: vec![author],
+        count,
+        join: false,
+    })
+}
+
+/// Members who joined within the window, counted together. Once a burst has fired, each member who
+/// joins while it is handled is a target of its own; the burst is handled until the window passes.
+pub fn evaluate_join(
+    scan: &Scan<'_>,
+    rule: &str,
+    index: usize,
+    spam: &JoinSpam,
+    context: &Context,
+) -> Option<Hit> {
+    let (Source::Join, Some(who)) = (&context.source, context.user.as_ref()) else {
+        return None;
+    };
+    let ctx = scan.ctx;
+    let guild = ctx.guild_id;
+    let kind = kind(rule, index);
+    let now = ctx.now();
+    if scan.recent.already_handled(guild, &kind, now) {
+        return Some(Hit {
+            detail: ctx.t_in(ctx.locale, "detail-join-burst", &Args::new()),
+            messages: Vec::new(),
+            targets: vec![who.id],
+            count: 1,
+            join: false,
+        });
+    }
+    let entries = scan.recent.entries(
+        guild,
+        &kind,
+        None,
+        spam.within,
+        now,
+        &RecentFilter::default(),
+    );
+    let count: u64 = entries.iter().map(|entry| u64::from(entry.count)).sum();
+    if count < u64::from(spam.amount) {
+        return None;
+    }
+    let mut targets: Vec<UserId> = Vec::new();
+    for entry in &entries {
+        if let Some(user) = UserId::new_checked(entry.subject)
+            && !targets.contains(&user)
+        {
+            targets.push(user);
+        }
+    }
+    if scan.commit {
+        // Taken, so that the next burst starts from nothing; handled, so that the members who join
+        // after it are punished one by one.
+        let _ = scan.recent.take(
+            guild,
+            &kind,
+            None,
+            spam.within,
+            now,
+            &RecentFilter::default(),
+        );
+        let until = now + i64::try_from(spam.within.as_secs()).unwrap_or(i64::MAX);
+        scan.recent.mark_handled(guild, &kind, until);
+    }
+    let args = Args::new()
+        .with("count", count)
+        .with("window", window_text(ctx, spam.within));
+    Some(Hit {
+        detail: ctx.t_in(ctx.locale, "detail-join-spam", &args),
+        messages: Vec::new(),
+        targets,
         count,
         join: false,
     })

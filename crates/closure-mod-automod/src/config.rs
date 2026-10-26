@@ -8,10 +8,11 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use closure_sdk::counters::{Condition, CounterDef, Counters, Decay, TriggerDef};
 use closure_sdk::duration;
 use closure_sdk::punish::Method;
 use closure_sdk::template::Template;
-use closure_sdk::{ChannelId, RoleId};
+use closure_sdk::{ChannelId, RoleId, Store};
 use regex::{Regex, RegexBuilder};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
@@ -38,6 +39,17 @@ const MAX_PURGE: Duration = Duration::from_secs(7 * 86_400);
 const MAX_AUTO_DELETE: Duration = Duration::from_secs(7 * 86_400);
 const MAX_DELETE_DAYS: u32 = 7;
 const MAX_AMOUNT: u32 = 10_000;
+/// How many counters the module keeps, and how many triggers each one has.
+pub const MAX_COUNTERS: usize = 10;
+const MAX_COUNTER_TRIGGERS: usize = 10;
+const MAX_ROLES: usize = 25;
+const MAX_CHANNELS: usize = 10;
+/// Discord's longest slowmode.
+const MAX_SLOWMODE: Duration = Duration::from_secs(6 * 3_600);
+const MAX_NEW_THRESHOLD: Duration = Duration::from_secs(30 * 86_400);
+const MAX_NICKNAME_CHARS: usize = 100;
+/// The counter value Discord's counters hold at most.
+const MAX_COUNTER_VALUE: i64 = 2_147_483_647;
 
 /// The module's section of a guild's configuration.
 #[derive(Debug, Deserialize)]
@@ -53,6 +65,8 @@ pub struct Config {
     pub timeout_method: Method,
     /// The id of the role a timeout gives, when `timeout_method` is `role`.
     pub timeout_role: Option<String>,
+    /// The counters, keyed by name. They are read as a whole, see [`setup`].
+    pub counters: BTreeMap<String, CounterConfig>,
     /// The rules as written, keyed by id. Each one is read on its own, see [`parse_rules`].
     pub rules: BTreeMap<String, Value>,
 }
@@ -65,9 +79,47 @@ impl Default for Config {
             dm_on_action: true,
             timeout_method: Method::Discord,
             timeout_role: None,
+            counters: BTreeMap::new(),
             rules: BTreeMap::new(),
         }
     }
+}
+
+/// One counter as the configuration writes it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CounterConfig {
+    pub per_channel: bool,
+    pub per_user: bool,
+    pub initial_value: i64,
+    pub decay: Option<DecayConfig>,
+    /// Each trigger is a condition, or a condition with the condition of its reverse.
+    pub triggers: BTreeMap<String, TriggerConfig>,
+}
+
+/// The decay of a counter: it goes down by `amount` every `every`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecayConfig {
+    pub amount: i64,
+    #[serde(deserialize_with = "readable")]
+    pub every: Duration,
+}
+
+/// A trigger of a counter: `">= 5"`, or the condition and its reverse.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum TriggerConfig {
+    Short(String),
+    Full(FullTrigger),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FullTrigger {
+    pub condition: String,
+    /// When left out, the opposite of `condition`.
+    pub reverse_condition: Option<String>,
 }
 
 /// One rule of the configuration, read and checked.
@@ -149,6 +201,98 @@ pub enum Trigger {
     Repeat(Repeat),
     Stickers(Stickers),
     Spam(Spam),
+    MemberJoin(MemberJoin),
+    MemberJoinSpam(JoinSpam),
+    MemberLeave(Empty),
+    RoleAdded(RoleList),
+    RoleRemoved(RoleList),
+    Case(CaseTrigger),
+    ThreadCreated(Empty),
+    ThreadArchived(Empty),
+    ThreadUnarchived(Empty),
+    ThreadDeleted(Empty),
+    Counter(CounterTrigger),
+}
+
+/// A member joined. With `only_new`, only an account made within `new_threshold` trips it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberJoin {
+    #[serde(default)]
+    pub only_new: bool,
+    #[serde(default = "hour", deserialize_with = "readable")]
+    pub new_threshold: Duration,
+}
+
+/// Members joined within a window, counted together; every one of them is a target.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinSpam {
+    pub amount: u32,
+    #[serde(deserialize_with = "readable")]
+    pub within: Duration,
+}
+
+/// Role changes that add (or remove) one of these roles trip the trigger.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleList {
+    #[serde(deserialize_with = "snowflake_list")]
+    pub roles: Vec<RoleId>,
+}
+
+/// A case was recorded. An empty `kinds` is any kind; the bot's own cases are left out unless
+/// `include_own` is set.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaseTrigger {
+    #[serde(default)]
+    pub kinds: Vec<CaseName>,
+    #[serde(default)]
+    pub include_own: bool,
+}
+
+/// The kinds of case a case trigger can name: the kinds the moderation module records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaseName {
+    Warn,
+    Note,
+    Timeout,
+    Untimeout,
+    Kick,
+    Ban,
+    Unban,
+    Vcmute,
+    Vcunmute,
+}
+
+impl CaseName {
+    /// The kind as a case records it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Note => "note",
+            Self::Timeout => "timeout",
+            Self::Untimeout => "untimeout",
+            Self::Kick => "kick",
+            Self::Ban => "ban",
+            Self::Unban => "unban",
+            Self::Vcmute => "vcmute",
+            Self::Vcunmute => "vcunmute",
+        }
+    }
+}
+
+/// A trigger of a counter: it fired (or, with `reverse`, its reverse did).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CounterTrigger {
+    pub counter: String,
+    pub trigger: String,
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 /// The options of a trigger or an action that has none; an unknown key is refused.
@@ -394,15 +538,44 @@ pub enum Action {
         #[serde(default)]
         text: Option<String>,
     },
+    AddRoles {
+        #[serde(deserialize_with = "snowflake_list")]
+        roles: Vec<RoleId>,
+    },
+    RemoveRoles {
+        #[serde(deserialize_with = "snowflake_list")]
+        roles: Vec<RoleId>,
+    },
+    /// The nickname of the member, a template.
+    SetNickname {
+        name: String,
+    },
+    /// The slowmode of the channels given, or of the channel of the event. Zero turns it off.
+    Slowmode {
+        #[serde(deserialize_with = "readable")]
+        duration: Duration,
+        #[serde(default, deserialize_with = "snowflake_list")]
+        channels: Vec<ChannelId>,
+    },
+    AddToCounter {
+        counter: String,
+        amount: i64,
+    },
+    SetCounter {
+        counter: String,
+        value: i64,
+    },
 }
 
-/// Why a rule is not run.
+/// Why a rule is not run, or why the counters are not used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     /// The rule does not have the shape the schema describes; the parser says where.
     Shape(String),
     /// One of the rule's own values is out of range; the key names the message.
     Key(&'static str),
+    /// The counters are not valid; the SDK says why.
+    Counters(String),
 }
 
 /// A rule as the configuration gave it: a valid rule, or the reason it cannot run.
@@ -412,9 +585,109 @@ pub enum Entry {
     Invalid { label: String, why: Problem },
 }
 
+/// The module's configuration as it is read: the rules, and the counters they may use.
+#[derive(Debug)]
+pub struct Setup {
+    pub rules: Vec<Entry>,
+    /// The counters, when they are all valid; none when they are not, see `counters_problem`.
+    pub counters: Vec<CounterDef>,
+    pub counters_problem: Option<Problem>,
+}
+
+/// Reads the counters and then the rules, which may name the counters. The counters are checked by
+/// the SDK's own rules when a store is given; a rule that names a counter that is not usable is
+/// invalid.
+pub fn setup(config: &Config, store: &Store) -> Setup {
+    let (counters, counters_problem) = match counter_defs(&config.counters).and_then(|defs| {
+        Counters::new(store, &defs)
+            .map(|_| defs)
+            .map_err(|error| Problem::Counters(error.to_string()))
+    }) {
+        Ok(defs) => (defs, None),
+        Err(problem) => (Vec::new(), Some(problem)),
+    };
+    let rules = parse_rules(&config.rules, &counters);
+    Setup {
+        rules,
+        counters,
+        counters_problem,
+    }
+}
+
+/// The counter definitions of the configuration, read from their written form.
+pub fn counter_defs(
+    counters: &BTreeMap<String, CounterConfig>,
+) -> Result<Vec<CounterDef>, Problem> {
+    let invalid = Problem::Key("problem-counters");
+    if counters.len() > MAX_COUNTERS {
+        return Err(invalid);
+    }
+    counters
+        .iter()
+        .map(|(name, config)| {
+            if !valid_counter_name(name) || config.triggers.len() > MAX_COUNTER_TRIGGERS {
+                return Err(invalid.clone());
+            }
+            let decay = match &config.decay {
+                Some(decay) if decay.every.as_secs() == 0 => return Err(invalid.clone()),
+                Some(decay) => Some(Decay {
+                    amount: decay.amount,
+                    every: decay.every,
+                }),
+                None => None,
+            };
+            let triggers = config
+                .triggers
+                .iter()
+                .map(|(trigger, written)| {
+                    let (condition, reverse) = match written {
+                        TriggerConfig::Short(text) => {
+                            let condition = parse_condition(text)?;
+                            (condition, condition.reverse())
+                        }
+                        TriggerConfig::Full(full) => {
+                            let condition = parse_condition(&full.condition)?;
+                            let reverse = match &full.reverse_condition {
+                                Some(text) => parse_condition(text)?,
+                                None => condition.reverse(),
+                            };
+                            (condition, reverse)
+                        }
+                    };
+                    Ok(TriggerDef {
+                        name: trigger.clone(),
+                        condition,
+                        reverse,
+                    })
+                })
+                .collect::<Result<Vec<_>, Problem>>()?;
+            Ok(CounterDef {
+                name: name.clone(),
+                per_channel: config.per_channel,
+                per_user: config.per_user,
+                initial_value: config.initial_value,
+                decay,
+                triggers,
+            })
+        })
+        .collect()
+}
+
+fn parse_condition(text: &str) -> Result<Condition, Problem> {
+    Condition::parse(text).map_err(|_| Problem::Key("problem-counters"))
+}
+
+/// Counter names are kept to plain characters, as rule ids are.
+fn valid_counter_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 /// Reads the rules one by one. A rule that is not valid is kept as [`Entry::Invalid`] rather than
 /// refusing the whole list.
-pub fn parse_rules(raw: &BTreeMap<String, Value>) -> Vec<Entry> {
+pub fn parse_rules(raw: &BTreeMap<String, Value>, counters: &[CounterDef]) -> Vec<Entry> {
     raw.iter()
         .enumerate()
         .map(|(index, (id, value))| {
@@ -424,7 +697,7 @@ pub fn parse_rules(raw: &BTreeMap<String, Value>) -> Vec<Entry> {
                     why: Problem::Key("problem-too-many"),
                 };
             }
-            match read(id, value.clone()) {
+            match read(id, value.clone(), counters) {
                 Ok(rule) => Entry::Valid(rule),
                 Err(why) => Entry::Invalid {
                     label: id.clone(),
@@ -435,7 +708,7 @@ pub fn parse_rules(raw: &BTreeMap<String, Value>) -> Vec<Entry> {
         .collect()
 }
 
-fn read(id: &str, value: Value) -> Result<Rule, Problem> {
+fn read(id: &str, value: Value, counters: &[CounterDef]) -> Result<Rule, Problem> {
     let mut rule: Rule =
         serde_json::from_value(value).map_err(|error| Problem::Shape(error.to_string()))?;
     if !valid_id(id) {
@@ -452,13 +725,13 @@ fn read(id: &str, value: Value) -> Result<Rule, Problem> {
         return Err(Problem::Key("problem-triggers"));
     }
     for trigger in &mut rule.triggers {
-        trigger.prepare()?;
+        trigger.prepare(counters)?;
     }
     if rule.actions.is_empty() || rule.actions.len() > MAX_ACTIONS {
         return Err(Problem::Key("problem-actions"));
     }
     for action in &rule.actions {
-        action.validate()?;
+        action.validate(counters)?;
     }
     if rule
         .cooldown
@@ -511,9 +784,15 @@ impl Scope {
 
 impl Trigger {
     /// Checks the trigger's ranges and compiles its patterns. Called once, when the rule is read.
-    fn prepare(&mut self) -> Result<(), Problem> {
+    fn prepare(&mut self, counters: &[CounterDef]) -> Result<(), Problem> {
         match self {
-            Self::AnyMessage(_) => Ok(()),
+            Self::AnyMessage(_)
+            | Self::MemberLeave(_)
+            | Self::ThreadCreated(_)
+            | Self::ThreadArchived(_)
+            | Self::ThreadUnarchived(_)
+            | Self::ThreadDeleted(_)
+            | Self::Case(_) => Ok(()),
             Self::Words(words) => words.check(),
             Self::Regex(patterns) => patterns.compile(),
             Self::Links(links) => links.compile(),
@@ -523,6 +802,45 @@ impl Trigger {
             Self::Repeat(repeat) => repeat.check(),
             Self::Stickers(stickers) => stickers.check(),
             Self::Spam(spam) => spam.check(),
+            Self::MemberJoin(join) => {
+                if join.new_threshold.is_zero() || join.new_threshold > MAX_NEW_THRESHOLD {
+                    Err(Problem::Key("problem-new-threshold"))
+                } else {
+                    Ok(())
+                }
+            }
+            Self::MemberJoinSpam(spam) => {
+                let ok = (1..=MAX_AMOUNT).contains(&spam.amount)
+                    && !spam.within.is_zero()
+                    && spam.within <= MAX_WINDOW;
+                if ok {
+                    Ok(())
+                } else {
+                    Err(Problem::Key("problem-window"))
+                }
+            }
+            Self::RoleAdded(list) | Self::RoleRemoved(list) => list.check(),
+            Self::Counter(trigger) => {
+                let known = counters.iter().any(|def| {
+                    def.name == trigger.counter
+                        && def.triggers.iter().any(|t| t.name == trigger.trigger)
+                });
+                if known {
+                    Ok(())
+                } else {
+                    Err(Problem::Key("problem-counter-unknown"))
+                }
+            }
+        }
+    }
+}
+
+impl RoleList {
+    fn check(&self) -> Result<(), Problem> {
+        if (1..=MAX_ROLES).contains(&self.roles.len()) {
+            Ok(())
+        } else {
+            Err(Problem::Key("problem-roles"))
         }
     }
 }
@@ -666,8 +984,50 @@ impl Spam {
 }
 
 impl Action {
-    fn validate(&self) -> Result<(), Problem> {
+    fn validate(&self, counters: &[CounterDef]) -> Result<(), Problem> {
         match self {
+            Self::AddRoles { roles } | Self::RemoveRoles { roles } => {
+                if (1..=MAX_ROLES).contains(&roles.len()) {
+                    Ok(())
+                } else {
+                    Err(Problem::Key("problem-roles"))
+                }
+            }
+            Self::SetNickname { name } => {
+                let length = name.chars().count();
+                if (1..=MAX_NICKNAME_CHARS).contains(&length) {
+                    reason_ok(Some(name))
+                } else {
+                    Err(Problem::Key("problem-nickname"))
+                }
+            }
+            Self::Slowmode { duration, channels } => {
+                if *duration > MAX_SLOWMODE || channels.len() > MAX_CHANNELS {
+                    Err(Problem::Key("problem-slowmode"))
+                } else {
+                    Ok(())
+                }
+            }
+            Self::AddToCounter { counter, amount } => {
+                if !counter_known(counters, counter) {
+                    return Err(Problem::Key("problem-counter-unknown"));
+                }
+                if amount.abs() <= MAX_COUNTER_VALUE {
+                    Ok(())
+                } else {
+                    Err(Problem::Key("problem-counter-amount"))
+                }
+            }
+            Self::SetCounter { counter, value } => {
+                if !counter_known(counters, counter) {
+                    return Err(Problem::Key("problem-counter-unknown"));
+                }
+                if (0..=MAX_COUNTER_VALUE).contains(value) {
+                    Ok(())
+                } else {
+                    Err(Problem::Key("problem-counter-amount"))
+                }
+            }
             Self::Delete(_) | Self::Kick { reason: None } | Self::Warn { reason: None } => Ok(()),
             Self::Kick { reason } | Self::Warn { reason } => reason_ok(reason.as_deref()),
             Self::Purge { within } => {
@@ -709,6 +1069,10 @@ impl Action {
             Self::Alert { text, .. } => reason_ok(text.as_deref()),
         }
     }
+}
+
+fn counter_known(counters: &[CounterDef], name: &str) -> bool {
+    counters.iter().any(|def| def.name == name)
 }
 
 fn reason_ok(text: Option<&str>) -> Result<(), Problem> {
@@ -784,6 +1148,17 @@ pub fn role_of(text: Option<&str>) -> Option<RoleId> {
 /// The key of a trigger's name, as the status and a dry run show it.
 pub fn trigger_key(trigger: &Trigger) -> &'static str {
     match trigger {
+        Trigger::MemberJoin(_) => "trigger-member-join",
+        Trigger::MemberJoinSpam(_) => "trigger-member-join-spam",
+        Trigger::MemberLeave(_) => "trigger-member-leave",
+        Trigger::RoleAdded(_) => "trigger-role-added",
+        Trigger::RoleRemoved(_) => "trigger-role-removed",
+        Trigger::Case(_) => "trigger-case",
+        Trigger::ThreadCreated(_) => "trigger-thread-created",
+        Trigger::ThreadArchived(_) => "trigger-thread-archived",
+        Trigger::ThreadUnarchived(_) => "trigger-thread-unarchived",
+        Trigger::ThreadDeleted(_) => "trigger-thread-deleted",
+        Trigger::Counter(_) => "trigger-counter",
         Trigger::AnyMessage(_) => "trigger-any-message",
         Trigger::Words(_) => "trigger-words",
         Trigger::Regex(_) => "trigger-regex",
@@ -808,5 +1183,40 @@ pub fn action_key(action: &Action) -> &'static str {
         Action::Ban { .. } => "action-ban",
         Action::Reply { .. } => "action-reply",
         Action::Alert { .. } => "action-alert",
+        Action::AddRoles { .. } => "action-add-roles",
+        Action::RemoveRoles { .. } => "action-remove-roles",
+        Action::SetNickname { .. } => "action-set-nickname",
+        Action::Slowmode { .. } => "action-slowmode",
+        Action::AddToCounter { .. } => "action-add-to-counter",
+        Action::SetCounter { .. } => "action-set-counter",
     }
+}
+
+/// The events a trigger listens to, as the status names them.
+pub fn event_key(trigger: &Trigger) -> &'static str {
+    match trigger {
+        Trigger::AnyMessage(_)
+        | Trigger::Words(_)
+        | Trigger::Regex(_)
+        | Trigger::Links(_)
+        | Trigger::Invites(_)
+        | Trigger::Attachments(_)
+        | Trigger::Caps(_)
+        | Trigger::Repeat(_)
+        | Trigger::Stickers(_)
+        | Trigger::Spam(_) => "event-messages",
+        Trigger::MemberJoin(_) | Trigger::MemberJoinSpam(_) => "event-joins",
+        Trigger::MemberLeave(_) => "event-leaves",
+        Trigger::RoleAdded(_) | Trigger::RoleRemoved(_) => "event-roles",
+        Trigger::Case(_) => "event-cases",
+        Trigger::ThreadCreated(_)
+        | Trigger::ThreadArchived(_)
+        | Trigger::ThreadUnarchived(_)
+        | Trigger::ThreadDeleted(_) => "event-threads",
+        Trigger::Counter(_) => "event-counters",
+    }
+}
+
+fn hour() -> Duration {
+    Duration::from_secs(3_600)
 }

@@ -306,3 +306,82 @@ pub fn days_ago(days: i64) -> String {
     let secs = unix_now() - days * 86_400;
     Timestamp::from_secs(secs).unwrap().iso_8601().to_string()
 }
+
+/// Declares a member of the guild with these roles to the pretend Discord, for the checks that
+/// look a member up (the scope of a rule reads the roles of a member that an event does not carry).
+pub fn declare(harness: &Harness, id: u64, roles: &[u64]) {
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(id, roles, false, None));
+}
+
+/// Delivers a member's join as the gateway would: with its roles and the time it joined.
+pub async fn join_with(harness: &Harness, user: u64, roles: &[u64], joined_at: i64) {
+    harness
+        .emit(Event::MemberJoined(closure_core::event::MemberInfo {
+            guild_id: Id::new(GUILD),
+            user: UserInfo {
+                id: Id::new(user),
+                name: "member".into(),
+                bot: false,
+            },
+            roles: roles.iter().map(|id| Id::new(*id)).collect(),
+            nick: None,
+            joined_at: Some(joined_at),
+            timed_out_until: None,
+        }))
+        .await
+        .unwrap();
+}
+
+/// Delivers a join of `user` now, with no roles.
+pub async fn join(harness: &Harness, user: u64) {
+    join_with(harness, user, &[], unix_now()).await;
+}
+
+/// Delivers the departure of `user` from the guild.
+pub async fn leave(harness: &Harness, user: u64) {
+    harness
+        .emit(Event::MemberLeft {
+            guild_id: Id::new(GUILD),
+            user: UserInfo {
+                id: Id::new(user),
+                name: "member".into(),
+                bot: false,
+            },
+        })
+        .await
+        .unwrap();
+}
+
+/// A user id whose account was made `secs_ago` seconds ago, as Discord's snowflakes say it.
+pub fn account_made(secs_ago: i64) -> u64 {
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    let made_ms = u64::try_from((unix_now() - secs_ago) * 1000).unwrap();
+    ((made_ms - DISCORD_EPOCH_MS) << 22) | 1
+}
+
+/// A case of `kind` against `target`, recorded by `moderator`, as the dispatcher announces it.
+pub fn case(kind: &str, target: u64, moderator: u64) -> Case {
+    Case {
+        number: 1,
+        guild_id: Id::new(GUILD),
+        module: closure_core::module::ModuleId::new("moderation").unwrap(),
+        kind: closure_sdk::CaseKind::new(kind).unwrap(),
+        target: Id::new(target),
+        moderator: Id::new(moderator),
+        reason: None,
+        created_at: unix_now(),
+        expires_at: None,
+        revoked: None,
+    }
+}
+
+/// The texts posted to `channel`, in order.
+pub fn texts_in(harness: &Harness, channel: u64) -> Vec<String> {
+    sent_texts(harness)
+        .into_iter()
+        .filter(|(sent_to, _)| *sent_to == channel)
+        .map(|(_, text)| text)
+        .collect()
+}

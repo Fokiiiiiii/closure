@@ -53,14 +53,30 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | `match_links`, `match_invites` | `links`: any, allowlist, blocklist, subdomains, bare domains, include and exclude regexes. `invites`: allowed and blocked codes. No guild rules |
 | windowed spam triggers | `spam`: messages, mentions, links, attachments, emojis, lines, characters, stickers, duplicates; `within`, `per_channel`, `distinct_channels`, identical-text options, burst handled once. No `distinct_users`, no thread-parent channels |
 | `match_regex`, attachment type, MIME type | `regex` (linear time, size-limited), `attachments` (count, extensions, MIME types with `type/*`) |
-| `role_added`, `role_removed` | available as `RolesChanged` (needs the `GUILD_MEMBERS` intent) |
-| `thread_create`, `thread_archive`, `thread_unarchive`, `thread_delete` | available as `ThreadCreated`, `ThreadArchived`, `ThreadUnarchived`, `ThreadDeleted` |
-| `ban`, `unban`, `kick`, `warn`, `mute`, `unmute` | available as `CaseCreated` for the cases the moderation modules record (`timeout` and `untimeout` stand for mute and unmute); `note` is not recorded yet |
-| `member_join`, `member_leave`, `member_join_spam`, counter and antiraid triggers | not yet |
-| 19 actions | `delete`, `purge`, `warn`, `timeout`, `kick`, `ban`, `reply` (with `auto_delete`), `alert`. Templates with `{user}`, `{rule}`, `{detail}` and more. No roles, nicknames, threads, counters |
-| counters | `closure_sdk::counters` (values per scope, lazy decay, triggers and reverses, compare-and-set writes); no module uses it yet. Antiraid levels: not yet |
+| `role_added`, `role_removed` | `role_added`, `role_removed`: a role given or taken away (from `RolesChanged`; the bot's own role changes are left out for ten seconds) |
+| `thread_create`, `thread_archive`, `thread_unarchive`, `thread_delete` | `thread_created`, `thread_archived`, `thread_unarchived`, `thread_deleted`. No `thread_create_spam` yet |
+| `ban`, `unban`, `kick`, `warn`, `mute`, `unmute` | `case` with `kinds`: the cases the moderation modules record (`timeout` and `untimeout` stand for mute and unmute); `note` is not recorded yet |
+| `member_join` (`only_new`, `new_threshold`), `member_leave`, `member_join_spam` | `member_join`, `member_join_spam`, `member_leave` |
+| `counter_trigger` | `counter` (a trigger of a counter fired, or its reverse) |
+| `antiraid_level` | not yet: antiraid is the next stage |
+| 19 actions | `delete`, `purge`, `warn`, `timeout`, `kick`, `ban`, `reply` (with `auto_delete`), `alert`, `addRoles` (`add_roles`), `removeRoles` (`remove_roles`), `changeNickname` (`set_nickname`), `setSlowmode` (`slowmode`), `addToCounter` (`add_to_counter`), `setCounter` (`set_counter`). Templates with `{user}`, `{rule}`, `{detail}` and more |
+| counters | the module's `counters`: per member, per channel or overall, lazy decay, triggers and reverses, changed by actions and by `/automod-counters`. Zeppelin's counter commands are `/automod-counters view\|set\|add\|reset` here |
 | message history for spam, `clean`, logs | available as the `message_history` capability: messages kept for `--message-history-days` (7 by default), with edits and deletions (see [writing modules](writing-modules.md#message-history)) |
 | `Logs` event log | ModLog of cases only |
 | Mutes / ModActions / Warnings message templates | fixed texts; `{user}` `{moderator}` `{server}` in templates. `closure_sdk::template` has `{name}` and `{a.b}` only, with no functions (Zeppelin's `if`, `plural`, `round`... are not ported) |
 | config overrides | closure-config has overrides |
 | text commands with a prefix (`!warn @user spam`) | `prefix` per guild; the words fill the options of the slash command of the same name, which runs with the same handler and checks (see [text commands](writing-modules.md#text-commands)) |
+
+## Deliberately not taken
+
+These are in Zeppelin and are left out on purpose, for now:
+
+- `presets`: a rule is written out in full; a preset would be a second source of truth.
+- `changePerms`: channel permission edits are a moderator's decision, not a rule's.
+- `startThread` and `archiveThread`: threads are for the members, not for automod.
+- `pauseInvites`: needs the invite settings, which no module manages yet.
+- `setAntiraidLevel` and the `antiraid_level` trigger: antiraid is the next stage of automod.
+- Coordinated spam (`coordinated_message_spam`, `coordinated_link_spam`): it needs the messages of many
+  members compared at once, and is not built yet.
+- `match_visible_names` and `match_custom_status`: the gateway does not give the names shown in a
+  server, or the custom statuses, to the module.
