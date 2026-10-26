@@ -2,6 +2,7 @@ use closure_core::action::{NewRole, Outcome, Reason, RolePatch};
 use closure_core::error::DiscordError;
 use closure_core::event::{GuildId, RoleId};
 use twilight_http::request::AuditLogReason;
+use twilight_model::guild::RolePosition;
 
 use super::{TwilightApi, read, read_list, run};
 
@@ -65,5 +66,16 @@ impl TwilightApi {
         reason: &Reason,
     ) -> Result<Outcome, DiscordError> {
         run(self.http.delete_role(guild, role).reason(reason.as_str())).await
+    }
+
+    /// Discord takes no audit log reason for this, and answers with every role of the guild.
+    pub(super) async fn reorder_roles(
+        &self,
+        guild: GuildId,
+        positions: &[RolePosition],
+    ) -> Result<Outcome, DiscordError> {
+        read_list(self.http.update_role_positions(guild, positions))
+            .await
+            .map(Outcome::Roles)
     }
 }

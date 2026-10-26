@@ -1,0 +1,33 @@
+//! The `{{id}}` module, run against the SDK's pretend Discord.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use closure_i18n::missing_keys;
+use closure_sdk::Locale;
+use closure_sdk::testing::{Harness, Invocation};
+use {{library}}::builder;
+
+const EN: &str = include_str!("../locales/en.ftl");
+const JA: &str = include_str!("../locales/ja.ftl");
+
+#[tokio::test]
+async fn the_command_greets_in_the_invokers_language() {
+    let harness = Harness::new(builder().unwrap()).unwrap();
+
+    let english = harness
+        .invoke(Invocation::new("{{id}}").locale(Locale::En))
+        .await
+        .unwrap();
+    assert!(english[0].content.starts_with("Hello, "), "{english:?}");
+
+    let japanese = harness
+        .invoke(Invocation::new("{{id}}").locale(Locale::Ja))
+        .await
+        .unwrap();
+    assert!(japanese[0].content.ends_with("さん！"), "{japanese:?}");
+}
+
+#[test]
+fn both_catalogs_define_the_same_messages() {
+    assert_eq!(missing_keys(EN, JA).unwrap(), Vec::<String>::new());
+    assert_eq!(missing_keys(JA, EN).unwrap(), Vec::<String>::new());
+}

@@ -2,10 +2,15 @@
 
 use std::time::Duration;
 
-use closure_core::event::{ChannelId, CommandInvocation, CommandOptionValue, RoleId, UserId};
+use closure_core::event::{
+    AttachmentInfo, ChannelId, CommandInvocation, CommandOptionValue, Mentionable, RoleId, UserId,
+};
 use closure_core::module::{OptionKind, OptionSpec};
 
 use crate::duration;
+
+/// A file uploaded with the command: its id, name, size, type and where it is served.
+pub type Attachment = AttachmentInfo;
 
 /// The options of a command, written as a struct (`#[derive(CommandArgs)]`) or by hand.
 pub trait CommandArgs: Sized + Send + 'static {
@@ -56,6 +61,8 @@ option_type!(bool, Boolean, Boolean);
 option_type!(UserId, User, User);
 option_type!(ChannelId, Channel, Channel);
 option_type!(RoleId, Role, Role);
+option_type!(Attachment, Attachment, Attachment);
+option_type!(Mentionable, Mentionable, Mentionable);
 
 /// A duration typed as words (`1h30m`), see [`crate::duration::parse`].
 impl OptionType for Duration {

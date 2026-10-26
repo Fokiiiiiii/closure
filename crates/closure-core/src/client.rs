@@ -3,17 +3,28 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use twilight_model::channel::Channel;
 use twilight_model::channel::message::{Embed, Message};
+use twilight_model::channel::thread::ThreadMember;
+use twilight_model::channel::webhook::Webhook;
+use twilight_model::guild::invite::Invite;
+use twilight_model::guild::scheduled_event::GuildScheduledEvent;
+use twilight_model::guild::{Emoji as GuildEmoji, RolePosition};
 use twilight_model::guild::{Guild, Member};
+use twilight_model::id::Id;
+use twilight_model::id::marker::{EmojiMarker, ScheduledEventMarker, WebhookMarker};
+use twilight_model::user::User;
 
 use crate::action::{
-    Action, Emoji, InteractionReply, InteractionResponse, MentionPolicy, ModalSpec, Outcome, Reason,
+    Action, ChannelPosition, Emoji, GuildPatch, InteractionReply, InteractionResponse,
+    MentionPolicy, MessageCursor, ModalSpec, NewScheduledEvent, Outcome, Reason,
+    ScheduledEventPatch, ThreadKind, ThreadPatch, WebhookToken,
 };
 use crate::capability::CapabilitySet;
 use crate::error::DiscordError;
 use crate::event::{ChannelId, GuildId, InteractionRef, MessageId, RoleId, UserId};
 use crate::interaction::InteractionGuilds;
-use crate::module::ModuleId;
+use crate::module::{ModuleId, OptionChoice};
 
 /// The single door to Discord. Implemented by the Twilight-backed client in production and by
 /// [`MockApi`](crate::testing::MockApi) in tests.
@@ -383,6 +394,659 @@ impl ApiClient {
         .map(drop)
     }
 
+    /// Server-deafens or undeafens a member in voice channels.
+    pub async fn set_voice_deafen(
+        &self,
+        guild_id: GuildId,
+        user_id: UserId,
+        deaf: bool,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::SetVoiceDeafen {
+            guild_id,
+            user_id,
+            deaf,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
+    /// Moves a member who is in voice into `channel_id`, which must be in the guild.
+    pub async fn move_member(
+        &self,
+        guild_id: GuildId,
+        user_id: UserId,
+        channel_id: ChannelId,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::MoveMember {
+            guild_id,
+            user_id,
+            channel_id,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
+    pub async fn disconnect_member(
+        &self,
+        guild_id: GuildId,
+        user_id: UserId,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::DisconnectMember {
+            guild_id,
+            user_id,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
+    pub async fn get_message(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> Result<Message, DiscordError> {
+        match self
+            .execute(Action::GetMessage {
+                channel_id,
+                message_id,
+            })
+            .await?
+        {
+            Outcome::Message(message) => Ok(*message),
+            _ => Err(unexpected("get_message")),
+        }
+    }
+
+    /// The newest messages of a channel, or those around, before or after `cursor`.
+    pub async fn get_messages(
+        &self,
+        channel_id: ChannelId,
+        cursor: Option<MessageCursor>,
+        limit: u16,
+    ) -> Result<Vec<Message>, DiscordError> {
+        match self
+            .execute(Action::GetMessages {
+                channel_id,
+                cursor,
+                limit,
+            })
+            .await?
+        {
+            Outcome::Messages(messages) => Ok(messages),
+            _ => Err(unexpected("get_messages")),
+        }
+    }
+
+    pub async fn get_pins(&self, channel_id: ChannelId) -> Result<Vec<Message>, DiscordError> {
+        match self.execute(Action::GetPins { channel_id }).await? {
+            Outcome::Messages(messages) => Ok(messages),
+            _ => Err(unexpected("get_pins")),
+        }
+    }
+
+    pub async fn pin_message(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::PinMessage {
+            channel_id,
+            message_id,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
+    pub async fn unpin_message(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::UnpinMessage {
+            channel_id,
+            message_id,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
+    pub async fn crosspost_message(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> Result<Message, DiscordError> {
+        match self
+            .execute(Action::CrosspostMessage {
+                channel_id,
+                message_id,
+            })
+            .await?
+        {
+            Outcome::Message(message) => Ok(*message),
+            _ => Err(unexpected("crosspost_message")),
+        }
+    }
+
+    pub async fn remove_reaction(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        emoji: Emoji,
+        user_id: UserId,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::RemoveReaction {
+            channel_id,
+            message_id,
+            emoji,
+            user_id,
+        })
+        .await
+        .map(drop)
+    }
+
+    /// Every reaction on the message, or only those with `emoji` when one is given.
+    pub async fn remove_all_reactions(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        emoji: Option<Emoji>,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::RemoveAllReactions {
+            channel_id,
+            message_id,
+            emoji,
+        })
+        .await
+        .map(drop)
+    }
+
+    pub async fn get_reaction_users(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        emoji: Emoji,
+        after: Option<UserId>,
+        limit: u16,
+    ) -> Result<Vec<User>, DiscordError> {
+        match self
+            .execute(Action::GetReactionUsers {
+                channel_id,
+                message_id,
+                emoji,
+                after,
+                limit,
+            })
+            .await?
+        {
+            Outcome::Users(users) => Ok(users),
+            _ => Err(unexpected("get_reaction_users")),
+        }
+    }
+
+    /// A thread in `channel_id`, or one started from `source`, a message of that channel.
+    pub async fn create_thread(
+        &self,
+        channel_id: ChannelId,
+        name: String,
+        source: Option<MessageId>,
+        kind: ThreadKind,
+        auto_archive_minutes: u16,
+    ) -> Result<Channel, DiscordError> {
+        match self
+            .execute(Action::CreateThread {
+                channel_id,
+                name,
+                source,
+                kind,
+                auto_archive_minutes,
+            })
+            .await?
+        {
+            Outcome::Channel(channel) => Ok(*channel),
+            _ => Err(unexpected("create_thread")),
+        }
+    }
+
+    pub async fn edit_thread(
+        &self,
+        thread_id: ChannelId,
+        patch: ThreadPatch,
+        reason: Reason,
+    ) -> Result<Channel, DiscordError> {
+        match self
+            .execute(Action::EditThread {
+                thread_id,
+                patch,
+                reason,
+            })
+            .await?
+        {
+            Outcome::Channel(channel) => Ok(*channel),
+            _ => Err(unexpected("edit_thread")),
+        }
+    }
+
+    pub async fn join_thread(&self, thread_id: ChannelId) -> Result<(), DiscordError> {
+        self.execute(Action::JoinThread { thread_id })
+            .await
+            .map(drop)
+    }
+
+    pub async fn leave_thread(&self, thread_id: ChannelId) -> Result<(), DiscordError> {
+        self.execute(Action::LeaveThread { thread_id })
+            .await
+            .map(drop)
+    }
+
+    pub async fn add_thread_member(
+        &self,
+        thread_id: ChannelId,
+        user_id: UserId,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::AddThreadMember { thread_id, user_id })
+            .await
+            .map(drop)
+    }
+
+    pub async fn remove_thread_member(
+        &self,
+        thread_id: ChannelId,
+        user_id: UserId,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::RemoveThreadMember { thread_id, user_id })
+            .await
+            .map(drop)
+    }
+
+    pub async fn list_thread_members(
+        &self,
+        thread_id: ChannelId,
+        after: Option<UserId>,
+        limit: u16,
+    ) -> Result<Vec<ThreadMember>, DiscordError> {
+        match self
+            .execute(Action::ListThreadMembers {
+                thread_id,
+                after,
+                limit,
+            })
+            .await?
+        {
+            Outcome::ThreadMembers(members) => Ok(members),
+            _ => Err(unexpected("list_thread_members")),
+        }
+    }
+
+    /// An invite to `channel_id`. `max_age_seconds` of 0 never expires; `max_uses` of 0 is unlimited.
+    pub async fn create_invite(
+        &self,
+        channel_id: ChannelId,
+        max_age_seconds: u32,
+        max_uses: u16,
+        temporary: bool,
+        unique: bool,
+        reason: Reason,
+    ) -> Result<Invite, DiscordError> {
+        match self
+            .execute(Action::CreateInvite {
+                channel_id,
+                max_age_seconds,
+                max_uses,
+                temporary,
+                unique,
+                reason,
+            })
+            .await?
+        {
+            Outcome::Invite(invite) => Ok(*invite),
+            _ => Err(unexpected("create_invite")),
+        }
+    }
+
+    pub async fn list_invites(&self, guild_id: GuildId) -> Result<Vec<Invite>, DiscordError> {
+        match self.execute(Action::ListInvites { guild_id }).await? {
+            Outcome::Invites(invites) => Ok(invites),
+            _ => Err(unexpected("list_invites")),
+        }
+    }
+
+    pub async fn delete_invite(
+        &self,
+        guild_id: GuildId,
+        code: String,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::DeleteInvite {
+            guild_id,
+            code,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
+    pub async fn create_webhook(
+        &self,
+        channel_id: ChannelId,
+        name: String,
+        reason: Reason,
+    ) -> Result<Webhook, DiscordError> {
+        match self
+            .execute(Action::CreateWebhook {
+                channel_id,
+                name,
+                reason,
+            })
+            .await?
+        {
+            Outcome::Webhook(webhook) => Ok(*webhook),
+            _ => Err(unexpected("create_webhook")),
+        }
+    }
+
+    pub async fn list_webhooks(&self, channel_id: ChannelId) -> Result<Vec<Webhook>, DiscordError> {
+        match self.execute(Action::ListWebhooks { channel_id }).await? {
+            Outcome::Webhooks(webhooks) => Ok(webhooks),
+            _ => Err(unexpected("list_webhooks")),
+        }
+    }
+
+    pub async fn delete_webhook(
+        &self,
+        guild_id: GuildId,
+        webhook_id: Id<WebhookMarker>,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::DeleteWebhook {
+            guild_id,
+            webhook_id,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
+    /// Posts `content` or `embeds` through a webhook, without notifying anyone.
+    pub async fn execute_webhook(
+        &self,
+        guild_id: GuildId,
+        webhook_id: Id<WebhookMarker>,
+        token: WebhookToken,
+        content: Option<String>,
+        embeds: Vec<Embed>,
+        username: Option<String>,
+    ) -> Result<Message, DiscordError> {
+        match self
+            .execute(Action::ExecuteWebhook {
+                guild_id,
+                webhook_id,
+                token,
+                content,
+                embeds,
+                username,
+                avatar_url: None,
+                mentions: MentionPolicy::None,
+            })
+            .await?
+        {
+            Outcome::Message(message) => Ok(*message),
+            _ => Err(unexpected("execute_webhook")),
+        }
+    }
+
+    pub async fn search_members(
+        &self,
+        guild_id: GuildId,
+        query: String,
+        limit: u16,
+    ) -> Result<Vec<Member>, DiscordError> {
+        match self
+            .execute(Action::SearchMembers {
+                guild_id,
+                query,
+                limit,
+            })
+            .await?
+        {
+            Outcome::Members(members) => Ok(members),
+            _ => Err(unexpected("search_members")),
+        }
+    }
+
+    pub async fn list_members(
+        &self,
+        guild_id: GuildId,
+        after: Option<UserId>,
+        limit: u16,
+    ) -> Result<Vec<Member>, DiscordError> {
+        match self
+            .execute(Action::ListMembers {
+                guild_id,
+                after,
+                limit,
+            })
+            .await?
+        {
+            Outcome::Members(members) => Ok(members),
+            _ => Err(unexpected("list_members")),
+        }
+    }
+
+    /// How many members `days` of inactivity would remove, without removing them.
+    pub async fn prune_count(
+        &self,
+        guild_id: GuildId,
+        days: u16,
+        include_roles: Vec<RoleId>,
+    ) -> Result<u64, DiscordError> {
+        match self
+            .execute(Action::PruneCount {
+                guild_id,
+                days,
+                include_roles,
+            })
+            .await?
+        {
+            Outcome::Count(count) => Ok(count),
+            _ => Err(unexpected("prune_count")),
+        }
+    }
+
+    /// Removes the members a prune would count, and answers with how many were removed.
+    pub async fn prune(
+        &self,
+        guild_id: GuildId,
+        days: u16,
+        include_roles: Vec<RoleId>,
+        reason: Reason,
+    ) -> Result<u64, DiscordError> {
+        match self
+            .execute(Action::Prune {
+                guild_id,
+                days,
+                include_roles,
+                reason,
+            })
+            .await?
+        {
+            Outcome::Count(count) => Ok(count),
+            _ => Err(unexpected("prune")),
+        }
+    }
+
+    pub async fn edit_guild(
+        &self,
+        guild_id: GuildId,
+        patch: GuildPatch,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::EditGuild {
+            guild_id,
+            patch,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
+    pub async fn reorder_roles(
+        &self,
+        guild_id: GuildId,
+        positions: Vec<RolePosition>,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::ReorderRoles {
+            guild_id,
+            positions,
+        })
+        .await
+        .map(drop)
+    }
+
+    pub async fn reorder_channels(
+        &self,
+        guild_id: GuildId,
+        positions: Vec<ChannelPosition>,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::ReorderChannels {
+            guild_id,
+            positions,
+        })
+        .await
+        .map(drop)
+    }
+
+    /// A direct message channel with a member of the guild the client is bound to.
+    pub async fn create_direct_message_channel(
+        &self,
+        user_id: UserId,
+    ) -> Result<Channel, DiscordError> {
+        let Some(guild_id) = self.guild else {
+            return Err(DiscordError::Invalid(
+                "direct message channels need a client bound to a guild".into(),
+            ));
+        };
+        match self
+            .execute(Action::CreateDirectMessageChannel { guild_id, user_id })
+            .await?
+        {
+            Outcome::Channel(channel) => Ok(*channel),
+            _ => Err(unexpected("create_direct_message_channel")),
+        }
+    }
+
+    pub async fn list_scheduled_events(
+        &self,
+        guild_id: GuildId,
+        with_user_count: bool,
+    ) -> Result<Vec<GuildScheduledEvent>, DiscordError> {
+        match self
+            .execute(Action::ListScheduledEvents {
+                guild_id,
+                with_user_count,
+            })
+            .await?
+        {
+            Outcome::ScheduledEvents(events) => Ok(events),
+            _ => Err(unexpected("list_scheduled_events")),
+        }
+    }
+
+    pub async fn create_scheduled_event(
+        &self,
+        guild_id: GuildId,
+        spec: NewScheduledEvent,
+    ) -> Result<GuildScheduledEvent, DiscordError> {
+        match self
+            .execute(Action::CreateScheduledEvent { guild_id, spec })
+            .await?
+        {
+            Outcome::ScheduledEvent(event) => Ok(*event),
+            _ => Err(unexpected("create_scheduled_event")),
+        }
+    }
+
+    pub async fn edit_scheduled_event(
+        &self,
+        guild_id: GuildId,
+        event_id: Id<ScheduledEventMarker>,
+        patch: ScheduledEventPatch,
+    ) -> Result<GuildScheduledEvent, DiscordError> {
+        match self
+            .execute(Action::EditScheduledEvent {
+                guild_id,
+                event_id,
+                patch,
+            })
+            .await?
+        {
+            Outcome::ScheduledEvent(event) => Ok(*event),
+            _ => Err(unexpected("edit_scheduled_event")),
+        }
+    }
+
+    pub async fn delete_scheduled_event(
+        &self,
+        guild_id: GuildId,
+        event_id: Id<ScheduledEventMarker>,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::DeleteScheduledEvent { guild_id, event_id })
+            .await
+            .map(drop)
+    }
+
+    pub async fn list_emojis(&self, guild_id: GuildId) -> Result<Vec<GuildEmoji>, DiscordError> {
+        match self.execute(Action::ListEmojis { guild_id }).await? {
+            Outcome::Emojis(emojis) => Ok(emojis),
+            _ => Err(unexpected("list_emojis")),
+        }
+    }
+
+    /// `image` is a PNG, JPEG or GIF as a base64 `data:` URI of at most 256 KiB.
+    pub async fn create_emoji(
+        &self,
+        guild_id: GuildId,
+        name: String,
+        image: String,
+        reason: Reason,
+    ) -> Result<GuildEmoji, DiscordError> {
+        match self
+            .execute(Action::CreateEmoji {
+                guild_id,
+                name,
+                image,
+                reason,
+            })
+            .await?
+        {
+            Outcome::Emoji(emoji) => Ok(*emoji),
+            _ => Err(unexpected("create_emoji")),
+        }
+    }
+
+    pub async fn delete_emoji(
+        &self,
+        guild_id: GuildId,
+        emoji_id: Id<EmojiMarker>,
+        reason: Reason,
+    ) -> Result<(), DiscordError> {
+        self.execute(Action::DeleteEmoji {
+            guild_id,
+            emoji_id,
+            reason,
+        })
+        .await
+        .map(drop)
+    }
+
     pub async fn add_role(
         &self,
         guild_id: GuildId,
@@ -424,6 +1088,16 @@ impl ApiClient {
         reply: InteractionReply,
     ) -> Result<(), DiscordError> {
         self.respond_with(invocation, InteractionResponse::Message { reply })
+            .await
+    }
+
+    /// Answers an autocomplete request with the choices the user may pick from.
+    pub async fn autocomplete(
+        &self,
+        invocation: &(impl InteractionRef + ?Sized),
+        choices: Vec<OptionChoice>,
+    ) -> Result<(), DiscordError> {
+        self.respond_with(invocation, InteractionResponse::Autocomplete { choices })
             .await
     }
 
@@ -636,6 +1310,8 @@ mod tests {
     }
 
     /// All ten actions that identify their target by a channel, aimed at `channel`.
+    // One of each channel-addressed action, so the guild boundary is tested for all of them.
+    #[allow(clippy::too_many_lines)]
     fn channel_actions(channel: u64) -> Vec<Action> {
         let channel_id = Id::new(channel);
         let message_id = Id::new(5);
@@ -669,6 +1345,72 @@ mod tests {
                 emoji: Emoji::Unicode {
                     value: "👍".into()
                 },
+            },
+            Action::GetMessage {
+                channel_id,
+                message_id,
+            },
+            Action::GetMessages {
+                channel_id,
+                cursor: None,
+                limit: 10,
+            },
+            Action::GetPins { channel_id },
+            Action::CreateThread {
+                channel_id,
+                name: "help".into(),
+                source: None,
+                kind: ThreadKind::Public,
+                auto_archive_minutes: 60,
+            },
+            Action::EditThread {
+                thread_id: channel_id,
+                patch: ThreadPatch::default(),
+                reason: reason(),
+            },
+            Action::JoinThread {
+                thread_id: channel_id,
+            },
+            Action::ListThreadMembers {
+                thread_id: channel_id,
+                after: None,
+                limit: 10,
+            },
+            Action::PinMessage {
+                channel_id,
+                message_id,
+                reason: reason(),
+            },
+            Action::UnpinMessage {
+                channel_id,
+                message_id,
+                reason: reason(),
+            },
+            Action::CrosspostMessage {
+                channel_id,
+                message_id,
+            },
+            Action::RemoveReaction {
+                channel_id,
+                message_id,
+                emoji: Emoji::Unicode {
+                    value: "👍".into()
+                },
+                user_id: Id::new(9),
+            },
+            Action::RemoveAllReactions {
+                channel_id,
+                message_id,
+                emoji: None,
+            },
+            Action::GetReactionUsers {
+                channel_id,
+                message_id,
+                emoji: Emoji::Unicode {
+                    value: "👍".into()
+                },
+                after: None,
+                limit: 10,
             },
             Action::GetChannel { channel_id },
             Action::EditChannel {
@@ -777,6 +1519,48 @@ mod tests {
             },
             reason: reason(),
         }
+    }
+
+    #[tokio::test]
+    async fn voice_moves_and_reorders_never_reach_another_guilds_channels() {
+        let api = Arc::new(MockApi::default());
+        api.add_channel(Id::new(30), Some(Id::new(2)));
+        api.add_channel(Id::new(31), Some(Id::new(1)));
+        let client = client(&api, &[Capability::MoveMembers, Capability::ManageChannels])
+            .scoped_to(Id::new(1));
+
+        let move_away = client
+            .move_member(Id::new(1), Id::new(20), Id::new(30), reason())
+            .await;
+        assert!(
+            matches!(move_away, Err(DiscordError::Forbidden(_))),
+            "{move_away:?}"
+        );
+        let reorder = client
+            .reorder_channels(
+                Id::new(1),
+                vec![
+                    ChannelPosition {
+                        channel_id: Id::new(31),
+                        position: 0,
+                    },
+                    ChannelPosition {
+                        channel_id: Id::new(30),
+                        position: 1,
+                    },
+                ],
+            )
+            .await;
+        assert!(
+            matches!(reorder, Err(DiscordError::Forbidden(_))),
+            "{reorder:?}"
+        );
+        assert!(api.actions().is_empty());
+
+        client
+            .move_member(Id::new(1), Id::new(20), Id::new(31), reason())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

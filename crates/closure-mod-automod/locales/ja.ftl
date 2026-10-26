@@ -1,0 +1,74 @@
+command-automod = 自動モデレーション
+    .description = 自動モデレーションのルールと状態
+subcommand-automod-status = 状態
+    .description = ドライランの設定と、動いているルールを表示します
+
+status-title = 自動モデレーションの状態
+status-dry-run = ドライラン: { $state }
+state-on = オン
+state-off = オフ
+status-counts = ルール: 有効 { $enabled } 件、無効 { $disabled } 件、不正 { $invalid } 件。
+status-none = ルールは設定されていません。
+status-rule = - `{ $id }`（{ $name }）: { $check }。動作: { $actions }。
+status-rule-off = - `{ $id }`（{ $name }）、無効: { $check }。動作: { $actions }。
+status-invalid-heading = 不正なルール（実行されません）:
+status-invalid = - `{ $label }`: { $reason }
+
+problem-shape = ルールの形がスキーマと合いません: { $error }
+problem-id = id は 1〜32 文字で、英小文字、数字、_ と - のみです。
+problem-name = 名前は 1〜64 文字です。
+problem-duplicate = 同じ id を持つ、先に書かれた有効なルールがあります。
+problem-actions = ルールの動作は 1〜8 個です。
+problem-id-value = チャンネルとロールの id は、0 以外の数字のみです。
+problem-too-many = 読み取るルールは最大 50 個です。
+problem-words = words の判定は 1〜500 語、各 1〜100 文字です。
+problem-domains = links の判定のドメインは最大 200 個で、空の名前は使えません。
+problem-invites = invites の判定のコードは最大 100 個で、空のものは使えません。
+problem-mentions = mentions の max は 1〜50 です。
+problem-caps = caps は max_ratio が 0〜1、min_letters が 1〜2000 である必要があります。
+problem-repeat = repeat の max_run は 2〜2000 です。
+problem-emoji = emoji の max は 1〜200 です。
+problem-attachments = attachments の判定には max（0〜10）か blocked_extensions が必要です。
+problem-flood = flood の判定には messages 2〜100 と per_minutes 1〜60 が必要です。
+problem-duration = 期間は 1h、30m、7d のように読める形で、0 以外である必要があります。
+problem-timeout = タイムアウトは最長 28 日です。
+problem-delete-days = 削除する日数は 0〜7 です。
+
+check-words = 語句
+check-links = リンク
+check-invites = 招待
+check-mentions = メンション
+check-caps = 大文字
+check-repeat = 繰り返し
+check-emoji = 絵文字
+check-attachments = 添付
+check-flood = 連投
+
+action-delete = 削除
+action-warn = 警告
+action-timeout = タイムアウト
+action-kick = キック
+action-ban = BAN
+action-notify = 通知
+
+detail-words = 語句「{ $word }」を含みます
+detail-link = { $host } へのリンクです
+detail-link-not-allowed = { $host } へのリンクです（許可されていないドメイン）
+detail-link-blocked = { $host } へのリンクです（禁止されているドメイン）
+detail-invite = コード { $code } のサーバー招待です
+detail-mentions = { $count } 件のユーザー、ロール、または全員へのメンションがあります
+detail-caps = 文字の { $percent } が大文字です
+detail-repeat = 同じ文字が { $count } 回続いています
+detail-emoji = 絵文字を { $count } 個投稿しました
+detail-attachments = ファイルを { $count } 個添付しました
+detail-attachment-type = 禁止された種類のファイルを添付しました: { $name }
+detail-flood = { $minutes } 分以内に { $count } 件のメッセージを送りました
+
+reason-automod = { $rule }: { $detail }
+notify-title = 自動モデレーション: { $rule }
+dry-run-title = [ドライラン] 自動モデレーション
+field-rule = ルール
+field-member = メンバー
+field-check = 判定
+field-message = メッセージ
+field-would-run = 実行される動作

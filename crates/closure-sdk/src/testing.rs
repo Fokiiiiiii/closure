@@ -18,8 +18,9 @@ use closure_core::cases::{CaseBackend, Cases, MemoryCases};
 use closure_core::client::ApiClient;
 use closure_core::error::ModuleError;
 use closure_core::event::{
-    AttachmentInfo, CommandInvocation, CommandOption, CommandOptionValue, ComponentInvocation,
-    Event, GuildId, InteractionToken, MessageInfo, ModalSubmission, UserId, UserInfo,
+    AttachmentInfo, AutocompleteInvocation, CommandInvocation, CommandOption, CommandOptionValue,
+    ComponentInvocation, ContextInvocation, ContextTarget, Event, GuildId, InteractionToken,
+    MessageInfo, ModalSubmission, UserId, UserInfo,
 };
 use closure_core::interaction::InteractionGuilds;
 use closure_core::locale::{Locale, Translator};
@@ -36,7 +37,7 @@ use twilight_model::channel::message::{Component, Embed};
 use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 
-use crate::module::{ModuleBuilder, SdkModule};
+use crate::module::{Choice, ModuleBuilder, SdkModule};
 
 /// One use of a command, as a test describes it.
 #[derive(Debug, Clone)]
@@ -257,6 +258,144 @@ impl Submit {
     }
 }
 
+/// A context-menu command used on a user or a message, as a test describes it.
+#[derive(Debug, Clone)]
+pub struct ContextUse {
+    command: String,
+    target: ContextTarget,
+    user: u64,
+    roles: Vec<u64>,
+    administrator: bool,
+}
+
+impl ContextUse {
+    /// The command `command`, used on the user `target`.
+    #[must_use]
+    pub fn on_user(command: &str, target: u64) -> Self {
+        Self::new(command, ContextTarget::User(tester(target)))
+    }
+
+    /// The command `command`, used on message `message`, which `author` posted with `content`.
+    #[must_use]
+    pub fn on_message(command: &str, message: u64, author: u64, content: &str) -> Self {
+        let info = MessageInfo {
+            id: Id::new(message),
+            channel_id: Id::new(5),
+            guild_id: Id::new(GUILD),
+            author: tester(author),
+            author_roles: Vec::new(),
+            content: content.to_owned(),
+            mentioned_users: Vec::new(),
+            mentioned_roles: Vec::new(),
+            mentions_everyone: false,
+            attachments: Vec::new(),
+            embed_count: 0,
+            sticker_count: 0,
+            reply_to: None,
+            from_webhook: false,
+            created_at: 0,
+            edited_at: None,
+        };
+        Self::new(command, ContextTarget::Message(info))
+    }
+
+    fn new(command: &str, target: ContextTarget) -> Self {
+        Self {
+            command: command.to_owned(),
+            target,
+            user: 100,
+            roles: Vec::new(),
+            administrator: false,
+        }
+    }
+
+    /// Who uses the command (default 100).
+    #[must_use]
+    pub fn user(mut self, id: u64) -> Self {
+        self.user = id;
+        self
+    }
+
+    #[must_use]
+    pub fn roles(mut self, roles: impl IntoIterator<Item = u64>) -> Self {
+        self.roles = roles.into_iter().collect();
+        self
+    }
+
+    /// The user holds Discord's Administrator permission.
+    #[must_use]
+    pub fn administrator(mut self) -> Self {
+        self.administrator = true;
+        self
+    }
+}
+
+/// A user typing in an option of a command, as a test describes it.
+#[derive(Debug, Clone)]
+pub struct Autocomplete {
+    command: String,
+    subcommand: Option<String>,
+    focused_option: String,
+    focused: String,
+    options: Vec<CommandOption>,
+    user: u64,
+    roles: Vec<u64>,
+    administrator: bool,
+}
+
+impl Autocomplete {
+    /// The option `focused_option` of `command` holds `typed` so far.
+    #[must_use]
+    pub fn new(command: &str, focused_option: &str, typed: &str) -> Self {
+        Self {
+            command: command.to_owned(),
+            subcommand: None,
+            focused_option: focused_option.to_owned(),
+            focused: typed.to_owned(),
+            options: Vec::new(),
+            user: 100,
+            roles: Vec::new(),
+            administrator: false,
+        }
+    }
+
+    #[must_use]
+    pub fn subcommand(mut self, name: &str) -> Self {
+        self.subcommand = Some(name.to_owned());
+        self
+    }
+
+    /// Another option the user already filled in.
+    #[must_use]
+    pub fn option(mut self, name: &str, value: CommandOptionValue) -> Self {
+        self.options.push(CommandOption {
+            name: name.to_owned(),
+            value,
+        });
+        self
+    }
+
+    /// Who types (default 100).
+    #[must_use]
+    pub fn user(mut self, id: u64) -> Self {
+        self.user = id;
+        self
+    }
+
+    #[must_use]
+    pub fn roles(mut self, roles: impl IntoIterator<Item = u64>) -> Self {
+        self.roles = roles.into_iter().collect();
+        self
+    }
+
+    /// The user holds Discord's Administrator permission.
+    #[must_use]
+    pub fn administrator(mut self) -> Self {
+        self.administrator = true;
+        self
+    }
+}
+
 /// A message a member posted in the guild, as a test describes it.
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -335,6 +474,7 @@ impl Message {
             filename: filename.to_owned(),
             size,
             content_type: None,
+            url: format!("https://cdn.test/{id}/{filename}"),
         });
         self
     }
@@ -753,6 +893,70 @@ impl Harness {
         Ok(self.api.actions()[before..]
             .iter()
             .filter_map(reply_of)
+            .collect())
+    }
+
+    /// Uses a context-menu command and returns what the module answered during this run.
+    pub async fn context_command(&self, command: ContextUse) -> Result<Vec<Reply>, ModuleError> {
+        let guild: GuildId = Id::new(GUILD);
+        let (number, token) = self.new_interaction(guild, Id::new(command.user), false);
+        let event = ContextInvocation {
+            interaction_id: Id::new(number),
+            application_id: Id::new(1),
+            token,
+            guild_id: guild,
+            channel_id: Id::new(5),
+            user: tester(command.user),
+            roles: command.roles.iter().map(|id| Id::new(*id)).collect(),
+            invoker_permissions: administrator_if(command.administrator),
+            locale: None,
+            command: command.command,
+            target: command.target,
+        };
+        self.deliver(guild, Event::ContextCommand(event)).await
+    }
+
+    /// Asks the module for the choices of an option while the user types, and returns them. Empty
+    /// when the module answered with none (or did not answer with choices at all).
+    pub async fn autocomplete(&self, query: Autocomplete) -> Result<Vec<Choice>, ModuleError> {
+        let guild: GuildId = Id::new(GUILD);
+        let (number, token) = self.new_interaction(guild, Id::new(query.user), false);
+        let event = AutocompleteInvocation {
+            interaction_id: Id::new(number),
+            application_id: Id::new(1),
+            token,
+            guild_id: guild,
+            channel_id: Id::new(5),
+            user: tester(query.user),
+            roles: query.roles.iter().map(|id| Id::new(*id)).collect(),
+            invoker_permissions: administrator_if(query.administrator),
+            locale: None,
+            command: query.command,
+            subcommand: query.subcommand,
+            focused_option: query.focused_option,
+            focused: query.focused,
+            options: query.options,
+        };
+        let before = self.api.actions().len();
+        self.module
+            .on_event(&self.context(guild), &Event::Autocomplete(event))
+            .await?;
+        let choices = self.api.actions()[before..]
+            .iter()
+            .find_map(|action| match action {
+                Action::Respond {
+                    response: InteractionResponse::Autocomplete { choices },
+                    ..
+                } => Some(choices.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Ok(choices
+            .into_iter()
+            .map(|choice| Choice {
+                name: choice.name,
+                value: choice.value,
+            })
             .collect())
     }
 

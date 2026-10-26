@@ -1,0 +1,69 @@
+//! The `{{id}}` module: one command, one permission and one setting, built with the SDK.
+//!
+//! The SDK reads the manifest, checks the permission before the handler runs and answers in the
+//! invoker's language; the handler only says what the command does. See `docs/writing-modules.md`.
+
+use closure_sdk::{Args, Command, CoreError, Level, Locale, ModuleBuilder, PermissionSpec, SdkModule};
+use serde::Deserialize;
+use serde_json::json;
+
+const EN: &str = include_str!("../locales/en.ftl");
+const JA: &str = include_str!("../locales/ja.ftl");
+
+/// The module's section of a server's configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Config {
+    /// The word the greeting starts with.
+    pub greeting: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            greeting: "Hello".to_owned(),
+        }
+    }
+}
+
+/// The module before it is built, so that tests can run it on the SDK's pretend Discord.
+pub fn builder() -> Result<ModuleBuilder, CoreError> {
+    Ok(
+        ModuleBuilder::new("{{id}}", "{{name}}", env!("CARGO_PKG_VERSION"))?
+            .description("Greets the invoker.")
+            .permission(PermissionSpec::new("{{id}}.use", Level::GENERAL, "Use the {{id}} command")?)
+            .config(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "greeting": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 40,
+                            "description": "The word the greeting starts with."
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+                json!({ "greeting": "Hello" }),
+            )
+            .command(
+                Command::<()>::new("{{id}}", "Say hello")
+                    .requires("{{id}}.use")
+                    .handler(|cx, ()| async move {
+                        let config: Config = cx.config()?;
+                        let args = Args::new()
+                            .with("greeting", config.greeting)
+                            .with("name", cx.user().name.clone());
+                        cx.reply_t("hello", &args).await
+                    }),
+            )
+            .catalog(Locale::En, EN)
+            .catalog(Locale::Ja, JA)
+            .enabled_by_default(),
+    )
+}
+
+pub fn module() -> Result<SdkModule, CoreError> {
+    builder()?.build()
+}

@@ -5,12 +5,15 @@
 
 use closure_core::action::Emoji;
 use closure_core::event::{
-    AttachmentInfo, ChannelInfo, CommandInvocation, CommandOption, CommandOptionValue,
-    ComponentInvocation, Event, GuildId, InteractionToken, MemberInfo, MessageInfo,
-    ModalSubmission, ReactionInfo, RoleInfo, UserInfo,
+    AttachmentInfo, AutocompleteInvocation, ChannelInfo, CommandInvocation, CommandOption,
+    CommandOptionValue, ComponentInvocation, ContextInvocation, ContextTarget, Event, GuildId,
+    InteractionToken, MemberInfo, Mentionable, MessageInfo, ModalSubmission, ReactionInfo,
+    RoleInfo, UserInfo,
 };
 use closure_core::locale::Locale;
 use twilight_gateway::Event as Gateway;
+use twilight_model::application::command::CommandType;
+use twilight_model::application::interaction::InteractionDataResolved;
 use twilight_model::application::interaction::application_command::{
     CommandDataOption, CommandOptionValue as TwilightValue,
 };
@@ -20,6 +23,8 @@ use twilight_model::channel::message::{EmojiReactionType, Message, MessageType};
 use twilight_model::channel::{Attachment, Channel};
 use twilight_model::gateway::payload::incoming::GuildCreate;
 use twilight_model::guild::{Member, Role};
+use twilight_model::id::Id;
+use twilight_model::id::marker::GenericMarker;
 use twilight_model::user::User;
 use twilight_model::util::Timestamp;
 
@@ -52,6 +57,7 @@ fn attachment(attachment: &Attachment) -> AttachmentInfo {
         filename: attachment.filename.clone(),
         size: attachment.size,
         content_type: attachment.content_type.clone(),
+        url: attachment.url.clone(),
     }
 }
 
@@ -115,7 +121,23 @@ fn emoji(emoji: &EmojiReactionType) -> Emoji {
     }
 }
 
-fn option_value(value: &TwilightValue) -> Option<CommandOptionValue> {
+/// A mentionable is a member or a role; Discord tells which one in the resolved data.
+fn mentionable(resolved: &InteractionDataResolved, id: Id<GenericMarker>) -> Option<Mentionable> {
+    let role: closure_core::event::RoleId = id.cast();
+    if resolved.roles.contains_key(&role) {
+        return Some(Mentionable::Role(role));
+    }
+    let user: closure_core::event::UserId = id.cast();
+    (resolved.users.contains_key(&user) || resolved.members.contains_key(&user))
+        .then_some(Mentionable::User(user))
+}
+
+/// `None` for a value the module model does not have (autocomplete state) or one Discord did
+/// not resolve, which is dropped rather than guessed at.
+fn option_value(
+    value: &TwilightValue,
+    resolved: Option<&InteractionDataResolved>,
+) -> Option<CommandOptionValue> {
     Some(match value {
         TwilightValue::String(text) => CommandOptionValue::String(text.clone()),
         TwilightValue::Integer(number) => CommandOptionValue::Integer(*number),
@@ -124,40 +146,59 @@ fn option_value(value: &TwilightValue) -> Option<CommandOptionValue> {
         TwilightValue::User(id) => CommandOptionValue::User(*id),
         TwilightValue::Channel(id) => CommandOptionValue::Channel(*id),
         TwilightValue::Role(id) => CommandOptionValue::Role(*id),
-        // Attachments, mentionables and autocomplete state are not part of the module model.
+        TwilightValue::Attachment(id) => {
+            CommandOptionValue::Attachment(attachment(resolved?.attachments.get(id)?))
+        }
+        TwilightValue::Mentionable(id) => {
+            CommandOptionValue::Mentionable(mentionable(resolved?, *id)?)
+        }
         _ => return None,
     })
 }
 
-fn options(options: &[CommandDataOption]) -> Vec<CommandOption> {
+fn options(
+    options: &[CommandDataOption],
+    resolved: Option<&InteractionDataResolved>,
+) -> Vec<CommandOption> {
     options
         .iter()
         .filter_map(|option| {
             Some(CommandOption {
                 name: option.name.clone(),
-                value: option_value(&option.value)?,
+                value: option_value(&option.value, resolved)?,
             })
         })
         .collect()
 }
 
-/// Splits `/command sub opt:...` into the subcommand name and its options. Subcommand groups
-/// (two levels of nesting) are not supported by command specs and are dropped.
-fn split_subcommand(raw: &[CommandDataOption]) -> Option<(Option<String>, Vec<CommandOption>)> {
+/// Splits `/command sub opt:...` into the subcommand name and its options; `/command group sub`
+/// gives the name `group sub` (names cannot hold a space, so the two levels stay apart).
+fn split_subcommand(
+    raw: &[CommandDataOption],
+    resolved: Option<&InteractionDataResolved>,
+) -> Option<(Option<String>, Vec<CommandOption>)> {
     match raw {
         [
             CommandDataOption {
                 name,
                 value: TwilightValue::SubCommand(inner),
             },
-        ] => Some((Some(name.clone()), options(inner))),
+        ] => Some((Some(name.clone()), options(inner, resolved))),
         [
             CommandDataOption {
-                value: TwilightValue::SubCommandGroup(_),
-                ..
+                name: group,
+                value: TwilightValue::SubCommandGroup(inner),
             },
-        ] => None,
-        other => Some((None, options(other))),
+        ] => match inner.as_slice() {
+            [
+                CommandDataOption {
+                    name,
+                    value: TwilightValue::SubCommand(inner),
+                },
+            ] => Some((Some(format!("{group} {name}")), options(inner, resolved))),
+            _ => None,
+        },
+        other => Some((None, options(other, resolved))),
     }
 }
 
@@ -201,7 +242,17 @@ fn origin(interaction: &Interaction) -> Option<Origin> {
 
 fn interaction_event(interaction: &Interaction) -> Option<Event> {
     match interaction.kind {
-        InteractionType::ApplicationCommand => command(interaction).map(Event::Command),
+        InteractionType::ApplicationCommand => match &interaction.data {
+            Some(InteractionData::ApplicationCommand(data))
+                if data.kind != CommandType::ChatInput =>
+            {
+                context(interaction).map(Event::ContextCommand)
+            }
+            _ => command(interaction).map(Event::Command),
+        },
+        InteractionType::ApplicationCommandAutocomplete => {
+            autocomplete(interaction).map(Event::Autocomplete)
+        }
         InteractionType::MessageComponent => component(interaction).map(Event::Component),
         InteractionType::ModalSubmit => modal(interaction).map(Event::Modal),
         _ => None,
@@ -267,6 +318,77 @@ fn modal(interaction: &Interaction) -> Option<ModalSubmission> {
     })
 }
 
+/// The option being typed in and the text so far, also when it is inside a subcommand.
+fn focused_of(raw: &[CommandDataOption]) -> Option<(String, String)> {
+    raw.iter().find_map(|option| match &option.value {
+        TwilightValue::Focused(text, _) => Some((option.name.clone(), text.clone())),
+        TwilightValue::SubCommand(inner) | TwilightValue::SubCommandGroup(inner) => {
+            focused_of(inner)
+        }
+        _ => None,
+    })
+}
+
+fn autocomplete(interaction: &Interaction) -> Option<AutocompleteInvocation> {
+    let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+        return None;
+    };
+    let (subcommand, options) = split_subcommand(&data.options, data.resolved.as_ref())?;
+    let (focused_option, focused) = focused_of(&data.options)?;
+    let origin = origin(interaction)?;
+    Some(AutocompleteInvocation {
+        interaction_id: origin.interaction_id,
+        application_id: origin.application_id,
+        token: origin.token,
+        guild_id: origin.guild_id,
+        channel_id: origin.channel_id,
+        user: origin.user,
+        roles: origin.roles,
+        invoker_permissions: origin.invoker_permissions,
+        locale: origin.locale,
+        command: data.name.clone(),
+        subcommand,
+        focused_option,
+        focused,
+        options,
+    })
+}
+
+/// A context-menu command: the user or the message it was used on is in the resolved data. A
+/// target Discord did not resolve is dropped, as an option of an unknown kind is.
+fn context(interaction: &Interaction) -> Option<ContextInvocation> {
+    let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+        return None;
+    };
+    let target_id = data.target_id?;
+    let resolved = data.resolved.as_ref()?;
+    let target = match data.kind {
+        CommandType::User => {
+            let user_id: closure_core::event::UserId = target_id.cast();
+            ContextTarget::User(user(resolved.users.get(&user_id)?))
+        }
+        CommandType::Message => {
+            let message_id: closure_core::event::MessageId = target_id.cast();
+            ContextTarget::Message(message(resolved.messages.get(&message_id)?)?)
+        }
+        _ => return None,
+    };
+    let origin = origin(interaction)?;
+    Some(ContextInvocation {
+        interaction_id: origin.interaction_id,
+        application_id: origin.application_id,
+        token: origin.token,
+        guild_id: origin.guild_id,
+        channel_id: origin.channel_id,
+        user: origin.user,
+        roles: origin.roles,
+        invoker_permissions: origin.invoker_permissions,
+        locale: origin.locale,
+        command: data.name.clone(),
+        target,
+    })
+}
+
 fn command(interaction: &Interaction) -> Option<CommandInvocation> {
     if interaction.kind != InteractionType::ApplicationCommand {
         return None;
@@ -274,7 +396,7 @@ fn command(interaction: &Interaction) -> Option<CommandInvocation> {
     let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
         return None;
     };
-    let (subcommand, options) = split_subcommand(&data.options)?;
+    let (subcommand, options) = split_subcommand(&data.options, data.resolved.as_ref())?;
     let origin = origin(interaction)?;
     Some(CommandInvocation {
         interaction_id: origin.interaction_id,
@@ -454,12 +576,14 @@ mod tests {
                     filename: "a.png".into(),
                     size: 1,
                     content_type: Some("image/png".into()),
+                    url: "u".into(),
                 },
                 AttachmentInfo {
                     id: 2,
                     filename: "b.bin".into(),
                     size: 2048,
                     content_type: None,
+                    url: "u".into(),
                 },
             ]
         );
@@ -631,6 +755,133 @@ mod tests {
         );
     }
 
+    #[test]
+    fn attachment_and_mentionable_options_take_what_discord_resolved_for_them() {
+        let mut json = command_json(&json!([
+            { "name": "file", "type": 11, "value": "55" },
+            { "name": "who", "type": 9, "value": "9" },
+            { "name": "pick", "type": 9, "value": "10" },
+            { "name": "gone", "type": 11, "value": "56" }
+        ]));
+        json["data"]["resolved"] = json!({
+            "attachments": { "55": {
+                "id": "55", "filename": "a.png", "size": 12, "content_type": "image/png",
+                "url": "https://cdn.example/a.png", "proxy_url": "https://proxy.example/a.png"
+            } },
+            "users": { "9": user_json("9", false) },
+            "roles": { "10": {
+                "id": "10", "name": "mods", "color": 0, "colors": { "primary_color": 0 },
+                "hoist": false, "managed": false, "mentionable": true, "position": 1,
+                "permissions": "0", "flags": 0
+            } }
+        });
+        let interaction: Interaction = serde_json::from_value(json).unwrap();
+        let gateway = Gateway::InteractionCreate(Box::new(InteractionCreate(interaction)));
+        let Some(Event::Command(invocation)) = event(&gateway) else {
+            panic!("expected a command event");
+        };
+        assert_eq!(
+            invocation.option("file"),
+            Some(&CommandOptionValue::Attachment(AttachmentInfo {
+                id: 55,
+                filename: "a.png".into(),
+                size: 12,
+                content_type: Some("image/png".into()),
+                url: "https://cdn.example/a.png".into(),
+            }))
+        );
+        assert_eq!(
+            invocation.option("who"),
+            Some(&CommandOptionValue::Mentionable(Mentionable::User(
+                twilight_model::id::Id::new(9)
+            )))
+        );
+        assert_eq!(
+            invocation.option("pick"),
+            Some(&CommandOptionValue::Mentionable(Mentionable::Role(
+                twilight_model::id::Id::new(10)
+            )))
+        );
+        // An attachment Discord did not resolve is not guessed at.
+        assert_eq!(invocation.option("gone"), None);
+    }
+
+    #[test]
+    fn an_autocomplete_request_names_the_focused_option_and_keeps_the_others() {
+        let mut json = command_json(&json!([
+            { "name": "user", "type": 6, "value": "9" },
+            { "name": "reason", "type": 3, "value": "sp", "focused": true }
+        ]));
+        json["type"] = json!(4);
+        let interaction: Interaction = serde_json::from_value(json).unwrap();
+        let gateway = Gateway::InteractionCreate(Box::new(InteractionCreate(interaction)));
+        let Some(Event::Autocomplete(query)) = event(&gateway) else {
+            panic!("expected an autocomplete event");
+        };
+        assert_eq!(query.command, "warn");
+        assert_eq!(query.subcommand, None);
+        assert_eq!(query.focused_option, "reason");
+        assert_eq!(query.focused, "sp");
+        assert_eq!(query.token.expose(), "tok");
+        assert_eq!(
+            query.options.len(),
+            1,
+            "the focused option is not among them"
+        );
+        assert_eq!(
+            query.option("user"),
+            Some(&CommandOptionValue::User(twilight_model::id::Id::new(9)))
+        );
+    }
+
+    fn context_gateway(kind: u64, target: &str, resolved: Value) -> Gateway {
+        let mut json = command_json(&json!([]));
+        json["data"]["type"] = json!(kind);
+        json["data"]["name"] = json!("report");
+        json["data"]["target_id"] = json!(target);
+        json["data"]["resolved"] = resolved;
+        let interaction: Interaction = serde_json::from_value(json).unwrap();
+        Gateway::InteractionCreate(Box::new(InteractionCreate(interaction)))
+    }
+
+    #[test]
+    fn a_context_command_on_a_user_carries_the_user_it_was_used_on() {
+        let gateway = context_gateway(2, "9", json!({ "users": { "9": user_json("9", false) } }));
+        let Some(Event::ContextCommand(invocation)) = event(&gateway) else {
+            panic!("expected a context command event");
+        };
+        assert_eq!(invocation.command, "report");
+        assert_eq!(
+            invocation.target,
+            ContextTarget::User(UserInfo {
+                id: twilight_model::id::Id::new(9),
+                name: "alice".into(),
+                bot: false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_context_command_on_a_message_carries_the_message_it_was_used_on() {
+        let mut message = message_json(Some("1"));
+        message["id"] = json!("80");
+        let gateway = context_gateway(3, "80", json!({ "messages": { "80": message } }));
+        let Some(Event::ContextCommand(invocation)) = event(&gateway) else {
+            panic!("expected a context command event");
+        };
+        let ContextTarget::Message(target) = invocation.target else {
+            panic!("expected a message target");
+        };
+        assert_eq!(target.id.get(), 80);
+        assert_eq!(target.content, "hello");
+    }
+
+    #[test]
+    fn a_context_command_whose_target_discord_did_not_resolve_is_dropped() {
+        let gateway = context_gateway(2, "9", json!({}));
+        assert_eq!(event(&gateway), None);
+    }
+
     fn user_interaction(kind: u8, data: &Value, extra: &Value) -> Gateway {
         let mut json = json!({
             "app_permissions": "0", "application_id": "60", "channel": { "id": "3", "type": 0 },
@@ -714,11 +965,20 @@ mod tests {
     }
 
     #[test]
-    fn subcommand_groups_are_not_supported_and_dropped() {
+    fn a_subcommand_of_a_group_is_named_by_both_levels() {
         let gateway = gateway_command(&json!([
-            { "name": "group", "type": 2, "options": [{ "name": "add", "type": 1, "options": [] }] }
+            { "name": "list", "type": 2, "options": [{
+                "name": "add", "type": 1, "options": [{ "name": "user", "type": 6, "value": "9" }]
+            }] }
         ]));
-        assert_eq!(event(&gateway), None);
+        let Some(Event::Command(invocation)) = event(&gateway) else {
+            panic!("expected a command event");
+        };
+        assert_eq!(invocation.subcommand.as_deref(), Some("list add"));
+        assert_eq!(
+            invocation.option("user"),
+            Some(&CommandOptionValue::User(twilight_model::id::Id::new(9)))
+        );
     }
 
     #[test]

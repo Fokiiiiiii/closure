@@ -95,6 +95,10 @@ pub enum OptionKind {
     User,
     Channel,
     Role,
+    /// A member or a role.
+    Mentionable,
+    /// A file uploaded with the command.
+    Attachment,
 }
 
 /// One value the user may pick for an option.
@@ -111,6 +115,30 @@ pub enum ChoiceValue {
     String(String),
     Integer(i64),
     Number(f64),
+}
+
+impl From<&str> for ChoiceValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
+}
+
+impl From<String> for ChoiceValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<i64> for ChoiceValue {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
+    }
+}
+
+impl From<f64> for ChoiceValue {
+    fn from(value: f64) -> Self {
+        Self::Number(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,6 +163,11 @@ pub struct OptionSpec {
     /// Most characters of a string option (at most 6000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u16>,
+    /// Discord asks the module for choices while the user types (see
+    /// [`crate::action::InteractionResponse::Autocomplete`]). Only for strings, integers and
+    /// numbers without fixed choices.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autocomplete: bool,
 }
 
 impl OptionSpec {
@@ -151,6 +184,7 @@ impl OptionSpec {
             max_value: None,
             min_length: None,
             max_length: None,
+            autocomplete: false,
         }
     }
 
@@ -179,7 +213,13 @@ impl OptionSpec {
             });
         let range = self.min_value.is_some() || self.max_value.is_some();
         let length = self.min_length.is_some() || self.max_length.is_some();
-        choices_ok
+        let autocomplete_ok = !self.autocomplete
+            || (matches!(
+                self.kind,
+                OptionKind::String | OptionKind::Integer | OptionKind::Number
+            ) && self.choices.is_empty());
+        autocomplete_ok
+            && choices_ok
             && (self.choices.is_empty() || !(range || length))
             && (!range || number)
             && (!length || text)
@@ -201,12 +241,31 @@ pub struct SubcommandSpec {
     pub name: String,
     pub description: String,
     pub options: Vec<OptionSpec>,
+    /// Non-empty for a subcommand group: `/command group sub`. The subcommands of a group have
+    /// options of their own and no further subcommands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subcommands: Vec<SubcommandSpec>,
 }
 
 /// Discord rejects a command whose optional options precede a required one.
 fn required_first(options: &[OptionSpec]) -> bool {
     let first_optional = options.iter().position(|option| !option.required);
     first_optional.is_none_or(|index| options[index..].iter().all(|option| !option.required))
+}
+
+/// What a context-menu command is used on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextKind {
+    User,
+    Message,
+}
+
+/// A context-menu command, as data. Discord publishes its name only, without a description.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCommandSpec {
+    pub name: String,
+    pub kind: ContextKind,
 }
 
 /// A slash command, as data.
@@ -265,14 +324,37 @@ impl CommandSpec {
             return Err(invalid("required options must come before optional ones"));
         }
         for sub in &self.subcommands {
-            if !name_ok(&sub.name) || !text_ok(&sub.description) || sub.options.len() > 25 {
+            if !name_ok(&sub.name)
+                || !text_ok(&sub.description)
+                || sub.options.len() > 25
+                || sub.subcommands.len() > 25
+            {
                 return Err(invalid("a subcommand is invalid"));
+            }
+            if !sub.subcommands.is_empty() && !sub.options.is_empty() {
+                return Err(invalid("a subcommand group has no options of its own"));
             }
             if !sub.options.iter().all(option_ok) {
                 return Err(invalid("a subcommand option is invalid"));
             }
             if !required_first(&sub.options) {
                 return Err(invalid("required options must come before optional ones"));
+            }
+            // Discord has two levels below a command: groups, then subcommands of a group.
+            for leaf in &sub.subcommands {
+                if !name_ok(&leaf.name)
+                    || !text_ok(&leaf.description)
+                    || leaf.options.len() > 25
+                    || !leaf.subcommands.is_empty()
+                {
+                    return Err(invalid("a subcommand of a group is invalid"));
+                }
+                if !leaf.options.iter().all(option_ok) {
+                    return Err(invalid("a subcommand option is invalid"));
+                }
+                if !required_first(&leaf.options) {
+                    return Err(invalid("required options must come before optional ones"));
+                }
             }
         }
         Ok(())
@@ -297,6 +379,9 @@ pub struct ModuleManifest {
     pub capabilities: CapabilitySet,
     pub dependencies: Vec<ModuleId>,
     pub commands: Vec<CommandSpec>,
+    /// Context-menu commands; Discord allows five per kind for each application.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_commands: Vec<ContextCommandSpec>,
     /// What the module lets a guild decide who may do; every key starts with the module's id.
     #[serde(default)]
     pub permissions: Vec<PermissionSpec>,
@@ -325,6 +410,7 @@ impl ModuleManifest {
             capabilities: CapabilitySet::new(),
             dependencies: Vec::new(),
             commands: Vec::new(),
+            context_commands: Vec::new(),
             permissions: Vec::new(),
             subscriptions: Vec::new(),
             config_schema: serde_json::json!({ "type": "object" }),
@@ -378,6 +464,13 @@ impl ModuleManifest {
         self
     }
 
+    /// A context-menu command on a user or on a message.
+    #[must_use]
+    pub fn context_command(mut self, command: ContextCommandSpec) -> Self {
+        self.context_commands.push(command);
+        self
+    }
+
     /// Subscribes to an event kind with a filter and a priority (and so adds it to `events`).
     #[must_use]
     pub fn subscribe(mut self, subscription: Subscription) -> Self {
@@ -422,6 +515,35 @@ impl ModuleManifest {
     pub(crate) fn validate(&self) -> Result<(), CoreError> {
         for command in &self.commands {
             command.validate(&self.id)?;
+        }
+        let mut declared = BTreeSet::new();
+        for spec in &self.context_commands {
+            let invalid = |reason: &str| CoreError::InvalidCommand {
+                module: self.id.clone(),
+                command: spec.name.clone(),
+                reason: reason.to_owned(),
+            };
+            if !(1..=32).contains(&spec.name.chars().count()) {
+                return Err(invalid("a context command name must be 1-32 characters"));
+            }
+            if !declared.insert((spec.kind, spec.name.clone())) {
+                return Err(invalid("is declared twice"));
+            }
+        }
+        for kind in [ContextKind::User, ContextKind::Message] {
+            if self
+                .context_commands
+                .iter()
+                .filter(|spec| spec.kind == kind)
+                .count()
+                > 5
+            {
+                return Err(CoreError::InvalidCommand {
+                    module: self.id.clone(),
+                    command: format!("{kind:?}"),
+                    reason: "at most 5 user and 5 message commands are allowed per module".into(),
+                });
+            }
         }
         let mut kinds = BTreeSet::new();
         for subscription in &self.subscriptions {

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use closure_core::event::{CommandInvocation, GuildId};
+use closure_core::event::{GuildId, InteractionRef};
 
 /// Whose use of the command counts against the limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,16 +67,16 @@ impl Cooldowns {
     pub(crate) fn take(
         &self,
         route: &str,
-        invocation: &CommandInvocation,
+        invocation: &(impl InteractionRef + ?Sized),
         cooldown: &Cooldown,
         now: Instant,
     ) -> Result<(), Duration> {
         let subject = match cooldown.scope {
-            CooldownScope::User => invocation.user.id.get(),
+            CooldownScope::User => invocation.user().id.get(),
             CooldownScope::Guild => 0,
-            CooldownScope::Channel => invocation.channel_id.get(),
+            CooldownScope::Channel => invocation.channel_id().get(),
         };
-        let key = (route.to_owned(), invocation.guild_id, subject);
+        let key = (route.to_owned(), invocation.guild_id(), subject);
         let mut until = self.until.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(end) = until.get(&key)
             && *end > now
@@ -103,7 +103,7 @@ impl Cooldowns {
 
 #[cfg(test)]
 mod tests {
-    use closure_core::event::{InteractionToken, UserInfo};
+    use closure_core::event::{CommandInvocation, InteractionToken, UserInfo};
     use twilight_model::guild::Permissions;
     use twilight_model::id::Id;
 

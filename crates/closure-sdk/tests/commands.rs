@@ -6,9 +6,9 @@ use std::time::Duration;
 use closure_core::event::CommandOptionValue;
 use closure_sdk::testing::{Harness, Invocation, Reply, ReplyKind};
 use closure_sdk::{
-    Args, Capability, Command, CommandArgs, Cooldown, Event, EventKind, Flow, Intents, Level,
-    Locale, ModuleBuilder, PermissionKey, PermissionSpec, Subscription, UserError, UserId,
-    UserInfo,
+    Args, Attachment, Capability, Command, CommandArgs, Cooldown, Event, EventKind, Flow, Intents,
+    Level, Locale, Mentionable, ModuleBuilder, OptionKind, PermissionKey, PermissionSpec,
+    SubcommandGroup, Subscription, UserError, UserId, UserInfo,
 };
 use twilight_model::id::Id;
 
@@ -631,4 +631,154 @@ async fn a_command_asks_about_its_own_permission_keys_only() {
     let result = harness.invoke(Invocation::new("probe").roles([10])).await;
     let error = result.unwrap_err().to_string();
     assert!(error.contains("its own permission keys"), "{error}");
+}
+
+#[derive(CommandArgs)]
+struct Upload {
+    /// The file to keep
+    file: Attachment,
+    /// Who it is about
+    who: Option<Mentionable>,
+}
+
+fn upload_module() -> ModuleBuilder {
+    ModuleBuilder::new("upload", "Upload", "0.1.0")
+        .unwrap()
+        .command(
+            Command::<Upload>::new("upload", "Keep a file").handler(|cx, args| async move {
+                let about = match args.who {
+                    Some(Mentionable::User(_)) => "user",
+                    Some(Mentionable::Role(_)) => "role",
+                    None => "nobody",
+                };
+                cx.reply(format!("{} {} {about}", args.file.filename, args.file.url))
+                    .await
+            }),
+        )
+}
+
+#[tokio::test]
+async fn attachment_and_mentionable_options_are_published_and_parsed() {
+    let options = Upload::options();
+    assert_eq!(options[0].kind, OptionKind::Attachment);
+    assert_eq!(options[1].kind, OptionKind::Mentionable);
+    let file = Attachment {
+        id: 55,
+        filename: "a.png".into(),
+        size: 12,
+        content_type: Some("image/png".into()),
+        url: "https://cdn.example/a.png".into(),
+    };
+    let harness = Harness::new(upload_module()).unwrap();
+    let invoke = |who: Option<CommandOptionValue>| {
+        let mut invocation =
+            Invocation::new("upload").option("file", CommandOptionValue::Attachment(file.clone()));
+        if let Some(who) = who {
+            invocation = invocation.option("who", who);
+        }
+        harness.invoke(invocation)
+    };
+    let replies = invoke(Some(CommandOptionValue::Mentionable(Mentionable::Role(
+        Id::new(10),
+    ))))
+    .await
+    .unwrap();
+    assert_eq!(texts(&replies), ["a.png https://cdn.example/a.png role"]);
+    let replies = invoke(Some(CommandOptionValue::Mentionable(Mentionable::User(
+        Id::new(9),
+    ))))
+    .await
+    .unwrap();
+    assert_eq!(texts(&replies), ["a.png https://cdn.example/a.png user"]);
+    let replies = invoke(None).await.unwrap();
+    assert_eq!(texts(&replies), ["a.png https://cdn.example/a.png nobody"]);
+}
+
+fn tree_module() -> ModuleBuilder {
+    ModuleBuilder::new("tree", "Tree", "0.1.0")
+        .unwrap()
+        .permission(PermissionSpec::new("tree.edit", Level::MODERATOR, "Edit the tree").unwrap())
+        .groups(
+            "warn",
+            "Warnings",
+            [
+                SubcommandGroup::new("list", "Look at warnings")
+                    .subcommand(
+                        Command::<()>::new("all", "Every warning")
+                            .cooldown(Cooldown::per_user(Duration::from_secs(10)))
+                            .handler(|cx, ()| async move { cx.reply("all").await }),
+                    )
+                    .subcommand(
+                        Command::<()>::new("kind", "Those of one kind")
+                            .requires("tree.edit")
+                            .handler(|cx, ()| async move { cx.reply("kind").await }),
+                    ),
+                SubcommandGroup::new("clear", "Remove warnings").subcommand(
+                    Command::<()>::new("all", "Everything")
+                        .handler(|cx, ()| async move { cx.reply("cleared").await }),
+                ),
+            ],
+        )
+}
+
+#[tokio::test]
+async fn subcommands_of_a_group_route_by_both_names_with_their_permission_and_cooldown() {
+    let harness = Harness::new(tree_module()).unwrap();
+    harness.permissions(|permissions| {
+        permissions
+            .role_levels
+            .insert(Id::new(10), Level::MODERATOR);
+    });
+    let all = Invocation::new("warn").subcommand("list all").user(7);
+    assert_eq!(texts(&harness.invoke(all.clone()).await.unwrap()), ["all"]);
+    // The cooldown of the nested command holds the user back, as for a flat subcommand.
+    assert_ne!(texts(&harness.invoke(all).await.unwrap()), ["all"]);
+    assert_eq!(
+        texts(
+            &harness
+                .invoke(Invocation::new("warn").subcommand("clear all").user(8))
+                .await
+                .unwrap()
+        ),
+        ["cleared"]
+    );
+    let kind = Invocation::new("warn").subcommand("list kind").user(9);
+    assert_ne!(
+        texts(&harness.invoke(kind.clone()).await.unwrap()),
+        ["kind"],
+        "without the permission"
+    );
+    assert_eq!(
+        texts(&harness.invoke(kind.roles([10])).await.unwrap()),
+        ["kind"]
+    );
+    // A name that is no route of the command is not answered.
+    assert!(
+        harness
+            .invoke(Invocation::new("warn").subcommand("all"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_group_is_refused_when_none_is_empty_or_two_routes_share_a_name() {
+    let empty = ModuleBuilder::new("tree", "Tree", "0.1.0").unwrap().groups(
+        "warn",
+        "Warnings",
+        [SubcommandGroup::new("list", "Look")],
+    );
+    assert!(empty.build().is_err(), "a group without subcommands");
+    let twice = ModuleBuilder::new("tree", "Tree", "0.1.0").unwrap().groups(
+        "warn",
+        "Warnings",
+        [
+            SubcommandGroup::new("list", "a")
+                .subcommand(Command::<()>::new("all", "a").handler(|_, ()| async move { Ok(()) })),
+            SubcommandGroup::new("list", "b")
+                .subcommand(Command::<()>::new("all", "b").handler(|_, ()| async move { Ok(()) })),
+        ],
+    );
+    assert!(twice.build().is_err(), "`list all` declared twice");
 }

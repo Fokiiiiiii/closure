@@ -1147,6 +1147,53 @@ async fn unknown_commands_are_answered_instead_of_ignored() {
     assert_eq!(h.api.actions().len(), 1);
 }
 
+fn autocomplete(command: &str) -> Event {
+    Event::Autocomplete(closure_core::event::AutocompleteInvocation {
+        interaction_id: Id::new(52),
+        application_id: Id::new(60),
+        token: InteractionToken::new("auto-token"),
+        guild_id: Id::new(GUILD),
+        channel_id: Id::new(3),
+        user: user(7),
+        roles: vec![],
+        invoker_permissions: Permissions::empty(),
+        locale: None,
+        command: command.into(),
+        subcommand: None,
+        focused_option: "reason".into(),
+        focused: "sp".into(),
+        options: vec![],
+    })
+}
+
+#[tokio::test]
+async fn an_autocomplete_nobody_may_answer_gets_no_choices_instead_of_nothing() {
+    // A command no module owns, and one whose module is off: Discord has no error to show there.
+    let module = Probe::with_command("warn", "warn");
+    for (command, enabled) in [("ghost", true), ("warn", false)] {
+        let h = harness(
+            &[(&module, enabled)],
+            limits(64, 4),
+            DispatcherConfig::default(),
+        )
+        .await;
+        h.dispatcher.dispatch(autocomplete(command));
+        h.dispatcher.flush().await;
+        let actions = h.api.actions();
+        assert_eq!(actions.len(), 1, "{command}");
+        assert!(
+            matches!(
+                &actions[0],
+                Action::Respond {
+                    response: InteractionResponse::Autocomplete { choices },
+                    ..
+                } if choices.is_empty()
+            ),
+            "{command}: {actions:?}"
+        );
+    }
+}
+
 fn click(custom_id: &str) -> Event {
     Event::Component(closure_core::event::ComponentInvocation {
         interaction_id: Id::new(51),

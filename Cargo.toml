@@ -20,6 +20,7 @@ closure-api = { path = "crates/closure-api" }
 closure-i18n = { path = "crates/closure-i18n" }
 closure-sdk = { path = "crates/closure-sdk" }
 closure-sdk-macros = { path = "crates/closure-sdk-macros" }
+closure-mod-automod = { path = "crates/closure-mod-automod" }
 closure-mod-diagnostics = { path = "crates/closure-mod-diagnostics" }
 closure-mod-moderation = { path = "crates/closure-mod-moderation" }
 
@@ -90,6 +91,12 @@ missing_panics_doc = "allow"
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "off"
+# Incremental caches grew target/ by gigabytes with every edit; a full rebuild of the workspace
+# crates is a few seconds slower and the dependencies stay cached.
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 lto = "thin"

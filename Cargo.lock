@@ -429,6 +429,7 @@ dependencies = [
  "closure-db",
  "closure-discord",
  "closure-i18n",
+ "closure-mod-automod",
  "closure-mod-diagnostics",
  "closure-mod-moderation",
  "dotenvy",
@@ -555,6 +556,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "closure-mod-automod"
+version = "0.1.0"
+dependencies = [
+ "closure-config",
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "twilight-model",
+]
+
+[[package]]
 name = "closure-mod-diagnostics"
 version = "0.1.0"
 dependencies = [
@@ -605,6 +620,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "closure-xtask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "closure",
+ "closure-core",
+ "closure-i18n",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,5 +1,6 @@
 use closure_core::action::{
-    ChannelKind, ChannelPatch, NewChannel, Outcome, OverwriteSpec, OverwriteTarget, Reason,
+    ChannelKind, ChannelPatch, ChannelPosition, NewChannel, Outcome, OverwriteSpec,
+    OverwriteTarget, Reason,
 };
 use closure_core::error::DiscordError;
 use closure_core::event::{ChannelId, GuildId};
@@ -8,6 +9,7 @@ use twilight_model::channel::ChannelType;
 use twilight_model::channel::permission_overwrite::{
     PermissionOverwrite as ChannelOverwrite, PermissionOverwriteType as ChannelOverwriteType,
 };
+use twilight_model::http::channel_position::Position;
 use twilight_model::http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType};
 
 use super::{TwilightApi, read, run};
@@ -143,6 +145,19 @@ impl TwilightApi {
             OverwriteTarget::Member(user) => request.member(user),
         };
         run(request.reason(reason.as_str())).await
+    }
+
+    /// Discord takes no audit log reason for this.
+    pub(super) async fn reorder_channels(
+        &self,
+        guild: GuildId,
+        positions: &[ChannelPosition],
+    ) -> Result<Outcome, DiscordError> {
+        let positions: Vec<Position> = positions
+            .iter()
+            .map(|position| Position::from((position.channel_id, position.position)))
+            .collect();
+        run(self.http.update_guild_channel_positions(guild, &positions)).await
     }
 }
 

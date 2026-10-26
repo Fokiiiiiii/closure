@@ -1,6 +1,8 @@
 use closure_core::action::{InteractionReply, InteractionResponse, Outcome};
 use closure_core::error::DiscordError;
 use closure_core::event::{InteractionId, InteractionToken};
+use closure_core::module::{ChoiceValue, OptionChoice};
+use twilight_model::application::command::{CommandOptionChoice, CommandOptionChoiceValue};
 use twilight_model::channel::message::{AllowedMentions, MessageFlags};
 use twilight_model::http::interaction::{
     InteractionResponse as TwilightResponse, InteractionResponseData, InteractionResponseType,
@@ -26,6 +28,19 @@ fn response_data(reply: &InteractionReply) -> InteractionResponseData {
 /// What an update says about the message it changes: its embeds and components are exactly
 /// those of the reply, so none means "take the old ones off". (A new message has none to take
 /// off, and leaves them out.)
+/// A choice of an autocomplete answer, in the form Discord takes.
+fn choice(choice: &OptionChoice) -> CommandOptionChoice {
+    CommandOptionChoice {
+        name: choice.name.clone(),
+        name_localizations: None,
+        value: match &choice.value {
+            ChoiceValue::String(text) => CommandOptionChoiceValue::String(text.clone()),
+            ChoiceValue::Integer(number) => CommandOptionChoiceValue::Integer(*number),
+            ChoiceValue::Number(number) => CommandOptionChoiceValue::Number(*number),
+        },
+    }
+}
+
 fn update_data(reply: &InteractionReply) -> InteractionResponseData {
     InteractionResponseData {
         embeds: Some(reply.embeds.clone()),
@@ -54,6 +69,13 @@ fn twilight_response(response: &InteractionResponse) -> TwilightResponse {
         InteractionResponse::DeferUpdate => TwilightResponse {
             kind: InteractionResponseType::DeferredUpdateMessage,
             data: None,
+        },
+        InteractionResponse::Autocomplete { choices } => TwilightResponse {
+            kind: InteractionResponseType::ApplicationCommandAutocompleteResult,
+            data: Some(InteractionResponseData {
+                choices: Some(choices.iter().map(choice).collect()),
+                ..InteractionResponseData::default()
+            }),
         },
         InteractionResponse::Modal(spec) => TwilightResponse {
             kind: InteractionResponseType::Modal,
@@ -129,6 +151,33 @@ impl TwilightApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autocomplete_answers_carry_their_choices_as_discord_takes_them() {
+        let answer = twilight_response(&InteractionResponse::Autocomplete {
+            choices: vec![
+                OptionChoice {
+                    name: "Spam".into(),
+                    value: ChoiceValue::String("spam".into()),
+                },
+                OptionChoice {
+                    name: "Three".into(),
+                    value: ChoiceValue::Integer(3),
+                },
+            ],
+        });
+        assert_eq!(
+            answer.kind,
+            InteractionResponseType::ApplicationCommandAutocompleteResult
+        );
+        let choices = answer.data.unwrap().choices.unwrap();
+        assert_eq!(choices[0].name, "Spam");
+        assert_eq!(
+            choices[0].value,
+            CommandOptionChoiceValue::String("spam".into())
+        );
+        assert_eq!(choices[1].value, CommandOptionChoiceValue::Integer(3));
+    }
 
     #[test]
     fn ephemeral_replies_set_the_flag_and_never_ping() {

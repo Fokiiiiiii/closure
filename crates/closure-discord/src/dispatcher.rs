@@ -19,10 +19,12 @@ use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::cases::{CaseBackend, Cases, MemoryCases};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
-use closure_core::event::{Event, GuildId, InteractionRef, UserId};
+use closure_core::event::{
+    AutocompleteInvocation, ContextTarget, Event, GuildId, InteractionRef, UserId,
+};
 use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
 use closure_core::locale::{Args, Locale, Translator};
-use closure_core::module::{EventContext, Module, ModuleId};
+use closure_core::module::{ContextKind, EventContext, Module, ModuleId};
 use closure_core::registry::ModuleRegistry;
 use closure_core::schedule::{MemoryScheduler, ScheduledJob, Scheduler, SchedulerBackend};
 use closure_core::settings::{ModuleSettings, SettingsProvider};
@@ -263,6 +265,8 @@ fn ordering_key(event: &Event) -> u64 {
         Event::RoleCreated(role) | Event::RoleUpdated(role) => role.id.get(),
         Event::RoleDeleted { role_id, .. } => role_id.get(),
         Event::Command(invocation) => invocation.user.id.get(),
+        Event::Autocomplete(query) => query.user.id.get(),
+        Event::ContextCommand(invocation) => invocation.user.id.get(),
         Event::Component(click) => click.user.id.get(),
         Event::Modal(submission) => submission.user.id.get(),
         Event::Scheduled(job) => u64::try_from(job.id).unwrap_or(0),
@@ -713,6 +717,20 @@ async fn handle_event(
             handle_interaction(shared, guild, state, event, owner, invocation).await;
             return None;
         }
+        Event::ContextCommand(invocation) => {
+            let kind = match invocation.target {
+                ContextTarget::User(_) => ContextKind::User,
+                ContextTarget::Message(_) => ContextKind::Message,
+            };
+            let owner = shared.registry.context_owner(&invocation.command, kind);
+            handle_interaction(shared, guild, state, event, owner, invocation).await;
+            return None;
+        }
+        Event::Autocomplete(query) => {
+            let owner = shared.registry.command_owner(&query.command);
+            handle_autocomplete(shared, guild, state, event, owner, query).await;
+            return None;
+        }
         Event::Component(click) => {
             let owner = shared.registry.interaction_owner(&click.custom_id);
             handle_interaction(shared, guild, state, event, owner, click).await;
@@ -982,6 +1000,52 @@ async fn handle_interaction(
         }
     };
     reply(shared, invocation, message).await;
+}
+
+/// Discord shows the user nothing when no choices come within three seconds, so the module
+/// gets less than that and the answer is given before Discord gives up.
+const AUTOCOMPLETE_DEADLINE: Duration = Duration::from_millis(2_500);
+
+/// An autocomplete request goes to the module that owns the command, in the same lane and under
+/// the same breaker as a command. Whatever goes wrong, the user gets no choices: Discord has no
+/// place for an error there.
+async fn handle_autocomplete(
+    shared: &Arc<Shared>,
+    guild: GuildId,
+    state: &Arc<GuildState>,
+    event: &Arc<Event>,
+    owner: Option<&Arc<dyn Module>>,
+    query: &AutocompleteInvocation,
+) {
+    let Some(module) = owner else {
+        return answer_without_choices(shared, query).await;
+    };
+    let id = module.manifest().id.clone();
+    if shared
+        .settings
+        .module(guild, &id)
+        .is_none_or(|settings| !settings.enabled)
+    {
+        return answer_without_choices(shared, query).await;
+    }
+    let call = call_module(shared, guild, state, Arc::clone(module), event);
+    // A module that answered is done; one that did not gets the empty answer.
+    if !matches!(
+        tokio::time::timeout(AUTOCOMPLETE_DEADLINE, call).await,
+        Ok(Verdict::Done(_))
+    ) {
+        answer_without_choices(shared, query).await;
+    }
+}
+
+async fn answer_without_choices(shared: &Shared, query: &AutocompleteInvocation) {
+    let granted: CapabilitySet = [Capability::RespondToInteractions].into_iter().collect();
+    let client = ApiClient::new(Arc::clone(&shared.api), granted, ModuleId::system());
+    match tokio::time::timeout(REPLY_TIMEOUT, client.autocomplete(query, Vec::new())).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "could not answer an autocomplete request"),
+        Err(_) => tracing::warn!("timed out answering an autocomplete request"),
+    }
 }
 
 fn text(shared: &Shared, locale: Locale, key: &str) -> String {

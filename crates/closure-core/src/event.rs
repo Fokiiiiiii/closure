@@ -50,6 +50,9 @@ pub struct AttachmentInfo {
     pub size: u64,
     /// `None` when Discord does not know the type.
     pub content_type: Option<String>,
+    /// Where Discord serves the file; a message that lost it has an empty one.
+    #[serde(default)]
+    pub url: String,
 }
 
 /// A message in a guild. `created_at` is when it was sent, also on a `MessageUpdated` event.
@@ -142,6 +145,13 @@ impl fmt::Debug for InteractionToken {
     }
 }
 
+/// What a `mentionable` option picked: a member or a role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mentionable {
+    User(UserId),
+    Role(RoleId),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum CommandOptionValue {
@@ -152,6 +162,8 @@ pub enum CommandOptionValue {
     User(UserId),
     Channel(ChannelId),
     Role(RoleId),
+    Attachment(AttachmentInfo),
+    Mentionable(Mentionable),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,6 +187,7 @@ pub struct CommandInvocation {
     /// Locale of the invoking user, when Discord reports one this bot supports.
     pub locale: Option<Locale>,
     pub command: String,
+    /// The subcommand, or `group sub` for a subcommand of a group (a space keeps the levels apart).
     pub subcommand: Option<String>,
     pub options: Vec<CommandOption>,
 }
@@ -225,6 +238,65 @@ impl ModalSubmission {
             .iter()
             .find(|(id, _)| id == custom_id)
             .map(|(_, value)| value.as_str())
+    }
+}
+
+/// What a context-menu command was used on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ContextTarget {
+    /// A member or a user (the user's id, name and bot flag).
+    User(UserInfo),
+    /// A message of the guild.
+    Message(MessageInfo),
+}
+
+/// A context-menu command (on a user or on a message) used by a member.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextInvocation {
+    pub interaction_id: InteractionId,
+    pub application_id: ApplicationId,
+    pub token: InteractionToken,
+    pub guild_id: GuildId,
+    pub channel_id: ChannelId,
+    pub user: UserInfo,
+    pub roles: Vec<RoleId>,
+    pub invoker_permissions: Permissions,
+    pub locale: Option<Locale>,
+    pub command: String,
+    pub target: ContextTarget,
+}
+
+/// A user typing in an option of a command: Discord asks the module for choices to offer. It
+/// is answered with [`crate::action::InteractionResponse::Autocomplete`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutocompleteInvocation {
+    pub interaction_id: InteractionId,
+    pub application_id: ApplicationId,
+    pub token: InteractionToken,
+    pub guild_id: GuildId,
+    pub channel_id: ChannelId,
+    pub user: UserInfo,
+    pub roles: Vec<RoleId>,
+    pub invoker_permissions: Permissions,
+    pub locale: Option<Locale>,
+    pub command: String,
+    /// The subcommand, or `group sub` (see [`CommandInvocation::subcommand`]).
+    pub subcommand: Option<String>,
+    /// The option the user is typing in.
+    pub focused_option: String,
+    /// What the user typed so far.
+    pub focused: String,
+    /// The other options the user already filled in; the focused one is not among them.
+    pub options: Vec<CommandOption>,
+}
+
+impl AutocompleteInvocation {
+    #[must_use]
+    pub fn option(&self, name: &str) -> Option<&CommandOptionValue> {
+        self.options
+            .iter()
+            .find(|option| option.name == name)
+            .map(|option| &option.value)
     }
 }
 
@@ -282,6 +354,8 @@ macro_rules! interaction_ref {
 interaction_ref!(CommandInvocation);
 interaction_ref!(ComponentInvocation);
 interaction_ref!(ModalSubmission);
+interaction_ref!(AutocompleteInvocation);
+interaction_ref!(ContextInvocation);
 
 impl CommandInvocation {
     #[must_use]
@@ -350,6 +424,10 @@ pub enum Event {
     Component(ComponentInvocation),
     /// A modal of the module that the user sent.
     Modal(ModalSubmission),
+    /// The user is typing in an option of a command of the module; answer with the choices.
+    Autocomplete(AutocompleteInvocation),
+    /// A context-menu command of the module was used on a user or a message.
+    ContextCommand(ContextInvocation),
     /// A job the module scheduled is due (see [`crate::schedule`]). Only that module gets it.
     /// Answering [`crate::subscription::Flow::Stop`] says the module cannot handle it and never
     /// will: the job is dropped (a repeating one stops) instead of being finished.
@@ -382,6 +460,8 @@ pub enum EventKind {
     Command,
     Component,
     Modal,
+    Autocomplete,
+    ContextCommand,
     Scheduled,
 }
 
@@ -410,6 +490,8 @@ impl EventKind {
             | Self::Command
             | Self::Component
             | Self::Modal
+            | Self::Autocomplete
+            | Self::ContextCommand
             | Self::Scheduled => Intents::empty(),
         }
     }
@@ -439,6 +521,8 @@ impl EventKind {
             Self::Command => "command",
             Self::Component => "component",
             Self::Modal => "modal",
+            Self::Autocomplete => "autocomplete",
+            Self::ContextCommand => "context_command",
             Self::Scheduled => "scheduled",
         }
     }
@@ -470,6 +554,8 @@ impl Event {
             Self::Command(_) => EventKind::Command,
             Self::Component(_) => EventKind::Component,
             Self::Modal(_) => EventKind::Modal,
+            Self::Autocomplete(_) => EventKind::Autocomplete,
+            Self::ContextCommand(_) => EventKind::ContextCommand,
             Self::Scheduled(_) => EventKind::Scheduled,
         }
     }
@@ -492,6 +578,8 @@ impl Event {
             Self::Command(invocation) => Some(invocation.channel_id),
             Self::Component(click) => Some(click.channel_id),
             Self::Modal(submission) => Some(submission.channel_id),
+            Self::Autocomplete(query) => Some(query.channel_id),
+            Self::ContextCommand(invocation) => Some(invocation.channel_id),
             _ => None,
         }
     }
@@ -509,6 +597,8 @@ impl Event {
             Self::Command(invocation) => invocation.user.bot,
             Self::Component(click) => click.user.bot,
             Self::Modal(submission) => submission.user.bot,
+            Self::Autocomplete(query) => query.user.bot,
+            Self::ContextCommand(invocation) => invocation.user.bot,
             _ => false,
         }
     }
@@ -522,6 +612,8 @@ impl Event {
             Self::Command(invocation) => &invocation.roles,
             Self::Component(click) => &click.roles,
             Self::Modal(submission) => &submission.roles,
+            Self::Autocomplete(query) => &query.roles,
+            Self::ContextCommand(invocation) => &invocation.roles,
             _ => &[],
         }
     }
@@ -549,6 +641,8 @@ impl Event {
             Self::Command(invocation) => invocation.guild_id,
             Self::Component(click) => click.guild_id,
             Self::Modal(submission) => submission.guild_id,
+            Self::Autocomplete(query) => query.guild_id,
+            Self::ContextCommand(invocation) => invocation.guild_id,
             Self::Scheduled(job) => job.guild_id,
         }
     }
@@ -561,6 +655,8 @@ impl Event {
             Self::Command(invocation) => Some(&invocation.token),
             Self::Component(click) => Some(&click.token),
             Self::Modal(submission) => Some(&submission.token),
+            Self::Autocomplete(query) => Some(&query.token),
+            Self::ContextCommand(invocation) => Some(&invocation.token),
             _ => None,
         }
     }

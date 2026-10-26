@@ -8,11 +8,16 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use closure_core::capability::Capability;
+use closure_core::error::DiscordError;
 use closure_core::error::{CoreError, ModuleError};
-use closure_core::event::{ComponentInvocation, Event, EventKind, InteractionRef, ModalSubmission};
+use closure_core::event::{
+    AutocompleteInvocation, ComponentInvocation, ContextInvocation, ContextTarget, Event,
+    EventKind, InteractionRef, ModalSubmission,
+};
 use closure_core::locale::{Args, Locale};
 use closure_core::module::{
-    CommandSpec, EventContext, Module, ModuleId, ModuleManifest, SubcommandSpec,
+    ChoiceValue, CommandSpec, ContextCommandSpec, ContextKind, EventContext, Module, ModuleId,
+    ModuleManifest, OptionChoice, OptionKind, OptionSpec, SubcommandSpec,
 };
 use closure_core::permission::{PermissionKey, PermissionSpec};
 use closure_core::schedule::ScheduledJob;
@@ -25,12 +30,33 @@ use twilight_model::guild::Permissions;
 
 use crate::args::CommandArgs;
 use crate::cooldown::{Cooldown, Cooldowns};
-use crate::cx::{CommandCx, ComponentCx, Cx, JobCx, ModalCx, REPLIES};
+use crate::cx::{AutocompleteCx, CommandCx, ComponentCx, ContextCx, Cx, JobCx, ModalCx, REPLIES};
 use crate::embed::Tone;
 use crate::error::UserError;
 use crate::ui::CustomId;
 
 type Run = dyn Fn(CommandCx) -> BoxFuture<'static, Result<(), UserError>> + Send + Sync;
+
+/// What offers the choices of an option while the user types in it.
+type AutoRun =
+    dyn Fn(AutocompleteCx) -> BoxFuture<'static, Result<Vec<Choice>, UserError>> + Send + Sync;
+
+/// One choice an autocomplete offers: what the user sees, and the value the command gets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choice {
+    pub name: String,
+    pub value: ChoiceValue,
+}
+
+impl Choice {
+    #[must_use]
+    pub fn new(name: impl Into<String>, value: impl Into<ChoiceValue>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+}
 
 /// A command that is declared but has no handler yet; `A` is its options.
 #[derive(Debug)]
@@ -123,6 +149,124 @@ impl std::fmt::Debug for BoundCommand {
     }
 }
 
+/// A group of subcommands inside a command made with [`ModuleBuilder::groups`]: `/warn list all`
+/// is the subcommand `all` of the group `list`. Each subcommand has its own permission and
+/// cooldown.
+#[derive(Debug)]
+pub struct SubcommandGroup {
+    name: String,
+    description: String,
+    subcommands: Vec<BoundCommand>,
+}
+
+impl SubcommandGroup {
+    /// A group with an English description; it needs at least one subcommand.
+    #[must_use]
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            subcommands: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn subcommand(mut self, command: BoundCommand) -> Self {
+        self.subcommands.push(command);
+        self
+    }
+}
+
+type ContextRun = dyn Fn(ContextCx) -> BoxFuture<'static, Result<(), UserError>> + Send + Sync;
+
+/// A context-menu command under construction: it is used on a user or on a message. Discord
+/// takes a name for it and no description.
+#[derive(Debug)]
+pub struct ContextCommand {
+    name: String,
+    kind: ContextKind,
+    requires: Option<String>,
+    cooldown: Option<Cooldown>,
+}
+
+impl ContextCommand {
+    /// A command used on a user.
+    #[must_use]
+    pub fn user(name: impl Into<String>) -> Self {
+        Self::of(name, ContextKind::User)
+    }
+
+    /// A command used on a message.
+    #[must_use]
+    pub fn message(name: impl Into<String>) -> Self {
+        Self::of(name, ContextKind::Message)
+    }
+
+    fn of(name: impl Into<String>, kind: ContextKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            requires: None,
+            cooldown: None,
+        }
+    }
+
+    /// The permission key the user needs; the module has to declare it.
+    #[must_use]
+    pub fn requires(mut self, key: impl Into<String>) -> Self {
+        self.requires = Some(key.into());
+        self
+    }
+
+    #[must_use]
+    pub fn cooldown(mut self, cooldown: Cooldown) -> Self {
+        self.cooldown = Some(cooldown);
+        self
+    }
+
+    /// What happens when the command is used. The handler reads its target with
+    /// [`ContextCx::target_user`] or [`ContextCx::target_message`].
+    pub fn handler<F, Fut>(self, handler: F) -> BoundContext
+    where
+        F: Fn(ContextCx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), UserError>> + Send + 'static,
+    {
+        let run: Arc<ContextRun> = Arc::new(move |cx| handler(cx).boxed());
+        BoundContext {
+            name: self.name,
+            kind: self.kind,
+            requires: self.requires,
+            cooldown: self.cooldown,
+            run,
+        }
+    }
+}
+
+/// A context-menu command with its handler.
+pub struct BoundContext {
+    name: String,
+    kind: ContextKind,
+    requires: Option<String>,
+    cooldown: Option<Cooldown>,
+    run: Arc<ContextRun>,
+}
+
+impl std::fmt::Debug for BoundContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundContext")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a context-menu command does when it is used.
+struct ContextRoute {
+    requires: Option<PermissionKey>,
+    cooldown: Option<Cooldown>,
+    run: Arc<ContextRun>,
+}
+
 /// What a command does when it runs.
 struct Route {
     requires: Option<PermissionKey>,
@@ -149,6 +293,9 @@ pub struct ModuleBuilder {
     components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
     modals: HashMap<String, Arc<UiRun<ModalSubmission>>>,
     jobs: HashMap<String, Arc<JobRun>>,
+    /// By command, subcommand (`group sub`, if any) and option.
+    autocompletes: HashMap<(String, Option<String>, String), Arc<AutoRun>>,
+    contexts: HashMap<(ContextKind, String), ContextRoute>,
     problem: Option<CoreError>,
     clock: Clock,
 }
@@ -179,6 +326,8 @@ impl ModuleBuilder {
             components: HashMap::new(),
             modals: HashMap::new(),
             jobs: HashMap::new(),
+            autocompletes: HashMap::new(),
+            contexts: HashMap::new(),
             problem: None,
             clock: Arc::new(Instant::now),
         })
@@ -335,6 +484,34 @@ impl ModuleBuilder {
         self
     }
 
+    /// What offers the choices of `option` of the command at `path` (`warn`, or `warn list all`
+    /// for a subcommand) while the user types in it. The option is published as autocompleted.
+    /// A user who may not run the command gets no choices, and so does a handler that fails
+    /// (the failure is logged).
+    #[must_use]
+    pub fn autocomplete<F, Fut>(mut self, path: &str, option: &str, handler: F) -> Self
+    where
+        F: Fn(AutocompleteCx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<Choice>, UserError>> + Send + 'static,
+    {
+        let (command, sub) = match path.split_once(' ') {
+            Some((command, sub)) => (command.to_owned(), Some(sub.to_owned())),
+            None => (path.to_owned(), None),
+        };
+        let run: Arc<AutoRun> = Arc::new(move |cx| handler(cx).boxed());
+        if self
+            .autocompletes
+            .insert((command, sub, option.to_owned()), run)
+            .is_some()
+        {
+            self.problem.get_or_insert(self.invalid(
+                path,
+                format!("has two autocomplete handlers for `{option}`"),
+            ));
+        }
+        self
+    }
+
     /// A route is written into a `custom_id` between colons, so it has to survive that.
     fn check_route(&mut self, route: &str) {
         if route.is_empty() || route.contains(':') {
@@ -389,6 +566,7 @@ impl ModuleBuilder {
                 name: sub.name.clone(),
                 description: sub.description.clone(),
                 options: sub.options.clone(),
+                subcommands: Vec::new(),
             });
             let sub_name = sub.name.clone();
             self.route(&name, Some(sub_name), sub);
@@ -402,6 +580,118 @@ impl ModuleBuilder {
         };
         self.manifest = self.manifest.command(spec);
         self
+    }
+
+    /// Adds a command made of groups of subcommands, two levels deep (`/warn list all`). The
+    /// route of a subcommand is its group and its name, separated by a space.
+    #[must_use]
+    pub fn groups(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        groups: impl IntoIterator<Item = SubcommandGroup>,
+    ) -> Self {
+        let name = name.into();
+        let mut specs = Vec::new();
+        for SubcommandGroup {
+            name: group,
+            description: group_description,
+            subcommands,
+        } in groups
+        {
+            if subcommands.is_empty() {
+                self.problem.get_or_insert(
+                    self.invalid(&group, "is a group without subcommands".to_owned()),
+                );
+            }
+            let mut leaves = Vec::new();
+            for sub in subcommands {
+                if sub.default_member_permissions.is_some() {
+                    self.problem.get_or_insert(self.invalid(
+                        &sub.name,
+                        "is a subcommand: Discord decides who sees a command by the command, not by its subcommands"
+                            .to_owned(),
+                    ));
+                }
+                leaves.push(SubcommandSpec {
+                    name: sub.name.clone(),
+                    description: sub.description.clone(),
+                    options: sub.options.clone(),
+                    subcommands: Vec::new(),
+                });
+                let route = format!("{group} {}", sub.name);
+                self.route(&name, Some(route), sub);
+            }
+            specs.push(SubcommandSpec {
+                name: group,
+                description: group_description,
+                options: Vec::new(),
+                subcommands: leaves,
+            });
+        }
+        let spec = CommandSpec {
+            name,
+            description: description.into(),
+            options: Vec::new(),
+            subcommands: specs,
+            default_member_permissions: None,
+        };
+        self.manifest = self.manifest.command(spec);
+        self
+    }
+
+    /// Adds a context-menu command (see [`ContextCommand`]).
+    #[must_use]
+    pub fn context(mut self, command: BoundContext) -> Self {
+        let BoundContext {
+            name,
+            kind,
+            requires,
+            cooldown,
+            run,
+        } = command;
+        let requires = match requires.as_deref().map(PermissionKey::new).transpose() {
+            Ok(key) => key,
+            Err(error) => {
+                self.problem.get_or_insert(error);
+                None
+            }
+        };
+        self.manifest = self.manifest.context_command(ContextCommandSpec {
+            name: name.clone(),
+            kind,
+        });
+        let route = ContextRoute {
+            requires,
+            cooldown,
+            run,
+        };
+        if self.contexts.insert((kind, name.clone()), route).is_some() {
+            self.problem
+                .get_or_insert(self.invalid(&name, "is declared twice".to_owned()));
+        }
+        self
+    }
+
+    /// A context-menu command on a user, with its handler (no permission or cooldown; for those
+    /// use [`ContextCommand`] with [`Self::context`]).
+    #[must_use]
+    pub fn user_command<F, Fut>(self, name: &str, handler: F) -> Self
+    where
+        F: Fn(ContextCx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), UserError>> + Send + 'static,
+    {
+        self.context(ContextCommand::user(name).handler(handler))
+    }
+
+    /// A context-menu command on a message, with its handler (see [`Self::user_command`]).
+    #[must_use]
+    pub fn message_command<F, Fut>(self, name: &str, handler: F) -> Self
+    where
+        F: Fn(ContextCx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), UserError>> + Send + 'static,
+    {
+        self.context(ContextCommand::message(name).handler(handler))
     }
 
     fn route(&mut self, command: &str, sub: Option<String>, bound: BoundCommand) {
@@ -437,6 +727,61 @@ impl ModuleBuilder {
             module: self.manifest.id.clone(),
             command: command.to_owned(),
             reason,
+        }
+    }
+
+    /// The checks of the context-menu commands and the autocompletes, and the marking of the
+    /// options that are autocompleted in the published commands.
+    fn check_interactions(&mut self) {
+        for route in self.contexts.values() {
+            if let Some(key) = &route.requires
+                && !self
+                    .manifest
+                    .permissions
+                    .iter()
+                    .any(|spec| spec.key == *key)
+            {
+                self.problem.get_or_insert(self.invalid(
+                    "",
+                    format!("requires the permission `{key}`, which the module does not declare"),
+                ));
+            }
+        }
+        // Discord takes five context-menu commands of each kind for an application.
+        for kind in [ContextKind::User, ContextKind::Message] {
+            let count = self
+                .manifest
+                .context_commands
+                .iter()
+                .filter(|spec| spec.kind == kind)
+                .count();
+            if count > 5 {
+                self.problem.get_or_insert(self.invalid(
+                    "",
+                    format!("has {count} {kind:?} commands; at most 5 are allowed"),
+                ));
+            }
+        }
+        // Each autocomplete has to name a command and an option that can be autocompleted, and
+        // the option is published as such.
+        let declared: Vec<_> = self.autocompletes.keys().cloned().collect();
+        for (command, sub, option) in declared {
+            let route_exists = self.routes.contains_key(&(command.clone(), sub.clone()));
+            let marked = if route_exists {
+                mark_autocomplete(
+                    &mut self.manifest.commands,
+                    &command,
+                    sub.as_deref(),
+                    &option,
+                )
+            } else {
+                Err("the command or subcommand is not declared")
+            };
+            if let Err(reason) = marked {
+                self.problem.get_or_insert(
+                    self.invalid(&command, format!("autocomplete of `{option}`: {reason}")),
+                );
+            }
         }
     }
 
@@ -513,6 +858,7 @@ impl ModuleBuilder {
                 ),
             );
         }
+        self.check_interactions();
         if let Some(problem) = self.problem {
             return Err(problem);
         }
@@ -523,10 +869,52 @@ impl ModuleBuilder {
             components: self.components,
             modals: self.modals,
             jobs: self.jobs,
+            autocompletes: self.autocompletes,
+            contexts: self.contexts,
             cooldowns: Cooldowns::default(),
             clock: self.clock,
         })
     }
+}
+
+/// Marks the option `option` of the command `command` (of its subcommand `sub`, `group sub` for a
+/// subcommand of a group) as autocompleted. Returns why that is not possible.
+fn mark_autocomplete(
+    commands: &mut [CommandSpec],
+    command: &str,
+    sub: Option<&str>,
+    option: &str,
+) -> Result<(), &'static str> {
+    let spec = commands
+        .iter_mut()
+        .find(|spec| spec.name == command)
+        .ok_or("the command is not declared")?;
+    let options = match sub {
+        None => &mut spec.options,
+        Some(path) => {
+            let found = match path.split_once(' ') {
+                Some((group, name)) => spec
+                    .subcommands
+                    .iter_mut()
+                    .find(|sub| sub.name == group)
+                    .and_then(|group| group.subcommands.iter_mut().find(|sub| sub.name == name)),
+                None => spec.subcommands.iter_mut().find(|sub| sub.name == path),
+            };
+            &mut found.ok_or("the subcommand is not declared")?.options
+        }
+    };
+    let target: &mut OptionSpec = options
+        .iter_mut()
+        .find(|spec| spec.name == option)
+        .ok_or("the option is not declared")?;
+    if !matches!(
+        target.kind,
+        OptionKind::String | OptionKind::Integer | OptionKind::Number
+    ) {
+        return Err("only text and number options can be autocompleted");
+    }
+    target.autocomplete = true;
+    Ok(())
 }
 
 /// A module made with [`ModuleBuilder`]. It answers its commands: checks the permission and
@@ -539,6 +927,8 @@ pub struct SdkModule {
     components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
     modals: HashMap<String, Arc<UiRun<ModalSubmission>>>,
     jobs: HashMap<String, Arc<JobRun>>,
+    autocompletes: HashMap<(String, Option<String>, String), Arc<AutoRun>>,
+    contexts: HashMap<(ContextKind, String), ContextRoute>,
     cooldowns: Cooldowns,
     clock: Clock,
 }
@@ -575,6 +965,9 @@ impl SdkModule {
         let Some((_, id)) = self.own_custom_id(&click.custom_id) else {
             return Ok(Flow::Continue);
         };
+        if id.expires_at.is_some_and(|at| cx.now() >= at) {
+            return Self::refuse(&cx, "sdk-expired").await;
+        }
         let Some(run) = self.components.get(&id.route) else {
             return Self::refuse(&cx, "sdk-gone").await;
         };
@@ -593,6 +986,115 @@ impl SdkModule {
         Ok(Flow::Continue)
     }
 
+    /// A context-menu command was used: the permission and the cooldown are checked as for a
+    /// command, then the handler runs and answers like a command does.
+    async fn on_context(
+        &self,
+        ctx: &EventContext,
+        invocation: &ContextInvocation,
+    ) -> Result<Flow, ModuleError> {
+        let kind = match invocation.target {
+            ContextTarget::User(_) => ContextKind::User,
+            ContextTarget::Message(_) => ContextKind::Message,
+        };
+        let Some(route) = self.contexts.get(&(kind, invocation.command.clone())) else {
+            return Ok(Flow::Continue);
+        };
+        let cx = ContextCx::new(ctx, invocation);
+        match self.run_context(&cx, route, &invocation.command).await {
+            Ok(()) => {
+                if !cx.has_replied() {
+                    let done = cx.core_message("sdk-done", &Args::new());
+                    cx.reply_private(done).await.map_err(module_error)?;
+                }
+            }
+            Err(error) => Self::answer(&cx, error).await?,
+        }
+        Ok(Flow::Continue)
+    }
+
+    async fn run_context(
+        &self,
+        cx: &ContextCx,
+        route: &ContextRoute,
+        name: &str,
+    ) -> Result<(), UserError> {
+        if let Some(key) = &route.requires {
+            cx.require_key(key).await?;
+        }
+        if let Some(cooldown) = &route.cooldown {
+            // Kept apart from the commands: a context command may be named like one.
+            self.cooldowns
+                .take(
+                    &format!("context:{name}"),
+                    cx.interaction(),
+                    cooldown,
+                    (self.clock)(),
+                )
+                .map_err(|remaining| UserError::Cooldown { remaining })?;
+        }
+        (route.run)(cx.clone()).await
+    }
+
+    /// A user typing in an option. The choices come from the handler of that option, and none
+    /// when the user may not run the command, there is no handler, or the handler fails (which
+    /// is logged). Discord has to be answered in any case.
+    async fn on_autocomplete(
+        &self,
+        ctx: &EventContext,
+        query: &AutocompleteInvocation,
+    ) -> Result<Flow, ModuleError> {
+        let cx = AutocompleteCx::new(ctx, query);
+        let route_key = (query.command.clone(), query.subcommand.clone());
+        let allowed = match self.routes.get(&route_key) {
+            None => false,
+            Some(route) => match &route.requires {
+                Some(key) => cx.require_key(key).await.is_ok(),
+                None => true,
+            },
+        };
+        let handler = self.autocompletes.get(&(
+            query.command.clone(),
+            query.subcommand.clone(),
+            query.focused_option.clone(),
+        ));
+        let mut choices = Vec::new();
+        if let Some(run) = handler.filter(|_| allowed) {
+            match run(cx.clone()).await {
+                Ok(found) => {
+                    choices = found
+                        .into_iter()
+                        .map(|choice| OptionChoice {
+                            name: choice.name,
+                            value: choice.value,
+                        })
+                        .collect();
+                }
+                Err(error) => tracing::warn!(
+                    module = %self.manifest.id,
+                    command = %query.command,
+                    option = %query.focused_option,
+                    ?error,
+                    "an autocomplete handler failed"
+                ),
+            }
+        }
+        match cx.answer(choices).await {
+            Ok(()) => Ok(Flow::Continue),
+            Err(DiscordError::Invalid(reason)) => {
+                tracing::warn!(
+                    module = %self.manifest.id,
+                    command = %query.command,
+                    %reason,
+                    "autocomplete choices Discord would refuse"
+                );
+                cx.answer(Vec::new()).await.map_err(ModuleError::Discord)?;
+                Ok(Flow::Continue)
+            }
+            Err(error) => Err(ModuleError::Discord(error)),
+        }
+    }
+
     /// A form that was sent.
     async fn on_modal(
         &self,
@@ -603,6 +1105,9 @@ impl SdkModule {
         let Some((_, id)) = self.own_custom_id(&submission.custom_id) else {
             return Ok(Flow::Continue);
         };
+        if id.expires_at.is_some_and(|at| cx.now() >= at) {
+            return Self::refuse(&cx, "sdk-expired").await;
+        }
         let Some(run) = self.modals.get(&id.route) else {
             return Self::refuse(&cx, "sdk-gone").await;
         };
@@ -710,6 +1215,8 @@ impl Module for SdkModule {
             Event::Component(click) => return self.on_component(ctx, click).await,
             Event::Modal(submission) => return self.on_modal(ctx, submission).await,
             Event::Scheduled(job) => return self.on_job(ctx, job).await,
+            Event::Autocomplete(query) => return self.on_autocomplete(ctx, query).await,
+            Event::ContextCommand(invocation) => return self.on_context(ctx, invocation).await,
             other => {
                 return match self.handlers.get(&other.kind()) {
                     Some(handler) => handler(ctx.clone(), other.clone()).await,

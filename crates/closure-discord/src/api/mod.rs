@@ -2,11 +2,17 @@
 
 mod automod;
 mod channels;
+mod emojis;
 mod guilds;
 mod interactions;
+mod invites;
 mod members;
 mod messages;
 mod roles;
+mod scheduled_events;
+mod threads;
+mod voice;
+mod webhooks;
 #[cfg(test)]
 mod wire_tests;
 
@@ -173,7 +179,19 @@ fn unreadable(error: impl fmt::Display) -> DiscordError {
 fn is_read(action: &Action) -> bool {
     matches!(
         action,
-        Action::GetGuild { .. }
+        Action::GetMessage { .. }
+            | Action::GetMessages { .. }
+            | Action::GetPins { .. }
+            | Action::GetReactionUsers { .. }
+            | Action::ListThreadMembers { .. }
+            | Action::ListInvites { .. }
+            | Action::ListWebhooks { .. }
+            | Action::SearchMembers { .. }
+            | Action::ListMembers { .. }
+            | Action::PruneCount { .. }
+            | Action::ListScheduledEvents { .. }
+            | Action::ListEmojis { .. }
+            | Action::GetGuild { .. }
             | Action::GetMember { .. }
             | Action::ListBans { .. }
             | Action::GetChannel { .. }
@@ -390,6 +408,233 @@ impl TwilightApi {
     #[allow(clippy::too_many_lines)]
     async fn perform(&self, action: &Action) -> Result<Outcome, DiscordError> {
         match action {
+            Action::ListScheduledEvents {
+                guild_id,
+                with_user_count,
+            } => {
+                self.list_scheduled_events(*guild_id, *with_user_count)
+                    .await
+            }
+            Action::CreateScheduledEvent { guild_id, spec } => {
+                self.create_scheduled_event(*guild_id, spec).await
+            }
+            Action::EditScheduledEvent {
+                guild_id,
+                event_id,
+                patch,
+            } => self.edit_scheduled_event(*guild_id, *event_id, patch).await,
+            Action::DeleteScheduledEvent { guild_id, event_id } => {
+                self.delete_scheduled_event(*guild_id, *event_id).await
+            }
+            Action::ListEmojis { guild_id } => self.list_emojis(*guild_id).await,
+            Action::CreateEmoji {
+                guild_id,
+                name,
+                image,
+                reason,
+            } => self.create_emoji(*guild_id, name, image, reason).await,
+            Action::DeleteEmoji {
+                guild_id,
+                emoji_id,
+                reason,
+            } => self.delete_emoji(*guild_id, *emoji_id, reason).await,
+            Action::SearchMembers {
+                guild_id,
+                query,
+                limit,
+            } => self.search_members(*guild_id, query, *limit).await,
+            Action::ListMembers {
+                guild_id,
+                after,
+                limit,
+            } => self.list_members(*guild_id, *after, *limit).await,
+            Action::PruneCount {
+                guild_id,
+                days,
+                include_roles,
+            } => self.prune_count(*guild_id, *days, include_roles).await,
+            Action::Prune {
+                guild_id,
+                days,
+                include_roles,
+                reason,
+            } => self.prune(*guild_id, *days, include_roles, reason).await,
+            Action::EditGuild {
+                guild_id,
+                patch,
+                reason,
+            } => self.edit_guild(*guild_id, patch, reason).await,
+            Action::ReorderRoles {
+                guild_id,
+                positions,
+            } => self.reorder_roles(*guild_id, positions).await,
+            Action::ReorderChannels {
+                guild_id,
+                positions,
+            } => self.reorder_channels(*guild_id, positions).await,
+            Action::CreateDirectMessageChannel { guild_id, user_id } => {
+                self.create_direct_message_channel(*guild_id, *user_id)
+                    .await
+            }
+            Action::CreateWebhook {
+                channel_id,
+                name,
+                reason,
+            } => self.create_webhook(*channel_id, name, reason).await,
+            Action::ListWebhooks { channel_id } => self.list_webhooks(*channel_id).await,
+            Action::DeleteWebhook {
+                guild_id,
+                webhook_id,
+                reason,
+            } => self.delete_webhook(*guild_id, *webhook_id, reason).await,
+            Action::ExecuteWebhook {
+                guild_id,
+                webhook_id,
+                token,
+                content,
+                embeds,
+                username,
+                avatar_url,
+                mentions,
+            } => {
+                self.execute_webhook(
+                    *guild_id,
+                    *webhook_id,
+                    token,
+                    content.as_deref(),
+                    embeds,
+                    username.as_deref(),
+                    avatar_url.as_deref(),
+                    mentions,
+                )
+                .await
+            }
+            Action::CreateInvite {
+                channel_id,
+                max_age_seconds,
+                max_uses,
+                temporary,
+                unique,
+                reason,
+            } => {
+                self.create_invite(
+                    *channel_id,
+                    *max_age_seconds,
+                    *max_uses,
+                    *temporary,
+                    *unique,
+                    reason,
+                )
+                .await
+            }
+            Action::ListInvites { guild_id } => self.list_invites(*guild_id).await,
+            Action::DeleteInvite {
+                guild_id,
+                code,
+                reason,
+            } => self.delete_invite(*guild_id, code, reason).await,
+            Action::CreateThread {
+                channel_id,
+                name,
+                source,
+                kind,
+                auto_archive_minutes,
+            } => {
+                self.create_thread(*channel_id, name, *source, *kind, *auto_archive_minutes)
+                    .await
+            }
+            Action::EditThread {
+                thread_id,
+                patch,
+                reason,
+            } => self.edit_thread(*thread_id, patch, reason).await,
+            Action::JoinThread { thread_id } => self.join_thread(*thread_id).await,
+            Action::LeaveThread { thread_id } => self.leave_thread(*thread_id).await,
+            Action::AddThreadMember { thread_id, user_id } => {
+                self.add_thread_member(*thread_id, *user_id).await
+            }
+            Action::RemoveThreadMember { thread_id, user_id } => {
+                self.remove_thread_member(*thread_id, *user_id).await
+            }
+            Action::ListThreadMembers {
+                thread_id,
+                after,
+                limit,
+            } => self.list_thread_members(*thread_id, *after, *limit).await,
+            Action::SetVoiceDeafen {
+                guild_id,
+                user_id,
+                deaf,
+                reason,
+            } => {
+                self.set_voice_deafen(*guild_id, *user_id, *deaf, reason)
+                    .await
+            }
+            Action::MoveMember {
+                guild_id,
+                user_id,
+                channel_id,
+                reason,
+            } => {
+                self.move_member(*guild_id, *user_id, *channel_id, reason)
+                    .await
+            }
+            Action::DisconnectMember {
+                guild_id,
+                user_id,
+                reason,
+            } => self.disconnect_member(*guild_id, *user_id, reason).await,
+            Action::GetMessage {
+                channel_id,
+                message_id,
+            } => self.get_message(*channel_id, *message_id).await,
+            Action::GetMessages {
+                channel_id,
+                cursor,
+                limit,
+            } => self.get_messages(*channel_id, *cursor, *limit).await,
+            Action::GetPins { channel_id } => self.get_pins(*channel_id).await,
+            Action::PinMessage {
+                channel_id,
+                message_id,
+                reason,
+            } => self.pin_message(*channel_id, *message_id, reason).await,
+            Action::UnpinMessage {
+                channel_id,
+                message_id,
+                reason,
+            } => self.unpin_message(*channel_id, *message_id, reason).await,
+            Action::CrosspostMessage {
+                channel_id,
+                message_id,
+            } => self.crosspost_message(*channel_id, *message_id).await,
+            Action::RemoveReaction {
+                channel_id,
+                message_id,
+                emoji,
+                user_id,
+            } => {
+                self.remove_reaction(*channel_id, *message_id, emoji, *user_id)
+                    .await
+            }
+            Action::RemoveAllReactions {
+                channel_id,
+                message_id,
+                emoji,
+            } => {
+                self.remove_all_reactions(*channel_id, *message_id, emoji.as_ref())
+                    .await
+            }
+            Action::GetReactionUsers {
+                channel_id,
+                message_id,
+                emoji,
+                after,
+                limit,
+            } => {
+                self.get_reaction_users(*channel_id, *message_id, emoji, *after, *limit)
+                    .await
+            }
             Action::SendMessage {
                 channel_id,
                 content,

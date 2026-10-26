@@ -150,6 +150,58 @@ pub type CommandCx = Cx<CommandInvocation>;
 pub type ComponentCx = Cx<ComponentInvocation>;
 /// A modal the user sent.
 pub type ModalCx = Cx<ModalSubmission>;
+/// A user typing in an option of a command (see [`crate::ModuleBuilder::autocomplete`]).
+pub type AutocompleteCx = Cx<closure_core::event::AutocompleteInvocation>;
+/// A context-menu command used on a user or a message (see [`crate::ModuleBuilder::user_command`]).
+pub type ContextCx = Cx<closure_core::event::ContextInvocation>;
+
+impl ContextCx {
+    /// The user the command was used on; `None` when it was used on a message.
+    #[must_use]
+    pub fn target_user(&self) -> Option<&closure_core::event::UserInfo> {
+        match &self.interaction.target {
+            closure_core::event::ContextTarget::User(user) => Some(user),
+            closure_core::event::ContextTarget::Message(_) => None,
+        }
+    }
+
+    /// The message the command was used on; `None` when it was used on a user.
+    #[must_use]
+    pub fn target_message(&self) -> Option<&closure_core::event::MessageInfo> {
+        match &self.interaction.target {
+            closure_core::event::ContextTarget::Message(message) => Some(message),
+            closure_core::event::ContextTarget::User(_) => None,
+        }
+    }
+}
+
+impl AutocompleteCx {
+    /// The option being typed in.
+    #[must_use]
+    pub fn focused_option(&self) -> &str {
+        &self.interaction.focused_option
+    }
+
+    /// What the user typed so far.
+    #[must_use]
+    pub fn focused(&self) -> &str {
+        &self.interaction.focused
+    }
+
+    /// The value of another option the user already filled in.
+    #[must_use]
+    pub fn option(&self, name: &str) -> Option<&closure_core::event::CommandOptionValue> {
+        self.interaction.option(name)
+    }
+
+    /// Answers with the choices; the SDK does this once the handler is done.
+    pub(crate) async fn answer(
+        &self,
+        choices: Vec<closure_core::module::OptionChoice>,
+    ) -> Result<(), closure_core::error::DiscordError> {
+        self.ctx.api.autocomplete(&*self.interaction, choices).await
+    }
+}
 
 impl<I: InteractionRef> std::fmt::Debug for Cx<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -210,6 +262,11 @@ impl ModalCx {
 }
 
 impl<I: InteractionRef + 'static> Cx<I> {
+    /// The interaction itself, for the checks the SDK makes before a handler runs.
+    pub(crate) fn interaction(&self) -> &I {
+        &self.interaction
+    }
+
     pub(crate) fn new(ctx: &EventContext, interaction: &I) -> Self
     where
         I: Clone,

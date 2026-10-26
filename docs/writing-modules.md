@@ -233,6 +233,63 @@ not declare it itself. `cx.config()` leaves the key out before it reads the modu
 The sections below describe what is under the SDK, and what a module that is not only commands
 (reacting to messages, members, bans) needs to know.
 
+### Option types, groups, autocomplete, context menus, expiring buttons
+
+Options: `Attachment` (the file uploaded with the command: id, filename, size, content type and url)
+and `Mentionable` (a `Mentionable::User(id)` or `Mentionable::Role(id)`) are field types like the
+others.
+
+```rust
+#[derive(CommandArgs)]
+struct Keep {
+    /// The file to keep
+    file: Attachment,
+    /// Who it is about
+    who: Option<Mentionable>,
+}
+```
+
+Groups, two levels deep (`/warn list all`). Each subcommand has its own permission and cooldown; a
+group has no options of its own. `ModuleBuilder::group` (one level) still works.
+
+```rust
+ModuleBuilder::new("warn", "Warnings", env!("CARGO_PKG_VERSION"))?
+    .groups("warn", "Warnings", [
+        SubcommandGroup::new("list", "Look at warnings")
+            .subcommand(Command::<()>::new("all", "Every warning").handler(list_all)),
+    ])
+```
+
+Autocomplete: mark a text or number option with `#[arg(autocomplete)]` (or name it in
+`ModuleBuilder::autocomplete("warn", "reason", handler)`, which marks it too). The handler gets an
+`AutocompleteCx` (`focused()`, `focused_option()`, `option(name)` for the options already filled in,
+`guild_id()`, `config()`, `t()`, `store()`) and returns `Vec<Choice>`; `Choice::new(name, value)`
+takes a string, an integer or a number as the value. Discord takes at most 25 choices of at most 100
+characters, and a longer answer is logged and answered with none. A user who may not run the command
+gets none, and so does a handler that fails. The answer is due within three seconds: the dispatcher
+gives the handler 2.5 seconds, then answers with none.
+
+```rust
+.autocomplete("warn", "reason", |cx| async move {
+    let typed = cx.focused().to_owned();
+    Ok(REASONS.iter().filter(|r| r.starts_with(typed.as_str()))
+        .map(|r| Choice::new(*r, *r)).collect())
+})
+```
+
+Context-menu commands on a user or on a message: `ContextCommand::user("name")` or
+`ContextCommand::message("name")`, with `requires` and `cooldown` as for a command, and `.handler`.
+`ModuleBuilder::user_command("name", handler)` and `message_command` are the shorthands without them.
+The handler reads `cx.target_user()` or `cx.target_message()` (one of them is `None`). Discord takes
+a name of 1 to 32 characters and no description; a module has at most five of each kind (checked when
+the module is built and when the registry is made).
+
+Expiring buttons: `CustomId::new("go").expires_in(cx.now(), Duration::from_secs(600))` puts the
+expiry into the `custom_id`, so it lasts as long as the message. A press or a submission after it is
+refused privately with `sdk-expired`. `Pager::expires_in` does the same for the page buttons. The
+SDK does not take the dead buttons off the message: an update would clear its embeds too, and the
+interaction does not carry them.
+
 ## 1. Describe the module (the manifest)
 
 The manifest is data. The host reads it before running a single line of your code.
@@ -264,6 +321,21 @@ let manifest = ModuleManifest::new(ModuleId::new("warn")?, "Warnings", env!("CAR
   roles and users in their configuration (see `configuration.md`); you only declare the keys.
 - The registry refuses duplicate ids, unknown or cyclic dependencies and colliding commands at
   start-up.
+
+### Hints for the dashboard (`x-ui`)
+
+A property of the configuration schema may carry an `x-ui` object that the dashboard uses to draw
+its form. The bot checks its shape at start-up and accepts no other keys in it:
+
+```json
+"x-ui": { "widget": "role", "group": "Limits", "order": 1, "help": "Who may use the command" }
+```
+
+- `widget`: one of `role`, `channel`, `duration`, `textarea` or `user`;
+- `group` (at most 40 characters) and `help` (at most 200): text for the form;
+- `order`: an integer from 0 to 1000.
+
+Other `x-` keywords are passed on unchanged. The module reference in `docs/reference` shows the widget.
 
 ## 2. Handle events
 
@@ -329,9 +401,12 @@ translation falls back to English rather than failing, but it is still a bug.
 
 ## 4. Register the module
 
-Add it to `modules()` in [`crates/closure/src/app.rs`](../crates/closure/src/app.rs). That is the
-only place that knows the full list. A test there checks the whole set forms a valid registry and
-that every command is publishable in every language.
+Add it to `modules()` in [`crates/closure/src/lib.rs`](../crates/closure/src/lib.rs) and add the
+crate to `crates/closure/Cargo.toml`. That is the only place that knows the full list.
+`cargo run -p closure-xtask -- new-module <id>` creates the crate from the templates and prints both
+lines. The tests in [`app.rs`](../crates/closure/src/app.rs) check that the whole set forms a valid
+registry and that every command is publishable in every language. After adding a module, run
+`cargo run -p closure-xtask -- docs` to write its page in `docs/reference`.
 
 ## 5. Test it
 
@@ -396,6 +471,18 @@ let foreign = links(&message.content).iter().any(|link| !link.is_domain("example
 
 In a test, `Harness::message(Message::new(author, channel).content("…"))` delivers a message the
 way the dispatcher does, and returns what the module's filter let through.
+
+## More actions and their capabilities
+
+Besides moderation, a module's `ApiClient` can do the following. Each call needs the capability in brackets, and a client bound to a guild refuses anything that reaches outside that guild, including channels that an action only refers to.
+
+- Messages: read one, the history and the pins, and who reacted [`read_messages`]; pin, unpin, crosspost, remove one user's reaction or all of them [`manage_messages`].
+- Voice: deafen [`deafen_members`]; move a member into a voice channel or out of voice [`move_members`].
+- Threads: create, edit [`manage_threads`]; join and leave [`send_messages`]; add or remove a member [`manage_threads`]; list members [`read_messages`].
+- Invites: create, list, delete [`manage_invites`].
+- Webhooks: create, list, delete [`manage_webhooks`]; post through one [`send_messages`]. A webhook token is redacted from debug output.
+- Members and guild: search and list members [`read_guild`]; prune [`kick_members`]; edit the guild [`manage_guild`]; reorder roles [`manage_roles`] or channels [`manage_channels`]; open a direct message channel [`send_direct_messages`].
+- Scheduled events: list [`read_guild`]; create, edit, delete [`manage_events`]. Emoji: list [`read_guild`]; create, delete [`manage_emojis`].
 
 ## Later: scripts
 

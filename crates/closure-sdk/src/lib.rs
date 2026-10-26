@@ -49,13 +49,15 @@ pub mod testing;
 pub mod text;
 pub mod ui;
 
-pub use args::{ArgError, ArgProblem, CommandArgs, OptionType};
+pub use args::{ArgError, ArgProblem, Attachment, CommandArgs, OptionType};
 pub use closure_core::action::{InteractionReply, Reason};
 pub use closure_core::capability::Capability;
 pub use closure_core::cases::{Case, CaseError, CaseKind, Cases, NewCase, Revoked};
 pub use closure_core::error::{CoreError, DiscordError, ModuleError};
 pub use closure_core::event::{AttachmentInfo, Event, EventKind, InteractionRef, MessageInfo};
-pub use closure_core::event::{ChannelId, CommandInvocation, GuildId, RoleId, UserId, UserInfo};
+pub use closure_core::event::{
+    ChannelId, CommandInvocation, GuildId, Mentionable, RoleId, UserId, UserInfo,
+};
 pub use closure_core::locale::{Args, Locale};
 pub use closure_core::module::EventContext;
 pub use closure_core::module::{ChoiceValue, ModuleId, OptionChoice, OptionKind, OptionSpec};
@@ -65,11 +67,16 @@ pub use closure_core::storage::{Entry, Expect, StorageError, Store};
 pub use closure_core::subscription::{EventFilter, Flow, Subscription};
 pub use closure_sdk_macros::CommandArgs;
 pub use cooldown::{Cooldown, CooldownScope};
-pub use cx::{CommandCx, ComponentCx, Cx, JobCx, ModalCx, parse_module_config};
+pub use cx::{
+    AutocompleteCx, CommandCx, ComponentCx, ContextCx, Cx, JobCx, ModalCx, parse_module_config,
+};
 pub use dm::{DirectMessage, Sent};
 pub use duration::{DurationError, TimeStyle};
 pub use embed::{Color, EmbedBuilder, EmbedError, Tone};
 pub use error::{TargetProblem, UserError};
-pub use module::{BoundCommand, Command, ModuleBuilder, SdkModule};
+pub use module::{
+    BoundCommand, BoundContext, Choice, Command, ContextCommand, ModuleBuilder, SdkModule,
+    SubcommandGroup,
+};
 pub use twilight_model::gateway::Intents;
 pub use ui::{CustomId, Pager};

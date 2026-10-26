@@ -307,6 +307,37 @@ pub(crate) fn check_supported(schema: &Value) -> Result<(), String> {
     scan(schema, true)
 }
 
+/// The widgets a dashboard can draw for a setting.
+const WIDGETS: [&str; 5] = ["role", "channel", "duration", "textarea", "user"];
+
+/// Hints for the dashboard's forms. They are annotations the bot does not act on, so only their
+/// shape is checked, and every other `x-` keyword is passed through as it is.
+fn check_ui_hints(hints: &Value) -> Result<(), String> {
+    let Value::Object(map) = hints else {
+        return Err("`x-ui` must be an object".to_owned());
+    };
+    let text_within = |value: &Value, max: usize| {
+        value
+            .as_str()
+            .is_some_and(|text| text.chars().count() <= max)
+    };
+    for (key, value) in map {
+        let valid = match key.as_str() {
+            "widget" => value
+                .as_str()
+                .is_some_and(|widget| WIDGETS.contains(&widget)),
+            "group" => text_within(value, 40),
+            "help" => text_within(value, 200),
+            "order" => value.as_u64().is_some_and(|order| order <= 1000),
+            _ => false,
+        };
+        if !valid {
+            return Err(format!("`x-ui.{key}` is not a valid hint"));
+        }
+    }
+    Ok(())
+}
+
 /// Looks at the places where a schema can have keywords. What a keyword holds that is not a schema
 /// (`const`, `enum`, `default`, annotations, keywords nobody here knows) is data and left alone.
 fn scan(schema: &Value, top: bool) -> Result<(), String> {
@@ -331,6 +362,9 @@ fn scan(schema: &Value, top: bool) -> Result<(), String> {
             return Err(format!(
                 "`$ref` to `{target}` is not supported; use `#`, `#/$defs/<name>` or `#/definitions/<name>`"
             ));
+        }
+        if keyword == "x-ui" {
+            check_ui_hints(inner)?;
         }
         if SCHEMA_MAPS.contains(&keyword) {
             if let Value::Object(named) = inner {
@@ -1241,13 +1275,72 @@ mod tests {
             // Names the way schemars writes them when they hold `/`, `~`, spaces or non-ASCII.
             json!({ "properties": { "a": { "$ref": "#/$defs/A~1B" }, "b": { "$ref": "#/$defs/%C3%BC%20x" } } }),
             // What nobody here knows is an annotation, whatever it holds.
-            json!({ "x-ui": { "$ref": "https://example.invalid/help", "$anchor": "a" } }),
+            json!({ "x-note": { "$ref": "https://example.invalid/help", "$anchor": "a" } }),
             // A schema that names itself.
             json!({ "$id": "urn:example:config", "$schema": "https://json-schema.org/draft/2020-12/schema" }),
             // A property is not a keyword, whatever it is called.
             json!({ "properties": { "$anchor": { "type": "string" }, "$ref": { "type": "string" } } }),
         ] {
             check_supported(&schema).unwrap_or_else(|error| panic!("{schema}: {error}"));
+        }
+    }
+
+    /// Whether some object in `value` has `key` set to exactly `wanted`.
+    fn holds_member(value: &Value, key: &str, wanted: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                map.get(key) == Some(wanted)
+                    || map.values().any(|inner| holds_member(inner, key, wanted))
+            }
+            Value::Array(items) => items.iter().any(|inner| holds_member(inner, key, wanted)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn ui_hints_are_accepted_and_kept_in_the_published_schema() {
+        let hint = json!({ "widget": "role", "group": "Roles", "order": 3, "help": "Who may act" });
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "role": { "type": "integer", "x-ui": hint },
+                // Other annotations with the `x-` prefix are passed through as they are.
+                "note": { "type": "string", "x-note": { "anything": [1, 2] } }
+            }
+        });
+        check_supported(&schema).unwrap();
+        for widget in ["role", "channel", "duration", "textarea", "user"] {
+            check_supported(&json!({ "x-ui": { "widget": widget } })).unwrap();
+        }
+        check_supported(&json!({ "x-ui": { "order": 0 } })).unwrap();
+        check_supported(&json!({ "x-ui": { "order": 1000, "group": "g".repeat(40) } })).unwrap();
+
+        let registry = registry_with(schema);
+        let published = document_schema(&registry).unwrap();
+        assert!(holds_member(&published, "x-ui", &hint), "{published}");
+        assert!(
+            holds_member(&published, "x-note", &json!({ "anything": [1, 2] })),
+            "{published}"
+        );
+    }
+
+    #[test]
+    fn ui_hints_of_the_wrong_shape_are_refused() {
+        for hint in [
+            json!("role"),
+            json!({ "widget": "dropdown" }),
+            json!({ "widget": 1 }),
+            json!({ "color": "red" }),
+            json!({ "group": "g".repeat(41) }),
+            json!({ "help": "h".repeat(201) }),
+            json!({ "order": -1 }),
+            json!({ "order": 1001 }),
+            json!({ "order": 1.5 }),
+            json!({ "order": "1" }),
+        ] {
+            let schema = json!({ "properties": { "a": { "x-ui": hint } } });
+            let error = check_supported(&schema).expect_err(&schema.to_string());
+            assert!(error.contains("x-ui"), "{error}");
         }
     }
 

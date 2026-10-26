@@ -1,0 +1,134 @@
+=== Cargo.toml ===
+[package]
+name = "closure-mod-example"
+description = "The example module for closure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+closure-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+closure-i18n.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+=== src/lib.rs ===
+//! The `example` module: one command, one permission and one setting, built with the SDK.
+//!
+//! The SDK reads the manifest, checks the permission before the handler runs and answers in the
+//! invoker's language; the handler only says what the command does. See `docs/writing-modules.md`.
+
+use closure_sdk::{Args, Command, CoreError, Level, Locale, ModuleBuilder, PermissionSpec, SdkModule};
+use serde::Deserialize;
+use serde_json::json;
+
+const EN: &str = include_str!("../locales/en.ftl");
+const JA: &str = include_str!("../locales/ja.ftl");
+
+/// The module's section of a server's configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Config {
+    /// The word the greeting starts with.
+    pub greeting: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            greeting: "Hello".to_owned(),
+        }
+    }
+}
+
+/// The module before it is built, so that tests can run it on the SDK's pretend Discord.
+pub fn builder() -> Result<ModuleBuilder, CoreError> {
+    Ok(
+        ModuleBuilder::new("example", "Example", env!("CARGO_PKG_VERSION"))?
+            .description("Greets the invoker.")
+            .permission(PermissionSpec::new("example.use", Level::GENERAL, "Use the example command")?)
+            .config(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "greeting": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 40,
+                            "description": "The word the greeting starts with."
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+                json!({ "greeting": "Hello" }),
+            )
+            .command(
+                Command::<()>::new("example", "Say hello")
+                    .requires("example.use")
+                    .handler(|cx, ()| async move {
+                        let config: Config = cx.config()?;
+                        let args = Args::new()
+                            .with("greeting", config.greeting)
+                            .with("name", cx.user().name.clone());
+                        cx.reply_t("hello", &args).await
+                    }),
+            )
+            .catalog(Locale::En, EN)
+            .catalog(Locale::Ja, JA)
+            .enabled_by_default(),
+    )
+}
+
+pub fn module() -> Result<SdkModule, CoreError> {
+    builder()?.build()
+}
+=== locales/en.ftl ===
+command-example = example
+    .description = Say hello
+hello = { $greeting }, { $name }!
+=== locales/ja.ftl ===
+command-example = example
+    .description = 挨拶します
+hello = { $greeting }、{ $name }さん！
+=== tests/example.rs ===
+//! The `example` module, run against the SDK's pretend Discord.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use closure_i18n::missing_keys;
+use closure_sdk::Locale;
+use closure_sdk::testing::{Harness, Invocation};
+use closure_mod_example::builder;
+
+const EN: &str = include_str!("../locales/en.ftl");
+const JA: &str = include_str!("../locales/ja.ftl");
+
+#[tokio::test]
+async fn the_command_greets_in_the_invokers_language() {
+    let harness = Harness::new(builder().unwrap()).unwrap();
+
+    let english = harness
+        .invoke(Invocation::new("example").locale(Locale::En))
+        .await
+        .unwrap();
+    assert!(english[0].content.starts_with("Hello, "), "{english:?}");
+
+    let japanese = harness
+        .invoke(Invocation::new("example").locale(Locale::Ja))
+        .await
+        .unwrap();
+    assert!(japanese[0].content.ends_with("さん！"), "{japanese:?}");
+}
+
+#[test]
+fn both_catalogs_define_the_same_messages() {
+    assert_eq!(missing_keys(EN, JA).unwrap(), Vec::<String>::new());
+    assert_eq!(missing_keys(JA, EN).unwrap(), Vec::<String>::new());
+}

@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use closure_core::action::{
-    Action, InteractionReply, InteractionResponse, MentionPolicy, Outcome, Reason,
+    Action, ChannelPosition, Emoji, EventLocation, GuildPatch, InteractionReply,
+    InteractionResponse, MentionPolicy, MessageCursor, NewScheduledEvent, Outcome, Reason,
+    ScheduledEventPatch, ScheduledEventStatus, ThreadKind, ThreadPatch, WebhookToken,
 };
 use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
@@ -14,6 +16,7 @@ use closure_core::event::InteractionToken;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use twilight_http::Client;
+use twilight_model::guild::{RolePosition, VerificationLevel};
 use twilight_model::id::Id;
 
 use super::{RetryPolicy, TwilightApi};
@@ -915,4 +918,872 @@ mod direct_messages {
             ["POST /users/@me/channels", "POST /channels/300/messages"]
         );
     }
+}
+
+/// A message as Discord sends it, for the message-reading and crosspost answers.
+const MESSAGE_JSON: &str = r#"{"id":"5","channel_id":"1","content":"hi","author":{"id":"1","username":"closure","discriminator":"0","avatar":null,"bot":true},"attachments":[],"embeds":[],"mention_everyone":false,"mention_roles":[],"mentions":[],"pinned":false,"timestamp":"2026-10-24T00:00:00.000000+00:00","edited_timestamp":null,"tts":false,"type":0}"#;
+
+/// Method and path of each request, without the API version prefix.
+fn method_paths(discord: &FakeDiscord) -> Vec<String> {
+    discord
+        .requests()
+        .into_iter()
+        .map(|request| {
+            let path = request
+                .path
+                .split_once("/api/v10")
+                .map_or(request.path.as_str(), |(_, rest)| rest);
+            format!("{} {path}", request.method)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn messages_are_read_one_by_one_and_as_history_from_a_cursor() {
+    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (200, "[]")]).await;
+    let api = discord.api();
+    let one = api
+        .execute(Action::GetMessage {
+            channel_id: Id::new(1),
+            message_id: Id::new(5),
+        })
+        .await;
+    assert!(matches!(one, Ok(Outcome::Message(_))), "{one:?}");
+    let history = api
+        .execute(Action::GetMessages {
+            channel_id: Id::new(1),
+            cursor: Some(MessageCursor::Before(Id::new(9))),
+            limit: 50,
+        })
+        .await;
+    assert_eq!(history, Ok(Outcome::Messages(vec![])));
+
+    let paths = method_paths(&discord);
+    assert_eq!(paths[0], "GET /channels/1/messages/5");
+    assert!(
+        paths[1].starts_with("GET /channels/1/messages?"),
+        "{paths:?}"
+    );
+    assert!(paths[1].contains("before=9"), "{paths:?}");
+    assert!(paths[1].contains("limit=50"), "{paths:?}");
+}
+
+#[tokio::test]
+async fn the_history_cursor_is_sent_as_after_or_around_when_asked() {
+    let discord = FakeDiscord::start(vec![(200, "[]")]).await;
+    let api = discord.api();
+    for cursor in [
+        MessageCursor::After(Id::new(7)),
+        MessageCursor::Around(Id::new(8)),
+    ] {
+        let action = Action::GetMessages {
+            channel_id: Id::new(1),
+            cursor: Some(cursor),
+            limit: 100,
+        };
+        assert_eq!(api.execute(action).await, Ok(Outcome::Messages(vec![])));
+    }
+    let paths = method_paths(&discord);
+    assert!(paths[0].contains("after=7"), "{paths:?}");
+    assert!(paths[1].contains("around=8"), "{paths:?}");
+}
+
+#[tokio::test]
+async fn pins_are_read_as_their_messages() {
+    let pins = format!(
+        r#"{{"items":[{{"pinned_at":"2026-10-24T00:00:00.000000+00:00","message":{MESSAGE_JSON}}}],"has_more":false}}"#
+    );
+    let discord = FakeDiscord::start(vec![(200, Box::leak(pins.into_boxed_str()))]).await;
+    let outcome = discord
+        .api()
+        .execute(Action::GetPins {
+            channel_id: Id::new(1),
+        })
+        .await;
+    let Ok(Outcome::Messages(messages)) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id.get(), 5);
+    assert_eq!(method_paths(&discord), ["GET /channels/1/messages/pins"]);
+}
+
+#[tokio::test]
+async fn pins_and_crossposts_are_sent_with_their_reason() {
+    let discord = FakeDiscord::start(vec![(204, ""), (204, ""), (200, MESSAGE_JSON)]).await;
+    let api = discord.api();
+    let pin = Action::PinMessage {
+        channel_id: Id::new(1),
+        message_id: Id::new(5),
+        reason: reason("keep"),
+    };
+    assert_eq!(api.execute(pin).await, Ok(Outcome::None));
+    let unpin = Action::UnpinMessage {
+        channel_id: Id::new(1),
+        message_id: Id::new(5),
+        reason: reason("stale"),
+    };
+    assert_eq!(api.execute(unpin).await, Ok(Outcome::None));
+    let crosspost = Action::CrosspostMessage {
+        channel_id: Id::new(1),
+        message_id: Id::new(5),
+    };
+    assert!(matches!(
+        api.execute(crosspost).await,
+        Ok(Outcome::Message(_))
+    ));
+
+    assert_eq!(
+        method_paths(&discord),
+        [
+            "PUT /channels/1/messages/pins/5",
+            "DELETE /channels/1/messages/pins/5",
+            "POST /channels/1/messages/5/crosspost",
+        ]
+    );
+    let requests = discord.requests();
+    assert_eq!(requests[0].headers["x-audit-log-reason"], "keep");
+    assert_eq!(requests[1].headers["x-audit-log-reason"], "stale");
+}
+
+#[tokio::test]
+async fn reactions_are_removed_per_user_or_all_and_their_users_are_listed() {
+    let discord = FakeDiscord::start(vec![(204, ""), (204, ""), (204, ""), (200, "[]")]).await;
+    let api = discord.api();
+    let thumbs = || Emoji::Unicode {
+        value: "👍".into()
+    };
+    let (channel_id, message_id) = (Id::new(1), Id::new(5));
+
+    let one = Action::RemoveReaction {
+        channel_id,
+        message_id,
+        emoji: thumbs(),
+        user_id: Id::new(20),
+    };
+    assert_eq!(api.execute(one).await, Ok(Outcome::None));
+    let all = Action::RemoveAllReactions {
+        channel_id,
+        message_id,
+        emoji: None,
+    };
+    assert_eq!(api.execute(all).await, Ok(Outcome::None));
+    let one_emoji = Action::RemoveAllReactions {
+        channel_id,
+        message_id,
+        emoji: Some(thumbs()),
+    };
+    assert_eq!(api.execute(one_emoji).await, Ok(Outcome::None));
+    let users = Action::GetReactionUsers {
+        channel_id,
+        message_id,
+        emoji: thumbs(),
+        after: Some(Id::new(19)),
+        limit: 10,
+    };
+    assert_eq!(api.execute(users).await, Ok(Outcome::Users(vec![])));
+
+    let paths = method_paths(&discord);
+    assert!(
+        paths[0].starts_with("DELETE /channels/1/messages/5/reactions/"),
+        "{paths:?}"
+    );
+    assert!(paths[0].ends_with("/20"), "{paths:?}");
+    assert_eq!(paths[1], "DELETE /channels/1/messages/5/reactions");
+    assert!(
+        paths[2].starts_with("DELETE /channels/1/messages/5/reactions/"),
+        "{paths:?}"
+    );
+    assert!(
+        paths[3].contains("after=19") && paths[3].contains("limit=10"),
+        "{paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn voice_deafen_and_moves_are_patched_with_their_reason() {
+    let discord = FakeDiscord::start(vec![(200, "{}")]).await;
+    let api = discord.api();
+    let deafen = Action::SetVoiceDeafen {
+        guild_id: Id::new(10),
+        user_id: Id::new(20),
+        deaf: true,
+        reason: reason("loud"),
+    };
+    assert_eq!(api.execute(deafen).await.map(drop), Ok(()));
+    let mv = Action::MoveMember {
+        guild_id: Id::new(10),
+        user_id: Id::new(20),
+        channel_id: Id::new(30),
+        reason: reason("calm"),
+    };
+    assert_eq!(api.execute(mv).await.map(drop), Ok(()));
+    let disconnect = Action::DisconnectMember {
+        guild_id: Id::new(10),
+        user_id: Id::new(20),
+        reason: reason("out"),
+    };
+    assert_eq!(api.execute(disconnect).await.map(drop), Ok(()));
+
+    assert_eq!(
+        method_paths(&discord),
+        [
+            "PATCH /guilds/10/members/20",
+            "PATCH /guilds/10/members/20",
+            "PATCH /guilds/10/members/20",
+        ]
+    );
+    let requests = discord.requests();
+    assert!(
+        requests[0].body.contains("\"deaf\":true"),
+        "{}",
+        requests[0].body
+    );
+    assert_eq!(requests[0].headers["x-audit-log-reason"], "loud");
+    assert!(
+        requests[1].body.contains("\"channel_id\":\"30\""),
+        "{}",
+        requests[1].body
+    );
+    assert!(
+        requests[2].body.contains("\"channel_id\":null"),
+        "{}",
+        requests[2].body
+    );
+}
+
+#[tokio::test]
+async fn a_member_outside_voice_is_reported_when_moved() {
+    const NOT_IN_VOICE: &str =
+        r#"{"message":"Target user is not connected to voice","code":40032}"#;
+    let discord = FakeDiscord::start(vec![(400, NOT_IN_VOICE)]).await;
+    let result = discord
+        .api()
+        .execute(Action::MoveMember {
+            guild_id: Id::new(10),
+            user_id: Id::new(20),
+            channel_id: Id::new(30),
+            reason: reason("calm"),
+        })
+        .await;
+    assert_eq!(result, Err(DiscordError::NotInVoice));
+}
+
+/// An invite as Discord sends it back, with the guild it belongs to.
+const INVITE_JSON: &str = r#"{"code":"abc123","type":0,"channel":{"id":"1","name":"general","type":0},"guild":{"id":"10","name":"g","features":[],"icon":null,"banner":null,"description":null,"splash":null,"verification_level":0,"vanity_url_code":null,"nsfw_level":0},"uses":0,"max_uses":5,"max_age":3600,"temporary":false}"#;
+
+#[tokio::test]
+async fn invites_are_created_and_listed_and_deleted_after_their_guild_is_checked() {
+    let discord = FakeDiscord::start(vec![
+        (200, INVITE_JSON),
+        (200, "[]"),
+        (200, INVITE_JSON),
+        (204, ""),
+    ])
+    .await;
+    let api = discord.api();
+    let create = Action::CreateInvite {
+        channel_id: Id::new(1),
+        max_age_seconds: 3600,
+        max_uses: 5,
+        temporary: false,
+        unique: true,
+        reason: reason("promo"),
+    };
+    assert!(matches!(api.execute(create).await, Ok(Outcome::Invite(_))));
+    let list = Action::ListInvites {
+        guild_id: Id::new(10),
+    };
+    assert_eq!(api.execute(list).await, Ok(Outcome::Invites(vec![])));
+    let delete = Action::DeleteInvite {
+        guild_id: Id::new(10),
+        code: "abc123".into(),
+        reason: reason("stale"),
+    };
+    assert_eq!(api.execute(delete).await, Ok(Outcome::None));
+
+    assert_eq!(
+        method_paths(&discord),
+        [
+            "POST /channels/1/invites",
+            "GET /guilds/10/invites",
+            "GET /invites/abc123",
+            "DELETE /invites/abc123",
+        ]
+    );
+    let requests = discord.requests();
+    assert!(
+        requests[0].body.contains("\"max_age\":3600"),
+        "{}",
+        requests[0].body
+    );
+    assert!(
+        requests[0].body.contains("\"max_uses\":5"),
+        "{}",
+        requests[0].body
+    );
+    assert_eq!(requests[0].headers["x-audit-log-reason"], "promo");
+    assert_eq!(requests[3].headers["x-audit-log-reason"], "stale");
+}
+
+#[tokio::test]
+async fn an_invite_of_another_guild_is_never_deleted() {
+    let discord = FakeDiscord::start(vec![(200, INVITE_JSON)]).await;
+    let delete = Action::DeleteInvite {
+        guild_id: Id::new(99),
+        code: "abc123".into(),
+        reason: reason("x"),
+    };
+    let result = discord.api().execute(delete).await;
+    assert!(
+        matches!(result, Err(DiscordError::Forbidden(_))),
+        "{result:?}"
+    );
+    assert_eq!(method_paths(&discord), ["GET /invites/abc123"]);
+}
+
+/// A webhook as Discord sends it back. Its token is what a post authorises.
+const WEBHOOK_JSON: &str = r#"{"id":"8","type":1,"guild_id":"10","channel_id":"1","name":"bridge","token":"tok-secret","avatar":null}"#;
+
+#[tokio::test]
+async fn webhooks_are_created_listed_and_deleted_after_their_guild_is_checked() {
+    let discord = FakeDiscord::start(vec![
+        (200, WEBHOOK_JSON),
+        (200, concat!("[", r#"{"id":"8","type":1,"guild_id":"10","channel_id":"1","name":"bridge","token":"tok-secret","avatar":null}"#, "]")),
+        (200, WEBHOOK_JSON),
+        (204, ""),
+    ])
+    .await;
+    let api = discord.api();
+    let create = Action::CreateWebhook {
+        channel_id: Id::new(1),
+        name: "bridge".into(),
+        reason: reason("relay"),
+    };
+    assert!(matches!(api.execute(create).await, Ok(Outcome::Webhook(_))));
+    let list = Action::ListWebhooks {
+        channel_id: Id::new(1),
+    };
+    assert!(matches!(api.execute(list).await, Ok(Outcome::Webhooks(hooks)) if hooks.len() == 1));
+    let delete = Action::DeleteWebhook {
+        guild_id: Id::new(10),
+        webhook_id: Id::new(8),
+        reason: reason("done"),
+    };
+    assert_eq!(api.execute(delete).await, Ok(Outcome::None));
+
+    assert_eq!(
+        method_paths(&discord),
+        [
+            "POST /channels/1/webhooks",
+            "GET /channels/1/webhooks",
+            "GET /webhooks/8",
+            "DELETE /webhooks/8",
+        ]
+    );
+    let requests = discord.requests();
+    assert!(
+        requests[0].body.contains("\"name\":\"bridge\""),
+        "{}",
+        requests[0].body
+    );
+    assert_eq!(requests[0].headers["x-audit-log-reason"], "relay");
+    assert_eq!(requests[3].headers["x-audit-log-reason"], "done");
+}
+
+#[tokio::test]
+async fn a_webhook_of_another_guild_is_neither_deleted_nor_posted_through() {
+    let discord = FakeDiscord::start(vec![(200, WEBHOOK_JSON), (200, WEBHOOK_JSON)]).await;
+    let api = discord.api();
+    let delete = Action::DeleteWebhook {
+        guild_id: Id::new(99),
+        webhook_id: Id::new(8),
+        reason: reason("x"),
+    };
+    assert!(matches!(
+        api.execute(delete).await,
+        Err(DiscordError::Forbidden(_))
+    ));
+    let post = Action::ExecuteWebhook {
+        guild_id: Id::new(99),
+        webhook_id: Id::new(8),
+        token: WebhookToken::new("tok-secret"),
+        content: Some("hi".into()),
+        embeds: vec![],
+        username: None,
+        avatar_url: None,
+        mentions: MentionPolicy::None,
+    };
+    assert!(matches!(
+        api.execute(post).await,
+        Err(DiscordError::Forbidden(_))
+    ));
+    assert_eq!(
+        method_paths(&discord),
+        ["GET /webhooks/8", "GET /webhooks/8/tok-secret"]
+    );
+}
+
+#[tokio::test]
+async fn a_webhook_post_is_checked_then_sent_and_its_reply_is_the_message() {
+    let discord = FakeDiscord::start(vec![(200, WEBHOOK_JSON), (200, MESSAGE_JSON)]).await;
+    let post = Action::ExecuteWebhook {
+        guild_id: Id::new(10),
+        webhook_id: Id::new(8),
+        token: WebhookToken::new("tok-secret"),
+        content: Some("hi".into()),
+        embeds: vec![],
+        username: Some("relay".into()),
+        avatar_url: None,
+        mentions: MentionPolicy::None,
+    };
+    assert!(matches!(
+        discord.api().execute(post).await,
+        Ok(Outcome::Message(_))
+    ));
+    let paths = method_paths(&discord);
+    assert_eq!(paths[0], "GET /webhooks/8/tok-secret");
+    assert!(
+        paths[1].starts_with("POST /webhooks/8/tok-secret?"),
+        "{paths:?}"
+    );
+    let requests = discord.requests();
+    assert!(
+        requests[1].path.contains("wait=true"),
+        "{}",
+        requests[1].path
+    );
+    assert!(
+        requests[1].body.contains("\"username\":\"relay\""),
+        "{}",
+        requests[1].body
+    );
+    assert!(
+        requests[1].body.contains("\"content\":\"hi\""),
+        "{}",
+        requests[1].body
+    );
+}
+
+/// A guild as Discord sends it back; the same shape the cache tests use.
+const GUILD_JSON: &str = r#"{"id":"10","name":"renamed","owner_id":"999999999","roles":[],"emojis":[],"features":[],"stickers":[],"afk_timeout":300,"default_message_notifications":0,"explicit_content_filter":0,"mfa_level":0,"nsfw_level":0,"premium_tier":0,"system_channel_flags":0,"verification_level":0,"preferred_locale":"en-US","premium_progress_bar_enabled":false,"max_members":null,"max_presences":null,"member_count":null,"splash":null,"banner":null,"icon":null,"description":null}"#;
+
+const MEMBER_JSON: &str = r#"{"communication_disabled_until":null,"deaf":false,"flags":0,"joined_at":"2026-01-01T00:00:00.000000+00:00","mute":false,"nick":null,"roles":[],"user":{"id":"20","username":"u","discriminator":"0","avatar":null}}"#;
+
+const DM_CHANNEL_JSON: &str = r#"{"id":"300","type":1,"recipients":[{"id":"20","username":"u","discriminator":"0","avatar":null}]}"#;
+
+#[tokio::test]
+async fn members_are_searched_and_listed_by_query_and_page() {
+    let discord = FakeDiscord::start(vec![(200, "[]"), (200, "[]")]).await;
+    let api = discord.api();
+    let search = Action::SearchMembers {
+        guild_id: Id::new(10),
+        query: "ana".into(),
+        limit: 5,
+    };
+    assert_eq!(api.execute(search).await, Ok(Outcome::Members(vec![])));
+    let list = Action::ListMembers {
+        guild_id: Id::new(10),
+        after: Some(Id::new(3)),
+        limit: 50,
+    };
+    assert_eq!(api.execute(list).await, Ok(Outcome::Members(vec![])));
+
+    let paths = method_paths(&discord);
+    assert!(
+        paths[0].starts_with("GET /guilds/10/members/search?"),
+        "{paths:?}"
+    );
+    assert!(
+        paths[0].contains("query=ana") && paths[0].contains("limit=5"),
+        "{paths:?}"
+    );
+    assert!(paths[1].starts_with("GET /guilds/10/members?"), "{paths:?}");
+    assert!(
+        paths[1].contains("after=3") && paths[1].contains("limit=50"),
+        "{paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_prune_is_counted_then_carried_out_with_its_reason() {
+    let discord =
+        FakeDiscord::start(vec![(200, r#"{"pruned":4}"#), (200, r#"{"pruned":4}"#)]).await;
+    let api = discord.api();
+    let count = Action::PruneCount {
+        guild_id: Id::new(10),
+        days: 7,
+        include_roles: vec![Id::new(5)],
+    };
+    assert_eq!(api.execute(count).await, Ok(Outcome::Count(4)));
+    let prune = Action::Prune {
+        guild_id: Id::new(10),
+        days: 7,
+        include_roles: vec![],
+        reason: reason("inactive"),
+    };
+    assert_eq!(api.execute(prune).await, Ok(Outcome::Count(4)));
+
+    let paths = method_paths(&discord);
+    assert!(paths[0].starts_with("GET /guilds/10/prune?"), "{paths:?}");
+    assert!(
+        paths[0].contains("days=7") && paths[0].contains("include_roles=5"),
+        "{paths:?}"
+    );
+    // Discord takes the days and the count flag in the query string, not the body.
+    assert!(paths[1].starts_with("POST /guilds/10/prune?"), "{paths:?}");
+    assert!(
+        paths[1].contains("days=7") && paths[1].contains("compute_prune_count=true"),
+        "{paths:?}"
+    );
+    let requests = discord.requests();
+    assert_eq!(requests[1].headers["x-audit-log-reason"], "inactive");
+}
+
+#[tokio::test]
+async fn the_guild_roles_and_channel_order_are_changed_as_sent() {
+    let discord = FakeDiscord::start(vec![(200, GUILD_JSON), (200, "[]"), (204, "")]).await;
+    let api = discord.api();
+    let edit = Action::EditGuild {
+        guild_id: Id::new(10),
+        patch: GuildPatch {
+            name: Some("renamed".into()),
+            verification_level: Some(VerificationLevel::High),
+        },
+        reason: reason("raid"),
+    };
+    assert_eq!(api.execute(edit).await, Ok(Outcome::None));
+    let roles = Action::ReorderRoles {
+        guild_id: Id::new(10),
+        positions: vec![RolePosition {
+            id: Id::new(5),
+            position: 2,
+        }],
+    };
+    assert_eq!(api.execute(roles).await, Ok(Outcome::Roles(vec![])));
+    let channels = Action::ReorderChannels {
+        guild_id: Id::new(10),
+        positions: vec![ChannelPosition {
+            channel_id: Id::new(1),
+            position: 0,
+        }],
+    };
+    assert_eq!(api.execute(channels).await, Ok(Outcome::None));
+
+    assert_eq!(
+        method_paths(&discord),
+        [
+            "PATCH /guilds/10",
+            "PATCH /guilds/10/roles",
+            "PATCH /guilds/10/channels"
+        ]
+    );
+    let requests = discord.requests();
+    assert_eq!(requests[0].headers["x-audit-log-reason"], "raid");
+    assert!(
+        requests[0].body.contains("\"name\":\"renamed\""),
+        "{}",
+        requests[0].body
+    );
+    assert!(
+        requests[0].body.contains("\"verification_level\":3"),
+        "{}",
+        requests[0].body
+    );
+    assert!(
+        requests[1].body.contains("\"position\":2"),
+        "{}",
+        requests[1].body
+    );
+    assert!(
+        requests[2].body.contains("\"id\":\"1\""),
+        "{}",
+        requests[2].body
+    );
+}
+
+#[tokio::test]
+async fn a_direct_message_channel_is_opened_only_with_a_member_of_the_guild() {
+    let discord = FakeDiscord::start(vec![(200, MEMBER_JSON), (200, DM_CHANNEL_JSON)]).await;
+    let action = Action::CreateDirectMessageChannel {
+        guild_id: Id::new(10),
+        user_id: Id::new(20),
+    };
+    assert!(matches!(
+        discord.api().execute(action).await,
+        Ok(Outcome::Channel(_))
+    ));
+    assert_eq!(
+        method_paths(&discord),
+        ["GET /guilds/10/members/20", "POST /users/@me/channels"]
+    );
+}
+
+/// A scheduled voice event as Discord sends it back.
+const EVENT_JSON: &str = r#"{"id":"9","guild_id":"10","channel_id":"3","creator_id":null,"name":"game","description":null,"scheduled_start_time":"2027-01-01T00:00:00+00:00","scheduled_end_time":null,"privacy_level":2,"status":1,"entity_type":2,"entity_id":null,"entity_metadata":null,"user_count":null,"image":null}"#;
+
+const EMOJI_JSON: &str = r#"{"id":"4","name":"party","roles":[],"require_colons":true,"managed":false,"animated":false,"available":true}"#;
+
+#[tokio::test]
+async fn scheduled_events_are_listed_created_edited_and_deleted_per_guild() {
+    let discord = FakeDiscord::start(vec![
+        (200, "[]"),
+        (200, EVENT_JSON),
+        (200, EVENT_JSON),
+        (204, ""),
+    ])
+    .await;
+    let api = discord.api();
+    let list = Action::ListScheduledEvents {
+        guild_id: Id::new(10),
+        with_user_count: true,
+    };
+    assert_eq!(
+        api.execute(list).await,
+        Ok(Outcome::ScheduledEvents(vec![]))
+    );
+    let create = Action::CreateScheduledEvent {
+        guild_id: Id::new(10),
+        spec: NewScheduledEvent {
+            name: "game".into(),
+            description: None,
+            start_unix: 1_800_000_000,
+            end_unix: None,
+            location: EventLocation::Voice {
+                channel_id: Id::new(3),
+            },
+        },
+    };
+    assert!(matches!(
+        api.execute(create).await,
+        Ok(Outcome::ScheduledEvent(_))
+    ));
+    let edit = Action::EditScheduledEvent {
+        guild_id: Id::new(10),
+        event_id: Id::new(9),
+        patch: ScheduledEventPatch {
+            name: None,
+            status: Some(ScheduledEventStatus::Canceled),
+        },
+    };
+    assert!(matches!(
+        api.execute(edit).await,
+        Ok(Outcome::ScheduledEvent(_))
+    ));
+    let delete = Action::DeleteScheduledEvent {
+        guild_id: Id::new(10),
+        event_id: Id::new(9),
+    };
+    assert_eq!(api.execute(delete).await, Ok(Outcome::None));
+
+    let paths = method_paths(&discord);
+    assert!(
+        paths[0].starts_with("GET /guilds/10/scheduled-events?"),
+        "{paths:?}"
+    );
+    assert!(paths[0].contains("with_user_count=true"), "{paths:?}");
+    assert_eq!(paths[1], "POST /guilds/10/scheduled-events");
+    assert_eq!(paths[2], "PATCH /guilds/10/scheduled-events/9");
+    assert_eq!(paths[3], "DELETE /guilds/10/scheduled-events/9");
+    let requests = discord.requests();
+    assert!(
+        requests[1].body.contains("\"entity_type\":2"),
+        "{}",
+        requests[1].body
+    );
+    assert!(
+        requests[1].body.contains("\"channel_id\":\"3\""),
+        "{}",
+        requests[1].body
+    );
+    assert!(
+        requests[2].body.contains("\"status\":4"),
+        "{}",
+        requests[2].body
+    );
+}
+
+#[tokio::test]
+async fn emoji_are_listed_created_with_their_reason_and_deleted() {
+    let discord = FakeDiscord::start(vec![(200, "[]"), (201, EMOJI_JSON), (204, "")]).await;
+    let api = discord.api();
+    let list = Action::ListEmojis {
+        guild_id: Id::new(10),
+    };
+    assert_eq!(api.execute(list).await, Ok(Outcome::Emojis(vec![])));
+    let create = Action::CreateEmoji {
+        guild_id: Id::new(10),
+        name: "party".into(),
+        image: "data:image/png;base64,iVBORw0KGgo=".into(),
+        reason: reason("theme"),
+    };
+    assert!(matches!(api.execute(create).await, Ok(Outcome::Emoji(_))));
+    let delete = Action::DeleteEmoji {
+        guild_id: Id::new(10),
+        emoji_id: Id::new(4),
+        reason: reason("unused"),
+    };
+    assert_eq!(api.execute(delete).await, Ok(Outcome::None));
+
+    assert_eq!(
+        method_paths(&discord),
+        [
+            "GET /guilds/10/emojis",
+            "POST /guilds/10/emojis",
+            "DELETE /guilds/10/emojis/4",
+        ]
+    );
+    let requests = discord.requests();
+    assert!(
+        requests[1].body.contains("\"name\":\"party\""),
+        "{}",
+        requests[1].body
+    );
+    assert_eq!(requests[1].headers["x-audit-log-reason"], "theme");
+    assert_eq!(requests[2].headers["x-audit-log-reason"], "unused");
+}
+
+/// A thread channel as Discord sends it back after it is created or edited.
+const THREAD_JSON: &str = r#"{"id":"40","type":11,"guild_id":"10","name":"help","parent_id":"1","owner_id":"1","last_message_id":null,"rate_limit_per_user":0,"thread_metadata":{"archived":false,"auto_archive_duration":1440,"archive_timestamp":"2026-10-24T00:00:00.000000+00:00","locked":false}}"#;
+
+#[tokio::test]
+async fn threads_are_started_from_a_message_or_on_their_own() {
+    let discord = FakeDiscord::start(vec![(201, THREAD_JSON), (201, THREAD_JSON)]).await;
+    let api = discord.api();
+    let from_message = Action::CreateThread {
+        channel_id: Id::new(1),
+        name: "help".into(),
+        source: Some(Id::new(5)),
+        kind: ThreadKind::Public,
+        auto_archive_minutes: 1440,
+    };
+    assert!(matches!(
+        api.execute(from_message).await,
+        Ok(Outcome::Channel(_))
+    ));
+    let standalone = Action::CreateThread {
+        channel_id: Id::new(1),
+        name: "help".into(),
+        source: None,
+        kind: ThreadKind::Private,
+        auto_archive_minutes: 10080,
+    };
+    assert!(matches!(
+        api.execute(standalone).await,
+        Ok(Outcome::Channel(_))
+    ));
+
+    assert_eq!(
+        method_paths(&discord),
+        [
+            "POST /channels/1/messages/5/threads",
+            "POST /channels/1/threads"
+        ]
+    );
+    let requests = discord.requests();
+    assert!(
+        requests[0].body.contains("\"auto_archive_duration\":1440"),
+        "{}",
+        requests[0].body
+    );
+    assert!(
+        requests[1].body.contains("\"type\":12"),
+        "{}",
+        requests[1].body
+    );
+    assert!(
+        requests[1].body.contains("\"auto_archive_duration\":10080"),
+        "{}",
+        requests[1].body
+    );
+}
+
+#[tokio::test]
+async fn a_thread_is_edited_with_its_reason_and_its_members_are_changed() {
+    let discord = FakeDiscord::start(vec![
+        (200, THREAD_JSON),
+        (204, ""),
+        (204, ""),
+        (204, ""),
+        (204, ""),
+        (200, "[]"),
+    ])
+    .await;
+    let api = discord.api();
+    let edit = Action::EditThread {
+        thread_id: Id::new(40),
+        patch: ThreadPatch {
+            name: Some("done".into()),
+            archived: Some(true),
+            locked: Some(true),
+            slowmode_seconds: Some(5),
+        },
+        reason: reason("solved"),
+    };
+    assert!(matches!(api.execute(edit).await, Ok(Outcome::Channel(_))));
+    assert_eq!(
+        api.execute(Action::JoinThread {
+            thread_id: Id::new(40)
+        })
+        .await,
+        Ok(Outcome::None)
+    );
+    assert_eq!(
+        api.execute(Action::LeaveThread {
+            thread_id: Id::new(40)
+        })
+        .await,
+        Ok(Outcome::None)
+    );
+    let add = Action::AddThreadMember {
+        thread_id: Id::new(40),
+        user_id: Id::new(20),
+    };
+    assert_eq!(api.execute(add).await, Ok(Outcome::None));
+    let remove = Action::RemoveThreadMember {
+        thread_id: Id::new(40),
+        user_id: Id::new(20),
+    };
+    assert_eq!(api.execute(remove).await, Ok(Outcome::None));
+    let members = Action::ListThreadMembers {
+        thread_id: Id::new(40),
+        after: Some(Id::new(19)),
+        limit: 25,
+    };
+    assert_eq!(
+        api.execute(members).await,
+        Ok(Outcome::ThreadMembers(vec![]))
+    );
+
+    let paths = method_paths(&discord);
+    assert_eq!(
+        paths[..5],
+        [
+            "PATCH /channels/40",
+            "PUT /channels/40/thread-members/@me",
+            "DELETE /channels/40/thread-members/@me",
+            "PUT /channels/40/thread-members/20",
+            "DELETE /channels/40/thread-members/20",
+        ]
+    );
+    assert!(
+        paths[5].starts_with("GET /channels/40/thread-members?"),
+        "{paths:?}"
+    );
+    assert!(
+        paths[5].contains("after=19") && paths[5].contains("limit=25"),
+        "{paths:?}"
+    );
+    let requests = discord.requests();
+    assert_eq!(requests[0].headers["x-audit-log-reason"], "solved");
+    assert!(
+        requests[0].body.contains("\"rate_limit_per_user\":5"),
+        "{}",
+        requests[0].body
+    );
+    assert!(
+        requests[0].body.contains("\"locked\":true"),
+        "{}",
+        requests[0].body
+    );
 }

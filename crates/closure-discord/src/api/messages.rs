@@ -1,15 +1,26 @@
-use closure_core::action::{Emoji, MentionPolicy, Outcome, Reason};
+use closure_core::action::{Emoji, MentionPolicy, MessageCursor, Outcome, Reason};
 use closure_core::error::DiscordError;
 use closure_core::event::{ChannelId, GuildId, MessageId, UserId};
 use twilight_http::request::AuditLogReason;
 use twilight_http::request::channel::reaction::RequestReactionType;
 use twilight_model::channel::message::{AllowedMentions, Embed};
 
-use super::{TwilightApi, read, run};
+use super::{TwilightApi, read, read_list, run};
+
+/// The form Discord takes for an emoji in a reaction path or body.
+fn request_emoji(emoji: &Emoji) -> RequestReactionType<'_> {
+    match emoji {
+        Emoji::Unicode { value } => RequestReactionType::Unicode { name: value },
+        Emoji::Custom { id, name } => RequestReactionType::Custom {
+            id: *id,
+            name: name.as_deref(),
+        },
+    }
+}
 
 /// Nobody is notified unless the caller explicitly lists them; `@everyone`, `@here` and
 /// arbitrary role mentions can never be produced by echoing user text.
-fn allowed_mentions(policy: &MentionPolicy) -> AllowedMentions {
+pub(super) fn allowed_mentions(policy: &MentionPolicy) -> AllowedMentions {
     match policy {
         MentionPolicy::None => AllowedMentions::default(),
         MentionPolicy::Users(users) => AllowedMentions {
@@ -63,13 +74,7 @@ impl TwilightApi {
         content: Option<&str>,
         embeds: &[Embed],
     ) -> Result<Outcome, DiscordError> {
-        let known = self
-            .cache
-            .as_ref()
-            .is_some_and(|cache| cache.member_roles(guild, user).is_some());
-        if !known {
-            self.get_member(guild, user).await?;
-        }
+        self.ensure_member(guild, user).await?;
         let channel = read(self.http.create_private_channel(user)).await?;
         let allowed = AllowedMentions::default();
         let mut request = self
@@ -143,14 +148,126 @@ impl TwilightApi {
         message: MessageId,
         emoji: &Emoji,
     ) -> Result<Outcome, DiscordError> {
-        let emoji = match emoji {
-            Emoji::Unicode { value } => RequestReactionType::Unicode { name: value },
-            Emoji::Custom { id, name } => RequestReactionType::Custom {
-                id: *id,
-                name: name.as_deref(),
-            },
-        };
-        run(self.http.create_reaction(channel, message, &emoji)).await
+        run(self
+            .http
+            .create_reaction(channel, message, &request_emoji(emoji)))
+        .await
+    }
+
+    pub(super) async fn get_message(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+    ) -> Result<Outcome, DiscordError> {
+        read(self.http.message(channel, message))
+            .await
+            .map(|message| Outcome::Message(Box::new(message)))
+    }
+
+    /// The newest messages when there is no cursor.
+    pub(super) async fn get_messages(
+        &self,
+        channel: ChannelId,
+        cursor: Option<MessageCursor>,
+        limit: u16,
+    ) -> Result<Outcome, DiscordError> {
+        let request = self.http.channel_messages(channel).limit(limit);
+        let messages = match cursor {
+            None => read_list(request).await,
+            Some(MessageCursor::Before(message)) => read_list(request.before(message)).await,
+            Some(MessageCursor::After(message)) => read_list(request.after(message)).await,
+            Some(MessageCursor::Around(message)) => read_list(request.around(message)).await,
+        }?;
+        Ok(Outcome::Messages(messages))
+    }
+
+    pub(super) async fn get_pins(&self, channel: ChannelId) -> Result<Outcome, DiscordError> {
+        let listing = read(self.http.pins(channel)).await?;
+        Ok(Outcome::Messages(
+            listing.items.into_iter().map(|pin| pin.message).collect(),
+        ))
+    }
+
+    pub(super) async fn pin_message(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+        reason: &Reason,
+    ) -> Result<Outcome, DiscordError> {
+        run(self
+            .http
+            .create_pin(channel, message)
+            .reason(reason.as_str()))
+        .await
+    }
+
+    pub(super) async fn unpin_message(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+        reason: &Reason,
+    ) -> Result<Outcome, DiscordError> {
+        run(self
+            .http
+            .delete_pin(channel, message)
+            .reason(reason.as_str()))
+        .await
+    }
+
+    pub(super) async fn crosspost_message(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+    ) -> Result<Outcome, DiscordError> {
+        read(self.http.crosspost_message(channel, message))
+            .await
+            .map(|message| Outcome::Message(Box::new(message)))
+    }
+
+    pub(super) async fn remove_reaction(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+        emoji: &Emoji,
+        user: UserId,
+    ) -> Result<Outcome, DiscordError> {
+        run(self
+            .http
+            .delete_reaction(channel, message, &request_emoji(emoji), user))
+        .await
+    }
+
+    pub(super) async fn remove_all_reactions(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+        emoji: Option<&Emoji>,
+    ) -> Result<Outcome, DiscordError> {
+        match emoji {
+            None => run(self.http.delete_all_reactions(channel, message)).await,
+            Some(emoji) => {
+                run(self
+                    .http
+                    .delete_all_reaction(channel, message, &request_emoji(emoji)))
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn get_reaction_users(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+        emoji: &Emoji,
+        after: Option<UserId>,
+        limit: u16,
+    ) -> Result<Outcome, DiscordError> {
+        let emoji = request_emoji(emoji);
+        let mut request = self.http.reactions(channel, message, &emoji).limit(limit);
+        if let Some(after) = after {
+            request = request.after(after);
+        }
+        read_list(request).await.map(Outcome::Users)
     }
 }
 

@@ -34,10 +34,21 @@ pub enum Capability {
     /// Message a member of the guild privately. Separate from `SendMessages`: a user may be
     /// messaged without any channel being shared.
     SendDirectMessages,
+    /// Read the history, pins and reaction users of a channel. Message content is private to
+    /// the channel, so this is granted separately from the moderation capabilities.
+    ReadMessages,
+    DeafenMembers,
+    MoveMembers,
+    ManageThreads,
+    ManageInvites,
+    ManageWebhooks,
+    ManageGuild,
+    ManageEvents,
+    ManageEmojis,
 }
 
 impl Capability {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 28] = [
         Self::SendMessages,
         Self::AddReactions,
         Self::ManageMessages,
@@ -57,6 +68,15 @@ impl Capability {
         Self::Schedule,
         Self::Cases,
         Self::SendDirectMessages,
+        Self::ReadMessages,
+        Self::DeafenMembers,
+        Self::MoveMembers,
+        Self::ManageThreads,
+        Self::ManageInvites,
+        Self::ManageWebhooks,
+        Self::ManageGuild,
+        Self::ManageEvents,
+        Self::ManageEmojis,
     ];
 
     #[must_use]
@@ -81,6 +101,15 @@ impl Capability {
             Self::Schedule => "schedule",
             Self::Cases => "cases",
             Self::SendDirectMessages => "send_direct_messages",
+            Self::ReadMessages => "read_messages",
+            Self::DeafenMembers => "deafen_members",
+            Self::MoveMembers => "move_members",
+            Self::ManageThreads => "manage_threads",
+            Self::ManageInvites => "manage_invites",
+            Self::ManageWebhooks => "manage_webhooks",
+            Self::ManageGuild => "manage_guild",
+            Self::ManageEvents => "manage_events",
+            Self::ManageEmojis => "manage_emojis",
         }
     }
 }

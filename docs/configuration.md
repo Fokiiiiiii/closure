@@ -116,6 +116,9 @@ capitalisation or with a region (`ja-JP`), a Discord id as a number or as digits
 capability listed twice, the text of a number or a boolean where one is wanted (`"2"`, `"yes"`),
 and a preset or capability written as a map holding `null` (`{ small: null }`).
 
+Keywords that start with `x-` are annotations: the bot passes them on unchanged. The `x-ui` hints
+for the dashboard's forms are the one checked by shape (see [writing a module](writing-modules.md#hints-for-the-dashboard-x-ui)).
+
 A module's schema may use `$defs`/`definitions` and `$ref` (as `schemars` writes them, with the
 escapes of a URI fragment and a JSON pointer, and also `#` for the root); each module's schema is
 its own reference scope, so two modules may define a type of the same name. A schema that names

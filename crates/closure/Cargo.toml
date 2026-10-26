@@ -19,6 +19,7 @@ closure-core.workspace = true
 closure-db.workspace = true
 closure-discord.workspace = true
 closure-i18n.workspace = true
+closure-mod-automod.workspace = true
 closure-mod-diagnostics.workspace = true
 closure-mod-moderation.workspace = true
 dotenvy.workspace = true

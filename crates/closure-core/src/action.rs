@@ -7,6 +7,7 @@
 //! plain data, scripted (Lua/WASM) modules use the exact same path as native ones.
 
 use std::collections::BTreeSet;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::Channel;
@@ -14,17 +15,27 @@ use twilight_model::channel::message::component::{
     Button, ButtonStyle, SelectMenu, SelectMenuType,
 };
 use twilight_model::channel::message::{Component, Embed, Message};
+use twilight_model::channel::thread::ThreadMember;
+use twilight_model::channel::webhook::Webhook;
 use twilight_model::guild::audit_log::AuditLog;
 use twilight_model::guild::auto_moderation::AutoModerationRule;
-use twilight_model::guild::{Ban, Guild, Member, Permissions, Role};
+use twilight_model::guild::invite::Invite;
+use twilight_model::guild::scheduled_event::GuildScheduledEvent;
+use twilight_model::guild::{
+    Ban, Emoji as GuildEmoji, Guild, Member, Permissions, Role, RolePosition, VerificationLevel,
+};
 use twilight_model::id::Id;
-use twilight_model::id::marker::{AutoModerationRuleMarker, EmojiMarker};
+use twilight_model::id::marker::{
+    AutoModerationRuleMarker, EmojiMarker, ScheduledEventMarker, WebhookMarker,
+};
+use twilight_model::user::User;
 
 use crate::capability::Capability;
 use crate::error::DiscordError;
 use crate::event::{
     ChannelId, GuildId, InteractionId, InteractionToken, MessageId, RoleId, UserId,
 };
+use crate::module::{ChoiceValue, OptionChoice};
 
 pub const MAX_MESSAGE_CHARS: usize = 2000;
 pub const MAX_EMBEDS: usize = 10;
@@ -224,6 +235,111 @@ pub struct AuditLogQuery {
     pub limit: Option<u16>,
 }
 
+/// The token of a webhook. Anyone holding it can post through the webhook, so it is redacted
+/// from `Debug` output and must never reach logs.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WebhookToken(String);
+
+impl WebhookToken {
+    #[must_use]
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for WebhookToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("WebhookToken(<redacted>)")
+    }
+}
+
+/// Whether a thread started on its own is open to everyone or only to the members added to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadKind {
+    Public,
+    Private,
+}
+
+/// Fields left as `None` are not changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadPatch {
+    pub name: Option<String>,
+    pub archived: Option<bool>,
+    pub locked: Option<bool>,
+    pub slowmode_seconds: Option<u16>,
+}
+
+pub const MAX_INVITE_AGE_SECONDS: u32 = 604_800;
+
+/// Fields left as `None` are not changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuildPatch {
+    pub name: Option<String>,
+    pub verification_level: Option<VerificationLevel>,
+}
+
+/// Where a scheduled event takes place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EventLocation {
+    /// A voice channel of the guild.
+    Voice { channel_id: ChannelId },
+    /// A place outside Discord, named in text.
+    External { place: String },
+}
+
+/// A scheduled event to create. Times are unix seconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewScheduledEvent {
+    pub name: String,
+    pub description: Option<String>,
+    pub start_unix: i64,
+    /// Required for an external event, optional for a voice one.
+    pub end_unix: Option<i64>,
+    pub location: EventLocation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledEventStatus {
+    Active,
+    Completed,
+    Canceled,
+}
+
+/// Fields left as `None` are not changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledEventPatch {
+    pub name: Option<String>,
+    pub status: Option<ScheduledEventStatus>,
+}
+
+/// A channel's place in the guild's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelPosition {
+    pub channel_id: ChannelId,
+    pub position: u64,
+}
+
+/// The archive times Discord offers: one hour, a day, three days and a week.
+const THREAD_ARCHIVE_MINUTES: [u16; 4] = [60, 1440, 4320, 10080];
+
+/// Where to start reading a channel's history, relative to one message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum MessageCursor {
+    Before(MessageId),
+    After(MessageId),
+    Around(MessageId),
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InteractionReply {
     pub content: Option<String>,
@@ -262,6 +378,10 @@ pub enum InteractionResponse {
     DeferUpdate,
     /// Answers with a form.
     Modal(ModalSpec),
+    /// Answers an autocomplete request with the choices (at most 25) the user may pick from.
+    Autocomplete {
+        choices: Vec<OptionChoice>,
+    },
 }
 
 /// Every Discord operation available to modules.
@@ -303,6 +423,230 @@ pub enum Action {
         channel_id: ChannelId,
         message_id: MessageId,
         emoji: Emoji,
+    },
+    GetMessage {
+        channel_id: ChannelId,
+        message_id: MessageId,
+    },
+    /// The newest messages when `cursor` is `None`; otherwise those around, before or after it.
+    GetMessages {
+        channel_id: ChannelId,
+        cursor: Option<MessageCursor>,
+        limit: u16,
+    },
+    /// The first page of the pins: Discord returns up to 50.
+    GetPins {
+        channel_id: ChannelId,
+    },
+    PinMessage {
+        channel_id: ChannelId,
+        message_id: MessageId,
+        reason: Reason,
+    },
+    UnpinMessage {
+        channel_id: ChannelId,
+        message_id: MessageId,
+        reason: Reason,
+    },
+    CrosspostMessage {
+        channel_id: ChannelId,
+        message_id: MessageId,
+    },
+    /// One user's reaction with `emoji`. Discord takes no audit log reason for this.
+    RemoveReaction {
+        channel_id: ChannelId,
+        message_id: MessageId,
+        emoji: Emoji,
+        user_id: UserId,
+    },
+    /// Every reaction on the message, or only those with `emoji`.
+    RemoveAllReactions {
+        channel_id: ChannelId,
+        message_id: MessageId,
+        emoji: Option<Emoji>,
+    },
+    GetReactionUsers {
+        channel_id: ChannelId,
+        message_id: MessageId,
+        emoji: Emoji,
+        after: Option<UserId>,
+        limit: u16,
+    },
+    /// Server-deafens or undeafens the member. Discord refuses it outside voice, as for mutes.
+    SetVoiceDeafen {
+        guild_id: GuildId,
+        user_id: UserId,
+        deaf: bool,
+        reason: Reason,
+    },
+    /// Moves a member who is in voice into `channel_id`, a voice or stage channel of the guild.
+    MoveMember {
+        guild_id: GuildId,
+        user_id: UserId,
+        channel_id: ChannelId,
+        reason: Reason,
+    },
+    /// Removes a member from voice altogether.
+    DisconnectMember {
+        guild_id: GuildId,
+        user_id: UserId,
+        reason: Reason,
+    },
+    /// A thread in `channel_id`, or one started from `source`, a message of that channel.
+    /// Discord takes no audit log reason for threads.
+    CreateThread {
+        channel_id: ChannelId,
+        name: String,
+        source: Option<MessageId>,
+        kind: ThreadKind,
+        auto_archive_minutes: u16,
+    },
+    EditThread {
+        thread_id: ChannelId,
+        patch: ThreadPatch,
+        reason: Reason,
+    },
+    /// Makes the bot a member of the thread.
+    JoinThread {
+        thread_id: ChannelId,
+    },
+    LeaveThread {
+        thread_id: ChannelId,
+    },
+    AddThreadMember {
+        thread_id: ChannelId,
+        user_id: UserId,
+    },
+    RemoveThreadMember {
+        thread_id: ChannelId,
+        user_id: UserId,
+    },
+    ListThreadMembers {
+        thread_id: ChannelId,
+        after: Option<UserId>,
+        limit: u16,
+    },
+    /// `max_age_seconds` of 0 never expires; `max_uses` of 0 has no limit.
+    CreateInvite {
+        channel_id: ChannelId,
+        max_age_seconds: u32,
+        max_uses: u16,
+        temporary: bool,
+        unique: bool,
+        reason: Reason,
+    },
+    ListScheduledEvents {
+        guild_id: GuildId,
+        with_user_count: bool,
+    },
+    /// Discord takes no audit log reason for scheduled events.
+    CreateScheduledEvent {
+        guild_id: GuildId,
+        spec: NewScheduledEvent,
+    },
+    EditScheduledEvent {
+        guild_id: GuildId,
+        event_id: Id<ScheduledEventMarker>,
+        patch: ScheduledEventPatch,
+    },
+    DeleteScheduledEvent {
+        guild_id: GuildId,
+        event_id: Id<ScheduledEventMarker>,
+    },
+    ListEmojis {
+        guild_id: GuildId,
+    },
+    /// `image` is a PNG, JPEG or GIF as a base64 `data:` URI of at most 256 KiB.
+    CreateEmoji {
+        guild_id: GuildId,
+        name: String,
+        image: String,
+        reason: Reason,
+    },
+    DeleteEmoji {
+        guild_id: GuildId,
+        emoji_id: Id<EmojiMarker>,
+        reason: Reason,
+    },
+    /// Members whose name or nickname starts with `query`, at most `limit` of them.
+    SearchMembers {
+        guild_id: GuildId,
+        query: String,
+        limit: u16,
+    },
+    ListMembers {
+        guild_id: GuildId,
+        after: Option<UserId>,
+        limit: u16,
+    },
+    /// How many members `days` of inactivity would remove. `include_roles` are members with
+    /// those roles, which are removed regardless of activity.
+    PruneCount {
+        guild_id: GuildId,
+        days: u16,
+        include_roles: Vec<RoleId>,
+    },
+    /// Removes the members that `PruneCount` would count, and answers with how many there were.
+    Prune {
+        guild_id: GuildId,
+        days: u16,
+        include_roles: Vec<RoleId>,
+        reason: Reason,
+    },
+    EditGuild {
+        guild_id: GuildId,
+        patch: GuildPatch,
+        reason: Reason,
+    },
+    /// Discord takes no audit log reason for reordering.
+    ReorderRoles {
+        guild_id: GuildId,
+        positions: Vec<RolePosition>,
+    },
+    ReorderChannels {
+        guild_id: GuildId,
+        positions: Vec<ChannelPosition>,
+    },
+    /// A direct message channel with a member of `guild_id`; the host checks the membership.
+    CreateDirectMessageChannel {
+        guild_id: GuildId,
+        user_id: UserId,
+    },
+    CreateWebhook {
+        channel_id: ChannelId,
+        name: String,
+        reason: Reason,
+    },
+    ListWebhooks {
+        channel_id: ChannelId,
+    },
+    /// The host first checks that the webhook belongs to `guild_id`, since Discord's endpoint
+    /// does not name a guild.
+    DeleteWebhook {
+        guild_id: GuildId,
+        webhook_id: Id<WebhookMarker>,
+        reason: Reason,
+    },
+    /// Posts through a webhook. The host first checks that the webhook belongs to `guild_id`.
+    ExecuteWebhook {
+        guild_id: GuildId,
+        webhook_id: Id<WebhookMarker>,
+        token: WebhookToken,
+        content: Option<String>,
+        embeds: Vec<Embed>,
+        username: Option<String>,
+        avatar_url: Option<String>,
+        mentions: MentionPolicy,
+    },
+    ListInvites {
+        guild_id: GuildId,
+    },
+    /// The host first checks that the invite belongs to `guild_id`, since Discord's endpoint
+    /// does not name a guild.
+    DeleteInvite {
+        guild_id: GuildId,
+        code: String,
+        reason: Reason,
     },
 
     GetGuild {
@@ -464,6 +808,20 @@ pub enum Outcome {
     AutoModRule(Box<AutoModerationRule>),
     AutoModRules(Vec<AutoModerationRule>),
     AuditLog(Box<AuditLog>),
+    Messages(Vec<Message>),
+    Users(Vec<User>),
+    ThreadMembers(Vec<ThreadMember>),
+    Invite(Box<Invite>),
+    Invites(Vec<Invite>),
+    Webhook(Box<Webhook>),
+    Webhooks(Vec<Webhook>),
+    Members(Vec<Member>),
+    /// A number of members, as a prune answers.
+    Count(u64),
+    ScheduledEvents(Vec<GuildScheduledEvent>),
+    ScheduledEvent(Box<GuildScheduledEvent>),
+    Emojis(Vec<GuildEmoji>),
+    Emoji(Box<GuildEmoji>),
 }
 
 fn ensure(condition: bool, message: impl FnOnce() -> String) -> Result<(), DiscordError> {
@@ -497,6 +855,20 @@ fn check_new_message(content: Option<&str>, embeds: &[Embed]) -> Result<(), Disc
         content.is_some_and(|c| !c.is_empty()) || !embeds.is_empty(),
         || "message needs content or at least one embed".into(),
     )
+}
+
+/// Discord takes at most 25 choices; names and string values are 1-100 characters.
+fn check_choices(choices: &[OptionChoice]) -> Result<(), DiscordError> {
+    ensure(choices.len() <= 25, || {
+        format!("at most 25 choices are allowed, got {}", choices.len())
+    })?;
+    for choice in choices {
+        check_len("choice name", &choice.name, 1, 100)?;
+        if let ChoiceValue::String(value) = &choice.value {
+            check_len("choice value", value, 1, 100)?;
+        }
+    }
+    Ok(())
 }
 
 fn check_reply(reply: &InteractionReply, require_body: bool) -> Result<(), DiscordError> {
@@ -662,13 +1034,189 @@ impl Action {
                     ids.extend(of(&spec.components));
                     ids
                 }
-                InteractionResponse::Defer { .. } | InteractionResponse::DeferUpdate => Vec::new(),
+                InteractionResponse::Defer { .. }
+                | InteractionResponse::DeferUpdate
+                | InteractionResponse::Autocomplete { .. } => Vec::new(),
             },
             Self::Followup { reply, .. } | Self::EditResponse { reply, .. } => {
                 of(&reply.components)
             }
             _ => Vec::new(),
         }
+    }
+}
+
+/// A unicode emoji is a short string; an empty one names nothing.
+fn check_emoji(emoji: &Emoji) -> Result<(), DiscordError> {
+    match emoji {
+        Emoji::Unicode { value } => check_len("emoji", value, 1, 64),
+        Emoji::Custom { .. } => Ok(()),
+    }
+}
+
+fn check_scheduled_event(spec: &NewScheduledEvent) -> Result<(), DiscordError> {
+    check_len("event name", &spec.name, 1, 100)?;
+    if let Some(description) = &spec.description {
+        check_len("event description", description, 0, 1000)?;
+    }
+    match &spec.location {
+        EventLocation::Voice { .. } => Ok(()),
+        EventLocation::External { place } => {
+            check_len("event place", place, 1, 100)?;
+            ensure(
+                spec.end_unix.is_some_and(|end| end > spec.start_unix),
+                || "an external event needs an end after its start".into(),
+            )
+        }
+    }
+}
+
+/// Discord takes a PNG, JPEG or GIF of at most 256 KiB, sent as a base64 data URI.
+fn check_emoji_image(image: &str) -> Result<(), DiscordError> {
+    const PREFIXES: [&str; 3] = [
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,",
+        "data:image/gif;base64,",
+    ];
+    const MAX_IMAGE_BYTES: usize = 256 * 1024;
+    let Some(payload) = PREFIXES
+        .iter()
+        .find_map(|prefix| image.strip_prefix(prefix))
+    else {
+        return Err(DiscordError::Invalid(
+            "an emoji image is a PNG, JPEG or GIF data URI".into(),
+        ));
+    };
+    // Four base64 characters carry three bytes, so this bounds the decoded size from above.
+    ensure(payload.len() / 4 * 3 <= MAX_IMAGE_BYTES, || {
+        "an emoji image is at most 256 KiB".into()
+    })
+}
+
+/// Limits and shapes of the message and thread actions, checked by [`Action::validate`].
+#[allow(clippy::too_many_lines)]
+fn check_new_limits(action: &Action) -> Result<(), DiscordError> {
+    match action {
+        Action::GetMessages { limit, .. } => ensure((1..=100).contains(limit), || {
+            "message history limit must be 1-100".into()
+        }),
+        Action::GetReactionUsers { emoji, limit, .. } => {
+            check_emoji(emoji)?;
+            ensure((1..=100).contains(limit), || {
+                "reaction user limit must be 1-100".into()
+            })
+        }
+        Action::RemoveReaction { emoji, .. } => check_emoji(emoji),
+        Action::RemoveAllReactions { emoji, .. } => emoji.as_ref().map_or(Ok(()), check_emoji),
+        Action::CreateThread {
+            name,
+            source,
+            kind,
+            auto_archive_minutes,
+            ..
+        } => {
+            check_len("thread name", name, 1, 100)?;
+            ensure(
+                THREAD_ARCHIVE_MINUTES.contains(auto_archive_minutes),
+                || format!("auto archive must be one of {THREAD_ARCHIVE_MINUTES:?} minutes"),
+            )?;
+            ensure(source.is_none() || *kind == ThreadKind::Public, || {
+                "a thread started from a message is public".into()
+            })
+        }
+        Action::EditThread { patch, .. } => {
+            if let Some(name) = &patch.name {
+                check_len("thread name", name, 1, 100)?;
+            }
+            ensure(
+                patch
+                    .slowmode_seconds
+                    .is_none_or(|s| s <= MAX_SLOWMODE_SECONDS),
+                || format!("slowmode is at most {MAX_SLOWMODE_SECONDS} seconds"),
+            )
+        }
+        Action::ListThreadMembers { limit, .. } => ensure((1..=100).contains(limit), || {
+            "thread member limit must be 1-100".into()
+        }),
+        Action::CreateInvite {
+            max_age_seconds,
+            max_uses,
+            ..
+        } => {
+            ensure(*max_age_seconds <= MAX_INVITE_AGE_SECONDS, || {
+                format!("an invite lasts at most {MAX_INVITE_AGE_SECONDS} seconds (7 days)")
+            })?;
+            ensure(*max_uses <= 100, || "an invite has at most 100 uses".into())
+        }
+        Action::CreateWebhook { name, .. } => check_len("webhook name", name, 1, 80),
+        Action::ExecuteWebhook {
+            content,
+            embeds,
+            username,
+            avatar_url,
+            ..
+        } => {
+            check_new_message(content.as_deref(), embeds)?;
+            if let Some(username) = username {
+                check_len("webhook username", username, 1, 80)?;
+            }
+            avatar_url.as_deref().map_or(Ok(()), |url| {
+                ensure(url.starts_with("https://"), || {
+                    "a webhook avatar is an https:// url".into()
+                })
+            })
+        }
+        Action::SearchMembers { query, limit, .. } => {
+            check_len("member search query", query, 1, 100)?;
+            ensure((1..=1000).contains(limit), || {
+                "member search limit must be 1-1000".into()
+            })
+        }
+        Action::ListMembers { limit, .. } => ensure((1..=1000).contains(limit), || {
+            "member list limit must be 1-1000".into()
+        }),
+        Action::PruneCount { days, .. } | Action::Prune { days, .. } => {
+            ensure((1..=30).contains(days), || "prune days must be 1-30".into())
+        }
+        Action::EditGuild { patch, .. } => patch
+            .name
+            .as_deref()
+            .map_or(Ok(()), |name| check_len("guild name", name, 2, 100)),
+        Action::ReorderRoles { positions, .. } => {
+            ensure(!positions.is_empty(), || "reorder needs positions".into())?;
+            let unique: BTreeSet<_> = positions.iter().map(|position| position.id).collect();
+            ensure(unique.len() == positions.len(), || {
+                "reorder roles must not repeat a role".into()
+            })
+        }
+        Action::ReorderChannels { positions, .. } => {
+            ensure(!positions.is_empty(), || "reorder needs positions".into())?;
+            let unique: BTreeSet<_> = positions.iter().map(|p| p.channel_id).collect();
+            ensure(unique.len() == positions.len(), || {
+                "reorder channels must not repeat a channel".into()
+            })
+        }
+        Action::CreateScheduledEvent { spec, .. } => check_scheduled_event(spec),
+        Action::EditScheduledEvent { patch, .. } => patch
+            .name
+            .as_deref()
+            .map_or(Ok(()), |name| check_len("event name", name, 1, 100)),
+        Action::CreateEmoji { name, image, .. } => {
+            ensure(
+                (2..=32).contains(&name.len())
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                || "an emoji name is 2-32 letters, digits or '_'".into(),
+            )?;
+            check_emoji_image(image)
+        }
+        Action::DeleteInvite { code, .. } => ensure(
+            (1..=64).contains(&code.len())
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            || "an invite code is 1-64 letters, digits, '-' or '_'".into(),
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -738,8 +1286,37 @@ impl Action {
     #[must_use]
     pub fn capability(&self) -> Capability {
         match self {
-            Self::SendMessage { .. } | Self::EditMessage { .. } => Capability::SendMessages,
-            Self::SendDirectMessage { .. } => Capability::SendDirectMessages,
+            Self::CreateInvite { .. } | Self::ListInvites { .. } | Self::DeleteInvite { .. } => {
+                Capability::ManageInvites
+            }
+            Self::EditGuild { .. } => Capability::ManageGuild,
+            Self::SetVoiceDeafen { .. } => Capability::DeafenMembers,
+            Self::MoveMember { .. } | Self::DisconnectMember { .. } => Capability::MoveMembers,
+            Self::CreateThread { .. }
+            | Self::EditThread { .. }
+            | Self::AddThreadMember { .. }
+            | Self::RemoveThreadMember { .. } => Capability::ManageThreads,
+            Self::GetMessage { .. }
+            | Self::GetMessages { .. }
+            | Self::GetPins { .. }
+            | Self::GetReactionUsers { .. }
+            | Self::ListThreadMembers { .. } => Capability::ReadMessages,
+            Self::PinMessage { .. }
+            | Self::UnpinMessage { .. }
+            | Self::CrosspostMessage { .. }
+            | Self::RemoveReaction { .. }
+            | Self::RemoveAllReactions { .. } => Capability::ManageMessages,
+            Self::SendMessage { .. }
+            | Self::EditMessage { .. }
+            | Self::JoinThread { .. }
+            | Self::LeaveThread { .. }
+            | Self::ExecuteWebhook { .. } => Capability::SendMessages,
+            Self::CreateWebhook { .. } | Self::ListWebhooks { .. } | Self::DeleteWebhook { .. } => {
+                Capability::ManageWebhooks
+            }
+            Self::SendDirectMessage { .. } | Self::CreateDirectMessageChannel { .. } => {
+                Capability::SendDirectMessages
+            }
             Self::AddReaction { .. } => Capability::AddReactions,
             Self::DeleteMessage { .. } | Self::BulkDeleteMessages { .. } => {
                 Capability::ManageMessages
@@ -748,9 +1325,19 @@ impl Action {
             | Self::GetMember { .. }
             | Self::GetChannel { .. }
             | Self::ListRoles { .. }
-            | Self::ListAutoModRules { .. } => Capability::ReadGuild,
+            | Self::ListAutoModRules { .. }
+            | Self::SearchMembers { .. }
+            | Self::ListMembers { .. }
+            | Self::ListScheduledEvents { .. }
+            | Self::ListEmojis { .. } => Capability::ReadGuild,
+            Self::CreateScheduledEvent { .. }
+            | Self::EditScheduledEvent { .. }
+            | Self::DeleteScheduledEvent { .. } => Capability::ManageEvents,
+            Self::CreateEmoji { .. } | Self::DeleteEmoji { .. } => Capability::ManageEmojis,
             Self::ListBans { .. } => Capability::ReadBans,
-            Self::Kick { .. } => Capability::KickMembers,
+            Self::Kick { .. } | Self::PruneCount { .. } | Self::Prune { .. } => {
+                Capability::KickMembers
+            }
             Self::Ban { .. } | Self::Unban { .. } => Capability::BanMembers,
             Self::Timeout { .. } => Capability::TimeoutMembers,
             Self::SetVoiceMute { .. } => Capability::MuteMembers,
@@ -759,12 +1346,14 @@ impl Action {
             | Self::RemoveRole { .. }
             | Self::CreateRole { .. }
             | Self::EditRole { .. }
-            | Self::DeleteRole { .. } => Capability::ManageRoles,
+            | Self::DeleteRole { .. }
+            | Self::ReorderRoles { .. } => Capability::ManageRoles,
             Self::CreateChannel { .. }
             | Self::EditChannel { .. }
             | Self::DeleteChannel { .. }
             | Self::SetPermissionOverwrite { .. }
-            | Self::DeletePermissionOverwrite { .. } => Capability::ManageChannels,
+            | Self::DeletePermissionOverwrite { .. }
+            | Self::ReorderChannels { .. } => Capability::ManageChannels,
             Self::CreateAutoModRule { .. } | Self::DeleteAutoModRule { .. } => {
                 Capability::ManageAutoMod
             }
@@ -802,7 +1391,29 @@ impl Action {
             | Self::CreateAutoModRule { guild_id, .. }
             | Self::DeleteAutoModRule { guild_id, .. }
             | Self::GetAuditLog { guild_id, .. }
-            | Self::SendDirectMessage { guild_id, .. } => Some(*guild_id),
+            | Self::SendDirectMessage { guild_id, .. }
+            | Self::ListInvites { guild_id }
+            | Self::ListScheduledEvents { guild_id, .. }
+            | Self::CreateScheduledEvent { guild_id, .. }
+            | Self::EditScheduledEvent { guild_id, .. }
+            | Self::DeleteScheduledEvent { guild_id, .. }
+            | Self::ListEmojis { guild_id }
+            | Self::CreateEmoji { guild_id, .. }
+            | Self::DeleteEmoji { guild_id, .. }
+            | Self::SearchMembers { guild_id, .. }
+            | Self::ListMembers { guild_id, .. }
+            | Self::PruneCount { guild_id, .. }
+            | Self::Prune { guild_id, .. }
+            | Self::EditGuild { guild_id, .. }
+            | Self::ReorderRoles { guild_id, .. }
+            | Self::ReorderChannels { guild_id, .. }
+            | Self::CreateDirectMessageChannel { guild_id, .. }
+            | Self::DeleteWebhook { guild_id, .. }
+            | Self::ExecuteWebhook { guild_id, .. }
+            | Self::DeleteInvite { guild_id, .. }
+            | Self::SetVoiceDeafen { guild_id, .. }
+            | Self::MoveMember { guild_id, .. }
+            | Self::DisconnectMember { guild_id, .. } => Some(*guild_id),
             Self::SendMessage { .. }
             | Self::EditMessage { .. }
             | Self::DeleteMessage { .. }
@@ -815,7 +1426,26 @@ impl Action {
             | Self::DeletePermissionOverwrite { .. }
             | Self::Respond { .. }
             | Self::Followup { .. }
-            | Self::EditResponse { .. } => None,
+            | Self::EditResponse { .. }
+            | Self::CreateInvite { .. }
+            | Self::CreateWebhook { .. }
+            | Self::ListWebhooks { .. }
+            | Self::GetMessage { .. }
+            | Self::GetMessages { .. }
+            | Self::GetPins { .. }
+            | Self::PinMessage { .. }
+            | Self::UnpinMessage { .. }
+            | Self::CrosspostMessage { .. }
+            | Self::RemoveReaction { .. }
+            | Self::RemoveAllReactions { .. }
+            | Self::GetReactionUsers { .. }
+            | Self::CreateThread { .. }
+            | Self::EditThread { .. }
+            | Self::JoinThread { .. }
+            | Self::LeaveThread { .. }
+            | Self::AddThreadMember { .. }
+            | Self::RemoveThreadMember { .. }
+            | Self::ListThreadMembers { .. } => None,
         }
     }
 
@@ -828,8 +1458,32 @@ impl Action {
     #[must_use]
     pub fn channels(&self) -> Vec<ChannelId> {
         match self {
+            Self::ReorderChannels { positions, .. } => positions
+                .iter()
+                .map(|position| position.channel_id)
+                .collect(),
+            Self::EditThread { thread_id, .. }
+            | Self::JoinThread { thread_id }
+            | Self::LeaveThread { thread_id }
+            | Self::AddThreadMember { thread_id, .. }
+            | Self::RemoveThreadMember { thread_id, .. }
+            | Self::ListThreadMembers { thread_id, .. } => vec![*thread_id],
             Self::SendMessage { channel_id, .. }
             | Self::EditMessage { channel_id, .. }
+            | Self::GetMessage { channel_id, .. }
+            | Self::GetMessages { channel_id, .. }
+            | Self::GetPins { channel_id }
+            | Self::PinMessage { channel_id, .. }
+            | Self::UnpinMessage { channel_id, .. }
+            | Self::CrosspostMessage { channel_id, .. }
+            | Self::RemoveReaction { channel_id, .. }
+            | Self::RemoveAllReactions { channel_id, .. }
+            | Self::GetReactionUsers { channel_id, .. }
+            | Self::CreateThread { channel_id, .. }
+            | Self::CreateInvite { channel_id, .. }
+            | Self::CreateWebhook { channel_id, .. }
+            | Self::ListWebhooks { channel_id }
+            | Self::MoveMember { channel_id, .. }
             | Self::DeleteMessage { channel_id, .. }
             | Self::BulkDeleteMessages { channel_id, .. }
             | Self::AddReaction { channel_id, .. }
@@ -871,7 +1525,27 @@ impl Action {
             | Self::SendDirectMessage { .. }
             | Self::Respond { .. }
             | Self::Followup { .. }
-            | Self::EditResponse { .. } => Vec::new(),
+            | Self::EditResponse { .. }
+            | Self::SetVoiceDeafen { .. }
+            | Self::DisconnectMember { .. }
+            | Self::ListInvites { .. }
+            | Self::DeleteInvite { .. }
+            | Self::DeleteWebhook { .. }
+            | Self::ExecuteWebhook { .. }
+            | Self::SearchMembers { .. }
+            | Self::ListMembers { .. }
+            | Self::PruneCount { .. }
+            | Self::Prune { .. }
+            | Self::EditGuild { .. }
+            | Self::ReorderRoles { .. }
+            | Self::CreateDirectMessageChannel { .. }
+            | Self::ListScheduledEvents { .. }
+            | Self::CreateScheduledEvent { .. }
+            | Self::EditScheduledEvent { .. }
+            | Self::DeleteScheduledEvent { .. }
+            | Self::ListEmojis { .. }
+            | Self::CreateEmoji { .. }
+            | Self::DeleteEmoji { .. } => Vec::new(),
         }
     }
 
@@ -914,7 +1588,48 @@ impl Action {
             | Self::CreateAutoModRule { .. }
             | Self::DeleteAutoModRule { .. }
             | Self::GetAuditLog { .. }
-            | Self::SendDirectMessage { .. } => None,
+            | Self::SendDirectMessage { .. }
+            | Self::SearchMembers { .. }
+            | Self::ListMembers { .. }
+            | Self::PruneCount { .. }
+            | Self::Prune { .. }
+            | Self::EditGuild { .. }
+            | Self::ReorderRoles { .. }
+            | Self::ReorderChannels { .. }
+            | Self::CreateDirectMessageChannel { .. }
+            | Self::ListScheduledEvents { .. }
+            | Self::CreateScheduledEvent { .. }
+            | Self::EditScheduledEvent { .. }
+            | Self::DeleteScheduledEvent { .. }
+            | Self::ListEmojis { .. }
+            | Self::CreateEmoji { .. }
+            | Self::DeleteEmoji { .. }
+            | Self::CreateWebhook { .. }
+            | Self::ListWebhooks { .. }
+            | Self::DeleteWebhook { .. }
+            | Self::ExecuteWebhook { .. }
+            | Self::CreateInvite { .. }
+            | Self::ListInvites { .. }
+            | Self::DeleteInvite { .. }
+            | Self::SetVoiceDeafen { .. }
+            | Self::MoveMember { .. }
+            | Self::DisconnectMember { .. }
+            | Self::GetMessage { .. }
+            | Self::GetMessages { .. }
+            | Self::GetPins { .. }
+            | Self::PinMessage { .. }
+            | Self::UnpinMessage { .. }
+            | Self::CrosspostMessage { .. }
+            | Self::RemoveReaction { .. }
+            | Self::RemoveAllReactions { .. }
+            | Self::GetReactionUsers { .. }
+            | Self::CreateThread { .. }
+            | Self::EditThread { .. }
+            | Self::JoinThread { .. }
+            | Self::LeaveThread { .. }
+            | Self::AddThreadMember { .. }
+            | Self::RemoveThreadMember { .. }
+            | Self::ListThreadMembers { .. } => None,
         }
     }
 
@@ -922,6 +1637,47 @@ impl Action {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
+            Self::SearchMembers { .. } => "search_members",
+            Self::ListMembers { .. } => "list_members",
+            Self::PruneCount { .. } => "prune_count",
+            Self::Prune { .. } => "prune",
+            Self::EditGuild { .. } => "edit_guild",
+            Self::ReorderRoles { .. } => "reorder_roles",
+            Self::ReorderChannels { .. } => "reorder_channels",
+            Self::CreateDirectMessageChannel { .. } => "create_direct_message_channel",
+            Self::ListScheduledEvents { .. } => "list_scheduled_events",
+            Self::CreateScheduledEvent { .. } => "create_scheduled_event",
+            Self::EditScheduledEvent { .. } => "edit_scheduled_event",
+            Self::DeleteScheduledEvent { .. } => "delete_scheduled_event",
+            Self::ListEmojis { .. } => "list_emojis",
+            Self::CreateEmoji { .. } => "create_emoji",
+            Self::DeleteEmoji { .. } => "delete_emoji",
+            Self::CreateWebhook { .. } => "create_webhook",
+            Self::ListWebhooks { .. } => "list_webhooks",
+            Self::DeleteWebhook { .. } => "delete_webhook",
+            Self::ExecuteWebhook { .. } => "execute_webhook",
+            Self::CreateInvite { .. } => "create_invite",
+            Self::ListInvites { .. } => "list_invites",
+            Self::DeleteInvite { .. } => "delete_invite",
+            Self::CreateThread { .. } => "create_thread",
+            Self::EditThread { .. } => "edit_thread",
+            Self::JoinThread { .. } => "join_thread",
+            Self::LeaveThread { .. } => "leave_thread",
+            Self::AddThreadMember { .. } => "add_thread_member",
+            Self::RemoveThreadMember { .. } => "remove_thread_member",
+            Self::ListThreadMembers { .. } => "list_thread_members",
+            Self::SetVoiceDeafen { .. } => "set_voice_deafen",
+            Self::MoveMember { .. } => "move_member",
+            Self::DisconnectMember { .. } => "disconnect_member",
+            Self::GetMessage { .. } => "get_message",
+            Self::GetMessages { .. } => "get_messages",
+            Self::GetPins { .. } => "get_pins",
+            Self::PinMessage { .. } => "pin_message",
+            Self::UnpinMessage { .. } => "unpin_message",
+            Self::CrosspostMessage { .. } => "crosspost_message",
+            Self::RemoveReaction { .. } => "remove_reaction",
+            Self::RemoveAllReactions { .. } => "remove_all_reactions",
+            Self::GetReactionUsers { .. } => "get_reaction_users",
             Self::SendMessage { .. } => "send_message",
             Self::SendDirectMessage { .. } => "send_direct_message",
             Self::EditMessage { .. } => "edit_message",
@@ -960,8 +1716,31 @@ impl Action {
     }
 
     /// Rejects actions Discord would refuse anyway, before any request is made.
+    // One exhaustive match: a new `Action` must decide how it is checked.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), DiscordError> {
         match self {
+            Self::GetMessages { .. }
+            | Self::GetReactionUsers { .. }
+            | Self::RemoveReaction { .. }
+            | Self::RemoveAllReactions { .. }
+            | Self::CreateThread { .. }
+            | Self::EditThread { .. }
+            | Self::ListThreadMembers { .. }
+            | Self::CreateInvite { .. }
+            | Self::DeleteInvite { .. }
+            | Self::CreateWebhook { .. }
+            | Self::ExecuteWebhook { .. }
+            | Self::SearchMembers { .. }
+            | Self::ListMembers { .. }
+            | Self::PruneCount { .. }
+            | Self::Prune { .. }
+            | Self::EditGuild { .. }
+            | Self::ReorderRoles { .. }
+            | Self::ReorderChannels { .. }
+            | Self::CreateScheduledEvent { .. }
+            | Self::EditScheduledEvent { .. }
+            | Self::CreateEmoji { .. } => check_new_limits(self),
             Self::SendMessage {
                 content, embeds, ..
             }
@@ -1033,6 +1812,7 @@ impl Action {
             ),
             Self::Respond { response, .. } => match response {
                 InteractionResponse::Defer { .. } | InteractionResponse::DeferUpdate => Ok(()),
+                InteractionResponse::Autocomplete { choices } => check_choices(choices),
                 InteractionResponse::Message { reply } => check_reply(reply, true),
                 InteractionResponse::Update { reply } => check_reply(reply, false),
                 InteractionResponse::Modal(spec) => check_modal(spec),
@@ -1055,7 +1835,27 @@ impl Action {
             | Self::ListRoles { .. }
             | Self::DeleteRole { .. }
             | Self::ListAutoModRules { .. }
-            | Self::DeleteAutoModRule { .. } => Ok(()),
+            | Self::DeleteAutoModRule { .. }
+            | Self::SetVoiceDeafen { .. }
+            | Self::MoveMember { .. }
+            | Self::DisconnectMember { .. }
+            | Self::GetMessage { .. }
+            | Self::GetPins { .. }
+            | Self::PinMessage { .. }
+            | Self::UnpinMessage { .. }
+            | Self::CrosspostMessage { .. }
+            | Self::JoinThread { .. }
+            | Self::LeaveThread { .. }
+            | Self::AddThreadMember { .. }
+            | Self::RemoveThreadMember { .. }
+            | Self::ListInvites { .. }
+            | Self::ListWebhooks { .. }
+            | Self::DeleteWebhook { .. }
+            | Self::CreateDirectMessageChannel { .. }
+            | Self::ListScheduledEvents { .. }
+            | Self::DeleteScheduledEvent { .. }
+            | Self::ListEmojis { .. }
+            | Self::DeleteEmoji { .. } => Ok(()),
         }
     }
 }
@@ -1357,6 +2157,44 @@ mod tests {
     }
 
     #[test]
+    fn autocomplete_choices_are_bounded_like_discord_bounds_them() {
+        use crate::module::{ChoiceValue, OptionChoice};
+        let respond = |choices: Vec<OptionChoice>| Action::Respond {
+            interaction_id: Id::new(1),
+            token: InteractionToken::new("t"),
+            response: InteractionResponse::Autocomplete { choices },
+        };
+        let choice = |name: &str| OptionChoice {
+            name: name.into(),
+            value: ChoiceValue::String(name.into()),
+        };
+        assert!(respond(Vec::new()).validate().is_ok());
+        assert!(
+            respond((0..25).map(|n| choice(&n.to_string())).collect())
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            respond((0..26).map(|n| choice(&n.to_string())).collect())
+                .validate()
+                .is_err()
+        );
+        assert!(
+            respond(vec![choice(&"x".repeat(101))]).validate().is_err(),
+            "name over 100"
+        );
+        assert!(respond(vec![choice("")]).validate().is_err(), "empty name");
+        let long_value = OptionChoice {
+            name: "a".into(),
+            value: ChoiceValue::String("v".repeat(101)),
+        };
+        assert!(
+            respond(vec![long_value]).validate().is_err(),
+            "value over 100"
+        );
+    }
+
+    #[test]
     fn the_custom_ids_of_an_action_are_all_found() {
         let respond = |response| Action::Respond {
             interaction_id: Id::new(1),
@@ -1444,6 +2282,767 @@ mod tests {
         assert_eq!(action.name(), "send_direct_message");
         assert!(action.channels().is_empty());
         assert!(action.validate().is_ok());
+    }
+
+    fn channel_history(limit: u16) -> Action {
+        Action::GetMessages {
+            channel_id: id::<1, _>(),
+            cursor: Some(MessageCursor::Before(id::<5, _>())),
+            limit,
+        }
+    }
+
+    #[test]
+    fn reading_history_needs_read_messages_and_names_its_channel() {
+        let action = channel_history(50);
+        assert_eq!(action.capability(), Capability::ReadMessages);
+        assert_eq!(action.guild_id(), None);
+        assert_eq!(action.channels(), vec![id::<1, _>()]);
+        assert_eq!(action.name(), "get_messages");
+        assert!(action.interaction_token().is_none());
+        assert!(action.validate().is_ok());
+    }
+
+    #[test]
+    fn history_and_reaction_user_limits_are_one_to_one_hundred() {
+        for limit in [0, 101] {
+            assert!(channel_history(limit).validate().is_err(), "{limit}");
+            let users = Action::GetReactionUsers {
+                channel_id: id::<1, _>(),
+                message_id: id::<2, _>(),
+                emoji: Emoji::Unicode {
+                    value: "👍".into()
+                },
+                after: None,
+                limit,
+            };
+            assert!(users.validate().is_err(), "{limit}");
+        }
+        assert!(channel_history(1).validate().is_ok());
+        assert!(channel_history(100).validate().is_ok());
+    }
+
+    #[test]
+    fn pins_and_reaction_removals_are_moderation_actions() {
+        let pin = Action::PinMessage {
+            channel_id: id::<1, _>(),
+            message_id: id::<2, _>(),
+            reason: reason(),
+        };
+        assert_eq!(pin.capability(), Capability::ManageMessages);
+        assert_eq!(pin.name(), "pin_message");
+        let remove = Action::RemoveReaction {
+            channel_id: id::<1, _>(),
+            message_id: id::<2, _>(),
+            emoji: Emoji::Unicode {
+                value: "👍".into()
+            },
+            user_id: id::<3, _>(),
+        };
+        assert_eq!(remove.capability(), Capability::ManageMessages);
+        assert_eq!(remove.channels(), vec![id::<1, _>()]);
+    }
+
+    #[test]
+    fn an_empty_unicode_emoji_is_rejected_before_discord() {
+        let action = Action::RemoveReaction {
+            channel_id: id::<1, _>(),
+            message_id: id::<2, _>(),
+            emoji: Emoji::Unicode {
+                value: String::new(),
+            },
+            user_id: id::<3, _>(),
+        };
+        assert!(matches!(action.validate(), Err(DiscordError::Invalid(_))));
+    }
+
+    #[test]
+    fn message_actions_round_trip_through_json() {
+        let actions = [
+            channel_history(10),
+            Action::GetMessages {
+                channel_id: id::<1, _>(),
+                cursor: Some(MessageCursor::Around(id::<5, _>())),
+                limit: 100,
+            },
+            Action::RemoveAllReactions {
+                channel_id: id::<1, _>(),
+                message_id: id::<2, _>(),
+                emoji: None,
+            },
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<Action>(&json).unwrap(), action);
+        }
+    }
+
+    #[test]
+    fn voice_moderation_names_its_guild_and_capability() {
+        let deafen = Action::SetVoiceDeafen {
+            guild_id: id::<7, _>(),
+            user_id: id::<2, _>(),
+            deaf: true,
+            reason: reason(),
+        };
+        assert_eq!(deafen.capability(), Capability::DeafenMembers);
+        assert_eq!(deafen.guild_id(), Some(id::<7, _>()));
+        assert!(deafen.channels().is_empty());
+        assert_eq!(deafen.name(), "set_voice_deafen");
+
+        let disconnect = Action::DisconnectMember {
+            guild_id: id::<7, _>(),
+            user_id: id::<2, _>(),
+            reason: reason(),
+        };
+        assert_eq!(disconnect.capability(), Capability::MoveMembers);
+        assert_eq!(disconnect.guild_id(), Some(id::<7, _>()));
+        assert!(disconnect.channels().is_empty());
+        assert_eq!(disconnect.name(), "disconnect_member");
+    }
+
+    #[test]
+    fn moving_a_member_names_the_channel_it_moves_into() {
+        let action = Action::MoveMember {
+            guild_id: id::<7, _>(),
+            user_id: id::<2, _>(),
+            channel_id: id::<30, _>(),
+            reason: reason(),
+        };
+        assert_eq!(action.capability(), Capability::MoveMembers);
+        assert_eq!(action.guild_id(), Some(id::<7, _>()));
+        assert_eq!(action.channels(), vec![id::<30, _>()]);
+        assert_eq!(action.name(), "move_member");
+        assert!(action.validate().is_ok());
+    }
+
+    #[test]
+    fn voice_moderation_round_trips_through_json() {
+        let actions = [
+            Action::SetVoiceDeafen {
+                guild_id: id::<1, _>(),
+                user_id: id::<2, _>(),
+                deaf: false,
+                reason: reason(),
+            },
+            Action::MoveMember {
+                guild_id: id::<1, _>(),
+                user_id: id::<2, _>(),
+                channel_id: id::<3, _>(),
+                reason: reason(),
+            },
+            Action::DisconnectMember {
+                guild_id: id::<1, _>(),
+                user_id: id::<2, _>(),
+                reason: reason(),
+            },
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<Action>(&json).unwrap(), action);
+        }
+    }
+
+    fn new_thread(minutes: u16) -> Action {
+        Action::CreateThread {
+            channel_id: id::<1, _>(),
+            name: "help".into(),
+            source: None,
+            kind: ThreadKind::Public,
+            auto_archive_minutes: minutes,
+        }
+    }
+
+    #[test]
+    fn a_thread_is_created_in_its_channel_with_an_allowed_archive_time() {
+        let action = new_thread(1440);
+        assert_eq!(action.capability(), Capability::ManageThreads);
+        assert_eq!(action.channels(), vec![id::<1, _>()]);
+        assert_eq!(action.guild_id(), None);
+        assert_eq!(action.name(), "create_thread");
+        assert!(action.validate().is_ok());
+        for minutes in [60, 1440, 4320, 10080] {
+            assert!(new_thread(minutes).validate().is_ok(), "{minutes}");
+        }
+        for minutes in [0, 30, 1441, 20160] {
+            assert!(new_thread(minutes).validate().is_err(), "{minutes}");
+        }
+    }
+
+    #[test]
+    fn a_thread_started_from_a_message_is_public_and_its_name_is_bounded() {
+        let from_message = |kind, name: &str| Action::CreateThread {
+            channel_id: id::<1, _>(),
+            name: name.into(),
+            source: Some(id::<5, _>()),
+            kind,
+            auto_archive_minutes: 60,
+        };
+        assert!(from_message(ThreadKind::Public, "help").validate().is_ok());
+        assert!(
+            from_message(ThreadKind::Private, "help")
+                .validate()
+                .is_err()
+        );
+        assert!(from_message(ThreadKind::Public, "").validate().is_err());
+        assert!(
+            from_message(ThreadKind::Public, &"t".repeat(101))
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn thread_edits_are_bounded_and_name_their_thread() {
+        let edit = |slowmode_seconds| Action::EditThread {
+            thread_id: id::<40, _>(),
+            patch: ThreadPatch {
+                name: Some("renamed".into()),
+                archived: Some(true),
+                locked: None,
+                slowmode_seconds,
+            },
+            reason: reason(),
+        };
+        let ok = edit(Some(MAX_SLOWMODE_SECONDS));
+        assert_eq!(ok.capability(), Capability::ManageThreads);
+        assert_eq!(ok.channels(), vec![id::<40, _>()]);
+        assert!(ok.validate().is_ok());
+        assert!(edit(Some(MAX_SLOWMODE_SECONDS + 1)).validate().is_err());
+    }
+
+    #[test]
+    fn thread_membership_needs_the_matching_capability() {
+        let thread = id::<40, _>();
+        let cases = [
+            (
+                Action::JoinThread { thread_id: thread },
+                Capability::SendMessages,
+            ),
+            (
+                Action::LeaveThread { thread_id: thread },
+                Capability::SendMessages,
+            ),
+            (
+                Action::AddThreadMember {
+                    thread_id: thread,
+                    user_id: id::<2, _>(),
+                },
+                Capability::ManageThreads,
+            ),
+            (
+                Action::RemoveThreadMember {
+                    thread_id: thread,
+                    user_id: id::<2, _>(),
+                },
+                Capability::ManageThreads,
+            ),
+            (
+                Action::ListThreadMembers {
+                    thread_id: thread,
+                    after: None,
+                    limit: 100,
+                },
+                Capability::ReadMessages,
+            ),
+        ];
+        for (action, capability) in cases {
+            assert_eq!(action.capability(), capability, "{}", action.name());
+            assert_eq!(action.channels(), vec![thread], "{}", action.name());
+            assert_eq!(action.guild_id(), None, "{}", action.name());
+            assert!(action.validate().is_ok(), "{}", action.name());
+        }
+    }
+
+    #[test]
+    fn thread_member_listing_is_limited_to_one_hundred() {
+        let list = |limit| Action::ListThreadMembers {
+            thread_id: id::<40, _>(),
+            after: None,
+            limit,
+        };
+        assert!(list(0).validate().is_err());
+        assert!(list(100).validate().is_ok());
+        assert!(list(101).validate().is_err());
+    }
+
+    #[test]
+    fn thread_actions_round_trip_through_json() {
+        let actions = [
+            new_thread(10080),
+            Action::EditThread {
+                thread_id: id::<40, _>(),
+                patch: ThreadPatch::default(),
+                reason: reason(),
+            },
+            Action::JoinThread {
+                thread_id: id::<40, _>(),
+            },
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<Action>(&json).unwrap(), action);
+        }
+    }
+
+    fn new_invite(max_age_seconds: u32, max_uses: u16) -> Action {
+        Action::CreateInvite {
+            channel_id: id::<1, _>(),
+            max_age_seconds,
+            max_uses,
+            temporary: false,
+            unique: true,
+            reason: reason(),
+        }
+    }
+
+    #[test]
+    fn an_invite_is_created_in_its_channel_within_discord_limits() {
+        let action = new_invite(3600, 5);
+        assert_eq!(action.capability(), Capability::ManageInvites);
+        assert_eq!(action.channels(), vec![id::<1, _>()]);
+        assert_eq!(action.guild_id(), None);
+        assert_eq!(action.name(), "create_invite");
+        assert!(action.validate().is_ok());
+        // Zero means never expires, zero uses means no limit.
+        assert!(new_invite(0, 0).validate().is_ok());
+        assert!(new_invite(604_800, 100).validate().is_ok());
+        assert!(new_invite(604_801, 5).validate().is_err());
+        assert!(new_invite(3600, 101).validate().is_err());
+    }
+
+    #[test]
+    fn invites_are_listed_and_deleted_per_guild_by_a_safe_code() {
+        let list = Action::ListInvites {
+            guild_id: id::<7, _>(),
+        };
+        assert_eq!(list.capability(), Capability::ManageInvites);
+        assert_eq!(list.guild_id(), Some(id::<7, _>()));
+        assert!(list.channels().is_empty());
+
+        let delete = |code: &str| Action::DeleteInvite {
+            guild_id: id::<7, _>(),
+            code: code.into(),
+            reason: reason(),
+        };
+        assert_eq!(delete("aB3-_9x").capability(), Capability::ManageInvites);
+        assert_eq!(delete("aB3-_9x").guild_id(), Some(id::<7, _>()));
+        assert!(delete("aB3-_9x").validate().is_ok());
+        // A code goes into a URL path: separators and empty codes are refused.
+        for code in ["", "a/b", "a?b", "a b", &"x".repeat(65)] {
+            assert!(delete(code).validate().is_err(), "{code:?}");
+        }
+    }
+
+    fn webhook_post(content: Option<&str>, username: Option<&str>) -> Action {
+        Action::ExecuteWebhook {
+            guild_id: id::<7, _>(),
+            webhook_id: id::<8, _>(),
+            token: WebhookToken::new("tok-secret"),
+            content: content.map(Into::into),
+            embeds: vec![],
+            username: username.map(Into::into),
+            avatar_url: None,
+            mentions: MentionPolicy::None,
+        }
+    }
+
+    #[test]
+    fn webhooks_are_managed_per_channel_and_deleted_per_guild() {
+        let create = |name: &str| Action::CreateWebhook {
+            channel_id: id::<1, _>(),
+            name: name.into(),
+            reason: reason(),
+        };
+        assert_eq!(create("bridge").capability(), Capability::ManageWebhooks);
+        assert_eq!(create("bridge").channels(), vec![id::<1, _>()]);
+        assert_eq!(create("bridge").name(), "create_webhook");
+        assert!(create("bridge").validate().is_ok());
+        assert!(create("").validate().is_err());
+        assert!(create(&"w".repeat(80)).validate().is_ok());
+        assert!(create(&"w".repeat(81)).validate().is_err());
+
+        let list = Action::ListWebhooks {
+            channel_id: id::<1, _>(),
+        };
+        assert_eq!(list.capability(), Capability::ManageWebhooks);
+        assert_eq!(list.channels(), vec![id::<1, _>()]);
+
+        let delete = Action::DeleteWebhook {
+            guild_id: id::<7, _>(),
+            webhook_id: id::<8, _>(),
+            reason: reason(),
+        };
+        assert_eq!(delete.capability(), Capability::ManageWebhooks);
+        assert_eq!(delete.guild_id(), Some(id::<7, _>()));
+        assert!(delete.channels().is_empty());
+    }
+
+    #[test]
+    fn a_webhook_post_is_a_message_and_its_token_never_shows_in_debug_output() {
+        let post = webhook_post(Some("hello"), Some("relay"));
+        assert_eq!(post.capability(), Capability::SendMessages);
+        assert_eq!(post.guild_id(), Some(id::<7, _>()));
+        assert!(post.channels().is_empty());
+        assert_eq!(post.name(), "execute_webhook");
+        assert!(post.validate().is_ok());
+        assert!(!format!("{post:?}").contains("tok-secret"));
+        assert!(!format!("{:?}", WebhookToken::new("tok-secret")).contains("tok-secret"));
+        assert_eq!(WebhookToken::new("tok-secret").expose(), "tok-secret");
+    }
+
+    #[test]
+    fn a_webhook_post_needs_a_body_and_bounded_names_and_avatars() {
+        assert!(webhook_post(None, None).validate().is_err());
+        assert!(webhook_post(Some(""), None).validate().is_err());
+        assert!(
+            webhook_post(Some("hi"), Some(&"n".repeat(81)))
+                .validate()
+                .is_err()
+        );
+        assert!(webhook_post(Some("hi"), Some("")).validate().is_err());
+        let with_avatar = |avatar_url: &str| Action::ExecuteWebhook {
+            guild_id: id::<7, _>(),
+            webhook_id: id::<8, _>(),
+            token: WebhookToken::new("t"),
+            content: Some("hi".into()),
+            embeds: vec![],
+            username: None,
+            avatar_url: Some(avatar_url.into()),
+            mentions: MentionPolicy::None,
+        };
+        assert!(with_avatar("https://example.org/a.png").validate().is_ok());
+        assert!(with_avatar("http://example.org/a.png").validate().is_err());
+    }
+
+    #[test]
+    fn webhook_actions_round_trip_through_json() {
+        let action = webhook_post(Some("hi"), None);
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(serde_json::from_str::<Action>(&json).unwrap(), action);
+    }
+
+    #[test]
+    fn member_searches_and_listings_are_read_and_bounded() {
+        let search = |query: &str, limit| Action::SearchMembers {
+            guild_id: id::<7, _>(),
+            query: query.into(),
+            limit,
+        };
+        assert_eq!(search("ana", 10).capability(), Capability::ReadGuild);
+        assert_eq!(search("ana", 10).guild_id(), Some(id::<7, _>()));
+        assert!(search("ana", 10).validate().is_ok());
+        assert!(search("", 10).validate().is_err());
+        assert!(search("ana", 0).validate().is_err());
+        assert!(search("ana", 1000).validate().is_ok());
+        assert!(search("ana", 1001).validate().is_err());
+
+        let list = Action::ListMembers {
+            guild_id: id::<7, _>(),
+            after: Some(id::<3, _>()),
+            limit: 1000,
+        };
+        assert_eq!(list.name(), "list_members");
+        assert!(list.validate().is_ok());
+        let too_many = Action::ListMembers {
+            guild_id: id::<7, _>(),
+            after: None,
+            limit: 1001,
+        };
+        assert!(too_many.validate().is_err());
+    }
+
+    #[test]
+    fn prunes_are_bounded_to_thirty_days_and_count_as_kicks() {
+        let prune = |days| Action::PruneCount {
+            guild_id: id::<7, _>(),
+            days,
+            include_roles: vec![],
+        };
+        assert_eq!(prune(7).capability(), Capability::KickMembers);
+        assert!(prune(0).validate().is_err());
+        assert!(prune(30).validate().is_ok());
+        assert!(prune(31).validate().is_err());
+        let real = Action::Prune {
+            guild_id: id::<7, _>(),
+            days: 7,
+            include_roles: vec![],
+            reason: reason(),
+        };
+        assert_eq!(real.capability(), Capability::KickMembers);
+        assert_eq!(real.name(), "prune");
+    }
+
+    #[test]
+    fn editing_the_guild_needs_manage_guild_and_a_valid_name() {
+        let edit = |name: Option<&str>| Action::EditGuild {
+            guild_id: id::<7, _>(),
+            patch: GuildPatch {
+                name: name.map(Into::into),
+                verification_level: None,
+            },
+            reason: reason(),
+        };
+        assert_eq!(edit(Some("New")).capability(), Capability::ManageGuild);
+        assert!(edit(None).validate().is_ok());
+        assert!(edit(Some("N")).validate().is_err());
+        assert!(edit(Some(&"n".repeat(101))).validate().is_err());
+    }
+
+    #[test]
+    fn reordering_names_its_targets_and_refuses_duplicates() {
+        let roles = Action::ReorderRoles {
+            guild_id: id::<7, _>(),
+            positions: vec![RolePosition {
+                id: id::<10, _>(),
+                position: 2,
+            }],
+        };
+        assert_eq!(roles.capability(), Capability::ManageRoles);
+        assert!(roles.validate().is_ok());
+        let none = Action::ReorderRoles {
+            guild_id: id::<7, _>(),
+            positions: vec![],
+        };
+        assert!(none.validate().is_err());
+
+        let channels = |ids: [u64; 2]| Action::ReorderChannels {
+            guild_id: id::<7, _>(),
+            positions: ids
+                .map(|id| ChannelPosition {
+                    channel_id: Id::new(id),
+                    position: 0,
+                })
+                .to_vec(),
+        };
+        assert_eq!(channels([1, 2]).capability(), Capability::ManageChannels);
+        assert_eq!(
+            channels([1, 2]).channels(),
+            vec![id::<1, _>(), id::<2, _>()]
+        );
+        assert!(channels([1, 2]).validate().is_ok());
+        assert!(channels([1, 1]).validate().is_err());
+    }
+
+    #[test]
+    fn a_direct_message_channel_needs_its_capability_and_guild() {
+        let action = Action::CreateDirectMessageChannel {
+            guild_id: id::<7, _>(),
+            user_id: id::<2, _>(),
+        };
+        assert_eq!(action.capability(), Capability::SendDirectMessages);
+        assert_eq!(action.guild_id(), Some(id::<7, _>()));
+        assert!(action.channels().is_empty());
+        assert_eq!(action.name(), "create_direct_message_channel");
+    }
+
+    #[test]
+    fn the_new_guild_actions_round_trip_through_json() {
+        let actions = [
+            Action::ListMembers {
+                guild_id: id::<1, _>(),
+                after: None,
+                limit: 5,
+            },
+            Action::EditGuild {
+                guild_id: id::<1, _>(),
+                patch: GuildPatch::default(),
+                reason: reason(),
+            },
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<Action>(&json).unwrap(), action);
+        }
+    }
+
+    fn event_at(start: i64, end: Option<i64>, location: EventLocation) -> NewScheduledEvent {
+        NewScheduledEvent {
+            name: "game night".into(),
+            description: None,
+            start_unix: start,
+            end_unix: end,
+            location,
+        }
+    }
+
+    #[test]
+    fn scheduled_events_are_read_and_managed_per_guild() {
+        let list = Action::ListScheduledEvents {
+            guild_id: id::<7, _>(),
+            with_user_count: true,
+        };
+        assert_eq!(list.capability(), Capability::ReadGuild);
+        assert_eq!(list.guild_id(), Some(id::<7, _>()));
+        assert!(list.validate().is_ok());
+
+        let create = Action::CreateScheduledEvent {
+            guild_id: id::<7, _>(),
+            spec: event_at(
+                1_800_000_000,
+                None,
+                EventLocation::Voice {
+                    channel_id: id::<3, _>(),
+                },
+            ),
+        };
+        assert_eq!(create.capability(), Capability::ManageEvents);
+        assert!(create.channels().is_empty());
+        assert!(create.validate().is_ok());
+
+        let edit = Action::EditScheduledEvent {
+            guild_id: id::<7, _>(),
+            event_id: id::<9, _>(),
+            patch: ScheduledEventPatch {
+                name: None,
+                status: Some(ScheduledEventStatus::Canceled),
+            },
+        };
+        assert_eq!(edit.capability(), Capability::ManageEvents);
+        assert_eq!(edit.name(), "edit_scheduled_event");
+        assert!(edit.validate().is_ok());
+
+        let delete = Action::DeleteScheduledEvent {
+            guild_id: id::<7, _>(),
+            event_id: id::<9, _>(),
+        };
+        assert_eq!(delete.capability(), Capability::ManageEvents);
+    }
+
+    #[test]
+    fn an_external_event_needs_a_place_and_an_end_after_its_start() {
+        let external = |end, place: &str| Action::CreateScheduledEvent {
+            guild_id: id::<7, _>(),
+            spec: event_at(
+                100,
+                end,
+                EventLocation::External {
+                    place: place.into(),
+                },
+            ),
+        };
+        assert!(external(Some(200), "the square").validate().is_ok());
+        assert!(external(None, "the square").validate().is_err());
+        assert!(external(Some(100), "the square").validate().is_err());
+        assert!(external(Some(200), "").validate().is_err());
+    }
+
+    #[test]
+    fn scheduled_event_names_and_descriptions_are_bounded() {
+        let mut spec = event_at(
+            100,
+            None,
+            EventLocation::Voice {
+                channel_id: id::<3, _>(),
+            },
+        );
+        spec.name = String::new();
+        let create = |spec: NewScheduledEvent| Action::CreateScheduledEvent {
+            guild_id: id::<7, _>(),
+            spec,
+        };
+        assert!(create(spec.clone()).validate().is_err());
+        spec.name = "ok".into();
+        spec.description = Some("d".repeat(1001));
+        assert!(create(spec).validate().is_err());
+    }
+
+    #[test]
+    fn emoji_are_listed_created_and_deleted_with_discord_rules() {
+        assert_eq!(
+            Action::ListEmojis {
+                guild_id: id::<7, _>()
+            }
+            .capability(),
+            Capability::ReadGuild
+        );
+        let image = "data:image/png;base64,iVBORw0KGgo=";
+        let create = |name: &str, image: &str| Action::CreateEmoji {
+            guild_id: id::<7, _>(),
+            name: name.into(),
+            image: image.into(),
+            reason: reason(),
+        };
+        assert_eq!(
+            create("party", image).capability(),
+            Capability::ManageEmojis
+        );
+        assert!(create("party", image).validate().is_ok());
+        assert!(create("p", image).validate().is_err());
+        assert!(create("bad name", image).validate().is_err());
+        assert!(
+            create("party", "https://example.org/a.png")
+                .validate()
+                .is_err()
+        );
+        assert!(
+            create("party", "data:image/bmp;base64,AAAA")
+                .validate()
+                .is_err()
+        );
+        // The decoded picture is at most 256 KiB.
+        let too_big = format!("data:image/png;base64,{}", "A".repeat(350_000));
+        assert!(create("party", &too_big).validate().is_err());
+
+        let delete = Action::DeleteEmoji {
+            guild_id: id::<7, _>(),
+            emoji_id: id::<4, _>(),
+            reason: reason(),
+        };
+        assert_eq!(delete.capability(), Capability::ManageEmojis);
+        assert_eq!(delete.guild_id(), Some(id::<7, _>()));
+    }
+
+    #[test]
+    fn the_member_guild_and_scheduled_event_actions_round_trip_through_json() {
+        let actions = [
+            Action::SearchMembers {
+                guild_id: id::<1, _>(),
+                query: "ana".into(),
+                limit: 10,
+            },
+            Action::Prune {
+                guild_id: id::<1, _>(),
+                days: 7,
+                include_roles: vec![id::<3, _>()],
+                reason: reason(),
+            },
+            Action::ReorderChannels {
+                guild_id: id::<1, _>(),
+                positions: vec![ChannelPosition {
+                    channel_id: id::<2, _>(),
+                    position: 4,
+                }],
+            },
+            Action::CreateScheduledEvent {
+                guild_id: id::<1, _>(),
+                spec: event_at(
+                    100,
+                    Some(200),
+                    EventLocation::External {
+                        place: "square".into(),
+                    },
+                ),
+            },
+            Action::EditScheduledEvent {
+                guild_id: id::<1, _>(),
+                event_id: id::<5, _>(),
+                patch: ScheduledEventPatch {
+                    name: None,
+                    status: Some(ScheduledEventStatus::Active),
+                },
+            },
+            Action::CreateEmoji {
+                guild_id: id::<1, _>(),
+                name: "party".into(),
+                image: "data:image/gif;base64,R0lGOD".into(),
+                reason: reason(),
+            },
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<Action>(&json).unwrap(), action);
+        }
     }
 
     #[test]

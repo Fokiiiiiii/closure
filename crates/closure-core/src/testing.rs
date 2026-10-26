@@ -109,6 +109,28 @@ impl MockApi {
             Action::SendMessage { channel_id, .. } => Ok(self.sent(*channel_id)),
             // The channel of a direct message is not known to the mock; any id will do.
             Action::SendDirectMessage { .. } => Ok(self.sent(ChannelId::new(1))),
+            Action::GetMessage {
+                channel_id,
+                message_id,
+            }
+            | Action::CrosspostMessage {
+                channel_id,
+                message_id,
+            } => Ok(sent_message(*channel_id, message_id.get())
+                .map_or(Outcome::None, |message| Outcome::Message(Box::new(message)))),
+            // The pretend Discord holds nothing else: lists come back empty, counts as zero.
+            Action::GetMessages { .. } | Action::GetPins { .. } => Ok(Outcome::Messages(vec![])),
+            Action::GetReactionUsers { .. } => Ok(Outcome::Users(vec![])),
+            Action::ListThreadMembers { .. } => Ok(Outcome::ThreadMembers(vec![])),
+            Action::ListInvites { .. } => Ok(Outcome::Invites(vec![])),
+            Action::ListWebhooks { .. } => Ok(Outcome::Webhooks(vec![])),
+            Action::SearchMembers { .. } | Action::ListMembers { .. } => {
+                Ok(Outcome::Members(vec![]))
+            }
+            Action::PruneCount { .. } | Action::Prune { .. } => Ok(Outcome::Count(0)),
+            Action::ListScheduledEvents { .. } => Ok(Outcome::ScheduledEvents(vec![])),
+            Action::ListEmojis { .. } => Ok(Outcome::Emojis(vec![])),
+            // Writes that return a new object are recorded but answered with `Outcome::None`.
             _ => Ok(Outcome::None),
         }
     }

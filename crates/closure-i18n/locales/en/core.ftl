@@ -77,3 +77,4 @@ punish-timeout-too-long = Discord allows a timeout of 28 days at most.
 punish-timeout-role-missing = Timeouts by role need a role: set timeout_role in the moderation settings.
 punish-voice-role-missing = Voice mutes by role need a role: set voice_mute_role in the moderation settings.
 punish-ban-delete-days-range = The days of messages to delete are 0 to 7.
+sdk-expired = This has expired, use the command again.

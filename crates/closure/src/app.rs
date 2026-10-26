@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use closure::modules;
 use closure_api::{ApiState, GatewayStatus, Readiness, ServerLimits, router};
 use closure_config::{ConfigCompiler, SettingsStore, parse_overrides};
 use closure_core::cases::CaseBackend;
 use closure_core::locale::Translator;
-use closure_core::module::Module;
 use closure_core::registry::ModuleRegistry;
 use closure_core::schedule::SchedulerBackend;
 use closure_core::settings::SettingsProvider;
@@ -21,7 +21,6 @@ use closure_discord::{
     run_jobs, start_gateway,
 };
 use closure_i18n::TranslatorBuilder;
-use closure_mod_diagnostics::DiagnosticsModule;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use secrecy::SecretString;
 use tokio::task::JoinHandle;
@@ -37,14 +36,6 @@ use crate::sync;
 const GATEWAY_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const DISPATCHER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Every module this build ships. Adding a module means adding it here.
-fn modules() -> Result<Vec<Arc<dyn Module>>> {
-    Ok(vec![
-        Arc::new(DiagnosticsModule::new()?),
-        Arc::new(closure_mod_moderation::module()?),
-    ])
-}
 
 struct GatewayReadiness(Arc<GatewayHealth>);
 
@@ -434,7 +425,7 @@ mod tests {
         let mut catalogs = TranslatorBuilder::new().unwrap();
         catalogs.add_registry(&registry).unwrap();
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
-        assert_eq!(commands.len(), 13);
+        assert_eq!(commands.len(), 14);
         for command in commands {
             // A name Discord would refuse (uppercase, too long) is dropped with only a log line,
             // so it is looked for here.

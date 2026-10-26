@@ -1,0 +1,74 @@
+command-automod = automod
+    .description = Automatic moderation: its rules and state
+subcommand-automod-status = status
+    .description = Show whether dry run is on and which rules run
+
+status-title = Automod status
+status-dry-run = Dry run: { $state }
+state-on = on
+state-off = off
+status-counts = Rules: { $enabled } enabled, { $disabled } disabled, { $invalid } invalid.
+status-none = No rules are set.
+status-rule = - `{ $id }` ({ $name }): { $check }. Actions: { $actions }.
+status-rule-off = - `{ $id }` ({ $name }), disabled: { $check }. Actions: { $actions }.
+status-invalid-heading = Invalid rules (they never run):
+status-invalid = - `{ $label }`: { $reason }
+
+problem-shape = The rule does not have the shape the schema describes: { $error }
+problem-id = The id is 1 to 32 characters: lowercase letters, digits, _ and -.
+problem-name = The name is 1 to 64 characters.
+problem-duplicate = An earlier valid rule has this id.
+problem-actions = A rule has 1 to 8 actions.
+problem-id-value = A channel or role id is digits only, and not zero.
+problem-too-many = At most 50 rules are read.
+problem-words = A words check has 1 to 500 words of 1 to 100 characters.
+problem-domains = A links check has at most 200 domains, none of them empty.
+problem-invites = An invites check has at most 100 codes, none of them empty.
+problem-mentions = Mentions max is 1 to 50.
+problem-caps = Caps need max_ratio from 0 to 1 and min_letters from 1 to 2000.
+problem-repeat = Repeat max_run is 2 to 2000.
+problem-emoji = Emoji max is 1 to 200.
+problem-attachments = An attachments check needs max (0 to 10) or blocked extensions.
+problem-flood = A flood check needs messages 2 to 100 and per_minutes 1 to 60.
+problem-duration = A duration is readable, such as 1h, 30m or 7d, and not zero.
+problem-timeout = A timeout lasts at most 28 days.
+problem-delete-days = Delete days are 0 to 7.
+
+check-words = words
+check-links = links
+check-invites = invites
+check-mentions = mentions
+check-caps = caps
+check-repeat = repeat
+check-emoji = emoji
+check-attachments = attachments
+check-flood = flood
+
+action-delete = delete
+action-warn = warn
+action-timeout = timeout
+action-kick = kick
+action-ban = ban
+action-notify = notify
+
+detail-words = contains the word "{ $word }"
+detail-link = links to { $host }
+detail-link-not-allowed = links to { $host }, which is not an allowed domain
+detail-link-blocked = links to { $host }, which is a blocked domain
+detail-invite = invites to the server with the code { $code }
+detail-mentions = mentions { $count } people, roles or everyone
+detail-caps = { $percent } of the letters are capitals
+detail-repeat = repeats one character { $count } times in a row
+detail-emoji = posts { $count } emoji
+detail-attachments = attaches { $count } files
+detail-attachment-type = attaches a file of a blocked type: { $name }
+detail-flood = sends { $count } messages within { $minutes } minute(s)
+
+reason-automod = { $rule }: { $detail }
+notify-title = automod: { $rule }
+dry-run-title = [dry run] automod
+field-rule = Rule
+field-member = Member
+field-check = Check
+field-message = Message
+field-would-run = Would run

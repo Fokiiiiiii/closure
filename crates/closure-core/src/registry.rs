@@ -5,7 +5,7 @@ use twilight_model::gateway::Intents;
 
 use crate::error::CoreError;
 use crate::event::EventKind;
-use crate::module::{CommandSpec, Module, ModuleId};
+use crate::module::{CommandSpec, ContextCommandSpec, ContextKind, Module, ModuleId};
 use crate::permission::{PermissionKey, PermissionSpec};
 use crate::subscription::Subscription;
 
@@ -180,6 +180,29 @@ impl ModuleRegistry {
             .iter()
             .find(|module| module.manifest().commands.iter().any(|c| c.name == name))
     }
+
+    /// The module that owns the context-menu command named `name` for `kind`.
+    #[must_use]
+    pub fn context_owner(&self, name: &str, kind: ContextKind) -> Option<&Arc<dyn Module>> {
+        self.modules.iter().find(|module| {
+            module
+                .manifest()
+                .context_commands
+                .iter()
+                .any(|c| c.name == name && c.kind == kind)
+        })
+    }
+
+    /// Every context-menu command of every registered module.
+    pub fn context_commands(&self) -> impl Iterator<Item = (&ModuleId, &ContextCommandSpec)> {
+        self.modules.iter().flat_map(|module| {
+            let manifest = module.manifest();
+            manifest
+                .context_commands
+                .iter()
+                .map(move |command| (&manifest.id, command))
+        })
+    }
 }
 
 /// Depth-first topological sort with deterministic order (ids sorted) and cycle detection.
@@ -349,6 +372,7 @@ mod tests {
             name: "add".into(),
             description: "d".into(),
             options: vec![],
+            subcommands: vec![],
         };
         let manifest = ModuleManifest::new(id("a"), "a", "0.1.0").command(CommandSpec {
             name: "warn".into(),
@@ -362,6 +386,95 @@ mod tests {
             result.unwrap_err(),
             CoreError::InvalidCommand { .. }
         ));
+    }
+
+    #[test]
+    fn a_subcommand_group_holds_subcommands_only_and_there_are_two_levels() {
+        let sub = |name: &str, options, subcommands| crate::module::SubcommandSpec {
+            name: name.into(),
+            description: "d".into(),
+            options,
+            subcommands,
+        };
+        let check = |group| {
+            let manifest = ModuleManifest::new(id("a"), "a", "0.1.0").command(CommandSpec {
+                name: "warn".into(),
+                description: "d".into(),
+                options: vec![],
+                subcommands: vec![group],
+                default_member_permissions: None,
+            });
+            ModuleRegistry::new(vec![Arc::new(Stub(manifest))])
+        };
+        let option = OptionSpec::new("user", "d", OptionKind::User);
+        assert!(
+            check(sub(
+                "list",
+                vec![],
+                vec![sub("add", vec![option.clone()], vec![])]
+            ))
+            .is_ok()
+        );
+        assert!(
+            check(sub("list", vec![option], vec![sub("add", vec![], vec![])])).is_err(),
+            "a group with an option of its own"
+        );
+        assert!(
+            check(sub(
+                "list",
+                vec![],
+                vec![sub("add", vec![], vec![sub("deep", vec![], vec![])])]
+            ))
+            .is_err(),
+            "a third level"
+        );
+    }
+
+    #[test]
+    fn context_commands_are_limited_to_five_per_kind_and_named_once() {
+        use crate::module::ContextKind;
+        let spec = |name: &str, kind| ContextCommandSpec {
+            name: name.into(),
+            kind,
+        };
+        let module = |commands: Vec<ContextCommandSpec>| {
+            let manifest = commands.into_iter().fold(
+                ModuleManifest::new(id("a"), "a", "0.1.0"),
+                ModuleManifest::context_command,
+            );
+            ModuleRegistry::new(vec![Arc::new(Stub(manifest))])
+        };
+        let users: Vec<_> = (0..5)
+            .map(|n| spec(&format!("user {n}"), ContextKind::User))
+            .collect();
+        assert!(module(users.clone()).is_ok());
+        let mut six = users;
+        six.push(spec("user 5", ContextKind::User));
+        assert!(module(six).is_err(), "six user commands");
+        assert!(
+            module(vec![spec("", ContextKind::Message)]).is_err(),
+            "empty name"
+        );
+        assert!(
+            module(vec![spec(&"x".repeat(33), ContextKind::Message)]).is_err(),
+            "name over 32"
+        );
+        assert!(
+            module(vec![
+                spec("report", ContextKind::Message),
+                spec("report", ContextKind::Message)
+            ])
+            .is_err(),
+            "declared twice"
+        );
+        assert!(
+            module(vec![
+                spec("report", ContextKind::User),
+                spec("report", ContextKind::Message)
+            ])
+            .is_ok(),
+            "one name for a user and a message command"
+        );
     }
 
     #[test]

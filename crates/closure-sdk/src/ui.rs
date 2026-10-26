@@ -6,6 +6,8 @@
 //! it, and `data` is whatever the module wants back (at most about 25 characters when the owner
 //! is set: Discord allows 100 characters in all; keep more in the module's storage).
 
+use std::time::Duration;
+
 use closure_core::action::ModalSpec;
 use closure_core::event::UserId;
 use closure_core::module::ModuleId;
@@ -22,6 +24,13 @@ pub struct CustomId {
     /// The only user who may use the component; `None` for anyone.
     pub owner: Option<UserId>,
     pub data: String,
+    /// When the component stops working, in Unix seconds; `None` for one that never does.
+    pub expires_at: Option<i64>,
+}
+
+/// The Unix second `lifetime` after `now` (see `cx.now()`), saturating far in the future.
+fn deadline(now: i64, lifetime: Duration) -> i64 {
+    now.saturating_add(i64::try_from(lifetime.as_secs()).unwrap_or(i64::MAX))
 }
 
 impl CustomId {
@@ -31,7 +40,16 @@ impl CustomId {
             route: route.into(),
             owner: None,
             data: String::new(),
+            expires_at: None,
         }
+    }
+
+    /// The component stops working `lifetime` after `now` (see `cx.now()`): a press after that
+    /// is refused. The expiry is part of the `custom_id`, so it lasts as long as the message.
+    #[must_use]
+    pub fn expires_in(mut self, now: i64, lifetime: Duration) -> Self {
+        self.expires_at = Some(deadline(now, lifetime));
+        self
     }
 
     /// Only this user may use the component; the others are told it is not theirs.
@@ -48,12 +66,16 @@ impl CustomId {
     }
 
     /// The text Discord keeps: it starts with the id of the module.
+    /// The owner field is `*` or the user's id, followed by `@` and the expiry when there is one.
     #[must_use]
     pub fn encode(&self, module: &ModuleId) -> String {
         let owner = self
             .owner
             .map_or_else(|| "*".to_owned(), |user| user.get().to_string());
-        format!("{module}:{}:{owner}:{}", self.route, self.data)
+        let expiry = self
+            .expires_at
+            .map_or_else(String::new, |at| format!("@{at}"));
+        format!("{module}:{}:{owner}{expiry}:{}", self.route, self.data)
     }
 
     /// Reads what [`Self::encode`] wrote, whatever module it is of.
@@ -62,12 +84,25 @@ impl CustomId {
         let mut parts = custom_id.splitn(4, ':');
         let module = ModuleId::new(parts.next()?).ok()?;
         let route = parts.next()?.to_owned();
-        let owner = match parts.next()? {
+        let owner_field = parts.next()?;
+        let (owner_text, expires_at) = match owner_field.split_once('@') {
+            Some((owner, at)) => (owner, Some(at.parse::<i64>().ok()?)),
+            None => (owner_field, None),
+        };
+        let owner = match owner_text {
             "*" => None,
             digits => Some(UserId::new_checked(digits.parse().ok()?)?),
         };
         let data = parts.next().unwrap_or_default().to_owned();
-        (!route.is_empty()).then_some((module, Self { route, owner, data }))
+        (!route.is_empty()).then_some((
+            module,
+            Self {
+                route,
+                owner,
+                data,
+                expires_at,
+            },
+        ))
     }
 }
 
@@ -235,6 +270,8 @@ pub struct Pager {
     pub pages: usize,
     /// Only this user may turn the pages.
     pub owner: Option<UserId>,
+    /// When the buttons stop working, in Unix seconds (see [`CustomId::expires_in`]).
+    pub expires_at: Option<i64>,
 }
 
 impl Pager {
@@ -245,12 +282,20 @@ impl Pager {
             page,
             pages,
             owner: None,
+            expires_at: None,
         }
     }
 
     #[must_use]
     pub fn only_for(mut self, user: UserId) -> Self {
         self.owner = Some(user);
+        self
+    }
+
+    /// The buttons stop working `lifetime` after `now` (see `cx.now()`).
+    #[must_use]
+    pub fn expires_in(mut self, now: i64, lifetime: Duration) -> Self {
+        self.expires_at = Some(deadline(now, lifetime));
         self
     }
 
@@ -262,6 +307,7 @@ impl Pager {
                 route: self.route.clone(),
                 owner: self.owner,
                 data: page.to_string(),
+                expires_at: self.expires_at,
             };
             id.encode(module)
         };
@@ -329,6 +375,40 @@ mod tests {
         ] {
             assert_eq!(CustomId::parse(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn an_expiring_custom_id_round_trips_and_old_ids_still_parse() {
+        let id = CustomId::new("confirm")
+            .only_for(Id::new(7))
+            .data("a:b")
+            .expires_in(1_000, Duration::from_secs(60));
+        let text = id.encode(&module());
+        assert_eq!(text, "warn:confirm:7@1060:a:b");
+        assert_eq!(CustomId::parse(&text), Some((module(), id)));
+        // Ids written before expiry existed read as before, and never expire.
+        let old = CustomId::parse("warn:confirm:7:a:b").map(|(_, id)| id);
+        assert_eq!(old.and_then(|id| id.expires_at), None);
+        let anyone = CustomId::new("page").expires_in(1_000, Duration::from_secs(5));
+        assert_eq!(anyone.encode(&module()), "warn:page:*@1005:");
+        assert_eq!(CustomId::parse("warn:page:*@x:3"), None);
+    }
+
+    #[test]
+    fn a_pager_with_an_expiry_puts_it_on_its_buttons() {
+        let pager = Pager::new("list", 0, 3).expires_in(1_000, Duration::from_secs(60));
+        let Component::ActionRow(row) = pager.row(&module()) else {
+            panic!("a row")
+        };
+        let Component::Button(next) = &row.components[2] else {
+            panic!("a button")
+        };
+        let parsed = next
+            .custom_id
+            .as_deref()
+            .and_then(CustomId::parse)
+            .and_then(|(_, id)| id.expires_at);
+        assert_eq!(parsed, Some(1_060));
     }
 
     #[test]

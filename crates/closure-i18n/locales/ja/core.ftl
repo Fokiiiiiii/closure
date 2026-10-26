@@ -65,3 +65,4 @@ punish-timeout-too-long = Discord のタイムアウトは最長 28 日です。
 punish-timeout-role-missing = ロールによるタイムアウトには、設定の timeout_role にロールが必要です。
 punish-voice-role-missing = ロールによるボイスミュートには、設定の voice_mute_role にロールが必要です。
 punish-ban-delete-days-range = 削除するメッセージの日数は 0 から 7 までです。
+sdk-expired = 期限が切れました。コマンドをもう一度使ってください。

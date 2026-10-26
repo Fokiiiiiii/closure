@@ -13,8 +13,9 @@
 //!
 //! Each field is one option: its name is the field's, its description the doc comment (or
 //! `desc = "..."`), it is required unless the type is `Option<_>`. Attributes inside `#[arg(..)]`:
-//! `name`, `desc`, `min`, `max` (numbers), `min_length`, `max_length` (strings) and `choices`
-//! (a list of strings or of integers).
+//! `name`, `desc`, `min`, `max` (numbers), `min_length`, `max_length` (strings), `choices`
+//! (a list of strings or of integers) and `autocomplete` (a flag: the option's choices come from
+//! the handler registered with `ModuleBuilder::autocomplete`).
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -44,6 +45,7 @@ struct OptionField {
     min_length: Option<u16>,
     max_length: Option<u16>,
     choices: Vec<TokenStream2>,
+    autocomplete: bool,
 }
 
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
@@ -110,6 +112,9 @@ fn spec_of(option: &OptionField) -> TokenStream2 {
         let choices = &option.choices;
         quote! { option.choices = ::std::vec![ #(#choices),* ]; }
     });
+    let autocomplete = option
+        .autocomplete
+        .then(|| quote! { option.autocomplete = true; });
     quote! {
         {
             let mut option = ::closure_sdk::OptionSpec::new(
@@ -117,7 +122,7 @@ fn spec_of(option: &OptionField) -> TokenStream2 {
                 #description,
                 <#ty as ::closure_sdk::OptionType>::KIND,
             );
-            #required #min #max #min_length #max_length #choices
+            #required #min #max #min_length #max_length #choices #autocomplete
             option
         }
     }
@@ -142,6 +147,7 @@ fn option_of(field: &syn::Field) -> syn::Result<OptionField> {
         min_length: None,
         max_length: None,
         choices: Vec::new(),
+        autocomplete: false,
     };
     for attribute in field.attrs.iter().filter(|a| a.path().is_ident("arg")) {
         attribute.parse_nested_meta(|meta| {
@@ -158,6 +164,7 @@ fn option_of(field: &syn::Field) -> syn::Result<OptionField> {
                 "min_length" => option.min_length = Some(length(&meta.value()?.parse()?)?),
                 "max_length" => option.max_length = Some(length(&meta.value()?.parse()?)?),
                 "choices" => option.choices = choices(&meta.value()?.parse()?)?,
+                "autocomplete" => option.autocomplete = true,
                 _ => return Err(meta.error("unknown option attribute")),
             }
             Ok(())
