@@ -58,7 +58,7 @@ tower = { version = "0.5", features = ["limit", "util"] }
 tower-http = { version = "0.7", features = ["timeout", "limit", "trace", "request-id", "util"] }
 proc-macro2 = "1"
 quote = "1"
-syn = "2"
+syn = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 twilight-cache-inmemory = "0.17"
