@@ -277,9 +277,10 @@ async fn serve(
         dispatcher.clone(),
         shutdown.clone(),
     )));
+    let dispatch_changes = dispatcher.clone();
     started.changes_task = Some(tokio::spawn(forward_config_changes(
         config_changes_rx,
-        dispatcher.clone(),
+        move |guild_id| dispatch_changes.try_dispatch(ModuleEvent::ConfigChanged { guild_id }),
         shutdown.clone(),
     )));
 
@@ -331,11 +332,16 @@ async fn serve(
     })
 }
 
+const HAND_OVER_ATTEMPTS: usize = 4;
+const HAND_OVER_RETRY_DELAY: Duration = Duration::from_millis(100);
+
 /// Hands the modules of a guild that its configuration changed, until shutdown. The event is
 /// dispatched like any other, so it reaches only the modules that are enabled in the guild.
+/// A refused hand-over (the dispatcher is full or closing) is retried a few times; after that the
+/// change is dropped with a warning, so a busy dispatcher never holds up the reload.
 async fn forward_config_changes(
     mut changes: UnboundedReceiver<GuildId>,
-    dispatcher: Dispatcher,
+    mut hand_over: impl FnMut(GuildId) -> bool + Send + 'static,
     shutdown: CancellationToken,
 ) {
     loop {
@@ -346,7 +352,19 @@ async fn forward_config_changes(
                 None => return,
             },
         };
-        dispatcher.dispatch(ModuleEvent::ConfigChanged { guild_id });
+        for attempt in 1..=HAND_OVER_ATTEMPTS {
+            if hand_over(guild_id) {
+                break;
+            }
+            if attempt == HAND_OVER_ATTEMPTS {
+                tracing::warn!(%guild_id, "the dispatcher refused a configuration change; the modules were not told");
+                break;
+            }
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(HAND_OVER_RETRY_DELAY) => {}
+            }
+        }
     }
 }
 
@@ -383,14 +401,15 @@ pub async fn run(args: Args) -> Result<()> {
 
     let shutdown = CancellationToken::new();
     let config_changes = tokio::sync::mpsc::unbounded_channel();
-    let sync_task = sync::start(
-        db.clone(),
-        Arc::clone(&core.store),
-        shutdown.clone(),
-        config_changes.0.clone(),
-    )
-    .await
-    .context("could not load guild configurations")?;
+    // Installs report through this channel; `serve` hands what arrives to the modules. A closed
+    // channel only means the process is shutting down.
+    let reports = config_changes.0.clone();
+    core.store.set_change_hook(move |guild| {
+        let _ = reports.send(guild);
+    });
+    let sync_task = sync::start(db.clone(), Arc::clone(&core.store), shutdown.clone())
+        .await
+        .context("could not load guild configurations")?;
 
     let upkeep_task = start_storage_upkeep(db.clone(), args.message_history_days, shutdown.clone());
     let mut started = Started::default();
@@ -488,6 +507,44 @@ mod tests {
         for path in [good, broken, invalid] {
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn a_refused_hand_over_is_retried_and_the_next_guild_still_gets_its_change() {
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::<GuildId>::new()));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let hand_over = {
+            let attempts = Arc::clone(&attempts);
+            move |guild: GuildId| {
+                let mut seen = attempts.lock().unwrap();
+                seen.push(guild);
+                // Guild 1 is accepted on its third try; guild 2 is refused every time.
+                let tries = seen.iter().filter(|attempt| **attempt == guild).count();
+                guild == Id::new(1) && tries >= 3
+            }
+        };
+        let task = tokio::spawn(forward_config_changes(rx, hand_over, shutdown.clone()));
+        tx.send(Id::new(1)).unwrap();
+        tx.send(Id::new(2)).unwrap();
+
+        let expected = 3 + HAND_OVER_ATTEMPTS;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while attempts.lock().unwrap().len() < expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the retries never finished");
+
+        let seen = attempts.lock().unwrap().clone();
+        assert_eq!(seen.iter().filter(|g| **g == Id::new(1)).count(), 3);
+        assert_eq!(
+            seen.iter().filter(|g| **g == Id::new(2)).count(),
+            HAND_OVER_ATTEMPTS
+        );
+        shutdown.cancel();
+        task.await.unwrap();
     }
 
     #[test]

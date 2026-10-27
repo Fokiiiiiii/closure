@@ -240,10 +240,12 @@ remembered with the module's `Storage` capability; without it nothing is taken o
 
 Dedicated roles of the role method: `punish::ensure_role(ctx, RestrictionRole::Timeout | Voice, configured)`
 returns the role a restriction gives. A configured role that exists is used as it is and never touched.
-Otherwise the remembered or a same-named role (`Timed out`, `Voice muted`) is used, or a new role is created
-with no permissions. A created role gets a deny overwrite in every channel by a job that `punish::jobs`
-registers (`restriction_sync`), and a module that wants the overwrites on new channels calls
-`punish::channel_created(ctx, channel)` on `Event::ChannelCreated`. The role needs the capabilities
+Otherwise the remembered or a same-named role (`Timed out`, `Voice muted`) is used when it is safe to hand
+out (no permissions, not managed, not @everyone, below the bot's top role); an unsafe one is ignored. A new
+role is created with no permissions. Calls for one guild and kind take turns within a process. A created
+role gets a deny overwrite in every channel by a job that `punish::jobs` registers (`restriction_sync`), which
+keeps the other overwrites of the channel. A module that wants the overwrites on new channels calls
+`punish::channel_created(ctx, channel)` on `Event::ChannelCreated`; it sets only the role in use. The role needs the capabilities
 `ManageRoles` and `ManageChannels`, and the job needs `Schedule`.
 
 ### Configuration changes
@@ -251,7 +253,9 @@ registers (`restriction_sync`), and a module that wants the overwrites on new ch
 `Event::ConfigChanged { guild_id }` (kind `config_changed`, no Discord intent) reaches every enabled
 module of a guild right after the guild's configuration was reloaded and changed, and once for each
 guild that has a configuration when the bot sees the guild at start-up or when it is added. An identical
-reload sends nothing. Use it to prepare what the settings need, such as the roles of the role method.
+reload sends nothing. Delivery is best effort: a refused hand-over is retried a few times, then dropped
+with a warning. The same change can also arrive twice (a reload racing a guild's arrival), so handlers
+must tolerate duplicates. Use it to prepare what the settings need, such as the roles of the role method.
 
 ### Listing channels
 

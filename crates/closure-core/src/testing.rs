@@ -1,13 +1,13 @@
 //! Test doubles for code written against [`closure_core`](crate).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use twilight_model::channel::{Channel, Message};
 use twilight_model::guild::{Guild, Member, Role};
 
-use crate::action::{Action, Outcome};
+use crate::action::{Action, Outcome, OverwriteTarget};
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
 use crate::event::{ChannelId, Event, GuildId, RoleId, UserId};
@@ -37,6 +37,21 @@ fn sent_message(channel: ChannelId, id: u64) -> Option<Message> {
     .ok()
 }
 
+/// Lets other tasks run once, as a request to Discord would.
+async fn yield_now() {
+    let mut yielded = false;
+    std::future::poll_fn(|cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+}
+
 /// A role as Discord answers its creation: no permissions, not hoisted, not managed.
 fn created_role(id: u64, name: &str) -> Role {
     serde_json::from_value(serde_json::json!({
@@ -49,12 +64,13 @@ fn created_role(id: u64, name: &str) -> Role {
 }
 
 /// A guild with the given id and name and nothing else of note.
-fn guild_named(guild: GuildId, name: &str) -> Guild {
+fn guild_named(guild: GuildId, name: &str, invites_disabled: bool) -> Guild {
     serde_json::from_value(serde_json::json!({
         "id": guild.to_string(),
         "name": name,
         "owner_id": "999999999",
-        "roles": [], "emojis": [], "features": [], "stickers": [],
+        "roles": [], "emojis": [], "stickers": [],
+        "features": if invites_disabled { vec!["INVITES_DISABLED"] } else { Vec::<&str>::new() },
         "afk_timeout": 300, "default_message_notifications": 0,
         "explicit_content_filter": 0, "mfa_level": 0, "nsfw_level": 0,
         "premium_tier": 0, "system_channel_flags": 0, "verification_level": 0,
@@ -97,6 +113,8 @@ pub struct MockApi {
     roles: Mutex<HashMap<GuildId, Vec<Role>>>,
     guild_channels: Mutex<HashMap<GuildId, Vec<Channel>>>,
     guild_names: Mutex<HashMap<GuildId, String>>,
+    /// The guilds whose invites are switched off by an edit, as the pretend Discord reports them.
+    invites_disabled: Mutex<HashSet<GuildId>>,
     lookups: Mutex<usize>,
 }
 
@@ -125,17 +143,41 @@ impl MockApi {
                     .push(role.clone());
                 Ok(Outcome::Role(Box::new(role)))
             }
+            Action::GetChannel { channel_id } => Ok(lock(&self.guild_channels)
+                .values()
+                .flatten()
+                .find(|channel| channel.id == *channel_id)
+                .map_or(Outcome::None, |channel| {
+                    Outcome::Channel(Box::new(channel.clone()))
+                })),
             Action::ListChannels { guild_id } => Ok(Outcome::Channels(
                 lock(&self.guild_channels)
                     .get(guild_id)
                     .cloned()
                     .unwrap_or_default(),
             )),
-            Action::GetGuild { guild_id } => Ok(lock(&self.guild_names)
-                .get(guild_id)
-                .map_or(Outcome::None, |name| {
-                    Outcome::Guild(Box::new(guild_named(*guild_id, name)))
-                })),
+            Action::GetGuild { guild_id } => {
+                let disabled = lock(&self.invites_disabled).contains(guild_id);
+                let names = lock(&self.guild_names);
+                Ok(match names.get(guild_id) {
+                    Some(name) => Outcome::Guild(Box::new(guild_named(*guild_id, name, disabled))),
+                    None if disabled => Outcome::Guild(Box::new(guild_named(*guild_id, "", true))),
+                    None => Outcome::None,
+                })
+            }
+            Action::EditGuild {
+                guild_id, patch, ..
+            } => {
+                if let Some(disabled) = patch.invites_disabled {
+                    let mut flagged = lock(&self.invites_disabled);
+                    if disabled {
+                        flagged.insert(*guild_id);
+                    } else {
+                        flagged.remove(guild_id);
+                    }
+                }
+                Ok(Outcome::None)
+            }
             Action::SendMessage { channel_id, .. } => Ok(self.sent(*channel_id)),
             // The channel of a direct message is not known to the mock; any id will do.
             Action::SendDirectMessage { .. } => Ok(self.sent(ChannelId::new(1))),
@@ -216,9 +258,15 @@ impl MockApi {
         lock(&self.roles).insert(guild, roles);
     }
 
-    /// Makes every role change of `role` fail with `error`, as Discord does for a role above the bot's.
+    /// Makes every role change of `role`, and every overwrite for it, fail with `error`, as Discord
+    /// does for a role above the bot's.
     pub fn fail_role(&self, role: RoleId, error: DiscordError) {
         lock(&self.failing_roles).insert(role, error);
+    }
+
+    /// Lets the role changes of every role succeed again.
+    pub fn recover_roles(&self) {
+        lock(&self.failing_roles).clear();
     }
 
     /// Declares the channels of `guild`, with their permission overwrites.
@@ -244,6 +292,8 @@ impl MockApi {
 #[async_trait]
 impl DiscordApi for MockApi {
     async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
+        // A real request waits for Discord, so other tasks may run between two calls.
+        yield_now().await;
         let injected = {
             let mut slot = lock(&self.failing_call);
             match slot.take() {
@@ -262,6 +312,10 @@ impl DiscordApi for MockApi {
             Action::AddRole { role_id, .. } | Action::RemoveRole { role_id, .. } => {
                 lock(&self.failing_roles).get(role_id).cloned()
             }
+            Action::SetPermissionOverwrite { overwrite, .. } => match overwrite.target {
+                OverwriteTarget::Role(role) => lock(&self.failing_roles).get(&role).cloned(),
+                OverwriteTarget::Member(_) => None,
+            },
             _ => None,
         };
         if let Some(error) = role_failure {

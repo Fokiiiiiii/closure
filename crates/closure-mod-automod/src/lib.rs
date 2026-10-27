@@ -180,6 +180,13 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 let state = Arc::clone(&state);
                 async move { antiraid::expire(&state, cx).await }
             }
+        })
+        .job(antiraid::RESUME_JOB, {
+            let state = Arc::clone(&state);
+            move |cx| {
+                let state = Arc::clone(&state);
+                async move { antiraid::resume(&state, cx).await }
+            }
         });
     Ok(punish::jobs(builder)
         .catalog(Locale::En, EN)

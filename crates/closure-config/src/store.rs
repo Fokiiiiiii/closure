@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use closure_core::event::GuildId;
@@ -14,6 +14,9 @@ use crate::error::ConfigError;
 use crate::model::{GuildOverrides, GuildSettings};
 use crate::yaml::parse_overrides;
 
+/// Called with a guild whose effective configuration an install changed (see `install`).
+type ChangeHook = Box<dyn Fn(GuildId) + Send + Sync>;
+
 /// In-memory, concurrently readable settings of every guild.
 ///
 /// Reads never block on I/O or on a writer for another guild. A configuration that fails
@@ -23,12 +26,15 @@ pub struct SettingsStore {
     compiler: ConfigCompiler,
     guilds: DashMap<GuildId, Versioned>,
     preferred_locales: DashMap<GuildId, Locale>,
+    change_hook: OnceLock<ChangeHook>,
 }
 
 /// Settings together with the database revision they were read at.
 struct Versioned {
     revision: i64,
     settings: Arc<GuildSettings>,
+    /// The revision whose change was last reported; a revision is reported at most once.
+    notified: i64,
 }
 
 impl std::fmt::Debug for SettingsStore {
@@ -46,6 +52,7 @@ impl SettingsStore {
             compiler,
             guilds: DashMap::new(),
             preferred_locales: DashMap::new(),
+            change_hook: OnceLock::new(),
         }
     }
 
@@ -68,6 +75,7 @@ impl SettingsStore {
             Versioned {
                 revision: 0,
                 settings: Arc::clone(&settings),
+                notified: 0,
             },
         );
         Ok(settings)
@@ -75,24 +83,74 @@ impl SettingsStore {
 
     /// Installs settings read at `revision`, unless newer ones are already in place. Concurrent
     /// writers and the change listener may all call this; the highest revision always wins, so
-    /// they can race without a stale read overwriting a fresh one. Returns whether it installed.
+    /// they can race without a stale read overwriting a fresh one. A change of the effective
+    /// configuration is reported to the change hook, at most once per revision.
+    /// Returns whether it installed.
     #[must_use]
     pub fn install(&self, guild: GuildId, revision: i64, settings: GuildSettings) -> bool {
-        let versioned = Versioned {
-            revision,
-            settings: Arc::new(settings),
-        };
-        match self.guilds.entry(guild) {
+        self.install_inner(guild, revision, settings, true)
+    }
+
+    /// Installs like [`install`](Self::install), but never reports the change: for loads whose
+    /// receivers learn the configuration another way (start-up, and a guild the bot rejoined).
+    #[must_use]
+    pub fn install_silently(&self, guild: GuildId, revision: i64, settings: GuildSettings) -> bool {
+        self.install_inner(guild, revision, settings, false)
+    }
+
+    /// The one place where an installed configuration is compared with the one it replaces.
+    fn install_inner(
+        &self,
+        guild: GuildId,
+        revision: i64,
+        settings: GuildSettings,
+        report: bool,
+    ) -> bool {
+        let settings = Arc::new(settings);
+        // Decided under the entry's lock, so two installs of the same change cannot both report it.
+        let (installed, reported) = match self.guilds.entry(guild) {
             Entry::Occupied(mut entry) if revision >= entry.get().revision => {
-                entry.insert(versioned);
-                true
+                let previous = entry.get();
+                let reported = report
+                    && previous.settings.effective != settings.effective
+                    && revision > previous.notified;
+                let notified = if reported {
+                    revision
+                } else {
+                    previous.notified
+                };
+                entry.insert(Versioned {
+                    revision,
+                    settings,
+                    notified,
+                });
+                (true, reported)
             }
-            Entry::Occupied(_) => false,
+            Entry::Occupied(_) => (false, false),
             Entry::Vacant(entry) => {
-                entry.insert(versioned);
-                true
+                // An unconfigured guild runs on the defaults, so they are what a first document
+                // is compared with.
+                let reported = report && settings.effective != self.compiler.defaults().effective;
+                let notified = if reported { revision } else { 0 };
+                entry.insert(Versioned {
+                    revision,
+                    settings,
+                    notified,
+                });
+                (true, reported)
             }
+        };
+        // Outside the entry's lock: the hook may take as long as it likes to hand the change on.
+        if reported && let Some(hook) = self.change_hook.get() {
+            hook(guild);
         }
+        installed
+    }
+
+    /// Sets the hook called with each guild whose effective configuration an install changed.
+    /// Only the first hook set is kept: a store has one consumer.
+    pub fn set_change_hook(&self, hook: impl Fn(GuildId) + Send + Sync + 'static) {
+        let _ = self.change_hook.set(Box::new(hook));
     }
 
     /// Parses and applies a YAML document.

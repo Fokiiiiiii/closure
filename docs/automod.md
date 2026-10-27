@@ -51,7 +51,7 @@ Start with `dry_run: true`, read the log for a while, then turn it off.
 | `warn_expire_days` | `30` | After how many days a `warn` action expires (1 to 365). |
 | `dm_on_action` | `true` | Whether the member is messaged about a punishment. |
 | `timeout_method` | `discord` | `discord`, or `role`: a role that a timer takes off again. |
-| `timeout_role` | none | The role id a `role` timeout gives. Left out, Closure creates a role named `Timed out` (or uses one of that name), with no permissions, and sets it up in every channel as moderation does. |
+| `timeout_role` | none | The role id a `role` timeout gives. Left out, Closure creates a role named `Timed out` (or uses a safe one of that name, see [moderation](moderation.md#timeouts-and-voice-mutes)), with no permissions, and sets it up in every channel as moderation does. |
 | `remove_roles_on_mute` | `false` | With a `role` timeout: `false`, `true` (every role of the member that can be taken off), or role ids. The roles are taken off with the role and remembered. |
 | `restore_roles_on_mute` | `true` | Which of the taken-off roles come back when the timeout ends: the same forms. |
 | `counters` | `{}` | The counters, keyed by name, at most 10 (see [Counters](#counters)). |
@@ -442,13 +442,18 @@ says why, and the rules keep running.
   when the level goes down; antiraid does not open them.
 - **Quarantine** applies to members who join while the current level has one: they get the quarantine
   role (and `marker_role`, if given). The role denies speaking, reactions and threads, as a timeout does.
+  Setting a level that quarantines creates the role and sets it up in every channel at once, and
+  `/automod antiraid view` says when that is done.
   A level change does not touch members who are already in the server. A quarantine is **never released
   automatically**, when the level goes down or otherwise: a moderator releases a member with
   `/automod antiraid release`, or everyone with `release-all`. A member who leaves is forgotten. Bots are
-  not quarantined. At most 5,000 members are quarantined at once; past that, joins are not quarantined.
+  not quarantined. At most 4,998 members are quarantined at once; past that, joins are not quarantined.
 - **Every change** is posted to the log channel and to the level's `notify_channel`: from and to, who made
   it, until when, how many Discord changes were made and how many failed. A failing change does not stop
   the others.
+- **Incomplete levels**: when a change could not make all its Discord changes, or could not record its end,
+  `/automod antiraid view` and `/automod status` say so with the reason. The missing changes are tried
+  again a minute later, up to five times, and setting the same level again makes them at once.
 - A timed level (`duration`) ends by itself. The end applies only to the change it belongs to: a later
   change of level is not undone by the earlier timer.
 

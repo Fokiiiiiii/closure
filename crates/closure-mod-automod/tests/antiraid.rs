@@ -660,3 +660,353 @@ fn the_schema_accepts_an_antiraid_section_and_rejects_its_bad_shapes() {
         "no automatic release"
     );
 }
+
+/// A member who joins, delivered as the gateway does, for the checks that need the error of a join.
+fn joining(user: u64) -> Event {
+    Event::MemberJoined(MemberInfo {
+        guild_id: Id::new(GUILD),
+        user: UserInfo {
+            id: Id::new(user),
+            name: "member".into(),
+            bot: false,
+        },
+        roles: Vec::new(),
+        nick: None,
+        joined_at: Some(unix_now()),
+        timed_out_until: None,
+    })
+}
+
+#[tokio::test]
+async fn a_failed_effect_is_applied_again_when_the_same_level_is_set() {
+    // A change that stopped halfway (here: one slowmode edit failed) is not complete, and setting the
+    // level it is at again must make the missing changes.
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "slowmode": { "seconds": 30 } } }
+    }));
+    // The channel list is the first call; the first slowmode edit is the second.
+    harness
+        .api()
+        .fail_nth(2, DiscordError::Forbidden("no".into()));
+    set(&harness, "high").await;
+    assert!(
+        view(&harness).await.contains("Incomplete"),
+        "the failed effect is reported"
+    );
+
+    set(&harness, "high").await;
+    assert!(
+        channel_edits(&harness).contains(&(CHANNEL, Some(30))),
+        "setting the same level again applies the failed effect: {:?}",
+        channel_edits(&harness)
+    );
+    assert!(!view(&harness).await.contains("Incomplete"));
+}
+
+#[tokio::test]
+async fn a_failed_effect_is_applied_by_the_resume_job_without_a_command() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "slowmode": { "seconds": 30 } } }
+    }));
+    harness
+        .api()
+        .fail_nth(2, DiscordError::Forbidden("no".into()));
+    set(&harness, "high").await;
+
+    harness.advance(std::time::Duration::from_secs(60));
+    let results = harness.run_due_jobs().await;
+    assert!(results.iter().all(Result::is_ok));
+    assert!(
+        channel_edits(&harness).contains(&(CHANNEL, Some(30))),
+        "the resume job applies the failed effect: {:?}",
+        channel_edits(&harness)
+    );
+    assert!(!view(&harness).await.contains("Incomplete"));
+}
+
+#[tokio::test]
+async fn an_incomplete_level_is_shown_with_its_reason_by_the_view_and_the_status() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "slowmode": { "seconds": 30 } } }
+    }));
+    harness
+        .api()
+        .fail_nth(2, DiscordError::Forbidden("no".into()));
+    set(&harness, "high").await;
+    assert!(view(&harness).await.contains("Incomplete"));
+    let status = text_of(&harness.invoke(sub("status")).await.unwrap());
+    assert!(
+        status.contains("incomplete"),
+        "the status says so: {status}"
+    );
+}
+
+#[tokio::test]
+async fn an_expiry_of_an_earlier_change_does_nothing_when_a_later_change_made_in_the_same_second() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "slowmode": { "seconds": 30 } } }
+    }));
+    harness
+        .invoke(set_invocation("high").option("duration", CommandOptionValue::String("1m".into())))
+        .await
+        .unwrap();
+    // Both changes happen in the same second, so their start times are equal.
+    harness
+        .invoke(set_invocation("low").option("duration", CommandOptionValue::String("10m".into())))
+        .await
+        .unwrap();
+    // The expiry of the first change, as if its cancellation had been lost.
+    let level: Value = harness
+        .store()
+        .get("antiraid:level")
+        .await
+        .unwrap()
+        .unwrap();
+    let set_at = level["set_at"].as_i64().unwrap();
+    harness
+        .scheduler()
+        .job(
+            "antiraid_expire",
+            &json!({ "set_at": set_at, "generation": 1 }),
+        )
+        .unwrap()
+        .key("stale")
+        .after(std::time::Duration::from_secs(60))
+        .await
+        .unwrap();
+
+    harness.advance(std::time::Duration::from_secs(120));
+    let results = harness.run_due_jobs().await;
+    assert!(results.iter().all(Result::is_ok));
+    assert!(
+        view(&harness).await.contains("low"),
+        "the later level stays"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_level_changes_end_consistent_and_keep_the_original_slowmode() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": {
+            "low": { "slowmode": { "seconds": 10 } },
+            "high": { "slowmode": { "seconds": 30 } }
+        }
+    }));
+    let (low, high) = tokio::join!(
+        harness.invoke(set_invocation("low")),
+        harness.invoke(set_invocation("high"))
+    );
+    low.unwrap();
+    high.unwrap();
+
+    let text = view(&harness).await;
+    let (level, seconds) = if text.contains("Level: high") {
+        ("high", 30)
+    } else {
+        ("low", 10)
+    };
+    assert!(text.contains(&format!("Level: {level}")), "{text}");
+    let last = channel_edits(&harness)
+        .into_iter()
+        .rev()
+        .find(|(channel, _)| *channel == CHANNEL);
+    assert_eq!(
+        last,
+        Some((CHANNEL, Some(seconds))),
+        "the channel has the slowmode of the level it is at"
+    );
+
+    clear(&harness).await;
+    assert!(
+        channel_edits(&harness).contains(&(CHANNEL, Some(3))),
+        "the original slowmode of the channel is kept: {:?}",
+        channel_edits(&harness)
+    );
+}
+
+#[tokio::test]
+async fn a_pause_whose_intent_cannot_be_recorded_is_not_made_and_is_retried() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "pause_invites": true } }
+    }));
+    // The level is stored first, so only the new invites marker can be refused.
+    set(&harness, "low").await;
+    let mut filler: usize = 0;
+    while harness
+        .store()
+        .set(&format!("filler:{filler}"), &filler)
+        .await
+        .is_ok()
+    {
+        filler += 1;
+    }
+
+    set(&harness, "high").await;
+    assert!(
+        guild_edits(&harness).is_empty(),
+        "invites are not paused without a record that they were"
+    );
+    assert!(view(&harness).await.contains("Incomplete"));
+
+    for n in 0..filler {
+        harness
+            .store()
+            .delete(&format!("filler:{n}"))
+            .await
+            .unwrap();
+    }
+    harness.advance(std::time::Duration::from_secs(60));
+    harness.run_due_jobs().await;
+    assert_eq!(
+        guild_edits(&harness),
+        vec![Some(true)],
+        "the resume job pauses the invites once the record can be written"
+    );
+    assert!(!view(&harness).await.contains("Incomplete"));
+}
+
+#[tokio::test]
+async fn a_quarantined_member_stays_recorded_when_its_marker_role_cannot_be_given() {
+    const MARKER: u64 = 78;
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": {
+            "role": ROLE.to_string(),
+            "marker_role": MARKER.to_string()
+        } } }
+    }));
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(ROLE, "Quarantine")]);
+    harness
+        .api()
+        .fail_role(Id::new(MARKER), DiscordError::Forbidden("no".into()));
+    set(&harness, "high").await;
+
+    assert!(
+        harness.emit(joining(MEMBER)).await.is_err(),
+        "the failed marker role is reported"
+    );
+    assert!(role_changes(&harness).contains(&(true, MEMBER, ROLE)));
+
+    harness
+        .invoke(sub("antiraid release").option("user", CommandOptionValue::User(Id::new(MEMBER))))
+        .await
+        .unwrap();
+    assert!(
+        role_changes(&harness).contains(&(false, MEMBER, ROLE)),
+        "the quarantine role is taken off although the marker failed"
+    );
+}
+
+#[tokio::test]
+async fn a_join_of_a_member_who_is_still_recorded_gives_the_role_again() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": { "role": ROLE.to_string() } } }
+    }));
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(ROLE, "Quarantine")]);
+    set(&harness, "high").await;
+    join(&harness, MEMBER).await;
+    // The record is still there, as if the leave had not forgotten the member.
+    join(&harness, MEMBER).await;
+    let given = role_changes(&harness)
+        .iter()
+        .filter(|change| **change == (true, MEMBER, ROLE))
+        .count();
+    assert_eq!(given, 2, "the role is given at each join");
+}
+
+#[tokio::test]
+async fn the_quarantine_refuses_a_join_past_the_capacity_of_its_chunks() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": { "role": ROLE.to_string() } } }
+    }));
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(ROLE, "Quarantine")]);
+    set(&harness, "high").await;
+    // 17 chunks of 294 members is the whole capacity: no chunk has room left.
+    for index in 0..17_u64 {
+        let members: Vec<Value> = (0..294_u64)
+            .map(|n| json!({ "user": 1_000_000 + index * 1_000 + n, "role": ROLE, "marker": 0 }))
+            .collect();
+        harness
+            .store()
+            .set(&format!("antiraid:quarantined:{index}"), &members)
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        harness.emit(joining(MEMBER)).await.is_err(),
+        "a join past the capacity is refused"
+    );
+    assert!(!role_changes(&harness).contains(&(true, MEMBER, ROLE)));
+}
+
+#[tokio::test]
+async fn an_expiry_after_the_section_is_removed_still_reverts_the_stored_changes() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "slowmode": { "seconds": 30 } } }
+    }));
+    harness
+        .invoke(set_invocation("high").option("duration", CommandOptionValue::String("1m".into())))
+        .await
+        .unwrap();
+    harness.set_config(json!({ "rules": {} }));
+
+    harness.advance(std::time::Duration::from_secs(120));
+    let results = harness.run_due_jobs().await;
+    assert!(results.iter().all(Result::is_ok));
+    assert!(
+        channel_edits(&harness).contains(&(CHANNEL, Some(3))),
+        "the timed slowmode goes back to the stored original: {:?}",
+        channel_edits(&harness)
+    );
+    assert_eq!(
+        texts_of_channel(&harness, LOG, "not configured any more"),
+        1,
+        "the log channel is told"
+    );
+    let level: Value = harness
+        .store()
+        .get("antiraid:level")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(level["name"], "calm");
+}
+
+#[tokio::test]
+async fn a_level_that_quarantines_sets_up_its_role_when_it_is_set() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": {} } }
+    }));
+    set(&harness, "high").await;
+    assert!(
+        harness
+            .api()
+            .actions()
+            .iter()
+            .any(|action| matches!(action, Action::CreateRole { .. })),
+        "the role is created with the level, not when the first member joins"
+    );
+    assert!(view(&harness).await.contains("still being set up"));
+
+    for _ in 0..3 {
+        harness.run_due_jobs().await;
+    }
+    assert!(view(&harness).await.contains("is ready"));
+}

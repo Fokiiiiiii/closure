@@ -211,6 +211,7 @@ scope-both = { $user }・{ $channel }
 
 # ---- antiraid ----
 status-antiraid = アンレイド: 現在のレベルは { $level } です。
+status-antiraid-incomplete = アンレイド: 現在のレベルは { $level } ですが、未完了です: { $reason }
 status-antiraid-off = アンレイドは無効です。
 status-antiraid-invalid = アンレイドの設定が正しくないため無効です: { $reason }
 antiraid-off = アンレイドが設定されていません。automod の設定に antiraid の項目が必要です。
@@ -223,9 +224,17 @@ antiraid-set-done = アンレイドのレベルを { $old } から { $new } に�
 antiraid-released = 隔離を解除しました。変更: { $changed }、失敗: { $failed }。
 antiraid-released-all = 隔離中のメンバーを全員解除しました。変更: { $changed }、失敗: { $failed }。
 antiraid-reason = アンレイド
-antiraid-notice = アンレイド: { $old } から { $new } へ、{ $who } による変更{ $until }。変更: { $changed }、失敗: { $failed }。招待: { $invites }。
+antiraid-notice = アンレイド: { $old } から { $new } へ、{ $who } による変更{ $until }。変更: { $changed }、失敗: { $failed }。招待: { $invites }。{ $quarantine }{ $incomplete }
 antiraid-invites-paused = 招待は停止中
 antiraid-invites-open = 招待は開いています
+antiraid-quarantine-ready = 隔離用のロールの準備ができています。
+antiraid-quarantine-syncing = 隔離用のロールを各チャンネルに設定中です。
+antiraid-incomplete = 未完了: { $reason }。同じレベルをもう一度設定すると、足りない変更を行います。
+antiraid-gap-unfinished = 変更の完了を確認できていません（bot が停止した可能性があります）
+antiraid-gap-failed = Discord への変更または保存された値が失敗しました
+antiraid-gap-expiry = 期限付きレベルの終了を予約できませんでした
+antiraid-reapplied = アンレイドのレベル { $new } の変更をやり直しました。変更: { $changed }、失敗: { $failed }。
+antiraid-unconfigured = アンレイドは設定から外れています。期限付きのレベルが終わり、保存された変更を元に戻しました。
 detail-antiraid = アンレイドのレベルが { $old } から { $level } に変わった
 trigger-antiraid-level = アンレイドのレベルが変わる
 event-antiraid = アンレイドのレベルの変更

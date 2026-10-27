@@ -117,6 +117,15 @@ async fn antiraid_line(cx: &CommandCx, setup: &Setup) -> Result<String, UserErro
     let (level, _) = crate::antiraid::level(cx.ctx().store(), antiraid.calm())
         .await
         .map_err(UserError::Module)?;
+    if let Some(gap) = level.incomplete() {
+        let reason = cx.t(crate::antiraid::gap_key(gap), &Args::new());
+        return Ok(cx.t(
+            "status-antiraid-incomplete",
+            &Args::new()
+                .with("level", level.name.as_str())
+                .with("reason", reason),
+        ));
+    }
     Ok(cx.t(
         "status-antiraid",
         &Args::new().with("level", level.name.as_str()),

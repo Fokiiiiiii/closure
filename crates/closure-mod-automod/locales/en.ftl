@@ -211,6 +211,7 @@ scope-both = for { $user } in { $channel }
 
 # ---- antiraid ----
 status-antiraid = Antiraid: the level is { $level }.
+status-antiraid-incomplete = Antiraid: the level is { $level }, incomplete: { $reason }.
 status-antiraid-off = Antiraid is off.
 status-antiraid-invalid = Antiraid is off, because its section is not valid: { $reason }
 antiraid-off = Antiraid is not set up: it needs an antiraid section in the automod settings.
@@ -223,9 +224,17 @@ antiraid-set-done = Antiraid level changed from { $old } to { $new }. Changes ma
 antiraid-released = Released from the quarantine. Changes made: { $changed }, failed: { $failed }.
 antiraid-released-all = Every quarantined member was released. Changes made: { $changed }, failed: { $failed }.
 antiraid-reason = Antiraid
-antiraid-notice = Antiraid: { $old } to { $new }, by { $who }{ $until }. Changes made: { $changed }, failed: { $failed }. Invites: { $invites }.
+antiraid-notice = Antiraid: { $old } to { $new }, by { $who }{ $until }. Changes made: { $changed }, failed: { $failed }. Invites: { $invites }.{ $quarantine }{ $incomplete }
 antiraid-invites-paused = invites are paused
 antiraid-invites-open = invites are open
+antiraid-quarantine-ready = The quarantine role is ready.
+antiraid-quarantine-syncing = The quarantine role is still being set up in the channels.
+antiraid-incomplete = Incomplete: { $reason }. Setting the same level again makes the missing changes.
+antiraid-gap-unfinished = the changes were not confirmed to be complete; the bot may have stopped
+antiraid-gap-failed = a Discord change or a stored value failed
+antiraid-gap-expiry = the end of the timed level could not be scheduled
+antiraid-reapplied = The changes of antiraid level { $new } were made again. Changes made: { $changed }, failed: { $failed }.
+antiraid-unconfigured = Antiraid is not configured any more: the timed level ended, and its changes were reverted from the stored state.
 detail-antiraid = the antiraid level changed from { $old } to { $level }
 trigger-antiraid-level = the antiraid level changes
 event-antiraid = antiraid level changes

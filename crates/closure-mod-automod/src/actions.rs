@@ -501,9 +501,12 @@ async fn set_antiraid_level(
         level,
         crate::antiraid::Setter::Bot,
         duration,
+        None,
     )
     .await?;
     Ok(match change {
+        // The effects of the level that is set were made again: the rules see no change.
+        Some(change) if change.reapplied() => (Ran::Other, Vec::new()),
         Some(change) => (
             Ran::Other,
             vec![Context::antiraid(&change.new, &change.old)],

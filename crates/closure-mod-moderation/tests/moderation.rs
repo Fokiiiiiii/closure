@@ -4160,3 +4160,169 @@ async fn a_date_more_than_twenty_eight_days_away_is_refused_for_a_discord_timeou
     assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
     assert!(cases_of(&harness, MEMBER).await.is_empty());
 }
+
+#[tokio::test]
+async fn roles_removed_before_a_failure_are_given_back_when_lifted() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.set_config(json!({
+        "timeout_method": "role",
+        "remove_roles_on_mute": ["60", "61"],
+        "restore_roles_on_mute": ["60", "61"]
+    }));
+    // The second role fails in the middle of the strip; the first one must not be lost.
+    harness.api().fail_role(
+        Id::new(61),
+        DiscordError::Transient("connection reset".into()),
+    );
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(removed(&harness), [60, 61]);
+    harness.api().recover_roles();
+    harness
+        .invoke(untimeout(MEMBER, Some("sorry")))
+        .await
+        .unwrap();
+    assert!(
+        given_back(&harness).contains(&60),
+        "{:?}",
+        given_back(&harness)
+    );
+}
+
+#[tokio::test]
+async fn roles_beyond_the_limit_stay_on_the_member_and_are_counted() {
+    let harness = harness();
+    strip_setup(&harness);
+    let ids: Vec<u64> = (0..300).map(|n| 1_000 + n).collect();
+    let mut roles: Vec<Role> = ids.iter().map(|id| role(*id, 1)).collect();
+    roles.extend([
+        role(GUILD, 0),
+        role(MODERATOR_ROLE, 5),
+        role(ADMIN_ROLE, 9),
+        role(TIMEOUT_ROLE, 1),
+        role(VOICE_ROLE, 1),
+        role(63, 3),
+    ]);
+    harness.api().set_roles(Id::new(GUILD), roles);
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(MEMBER, &ids, false));
+    harness.set_config(json!({ "timeout_method": "role", "remove_roles_on_mute": true }));
+    let replies = harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(removed(&harness).len(), 250);
+    assert!(
+        text(&replies).contains("50 of the member's roles could not be taken off"),
+        "{replies:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_and_a_voice_mute_share_the_roles_taken_off_and_no_restriction_role_comes_back() {
+    let harness = harness();
+    strip_setup(&harness);
+    // The timeout gave the member its timeout role, which the voice mute must leave alone.
+    harness.api().set_member(
+        Id::new(GUILD),
+        member(MEMBER, &[GUILD, 60, 61, 62, TIMEOUT_ROLE], false),
+    );
+    harness.set_config(json!({
+        "timeout_method": "role",
+        "timeout_role": TIMEOUT_ROLE.to_string(),
+        "voice_mute_method": "role",
+        "voice_mute_role": VOICE_ROLE.to_string(),
+        "remove_roles_on_mute": true,
+        "restore_roles_on_mute": true
+    }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    harness
+        .invoke(voice_mute(MEMBER, Some("2h"), Some("noisy")))
+        .await
+        .unwrap();
+    assert!(
+        !removed(&harness).contains(&TIMEOUT_ROLE),
+        "a restriction role is never taken off: {:?}",
+        removed(&harness)
+    );
+    // The timeout ends first: its role goes, but the mute still stands, so nothing comes back.
+    harness.advance(Duration::from_secs(3_601));
+    harness.run_due_jobs().await;
+    assert!(
+        given_back(&harness).is_empty(),
+        "the voice mute still stands"
+    );
+    // The mute ends: the roles come back, and the expired timeout role does not.
+    harness.advance(Duration::from_secs(3_600));
+    harness.run_due_jobs().await;
+    assert_eq!(given_back(&harness).last(), Some(&60));
+    assert_eq!(
+        roles_added(&harness)
+            .iter()
+            .filter(|role| **role == TIMEOUT_ROLE)
+            .count(),
+        1,
+        "the timeout role is only given by the timeout itself"
+    );
+}
+
+#[tokio::test]
+async fn roles_that_could_not_be_given_back_are_given_back_by_a_later_lift() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness.set_config(json!({
+        "timeout_method": "role",
+        "remove_roles_on_mute": ["60"],
+        "restore_roles_on_mute": ["60"]
+    }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    assert_eq!(removed(&harness), [60]);
+    harness.api().fail_role(
+        Id::new(60),
+        DiscordError::Forbidden("Missing Permissions".into()),
+    );
+    harness
+        .invoke(untimeout(MEMBER, Some("sorry")))
+        .await
+        .unwrap();
+    harness.api().recover_roles();
+    // The command has a cooldown of a few seconds.
+    harness.advance(Duration::from_secs(60));
+    harness
+        .invoke(untimeout(MEMBER, Some("again")))
+        .await
+        .unwrap();
+    assert_eq!(
+        given_back(&harness)
+            .iter()
+            .filter(|role| **role == 60)
+            .count(),
+        2,
+        "the first give failed, the later lift gives it back: {:?}",
+        given_back(&harness)
+    );
+}
+
+#[tokio::test]
+async fn roles_left_under_the_keys_of_the_older_layout_are_given_back() {
+    let harness = harness();
+    strip_setup(&harness);
+    harness
+        .store()
+        .set(&format!("stripped:{MEMBER}:vcmute"), &vec![60_u64])
+        .await
+        .unwrap();
+    harness.set_config(json!({ "timeout_method": "role", "restore_roles_on_mute": true }));
+    harness.invoke(untimeout(MEMBER, None)).await.unwrap();
+    assert_eq!(given_back(&harness), [60]);
+}

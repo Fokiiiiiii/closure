@@ -479,6 +479,13 @@ impl Dispatcher {
         self.enqueue(event, None);
     }
 
+    /// Like [`dispatch`](Self::dispatch), but tells whether the event was accepted. A refused
+    /// event is not delivered at all, so the caller may send it again.
+    #[must_use]
+    pub fn try_dispatch(&self, event: Event) -> bool {
+        self.enqueue(event, None)
+    }
+
     /// [`Self::dispatch`], and a message that is a text command also runs as that command (see
     /// [`crate::text_commands`]). `permissions` is asked for only when a command runs.
     pub fn dispatch_message(

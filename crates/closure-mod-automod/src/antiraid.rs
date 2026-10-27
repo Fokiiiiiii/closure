@@ -6,15 +6,16 @@
 //! by comparing with what the module changed before, so that a later level restores what an earlier
 //! one set (a slowmode) or paused (the invites).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use closure_core::action::{Action, ChannelPatch, GuildPatch, MentionPolicy, Outcome, Reason};
 use closure_core::error::DiscordError;
 use closure_sdk::punish::{RestrictionRole, ensure_role};
 use closure_sdk::{
-    Args, ChannelId, Event, EventContext, Expect, JobCx, ModuleError, RoleId, StorageError, Store,
-    UserId,
+    Args, ChannelId, Event, EventContext, Expect, GuildId, JobCx, ModuleError, RoleId,
+    StorageError, Store, UserId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,20 +37,29 @@ const MAX_SLOWMODE_SECONDS: u16 = 21_600;
 const MAX_EFFECT_CHANNELS: usize = 100;
 /// The text channels a slowmode with no channel list reaches; the rest of the guild is left alone.
 const MAX_CHANNELS: usize = 200;
-/// How many members are quarantined at once; a join past this is not quarantined.
-const MAX_QUARANTINED: usize = 5_000;
-/// The quarantined members are kept in chunks, each well inside one store value.
-const CHUNK_MEMBERS: usize = 300;
-const CHUNKS: usize = MAX_QUARANTINED.div_ceil(CHUNK_MEMBERS);
+/// The quarantined members are kept in chunks, each well inside one store value. The capacity is
+/// `CHUNKS * CHUNK_MEMBERS` (4,998 members): a chunk takes a member only while it has room, so no
+/// count of all the members is kept.
+const CHUNK_MEMBERS: usize = 294;
+const CHUNKS: usize = 17;
 /// How often a write that lost a race to another write is tried again.
 const CAS_TRIES: usize = 5;
 /// The job that returns a timed level to the calm one.
 pub const EXPIRE_JOB: &str = "antiraid_expire";
 const EXPIRE_KEY: &str = "antiraid";
+/// The job that applies again the effects of a change that were not all made. It has one key, so
+/// that a later try replaces an earlier one.
+pub const RESUME_JOB: &str = "antiraid_resume";
+const RESUME_KEY: &str = "antiraid:resume";
+/// How long after a change is tried again, and how many times it is.
+const RESUME_DELAY: Duration = Duration::from_secs(60);
+const RESUME_TRIES: u32 = 5;
 const LEVEL_KEY: &str = "antiraid:level";
 const INVITES_KEY: &str = "antiraid:invites";
 const SLOWMODE_KEY: &str = "antiraid:slowmode:";
 const QUARANTINE_KEY: &str = "antiraid:quarantined:";
+/// The marker that the quarantine role sync of the SDK stores once the channels of the role are set.
+const QUARANTINE_SYNCED_KEY: &str = "synced:quarantine";
 /// The most entries one listing of the store returns.
 const LIST_LIMIT: usize = 1_000;
 
@@ -247,7 +257,8 @@ pub enum Setter {
     },
 }
 
-/// The level the server is at.
+/// The level the server is at. A change writes it before it makes the Discord changes its level asks
+/// for, and writes it again once they are all made: see [`Level::incomplete`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Level {
     pub name: String,
@@ -256,6 +267,46 @@ pub struct Level {
     pub set_by: Setter,
     /// When a timed level ends, if it does.
     pub until: Option<i64>,
+    /// Counts the changes of the level. A job made for a change acts only while it is the current one.
+    #[serde(default)]
+    pub generation: u64,
+    /// Whether every effect of the level is in place.
+    #[serde(default = "applied_by_default")]
+    pub applied: bool,
+    /// Why the effects are not all in place, while they are not.
+    #[serde(default)]
+    pub gap: Option<Gap>,
+    /// The calm level, which a timed level returns to. Kept here so that an expiry needs no section.
+    #[serde(default)]
+    pub calm: Option<String>,
+    /// How often the resume job has tried to finish this change.
+    #[serde(default)]
+    pub tries: u32,
+}
+
+/// A record written before the flag existed was written once its effects were made.
+fn applied_by_default() -> bool {
+    true
+}
+
+/// What is missing from a level whose effects are not all in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Gap {
+    /// The change was started but not confirmed complete; the process may have stopped in it.
+    Unfinished,
+    /// A Discord change or a stored value failed.
+    Failed,
+    /// The end of the timed level could not be scheduled.
+    Expiry,
+}
+
+impl Level {
+    /// Why the level is incomplete, if it is.
+    #[must_use]
+    pub fn incomplete(&self) -> Option<Gap> {
+        (!self.applied).then(|| self.gap.unwrap_or(Gap::Unfinished))
+    }
 }
 
 /// How many Discord changes a level change made, and how many failed.
@@ -275,6 +326,18 @@ pub struct Change {
     pub tally: Tally,
     /// Whether the invites are paused by antiraid once the change is made.
     pub invites_paused: bool,
+    /// Why the effects are not all in place, if they are not.
+    pub gap: Option<Gap>,
+    /// Whether the quarantine role of the level is ready for members; `None` without a quarantine.
+    pub quarantine_ready: Option<bool>,
+}
+
+impl Change {
+    /// Whether the change only made the effects of the level that was already set.
+    #[must_use]
+    pub fn reapplied(&self) -> bool {
+        self.old == self.new
+    }
 }
 
 /// The level, and the revision it was read at (`None` while it was never set, so the calm one).
@@ -294,69 +357,128 @@ pub async fn level(store: &Store, calm: &str) -> Result<(Level, Option<i64>), Mo
                 set_at: 0,
                 set_by: Setter::Bot,
                 until: None,
+                generation: 0,
+                applied: true,
+                gap: None,
+                calm: Some(calm.to_owned()),
+                tries: 0,
             },
             None,
         )),
     }
 }
 
+/// The lock of a guild. The level changes of a guild, and the jobs that finish them, take it, so
+/// that their effects never interleave.
+fn guild_lock(guild: GuildId) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<GuildId, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(
+        locks
+            .entry(guild)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
+}
+
 /// Changes the level to `name`, and makes the Discord changes that the new level asks for and the
 /// old one leaves behind. A timed level is given `duration`, after which the calm level comes back.
-/// Returns `None` when the server is at `name` already. A failing change is counted in the
-/// [`Tally`] and the others go on; only a level that cannot be written is an error.
+/// Returns `None` when the server is at `name` with its effects in place, or when `expect_generation`
+/// names another change. Setting the level of a change that is incomplete makes its effects again
+/// ([`Change::reapplied`]). A failing effect is counted in the [`Tally`] and the others go on; only a
+/// level that cannot be written is an error.
 pub async fn set_level(
     ctx: &EventContext,
     cfg: &Antiraid,
     name: &str,
     set_by: Setter,
     duration: Option<Duration>,
+    expect_generation: Option<u64>,
 ) -> Result<Option<Change>, ModuleError> {
     if !cfg.levels.iter().any(|level| level == name) {
         return Err(ModuleError::other(format!(
             "there is no antiraid level named `{name}`"
         )));
     }
+    let lock = guild_lock(ctx.guild_id);
+    let _guard = lock.lock().await;
+    change(ctx, cfg, name, set_by, duration, expect_generation).await
+}
+
+/// The change of [`set_level`], made under the lock of the guild.
+async fn change(
+    ctx: &EventContext,
+    cfg: &Antiraid,
+    name: &str,
+    set_by: Setter,
+    duration: Option<Duration>,
+    expect_generation: Option<u64>,
+) -> Result<Option<Change>, ModuleError> {
     let store = ctx.store();
     let (old, revision) = level(store, cfg.calm()).await?;
-    if old.name == name {
+    if expect_generation.is_some_and(|expected| expected != old.generation) {
         return Ok(None);
     }
-    let now = ctx.now();
-    let until = duration
-        .map(|duration| now.saturating_add(i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)));
-    let new = Level {
-        name: name.to_owned(),
-        set_at: now,
-        set_by,
-        until,
+    let reapply = old.name == name;
+    if reapply && old.applied {
+        return Ok(None);
+    }
+    let level = if reapply {
+        Level {
+            applied: false,
+            gap: Some(Gap::Unfinished),
+            tries: 0,
+            ..old.clone()
+        }
+    } else {
+        let now = ctx.now();
+        Level {
+            name: name.to_owned(),
+            set_at: now,
+            set_by,
+            until: duration.map(|duration| {
+                now.saturating_add(i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+            }),
+            generation: old.generation.saturating_add(1),
+            applied: false,
+            gap: Some(Gap::Unfinished),
+            calm: Some(cfg.calm().to_owned()),
+            tries: 0,
+        }
     };
-    write_level(store, &new, revision).await?;
-
+    // The record goes first: a stop during the Discord changes leaves the level incomplete, which
+    // the resume job or setting the same level again finishes.
+    let revision = write_level(store, &level, revision).await?;
     let effect = cfg.effects.get(name).cloned().unwrap_or_default();
     let mut tally = Tally::default();
-    slowmodes(ctx, effect.slowmode.as_ref(), &mut tally).await;
-    let invites_paused = invites(ctx, effect.pause_invites, &mut tally).await;
-    schedule(ctx, duration, now, &mut tally).await;
+    let effects = apply_effects(ctx, &effect, &level, &mut tally).await;
+    let gap = settle(store, &level, revision, gap_of(&effects, &tally)).await;
+    if gap.is_some() && schedule_resume(ctx, level.generation).await.is_err() {
+        tally.failed += 1;
+    }
     let change = Change {
         old: old.name,
-        new: new.name,
-        set_by,
-        until,
+        new: name.to_owned(),
+        set_by: level.set_by,
+        until: level.until,
         tally,
-        invites_paused,
+        invites_paused: effects.invites_paused,
+        gap,
+        quarantine_ready: effects.quarantine_ready,
     };
     notify(ctx, &change, effect.notify).await;
     Ok(Some(change))
 }
 
+/// Writes the level if it is still at `revision` (`None`: never written), and returns its revision.
 async fn write_level(
     store: &Store,
     level: &Level,
     revision: Option<i64>,
-) -> Result<(), ModuleError> {
+) -> Result<i64, ModuleError> {
     let expect = revision.map_or(Expect::Missing, Expect::Revision);
     match store.replace(LEVEL_KEY, level, expect, None).await {
-        Ok(_) => Ok(()),
+        Ok(revision) => Ok(revision),
         Err(StorageError::Conflict) => Err(ModuleError::other(
             "the antiraid level was changed at the same time, try again",
         )),
@@ -364,23 +486,163 @@ async fn write_level(
     }
 }
 
-/// The payload of the expiry job: the change it ends. A later change has another `set_at`.
-#[derive(Debug, Serialize, Deserialize)]
-struct Expiry {
-    set_at: i64,
+/// Records whether the effects of `level` are all in place, if the record is still at `revision`.
+/// A record that cannot be written keeps the state it was written in, which is incomplete, so the
+/// gap is then a failure.
+async fn settle(store: &Store, level: &Level, revision: i64, gap: Option<Gap>) -> Option<Gap> {
+    let settled = Level {
+        applied: gap.is_none(),
+        gap,
+        ..level.clone()
+    };
+    match write_level(store, &settled, Some(revision)).await {
+        Ok(_) => gap,
+        Err(_) => Some(gap.unwrap_or(Gap::Failed)),
+    }
 }
 
-async fn schedule(ctx: &EventContext, duration: Option<Duration>, now: i64, tally: &mut Tally) {
+/// Why the effects of a level are not all in place, if they are not.
+fn gap_of(effects: &Effects, tally: &Tally) -> Option<Gap> {
+    if effects.expiry_failed {
+        Some(Gap::Expiry)
+    } else if tally.failed > 0 {
+        Some(Gap::Failed)
+    } else {
+        None
+    }
+}
+
+/// Schedules the next try of a change whose effects are not all in place.
+async fn schedule_resume(ctx: &EventContext, generation: u64) -> Result<(), ModuleError> {
+    ctx.scheduler()
+        .job(RESUME_JOB, &Resume { generation })
+        .map_err(|error| ModuleError::other(error.to_string()))?
+        .key(RESUME_KEY)
+        .after(RESUME_DELAY)
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))
+}
+
+/// The payload of the expiry job: the change it ends, by its generation. A job written before
+/// generations existed reads as generation 0, the generation of a level written before them.
+#[derive(Debug, Serialize, Deserialize)]
+struct Expiry {
+    #[serde(default)]
+    generation: u64,
+}
+
+/// The payload of the resume job: the change whose effects it applies again.
+#[derive(Debug, Serialize, Deserialize)]
+struct Resume {
+    generation: u64,
+}
+
+/// The invites marker: that antiraid paused the invites, and by which change. It is written before a
+/// pause is made, and cleared only after a resume is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct InvitesMark {
+    state: InvitesState,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InvitesState {
+    Pausing,
+    Paused,
+    Resuming,
+}
+
+/// The marker as stored: a bare `true` is what the module stored before the marker had a state.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StoredMark {
+    Current(InvitesMark),
+    Legacy(bool),
+}
+
+/// What applying the effects of a level left to report.
+struct Effects {
+    invites_paused: bool,
+    quarantine_ready: Option<bool>,
+    expiry_failed: bool,
+}
+
+/// Makes the Discord changes and the schedule that `effect` and `level` ask for. Each step is tried
+/// whatever the others did; failures are counted in `tally`.
+async fn apply_effects(
+    ctx: &EventContext,
+    effect: &Effect,
+    level: &Level,
+    tally: &mut Tally,
+) -> Effects {
+    slowmodes(ctx, effect.slowmode.as_ref(), tally).await;
+    let invites_paused = invites(ctx, effect.pause_invites, level.generation, tally).await;
+    let quarantine_ready = if let Some(quarantine) = effect.quarantine {
+        Some(quarantine_role_ready(ctx, quarantine, tally).await)
+    } else {
+        None
+    };
+    let expiry_failed = !schedule(ctx, level, tally).await;
+    Effects {
+        invites_paused,
+        quarantine_ready,
+        expiry_failed,
+    }
+}
+
+/// Starts the sync of the quarantine role that the level needs, and says whether the role is ready
+/// for members: a configured role is, a created one once its channels are set up.
+async fn quarantine_role_ready(
+    ctx: &EventContext,
+    quarantine: Quarantine,
+    tally: &mut Tally,
+) -> bool {
+    let Ok(role) = ensure_role(ctx, RestrictionRole::Quarantine, quarantine.role).await else {
+        tally.failed += 1;
+        return false;
+    };
+    quarantine.role == Some(role) || synced_to(ctx.store(), role).await
+}
+
+/// Whether the channel sync of the quarantine role has finished for `role`.
+async fn synced_to(store: &Store, role: RoleId) -> bool {
+    store.get::<u64>(QUARANTINE_SYNCED_KEY).await.ok().flatten() == Some(role.get())
+}
+
+/// Whether the quarantine role of a level is ready for members, as the view and the notice say.
+pub async fn quarantine_is_ready(store: &Store, quarantine: Quarantine) -> bool {
+    quarantine.role.is_some()
+        || store
+            .get::<u64>(QUARANTINE_SYNCED_KEY)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+}
+
+/// Schedules the end of a timed level, or cancels the end of an untimed one. Returns whether that
+/// worked; a failure is counted in `tally`.
+async fn schedule(ctx: &EventContext, level: &Level, tally: &mut Tally) -> bool {
     let scheduler = ctx.scheduler();
-    let result: Result<(), String> = match duration {
-        Some(duration) => match scheduler.job(EXPIRE_JOB, &Expiry { set_at: now }) {
-            Ok(job) => job
-                .key(EXPIRE_KEY)
-                .after(duration)
-                .await
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        },
+    let result: Result<(), String> = match level.until {
+        Some(until) => {
+            let delay =
+                Duration::from_secs(u64::try_from(until.saturating_sub(ctx.now())).unwrap_or(0));
+            match scheduler.job(
+                EXPIRE_JOB,
+                &Expiry {
+                    generation: level.generation,
+                },
+            ) {
+                Ok(job) => job
+                    .key(EXPIRE_KEY)
+                    .after(delay)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            }
+        }
         None => scheduler
             .cancel(EXPIRE_KEY)
             .await
@@ -390,27 +652,144 @@ async fn schedule(ctx: &EventContext, duration: Option<Duration>, now: i64, tall
     if result.is_err() {
         tally.failed += 1;
     }
+    result.is_ok()
 }
 
-/// Applies the expiry of a timed level: the calm level comes back when the change it belongs to is
-/// still the current one.
+/// Applies the end of a timed level. The calm level comes back when the change the job was made for
+/// is still the current one; a change made since is left alone. Without an antiraid section the
+/// stored changes are reverted instead.
 pub async fn expire(state: &State, cx: JobCx) -> Result<(), ModuleError> {
     let payload: Expiry = cx.payload()?;
     let loaded = state.load(cx.ctx())?;
     let Some(cfg) = loaded.setup.antiraid.as_ref() else {
-        return Ok(());
+        return revert_unconfigured(state, cx.ctx(), payload.generation).await;
     };
-    let (current, _) = level(cx.store(), cfg.calm()).await?;
-    if current.set_at != payload.set_at || current.until.is_none() {
-        return Ok(());
-    }
-    if let Some(change) = set_level(cx.ctx(), cfg, cfg.calm(), Setter::Bot, None).await? {
+    let change = set_level(
+        cx.ctx(),
+        cfg,
+        cfg.calm(),
+        Setter::Bot,
+        None,
+        Some(payload.generation),
+    )
+    .await?;
+    if let Some(change) = change {
         engine::after_command(
             state,
             cx.ctx(),
             vec![Context::antiraid(&change.new, &change.old)],
         )
         .await?;
+    }
+    Ok(())
+}
+
+/// The end of a timed level when the antiraid section is gone: the stored changes are reverted
+/// without it. The slowmodes go back to their stored originals and the invites open if antiraid
+/// paused them; the level goes to the calm level it was written with.
+async fn revert_unconfigured(
+    state: &State,
+    ctx: &EventContext,
+    generation: u64,
+) -> Result<(), ModuleError> {
+    let lock = guild_lock(ctx.guild_id);
+    let change = {
+        let _guard = lock.lock().await;
+        revert_locked(ctx, generation).await?
+    };
+    if let Some(change) = change {
+        engine::after_command(
+            state,
+            ctx,
+            vec![Context::antiraid(&change.new, &change.old)],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The revert of [`revert_unconfigured`], made under the lock of the guild.
+async fn revert_locked(ctx: &EventContext, generation: u64) -> Result<Option<Change>, ModuleError> {
+    let store = ctx.store();
+    let (old, revision) = level(store, DEFAULT_LEVELS[0]).await?;
+    if old.generation != generation || old.until.is_none() {
+        return Ok(None);
+    }
+    let mut tally = Tally::default();
+    slowmodes(ctx, None, &mut tally).await;
+    let invites_paused = invites(ctx, false, generation, &mut tally).await;
+    let calm = old
+        .calm
+        .clone()
+        .unwrap_or_else(|| DEFAULT_LEVELS[0].to_owned());
+    let level = Level {
+        name: calm.clone(),
+        set_at: ctx.now(),
+        set_by: Setter::Bot,
+        until: None,
+        generation: old.generation.saturating_add(1),
+        applied: false,
+        gap: Some(Gap::Unfinished),
+        calm: Some(calm.clone()),
+        tries: 0,
+    };
+    let revision = write_level(store, &level, revision).await?;
+    let gap = settle(
+        store,
+        &level,
+        revision,
+        (tally.failed > 0).then_some(Gap::Failed),
+    )
+    .await;
+    let change = Change {
+        old: old.name,
+        new: calm,
+        set_by: Setter::Bot,
+        until: None,
+        tally,
+        invites_paused,
+        gap,
+        quarantine_ready: None,
+    };
+    notify(ctx, &change, None).await;
+    if let Some(log) = ctx.policy().log_channel {
+        send(ctx, log, text(ctx, "antiraid-unconfigured", &Args::new())).await;
+    }
+    Ok(Some(change))
+}
+
+/// Applies again the effects of the current level when its change is the one the job was made for
+/// and its effects are not all in place. A try that does not finish schedules the next one, until
+/// [`RESUME_TRIES`].
+pub async fn resume(state: &State, cx: JobCx) -> Result<(), ModuleError> {
+    let payload: Resume = cx.payload()?;
+    let loaded = state.load(cx.ctx())?;
+    // The effects come from the section: without it there is nothing to apply.
+    let Some(cfg) = loaded.setup.antiraid.as_ref() else {
+        return Ok(());
+    };
+    let ctx = cx.ctx();
+    let lock = guild_lock(ctx.guild_id);
+    let _guard = lock.lock().await;
+    let store = ctx.store();
+    let (current, revision) = level(store, cfg.calm()).await?;
+    let Some(revision) = revision else {
+        return Ok(());
+    };
+    if current.applied || current.generation != payload.generation || current.tries >= RESUME_TRIES
+    {
+        return Ok(());
+    }
+    let effect = cfg.effects.get(&current.name).cloned().unwrap_or_default();
+    let mut tally = Tally::default();
+    let effects = apply_effects(ctx, &effect, &current, &mut tally).await;
+    let next = Level {
+        tries: current.tries + 1,
+        ..current
+    };
+    let gap = settle(store, &next, revision, gap_of(&effects, &tally)).await;
+    if gap.is_some() && next.tries < RESUME_TRIES {
+        schedule_resume(ctx, next.generation).await?;
     }
     Ok(())
 }
@@ -450,9 +829,16 @@ async fn slowmodes(ctx: &EventContext, wanted: Option<&Slowmode>, tally: &mut Ta
     for (channel, seconds) in &targets {
         if !remembered.iter().any(|(known, _)| known == channel) {
             let current = rate_limit_of(&channels, *channel);
-            if store.set(&slowmode_key(*channel), &current).await.is_err() {
-                tally.failed += 1;
-                continue;
+            // Only the first original is kept: a stored one is never replaced.
+            match store
+                .replace(&slowmode_key(*channel), &current, Expect::Missing, None)
+                .await
+            {
+                Ok(_) | Err(StorageError::Conflict) => {}
+                Err(_) => {
+                    tally.failed += 1;
+                    continue;
+                }
             }
         }
         if rate_limit_of(&channels, *channel) == *seconds {
@@ -558,32 +944,89 @@ async fn remembered_slowmodes(store: &Store) -> Result<Vec<(ChannelId, u16)>, Mo
         .collect())
 }
 
-/// Pauses or resumes the invites when the level asks for another state than they are in. Invites
-/// that the server closed itself are left alone, and so are not resumed later. Returns whether the
-/// invites are paused by antiraid once this is done.
-async fn invites(ctx: &EventContext, pause: bool, tally: &mut Tally) -> bool {
+/// Pauses or resumes the invites when the level asks for another state than they are in. A pause is
+/// recorded before it is made, and only a recorded pause is resumed; invites that the server closed
+/// itself are left alone. Returns whether the invites are paused by antiraid once this is done.
+async fn invites(ctx: &EventContext, pause: bool, generation: u64, tally: &mut Tally) -> bool {
     let store = ctx.store();
-    let Ok(paused) = store.get::<bool>(INVITES_KEY).await else {
+    let Ok(mark) = stored_mark(store).await else {
         tally.failed += 1;
         return false;
     };
-    let paused = paused.unwrap_or(false);
-    if pause == paused {
-        return paused;
-    }
     if pause {
-        match closed_by_server(ctx).await {
-            Ok(false) => {}
-            Ok(true) => return false,
-            Err(_) => {
-                tally.failed += 1;
-                return false;
+        if mark.is_some_and(|mark| mark.state == InvitesState::Paused) {
+            return true;
+        }
+        if mark.is_none() {
+            match invites_disabled(ctx).await {
+                Ok(false) => {}
+                Ok(true) => return false,
+                Err(_) => {
+                    tally.failed += 1;
+                    return false;
+                }
             }
         }
+        if !write_mark(store, InvitesState::Pausing, generation).await {
+            tally.failed += 1;
+            return false;
+        }
+        if !edit_invites(ctx, true, tally).await {
+            return false;
+        }
+        if !write_mark(store, InvitesState::Paused, generation).await {
+            tally.failed += 1;
+        }
+        return true;
     }
+    if mark.is_none() {
+        return false;
+    }
+    let Ok(disabled) = invites_disabled(ctx).await else {
+        tally.failed += 1;
+        return true;
+    };
+    if disabled {
+        if !write_mark(store, InvitesState::Resuming, generation).await {
+            tally.failed += 1;
+            return true;
+        }
+        if !edit_invites(ctx, false, tally).await {
+            return true;
+        }
+    }
+    // The mark goes only after the change: when it stays, the resume job finishes the change.
+    if store.delete(INVITES_KEY).await.is_err() {
+        tally.failed += 1;
+    }
+    false
+}
+
+/// The invites marker, if antiraid paused the invites.
+async fn stored_mark(store: &Store) -> Result<Option<InvitesMark>, StorageError> {
+    Ok(match store.get::<StoredMark>(INVITES_KEY).await? {
+        Some(StoredMark::Current(mark)) => Some(mark),
+        Some(StoredMark::Legacy(true)) => Some(InvitesMark {
+            state: InvitesState::Paused,
+            generation: 0,
+        }),
+        Some(StoredMark::Legacy(false)) | None => None,
+    })
+}
+
+/// Writes the invites marker; whether that worked.
+async fn write_mark(store: &Store, state: InvitesState, generation: u64) -> bool {
+    store
+        .set(INVITES_KEY, &InvitesMark { state, generation })
+        .await
+        .is_ok()
+}
+
+/// Switches the invites of the guild off or on; whether Discord made the change.
+async fn edit_invites(ctx: &EventContext, disabled: bool, tally: &mut Tally) -> bool {
     let reason = Reason::truncated(&text(ctx, "antiraid-reason", &Args::new()));
     let patch = GuildPatch {
-        invites_disabled: Some(pause),
+        invites_disabled: Some(disabled),
         ..GuildPatch::default()
     };
     if ctx
@@ -597,21 +1040,14 @@ async fn invites(ctx: &EventContext, pause: bool, tally: &mut Tally) -> bool {
         .is_err()
     {
         tally.failed += 1;
-        return paused;
+        return false;
     }
     tally.changed += 1;
-    let stored = if pause {
-        store.set(INVITES_KEY, &true).await
-    } else {
-        store.delete(INVITES_KEY).await.map(drop)
-    };
-    if stored.is_err() {
-        tally.failed += 1;
-    }
-    pause
+    true
 }
 
-async fn closed_by_server(ctx: &EventContext) -> Result<bool, DiscordError> {
+/// Whether the invites of the guild are switched off, by antiraid or by the server.
+async fn invites_disabled(ctx: &EventContext) -> Result<bool, DiscordError> {
     match ctx
         .api
         .execute(Action::GetGuild {
@@ -625,6 +1061,38 @@ async fn closed_by_server(ctx: &EventContext) -> Result<bool, DiscordError> {
             .any(|feature| matches!(feature, GuildFeature::InvitesDisabled))),
         _ => Ok(false),
     }
+}
+
+/// The text that follows a sentence in a notice: a space before it, nothing when there is none.
+fn following(sentence: String) -> String {
+    if sentence.is_empty() {
+        sentence
+    } else {
+        format!(" {sentence}")
+    }
+}
+
+/// The locale key of the reason a level is incomplete.
+pub fn gap_key(gap: Gap) -> &'static str {
+    match gap {
+        Gap::Unfinished => "antiraid-gap-unfinished",
+        Gap::Failed => "antiraid-gap-failed",
+        Gap::Expiry => "antiraid-gap-expiry",
+    }
+}
+
+/// Posts `body` to `channel`. A notice that does not arrive does not undo the change it tells of.
+async fn send(ctx: &EventContext, channel: ChannelId, body: String) {
+    let _ = ctx
+        .api
+        .execute(Action::SendMessage {
+            channel_id: channel,
+            content: Some(body),
+            embeds: Vec::new(),
+            reply_to: None,
+            mentions: MentionPolicy::None,
+        })
+        .await;
 }
 
 /// Tells the log channel, and the notify channel of the level when it has one, what changed.
@@ -641,6 +1109,18 @@ async fn notify(ctx: &EventContext, change: &Change, notify: Option<ChannelId>) 
     } else {
         "antiraid-invites-open"
     };
+    let quarantine = match change.quarantine_ready {
+        Some(true) => text(ctx, "antiraid-quarantine-ready", &Args::new()),
+        Some(false) => text(ctx, "antiraid-quarantine-syncing", &Args::new()),
+        None => String::new(),
+    };
+    let incomplete = change.gap.map_or_else(String::new, |gap| {
+        text(
+            ctx,
+            "antiraid-incomplete",
+            &Args::new().with("reason", text(ctx, gap_key(gap), &Args::new())),
+        )
+    });
     let body = text(
         ctx,
         "antiraid-notice",
@@ -651,7 +1131,9 @@ async fn notify(ctx: &EventContext, change: &Change, notify: Option<ChannelId>) 
             .with("until", until)
             .with("changed", count(change.tally.changed))
             .with("failed", count(change.tally.failed))
-            .with("invites", text(ctx, invites_key, &Args::new())),
+            .with("invites", text(ctx, invites_key, &Args::new()))
+            .with("quarantine", following(quarantine))
+            .with("incomplete", following(incomplete)),
     );
     let mut channels = Vec::new();
     if let Some(log) = ctx.policy().log_channel {
@@ -663,17 +1145,7 @@ async fn notify(ctx: &EventContext, change: &Change, notify: Option<ChannelId>) 
         channels.push(channel);
     }
     for channel in channels {
-        // A notice that does not arrive does not undo the change it tells of.
-        let _ = ctx
-            .api
-            .execute(Action::SendMessage {
-                channel_id: channel,
-                content: Some(body.clone()),
-                embeds: Vec::new(),
-                reply_to: None,
-                mentions: MentionPolicy::None,
-            })
-            .await;
+        send(ctx, channel, body.clone()).await;
     }
 }
 
@@ -723,11 +1195,10 @@ async fn held_for(store: &Store, user: u64) -> Result<Vec<Held>, ModuleError> {
 }
 
 /// Records a quarantined member in the first chunk with room. Each write is checked against the
-/// revision it was read at, so two joins do not lose each other.
+/// revision it was read at, so two joins do not lose each other. A chunk that keeps changing under
+/// the write is a conflict to try again, not a full quarantine.
 async fn hold(store: &Store, held: Held) -> Result<(), ModuleError> {
-    if held_all(store).await?.len() >= MAX_QUARANTINED {
-        return Err(full());
-    }
+    let mut contended = false;
     for index in 0..CHUNKS {
         for _ in 0..CAS_TRIES {
             let (mut members, expect) = chunk(store, index).await?;
@@ -740,24 +1211,31 @@ async fn hold(store: &Store, held: Held) -> Result<(), ModuleError> {
                 .await
             {
                 Ok(_) => return Ok(()),
-                Err(StorageError::Conflict) => {}
+                Err(StorageError::Conflict) => contended = true,
                 Err(error) => return Err(store_error(&error)),
             }
         }
     }
-    Err(full())
+    Err(if contended { busy() } else { full() })
 }
 
 fn full() -> ModuleError {
     ModuleError::other("the antiraid quarantine is full")
 }
 
-/// Forgets a member, wherever it is recorded.
+fn busy() -> ModuleError {
+    ModuleError::other("the antiraid quarantine changed at the same time, try again")
+}
+
+/// Forgets a member, wherever it is recorded. A chunk that keeps changing under the write is an error
+/// to try again: the member may still be recorded, so it is not reported as forgotten.
 async fn forget(store: &Store, user: u64) -> Result<(), ModuleError> {
     for index in 0..CHUNKS {
+        let mut settled = false;
         for _ in 0..CAS_TRIES {
             let (members, expect) = chunk(store, index).await?;
             if !members.iter().any(|held| held.user == user) {
+                settled = true;
                 break;
             }
             let rest: Vec<Held> = members
@@ -765,17 +1243,25 @@ async fn forget(store: &Store, user: u64) -> Result<(), ModuleError> {
                 .filter(|held| held.user != user)
                 .collect();
             match store.replace(&chunk_key(index), &rest, expect, None).await {
-                Ok(_) => break,
+                Ok(_) => {
+                    settled = true;
+                    break;
+                }
                 Err(StorageError::Conflict) => {}
                 Err(error) => return Err(store_error(&error)),
             }
+        }
+        if !settled {
+            return Err(busy());
         }
     }
     Ok(())
 }
 
 /// Gives the quarantine role (and the marker role) to a member who joins at a level that has one.
-/// The member is recorded first; if a role cannot be given, the record is taken back.
+/// The member is recorded before the quarantine role is given, so a role that was given is always
+/// recorded. A quarantine role that cannot be given takes a new record back; a marker role that
+/// cannot be given is reported and keeps the record, so that release still takes the quarantine off.
 async fn quarantine_join(
     ctx: &EventContext,
     memory: &Memory,
@@ -791,30 +1277,32 @@ async fn quarantine_join(
     else {
         return Ok(());
     };
-    if !held_for(store, user.get()).await?.is_empty() {
-        return Ok(());
-    }
     let role = ensure_role(ctx, RestrictionRole::Quarantine, quarantine.role)
         .await
         .map_err(|error| ModuleError::other(error.to_string()))?;
-    hold(
-        store,
-        Held {
-            user: user.get(),
-            role: role.get(),
-            marker: quarantine.marker.map_or(0, RoleId::get),
-        },
-    )
-    .await?;
-    let mut given = give(ctx, memory, user, role).await;
-    if let (Ok(()), Some(marker)) = (&given, quarantine.marker) {
-        given = give(ctx, memory, user, marker).await;
+    // A member who is recorded already keeps that record; the role is given all the same.
+    let fresh = held_for(store, user.get()).await?.is_empty();
+    if fresh {
+        hold(
+            store,
+            Held {
+                user: user.get(),
+                role: role.get(),
+                marker: quarantine.marker.map_or(0, RoleId::get),
+            },
+        )
+        .await?;
     }
-    if let Err(error) = given {
-        forget(store, user.get()).await?;
+    if let Err(error) = give(ctx, memory, user, role).await {
+        if fresh {
+            forget(store, user.get()).await?;
+        }
         return Err(error);
     }
-    Ok(())
+    match quarantine.marker {
+        Some(marker) => give(ctx, memory, user, marker).await,
+        None => Ok(()),
+    }
 }
 
 async fn give(

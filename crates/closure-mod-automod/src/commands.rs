@@ -305,7 +305,7 @@ pub async fn antiraid_view(state: Arc<State>, cx: CommandCx, (): ()) -> Result<(
         || cx.t("antiraid-no-end", &Args::new()),
         |at| cx.t("antiraid-until", &Args::new().with("at", at)),
     );
-    let text = cx.t(
+    let mut text = cx.t(
         "antiraid-view",
         &Args::new()
             .with("level", level.name.as_str())
@@ -314,6 +314,24 @@ pub async fn antiraid_view(state: Arc<State>, cx: CommandCx, (): ()) -> Result<(
             .with("until", until)
             .with("quarantined", count(quarantined)),
     );
+    if let Some(gap) = level.incomplete() {
+        let reason = cx.t(antiraid::gap_key(gap), &Args::new());
+        text.push('\n');
+        text.push_str(&cx.t("antiraid-incomplete", &Args::new().with("reason", reason)));
+    }
+    if let Some(quarantine) = antiraid
+        .effects
+        .get(&level.name)
+        .and_then(|effect| effect.quarantine)
+    {
+        let key = if antiraid::quarantine_is_ready(store, quarantine).await {
+            "antiraid-quarantine-ready"
+        } else {
+            "antiraid-quarantine-syncing"
+        };
+        text.push('\n');
+        text.push_str(&cx.t(key, &Args::new()));
+    }
     cx.reply_private(text).await
 }
 
@@ -378,28 +396,38 @@ async fn set_and_reply(
     let Some(antiraid) = loaded.setup.antiraid.as_ref() else {
         return antiraid_off(cx).await;
     };
-    let change = antiraid::set_level(cx.ctx(), antiraid, level, by, duration)
+    let change = antiraid::set_level(cx.ctx(), antiraid, level, by, duration, None)
         .await
         .map_err(UserError::Module)?;
     let Some(change) = change else {
         let text = cx.t("antiraid-already", &Args::new().with("level", level));
         return cx.reply_private(text).await;
     };
-    engine::after_command(
-        state,
-        cx.ctx(),
-        vec![Context::antiraid(&change.new, &change.old)],
-    )
-    .await
-    .map_err(UserError::Module)?;
-    let text = cx.t(
-        "antiraid-set-done",
-        &Args::new()
-            .with("old", change.old.as_str())
-            .with("new", change.new.as_str())
-            .with("changed", count(change.tally.changed))
-            .with("failed", count(change.tally.failed)),
-    );
+    // Making the effects of the level that is set again is no change for the rules to see.
+    if !change.reapplied() {
+        engine::after_command(
+            state,
+            cx.ctx(),
+            vec![Context::antiraid(&change.new, &change.old)],
+        )
+        .await
+        .map_err(UserError::Module)?;
+    }
+    let args = Args::new()
+        .with("old", change.old.as_str())
+        .with("new", change.new.as_str())
+        .with("changed", count(change.tally.changed))
+        .with("failed", count(change.tally.failed));
+    let mut text = if change.reapplied() {
+        cx.t("antiraid-reapplied", &args)
+    } else {
+        cx.t("antiraid-set-done", &args)
+    };
+    if let Some(gap) = change.gap {
+        let reason = cx.t(antiraid::gap_key(gap), &Args::new());
+        text.push('\n');
+        text.push_str(&cx.t("antiraid-incomplete", &Args::new().with("reason", reason)));
+    }
     cx.reply_private(text).await
 }
 

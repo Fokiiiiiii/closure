@@ -25,7 +25,7 @@ use crate::{
     UserInfo,
 };
 pub use roles::{RestrictionRole, RoleError, channel_created, ensure_role};
-use roles::{restore, strip};
+use roles::{restore_when_free, strip};
 
 /// Discord's longest timeout, 28 days in seconds.
 const MAX_TIMEOUT_SECONDS: u32 = 28 * 86_400;
@@ -597,7 +597,20 @@ impl<'a> Punisher<'a> {
         let Some(role) = role else {
             return Ok(None);
         };
-        match strip(self.ctx, target, which, role, &self.settings.strip.remove).await {
+        let configured: Vec<RoleId> = [self.settings.timeout_role, self.settings.voice_role]
+            .into_iter()
+            .flatten()
+            .collect();
+        match strip(
+            self.ctx,
+            target,
+            which,
+            role,
+            &configured,
+            &self.settings.strip.remove,
+        )
+        .await
+        {
             Ok(skipped) => Ok((skipped > 0).then_some(Note::RolesNotStripped(skipped))),
             // Nothing was taken off when the strip could not be remembered: logged, not refused.
             Err(error) => {
@@ -607,19 +620,27 @@ impl<'a> Punisher<'a> {
         }
     }
 
-    /// Gives back what the role punishment took off, but only when the lift is the last standing
-    /// case of its kind. A failure is logged: the punishment is lifted either way.
+    /// Gives back what the role punishments took off, but only when no restriction of any kind is
+    /// left for the member. A failure is logged: the punishment is lifted either way.
     async fn restore_if_last(
         &self,
         target: UserId,
         which: RestrictionRole,
         kind: &str,
     ) -> Result<(), UserError> {
-        let standing = active_cases(self.ctx.cases(), target, kind, self.ctx.now(), 2).await?;
-        if standing.len() > 1 {
-            return Ok(());
-        }
-        if let Err(error) = restore(self.ctx, target, which, &self.settings.strip.restore).await {
+        // The lift takes away the one standing case of its kind, if there is one.
+        let lifting = active_cases(self.ctx.cases(), target, kind, self.ctx.now(), 1)
+            .await?
+            .len();
+        if let Err(error) = restore_when_free(
+            self.ctx,
+            target,
+            which,
+            lifting,
+            &self.settings.strip.restore,
+        )
+        .await
+        {
             tracing::warn!(user = %target, %error, "could not give back the roles of a lifted punishment");
         }
         Ok(())
@@ -1056,7 +1077,15 @@ async fn end_timeout(cx: JobCx) -> Result<(), ModuleError> {
         .await
     {
         Ok(()) | Err(DiscordError::NotFound) => {
-            restore(cx.ctx(), user, RestrictionRole::Timeout, &payload.restore).await?;
+            // The timer's case has run out: nothing of it stands any more.
+            restore_when_free(
+                cx.ctx(),
+                user,
+                RestrictionRole::Timeout,
+                0,
+                &payload.restore,
+            )
+            .await?;
             Ok(())
         }
         Err(error) => Err(ModuleError::Discord(error)),
@@ -1096,7 +1125,7 @@ async fn end_voice_mute(cx: JobCx) -> Result<(), ModuleError> {
     };
     if matches!(payload.via, Method::Role) && matches!(result, Ok(()) | Err(DiscordError::NotFound))
     {
-        restore(cx.ctx(), user, RestrictionRole::Voice, &payload.restore).await?;
+        restore_when_free(cx.ctx(), user, RestrictionRole::Voice, 0, &payload.restore).await?;
     }
     match result {
         Err(DiscordError::NotInVoice) if cx.now() - payload.due <= DAY => cx

@@ -66,22 +66,30 @@ well, to show the replies of this module to the invoking user only or to everyon
   the first time it is needed, and reuses it afterwards:
 
   - The roles are named `Timed out` and `Voice muted`. A role with that name (without regard to case)
-    that already exists is used instead, so two modules of one server share one role.
+    that already exists is used instead, so two modules of one server share one role. Only a safe one
+    is used: no permissions at all, not managed by an integration, not @everyone, and below the bot's
+    highest role. A same-named role that is not safe is ignored, and the module creates its own.
   - The role has **no permissions at all**. It is not hoisted and not mentionable. It only denies.
+  - Two punishments at the same time in one process take turns on finding or creating the role, so
+    they share one. Several bot processes on one server are not covered.
   - In every channel, category and voice channel of the server (up to 500 channels), the role gets a
     deny overwrite. A timeout denies Send Messages, Send Messages in Threads, Create Public Threads,
     Create Private Threads, Add Reactions, Speak, Stream and Request to Speak. A voice mute denies
-    Speak, Stream and Use Voice Activity. A channel that already has an overwrite for the role is left
-    alone. The sync runs as a job, ten channels per run; a channel where Discord refuses the change is
-    skipped and counted.
-  - A channel created later gets the same overwrites. A sync is started when the role is created, and
-    again when an earlier one did not finish. A sync that is running is not started again by a later
-    punishment, for ten minutes at a time: a lost job is started again after that.
+    Speak, Stream and Use Voice Activity. A channel where the role already denies all of these is left
+    alone. Otherwise the overwrite keeps its other denies, and an allow of the same bits is dropped: only
+    the bits of the restriction change. The sync runs as a job, ten channels per run; a channel where
+    Discord refuses the change is skipped and counted. A sync that skipped channels runs again an hour
+    later, up to three times, before its outcome is noted.
+  - A channel created later gets the same overwrites, but only for the role that is in use: a role an
+    explicit `timeout_role` or `voice_mute_role` has replaced is not touched. A sync is started when the
+    role is created, and again when an earlier one did not finish. A sync that is running is not started
+    again by a later punishment, for ten minutes at a time: a lost job is started again after that.
   - When the configuration changes, the roles that its methods need are created at once, so the first
     punishment finds them ready.
   - When the sync is done, the log channel gets a note with three counts: the channels that could not
-    be set up, the channels where another role still allows speaking, and the channels that were not
-    checked (more than 500 channels).
+    be set up, the channels where another role or a member still allows speaking (@everyone's allow
+    does not count, since the role's deny comes after it), and the channels that were not checked (more
+    than 500 channels).
   - A role named in `timeout_role` or `voice_mute_role` is never touched: no overwrites are set, and the
     server owns its permissions. A configured role that no longer exists is replaced by a created one.
 
@@ -125,13 +133,19 @@ punishment ends.
 - `false` (the default for removing): no role is taken off. `true`: every role that can be taken off,
   which excludes @everyone, managed roles (a bot's or a boost role), roles at or above the bot's highest
   role, and the dedicated role itself. A list of role ids: the listed roles the member has.
-- The taken-off roles are remembered for the member and the kind of punishment, up to 250 roles, until
-  they come back. `restore_roles_on_mute` defaults to `true`, which gives back all of them; a list gives
-  back only the listed ones, and the others are dropped.
-- Roles come back when the punishment is lifted by a command or by its timer, but only when no other
-  punishment of the same kind still stands for the member.
-- A role that Discord refuses to take off or give back is skipped, and the reply says how many roles
-  stayed on the member. Remembering the roles uses the module's storage: without it, nothing is taken off.
+- The taken-off roles are remembered for the member, in one list shared by timeouts and voice mutes, up
+  to 250 roles, until they come back. Roles beyond the 250 stay on the member, and the reply counts them.
+  `restore_roles_on_mute` defaults to `true`, which gives back all of them; a list gives back only the
+  listed ones, and the others are dropped.
+- A restriction role (the timeout and voice roles, configured or created) is never taken off and never
+  given back, so an expired timeout role does not come back with a voice mute's end.
+- Roles come back when the punishment is lifted by a command or by its timer, but only when no timeout
+  and no voice mute of any module still stands for the member.
+- A role that Discord refuses to take off is skipped, and the reply says how many roles stayed on the
+  member. The list is saved before the first role is taken off, so a failure in the middle keeps the
+  roles already taken off. A role that Discord refuses to give back stays remembered for 30 days, so a
+  later lift can give it back; a role that no longer exists is dropped. Remembering the roles uses the
+  module's storage: without it, nothing is taken off.
 - Rejoining gives the dedicated role again, and takes nothing off. The roles taken off before the
   leave come back when the punishment ends.
 - Discord's own timeout takes no roles off, so this applies to `role` only.
