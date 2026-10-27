@@ -634,10 +634,27 @@ async fn a_failed_lookup_is_shared_by_those_waiting_and_not_remembered() {
     assert!(failed >= 1);
     assert_eq!(api.lookups_in_flight(), 0);
 
-    // The failure was not kept: asking again goes to Discord again.
-    let before = discord.requests().len();
+    // The failure was not kept: whoever asks next gets the real answer. (How many requests it took
+    // depends on the order the waiters ran in, so only the answer is asserted here.)
     assert_eq!(api.channel_guild(Id::new(100)).await, Ok(Some(Id::new(10))));
-    assert_eq!(discord.requests().len(), before + 1);
+}
+
+#[tokio::test]
+async fn a_failed_lookup_is_not_remembered() {
+    let discord = FakeDiscord::start(vec![
+        (404, r#"{"code":10003,"message":"Unknown Channel"}"#),
+        (200, r#"{"id":"100","type":0,"guild_id":"10"}"#),
+    ])
+    .await;
+    let api = discord.api();
+
+    assert_eq!(
+        api.channel_guild(Id::new(100)).await,
+        Err(DiscordError::NotFound)
+    );
+    // Asking again goes to Discord again.
+    assert_eq!(api.channel_guild(Id::new(100)).await, Ok(Some(Id::new(10))));
+    assert_eq!(discord.requests().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
