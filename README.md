@@ -28,7 +28,9 @@ example module). The moderation features themselves are the next step.
 - **Operations.** Health and readiness probes, Prometheus metrics, structured logs, graceful
   shutdown, a database that is the single source of truth.
 
-How the pieces fit: [docs/architecture.md](docs/architecture.md).
+How the pieces fit: [docs/architecture.md](docs/architecture.md). Builds, releases and the
+container image: [docs/deploy.md](docs/deploy.md) (the bot is built on GitHub; download it instead
+of compiling it).
 
 ## Running it
 

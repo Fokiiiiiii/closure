@@ -119,7 +119,8 @@ accepts an installation whose revision is at least as new as the one it holds, s
 writers cannot let a stale read win. A stored document that no longer validates is skipped with a
 warning and the guild keeps its previous settings.
 
-See [configuration.md](configuration.md) for the document itself.
+See [configuration.md](configuration.md) for the document itself. Building, releases and the
+container image are in [deploy.md](deploy.md).
 
 ## Languages
 

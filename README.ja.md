@@ -27,7 +27,9 @@ closure は、小さく厳格な「核」を中心に作られたモデレーシ
 - **運用。** ヘルス/レディネス、Prometheus メトリクス、構造化ログ、グレースフルシャットダウン。
   データベースが唯一の正本です。
 
-全体の構成は [docs/architecture.md](docs/architecture.md) を参照してください。
+全体の構成は [docs/architecture.md](docs/architecture.md) を参照してください。ビルド、リリース、
+コンテナイメージは [docs/deploy.md](docs/deploy.md)（ビルドは GitHub 上で行うので、手元では
+コンパイルせずにダウンロードして使います）。
 
 ## 動かし方
 

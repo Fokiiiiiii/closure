@@ -4,18 +4,55 @@ on:
   push:
     branches: [main]
   pull_request:
+  # New advisories appear without any change here, so the dependency check also runs weekly.
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+# A newer push to the same branch makes the running check on the older one pointless.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
   RUSTFLAGS: -D warnings
-  DATABASE_URL: postgres://postgres:postgres@localhost:5432/closure_test
 
 jobs:
-  check:
+  fmt:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Only main writes the cache: a pull request reads it but does not evict it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/closure_test
     services:
       postgres:
         image: postgres:17
@@ -33,13 +70,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo run -p closure-xtask -- docs --check
+        with:
+          shared-key: ci-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --workspace --locked
+      # The generated references must match the modules; the check builds the app crate too.
+      - run: cargo run --locked -p closure-xtask -- docs --check
 
   deny:
     runs-on: ubuntu-latest
