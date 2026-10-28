@@ -3,6 +3,7 @@
 //! so that the role takes the speech away there. An explicitly configured role is never touched.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -146,6 +147,37 @@ type Gate = Arc<Mutex<()>>;
 fn gates() -> &'static StdMutex<HashMap<(u64, &'static str), Gate>> {
     static GATES: OnceLock<StdMutex<HashMap<(u64, &'static str), Gate>>> = OnceLock::new();
     GATES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// The turns of the role changes of each member, by guild and user. A gate is kept only while a
+/// turn is taken or waited for.
+fn member_gates() -> &'static StdMutex<HashMap<(u64, u64), Gate>> {
+    static MEMBER_GATES: OnceLock<StdMutex<HashMap<(u64, u64), Gate>>> = OnceLock::new();
+    MEMBER_GATES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Runs `work` while no other strip or restore of `target` runs. Each of them reads the plan of the
+/// member, makes Discord calls and writes the plan back, so they must not interleave.
+async fn one_at_a_time<T>(ctx: &EventContext, target: UserId, work: impl Future<Output = T>) -> T {
+    let key = (ctx.guild_id.get(), target.get());
+    let gate = {
+        let mut map = member_gates()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+    };
+    let result = {
+        let _turn = gate.lock().await;
+        work.await
+    };
+    // Only the map and this call hold the gate when nobody waits for it: it is dropped then.
+    let mut map = member_gates()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if Arc::strong_count(&gate) <= 2 {
+        map.remove(&key);
+    }
+    result
 }
 
 /// The role a restriction gives. A configured role that exists is used as it is. Otherwise the
@@ -493,6 +525,22 @@ pub(super) async fn strip(
     configured: &[RoleId],
     selection: &RoleSelection,
 ) -> Result<u32, ModuleError> {
+    one_at_a_time(
+        ctx,
+        target,
+        strip_now(ctx, target, which, dedicated, configured, selection),
+    )
+    .await
+}
+
+async fn strip_now(
+    ctx: &EventContext,
+    target: UserId,
+    which: RestrictionRole,
+    dedicated: RoleId,
+    configured: &[RoleId],
+    selection: &RoleSelection,
+) -> Result<u32, ModuleError> {
     if matches!(selection, RoleSelection::None) {
         return Ok(0);
     }
@@ -602,6 +650,15 @@ pub(super) async fn restore(
     which: RestrictionRole,
     selection: &RoleSelection,
 ) -> Result<u32, ModuleError> {
+    one_at_a_time(ctx, target, restore_now(ctx, target, which, selection)).await
+}
+
+async fn restore_now(
+    ctx: &EventContext,
+    target: UserId,
+    which: RestrictionRole,
+    selection: &RoleSelection,
+) -> Result<u32, ModuleError> {
     let stored = match stripped(ctx, target).await {
         Ok(stored) => stored,
         // Without the storage grant nothing could have been stripped, so nothing is given back.
@@ -627,14 +684,15 @@ pub(super) async fn restore(
             .filter(|role| stored.contains(&role.get()))
             .collect(),
     };
+    let pending: Vec<RoleId> = wanted
+        .into_iter()
+        .filter(|role| !restricted.contains(&role.get()))
+        .collect();
     let mut given = Vec::new();
     let mut gone = Vec::new();
     let mut kept = 0;
     let mut fatal = None;
-    for role in wanted
-        .into_iter()
-        .filter(|role| !restricted.contains(&role.get()))
-    {
+    for role in pending.iter().copied() {
         match ctx
             .api
             .add_role(ctx.guild_id, target, role, audit(ctx, which, "restored"))
@@ -662,9 +720,11 @@ pub(super) async fn restore(
             }
         }
     }
-    let left: Vec<u64> = stored
-        .into_iter()
-        .filter(|id| !given.contains(id) && !gone.contains(id) && !restricted.contains(id))
+    // Only the roles this restore chose are remembered, and only those it did not give back yet.
+    let left: Vec<u64> = pending
+        .iter()
+        .map(|role| role.get())
+        .filter(|id| !given.contains(id) && !gone.contains(id))
         .collect();
     if left.is_empty() {
         ctx.store()

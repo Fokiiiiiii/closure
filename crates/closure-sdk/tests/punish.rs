@@ -6,7 +6,9 @@ use std::time::Duration;
 use closure_core::action::Action;
 use closure_core::error::DiscordError;
 use closure_core::event::CommandOptionValue;
-use closure_sdk::punish::{self, Done, Method, Moderator, Punisher, Settings, Strip};
+use closure_sdk::punish::{
+    self, Done, Method, Moderator, Punisher, RoleSelection, RoleSetting, Settings, Strip,
+};
 use closure_sdk::testing::{Harness, Invocation, Reply};
 use closure_sdk::{
     Capability, Case, CaseKind, Command, CommandArgs, CommandCx, Locale, ModuleBuilder,
@@ -14,6 +16,7 @@ use closure_sdk::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use twilight_model::guild::{Member, Role};
 use twilight_model::id::Id;
 
 const MODERATOR: u64 = 100;
@@ -31,6 +34,8 @@ struct Setup {
     timeout_role: Option<String>,
     voice: Method,
     voice_role: Option<String>,
+    strip_remove: Option<RoleSetting>,
+    strip_restore: Option<RoleSetting>,
 }
 
 impl Setup {
@@ -46,7 +51,16 @@ impl Setup {
             timeout_role: role(&self.timeout_role),
             voice: self.voice,
             voice_role: role(&self.voice_role),
-            strip: Strip::default(),
+            strip: Strip {
+                remove: self
+                    .strip_remove
+                    .as_ref()
+                    .map_or(RoleSelection::None, RoleSetting::selection),
+                restore: self
+                    .strip_restore
+                    .as_ref()
+                    .map_or(RoleSelection::All, RoleSetting::selection),
+            },
         }
     }
 }
@@ -229,6 +243,7 @@ fn module() -> ModuleBuilder {
         .capability(Capability::ManageRoles)
         .capability(Capability::MuteMembers)
         .capability(Capability::ReadGuild)
+        .capability(Capability::Storage)
         .config(json!({ "type": "object", "properties": {} }), json!({}))
         .command(Command::<Kick>::new("kick", "Kick").handler(kick))
         .command(Command::<Kick>::new("bot_kick", "Kick as the bot").handler(bot_kick))
@@ -696,6 +711,134 @@ async fn a_timed_out_role_is_the_one_the_timeout_gave_even_after_a_config_change
     assert!(ended[0].is_ok(), "{ended:?}");
     assert!(role_changed(&harness, 30, false));
     assert!(!role_changed(&harness, 32, false));
+}
+
+fn guild_role(id: u64, position: i64) -> Role {
+    serde_json::from_value(json!({
+        "id": id.to_string(),
+        "name": "role",
+        "color": 0,
+        "colors": { "primary_color": 0, "secondary_color": null, "tertiary_color": null },
+        "hoist": false,
+        "managed": false,
+        "mentionable": false,
+        "permissions": "0",
+        "position": position,
+        "flags": 0,
+    }))
+    .unwrap()
+}
+
+fn member_with_roles(id: u64, roles: &[u64]) -> Member {
+    serde_json::from_value(json!({
+        "deaf": false,
+        "mute": false,
+        "flags": 0,
+        "roles": roles.iter().map(u64::to_string).collect::<Vec<_>>(),
+        "user": {
+            "id": id.to_string(),
+            "username": "member",
+            "discriminator": "0",
+            "avatar": null,
+            "bot": false,
+        },
+    }))
+    .unwrap()
+}
+
+// ---- roles taken off and given back ----
+
+#[tokio::test]
+async fn a_lift_that_leaves_a_role_out_does_not_let_a_later_lift_give_it_back() {
+    let harness = harness();
+    harness
+        .api()
+        .set_roles(Id::new(1), vec![guild_role(700, 1)]);
+    harness
+        .api()
+        .set_member(Id::new(1), member_with_roles(MEMBER, &[700]));
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30", "strip_remove": true }));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    assert!(role_changed(&harness, 700, false), "700 is taken off");
+
+    // This lift gives back only role 999, which the member never had: 700 is left out for good.
+    harness.set_config(json!({
+        "timeout": "role", "timeout_role": "30", "strip_remove": true, "strip_restore": ["999"]
+    }));
+    harness.invoke(target("untimeout", MEMBER)).await.unwrap();
+    assert!(!role_changed(&harness, 700, true), "nothing is given back");
+
+    // A later punishment takes nothing off, and its lift gives back everything it remembers.
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30", "strip_restore": true }));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    harness.invoke(target("untimeout", MEMBER)).await.unwrap();
+    assert!(
+        !role_changed(&harness, 700, true),
+        "700 was left out of the earlier lift and is not given back now"
+    );
+}
+
+#[tokio::test]
+async fn a_role_taken_off_while_a_lift_gives_roles_back_is_given_back_later() {
+    let harness = harness();
+    let held: Vec<u64> = (700..708).collect();
+    let mut known: Vec<Role> = held.iter().map(|id| guild_role(*id, 1)).collect();
+    known.push(guild_role(900, 1));
+    harness.api().set_roles(Id::new(1), known);
+    harness
+        .api()
+        .set_member(Id::new(1), member_with_roles(MEMBER, &held));
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30", "strip_remove": true }));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    assert!(
+        held.iter().all(|id| role_changed(&harness, *id, false)),
+        "every role is taken off"
+    );
+
+    // The member now holds 900 instead. The lift gives the eight roles back one call at a time,
+    // and a timeout that starts a few calls later takes 900 off while the lift is still running.
+    harness
+        .api()
+        .set_member(Id::new(1), member_with_roles(MEMBER, &[900]));
+    let (lift, punish) = tokio::time::timeout(Duration::from_secs(10), async {
+        let later = async {
+            // Three calls: the lift has checked for other punishments by then, and is in its restore.
+            for _ in 0..3 {
+                tokio::task::yield_now().await;
+            }
+            harness
+                .invoke(with_duration(target("timeout", MEMBER), "1h"))
+                .await
+        };
+        tokio::join!(harness.invoke(target("untimeout", MEMBER)), later)
+    })
+    .await
+    .expect("the lift and the timeout finish");
+    lift.unwrap();
+    punish.unwrap();
+    assert!(
+        held.iter().all(|id| role_changed(&harness, *id, true)),
+        "the lift gives the roles back"
+    );
+    assert!(
+        role_changed(&harness, 900, false),
+        "the timeout takes 900 off"
+    );
+
+    harness.invoke(target("untimeout", MEMBER)).await.unwrap();
+    assert!(
+        role_changed(&harness, 900, true),
+        "900 was taken off while the lift ran, and must be given back by a later lift"
+    );
 }
 
 // ---- ban and unban ----
