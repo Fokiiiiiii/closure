@@ -296,7 +296,8 @@ impl HistoryBackend for Db {
              ON CONFLICT (guild_id, message_id, attachment_id) DO UPDATE SET
                 channel_id = EXCLUDED.channel_id, filename = EXCLUDED.filename,
                 size = EXCLUDED.size, content_type = EXCLUDED.content_type, url = EXCLUDED.url,
-                stored = EXCLUDED.stored, data = EXCLUDED.data, kept_at = EXCLUDED.kept_at",
+                stored = EXCLUDED.stored, data = EXCLUDED.data, kept_at = EXCLUDED.kept_at
+               WHERE EXCLUDED.stored OR NOT message_files.stored",
         )
         .bind(to_db(guild).map_err(backend)?)
         .bind(to_db(message).map_err(backend)?)

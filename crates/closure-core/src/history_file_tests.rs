@@ -1,11 +1,14 @@
 //! Tests of the files the history keeps for the attachments of messages.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::attachments::{Fetcher, keep_missing};
 use crate::capability::{Capability, CapabilitySet};
 use crate::event::{AttachmentInfo, GuildId, MessageId};
 use crate::history::{HistoryBackend, HistoryError, MemoryHistory, MessageHistory};
 use crate::module::ModuleId;
+use tokio::sync::Barrier;
 use twilight_model::id::Id;
 
 const GUILD: u64 = 1;
@@ -18,6 +21,34 @@ fn picture(id: u64) -> AttachmentInfo {
         size: 2048,
         content_type: Some("image/png".into()),
         url: format!("https://cdn.example/attachments/{id}/photo.png"),
+    }
+}
+
+fn cdn_picture(id: u64) -> AttachmentInfo {
+    AttachmentInfo {
+        url: format!("https://cdn.discordapp.com/attachments/{id}/photo.png"),
+        ..picture(id)
+    }
+}
+
+/// Serves the same bytes for every link, as the CDN does.
+struct FakeCdn;
+
+#[async_trait::async_trait]
+impl Fetcher for FakeCdn {
+    async fn fetch(&self, _url: &str) -> Result<Vec<u8>, String> {
+        Ok(b"png bytes".to_vec())
+    }
+}
+
+/// Serves its bytes only once every fetch has started, so the fetches must run at the same time.
+struct BarrierCdn(Barrier);
+
+#[async_trait::async_trait]
+impl Fetcher for BarrierCdn {
+    async fn fetch(&self, _url: &str) -> Result<Vec<u8>, String> {
+        self.0.wait().await;
+        Ok(b"png bytes".to_vec())
     }
 }
 
@@ -145,4 +176,70 @@ async fn a_module_without_the_capability_cannot_read_files() {
         history.file_data(message(10), 9).await,
         Err(HistoryError::NotGranted)
     ));
+}
+
+#[tokio::test]
+async fn a_failed_fetch_does_not_replace_a_stored_file() {
+    let backend = Arc::new(MemoryHistory::default());
+    keep(&backend, &picture(1), Some(b"png bytes"), 100).await;
+    keep(&backend, &picture(1), None, 200).await;
+    let history = granted_history(Arc::clone(&backend));
+
+    let files = history.files_of(message(10)).await.unwrap();
+
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].stored);
+    let data = history.file_data(message(10), 1).await.unwrap();
+    assert_eq!(data.as_deref(), Some(&b"png bytes"[..]));
+}
+
+#[tokio::test]
+async fn a_file_that_could_not_be_fetched_is_fetched_again_when_asked() {
+    let backend = Arc::new(MemoryHistory::default());
+    keep(&backend, &cdn_picture(2), None, 100).await;
+
+    keep_missing(
+        &*backend,
+        &FakeCdn,
+        guild(),
+        Id::new(CHANNEL),
+        message(10),
+        &[cdn_picture(2)],
+        200,
+    )
+    .await
+    .unwrap();
+
+    let history = granted_history(Arc::clone(&backend));
+    let files = history.files_of(message(10)).await.unwrap();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].stored);
+}
+
+#[tokio::test]
+async fn missing_files_are_fetched_at_the_same_time() {
+    let backend = Arc::new(MemoryHistory::default());
+    let attachments: Vec<AttachmentInfo> = (1..=10).map(cdn_picture).collect();
+    let cdn = BarrierCdn(Barrier::new(attachments.len()));
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        keep_missing(
+            &*backend,
+            &cdn,
+            guild(),
+            Id::new(CHANNEL),
+            message(10),
+            &attachments,
+            100,
+        ),
+    )
+    .await
+    .expect("the fetches waited for each other")
+    .unwrap();
+
+    let history = granted_history(Arc::clone(&backend));
+    let files = history.files_of(message(10)).await.unwrap();
+    assert_eq!(files.len(), attachments.len(), "{files:?}");
+    assert!(files.iter().all(|file| file.stored));
 }

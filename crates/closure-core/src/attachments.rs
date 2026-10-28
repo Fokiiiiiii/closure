@@ -6,6 +6,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
+
 use crate::event::{AttachmentInfo, ChannelId, GuildId, MessageId};
 use crate::history::{HistoryBackend, HistoryError};
 
@@ -52,8 +54,8 @@ async fn fetch_attachment(fetcher: &dyn Fetcher, attachment: &AttachmentInfo) ->
     }
 }
 
-/// Keeps the files of `attachments` that are not kept yet: fetched where they can be, and recorded
-/// without bytes where they cannot, so that a log can say so.
+/// Keeps the files of `attachments` that are not stored yet: fetched where they can be, and recorded
+/// without bytes where they cannot, so that a log can say so. The fetches run at the same time.
 pub async fn keep_missing(
     backend: &dyn HistoryBackend,
     fetcher: &dyn Fetcher,
@@ -70,13 +72,15 @@ pub async fn keep_missing(
         .files_of(guild, message)
         .await?
         .iter()
+        .filter(|file| file.stored)
         .map(|file| file.attachment.id)
         .collect();
-    for attachment in attachments
+    let mut in_flight: FuturesUnordered<_> = attachments
         .iter()
         .filter(|attachment| !kept.contains(&attachment.id))
-    {
-        let data = fetch_attachment(fetcher, attachment).await;
+        .map(|attachment| async move { (attachment, fetch_attachment(fetcher, attachment).await) })
+        .collect();
+    while let Some((attachment, data)) = in_flight.next().await {
         backend
             .save_file(guild, channel, message, attachment, data.as_deref(), at)
             .await?;

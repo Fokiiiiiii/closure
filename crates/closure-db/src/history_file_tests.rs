@@ -123,3 +123,18 @@ async fn purging_drops_the_files_kept_before_the_cutoff(pool: PgPool) {
 
     assert_eq!(attachment_ids(&db).await, [8]);
 }
+
+#[sqlx::test]
+async fn a_failed_fetch_does_not_replace_a_stored_file(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    db.migrate().await.unwrap();
+    keep(&db, &picture(1), Some(b"png bytes"), 1_700_000_000).await;
+    keep(&db, &picture(1), None, 1_700_000_200).await;
+
+    let files = history(&db).files_of(Id::new(MESSAGE)).await.unwrap();
+
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].stored);
+    let data = history(&db).file_data(Id::new(MESSAGE), 1).await.unwrap();
+    assert_eq!(data.as_deref(), Some(&b"png bytes"[..]));
+}

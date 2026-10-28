@@ -158,7 +158,8 @@ pub trait HistoryBackend: Send + Sync {
     async fn purge_before(&self, cutoff: i64) -> Result<u64, HistoryError>;
 
     /// Keeps the file of an attachment of a message. `data` is `None` when the file could not be
-    /// fetched. Keeping the same attachment again replaces its file.
+    /// fetched. Keeping the same attachment again replaces its file,
+    /// unless `data` is `None` and a file is already stored: then nothing changes.
     async fn save_file(
         &self,
         guild: GuildId,
@@ -540,6 +541,15 @@ impl HistoryBackend for MemoryHistory {
     ) -> Result<(), HistoryError> {
         let mut guilds = self.lock();
         let files = &mut guilds.entry(guild).or_default().files;
+        // As in the database: a failed fetch never replaces a stored file.
+        let stored_already = files.iter().any(|file| {
+            file.kept.stored
+                && file.kept.message_id == message
+                && file.kept.attachment.id == attachment.id
+        });
+        if data.is_none() && stored_already {
+            return Ok(());
+        }
         files.retain(|file| {
             !(file.kept.message_id == message && file.kept.attachment.id == attachment.id)
         });
