@@ -103,8 +103,8 @@ pub enum DispatchError {
     },
 }
 
-/// How long a lane waits for the history to keep a message before it hands the message to modules.
-/// It is longer than a message hook may run, so a slow hook still lets the message through.
+/// How long a lane waits, counted from when a message arrived, for the history to be done with it.
+/// Queue time counts. Past it the message goes to the modules without waiting for the history.
 const RECORD_WAIT: Duration = Duration::from_secs(25);
 
 struct Job {
@@ -114,7 +114,9 @@ struct Job {
     command: bool,
     /// Where to say how a scheduled job went; dropped unsent if the job was lost on the way.
     outcome: Option<oneshot::Sender<JobOutcome>>,
-    /// Set for a message: the modules see it only once this has fired, when the history has kept it.
+    /// Set for a message: the lane waits for the history to be done with it, but only up to
+    /// `RECORD_WAIT` after the message arrived. The history sends whether or not it kept the message;
+    /// a dropped sender ends the wait too.
     recorded: Option<oneshot::Receiver<()>>,
 }
 
@@ -503,7 +505,8 @@ impl Dispatcher {
     }
 
     /// Like [`Self::dispatch_message`], but the modules get the event only once `recorded` has fired
-    /// or been dropped: the history has then kept what the event carries.
+    /// or been dropped, or `RECORD_WAIT` has passed since the event arrived, whichever comes first.
+    /// Firing means the history is done with the event, kept or not.
     pub fn dispatch_message_after(
         &self,
         event: Event,
@@ -826,9 +829,9 @@ async fn lane_worker(
         };
         let Some(mut job) = job else { break };
         if let Some(recorded) = job.recorded.take() {
-            // A message is handled once the history has kept it. A recorder that is slow or gone
-            // does not hold the lane for longer than RECORD_WAIT.
-            let _ = tokio::time::timeout(RECORD_WAIT, recorded).await;
+            // The wait runs from the arrival, so the time spent in the queue counts.
+            // Past RECORD_WAIT the message goes to the modules without waiting for the history.
+            let _ = tokio::time::timeout_at(job.enqueued + RECORD_WAIT, recorded).await;
         }
         metrics::histogram!("closure_event_queue_seconds")
             .record(job.enqueued.elapsed().as_secs_f64());

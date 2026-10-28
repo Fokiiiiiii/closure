@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -11,6 +12,7 @@ use closure_core::event::{Event as ModuleEvent, GuildId};
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Locale;
 use closure_core::registry::ModuleRegistry;
+use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -28,8 +30,9 @@ use crate::text_commands;
 
 /// How long a hook may take before the gateway moves on without it.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the history may take to keep one message, fetching its attachments when a deletion or an
-/// edit needs them. Longer than an ordinary hook, and shorter than the wait of the lanes.
+/// How long the history may take to keep one message, fetching its attachments when a deletion
+/// or an edit needs them. Shorter than the lanes' wait for it (`RECORD_WAIT` in dispatcher.rs,
+/// 25 seconds), so normally a lane hears that the record is done before it gives up on it.
 const RECORD_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How many message events may wait for their hook. Past it the newest is dropped and logged:
@@ -237,7 +240,8 @@ struct HookQueueState {
     pending: HashMap<GuildId, HookJob>,
     /// Message events in the order they came; every one is kept up to the capacity.
     messages: VecDeque<(ModuleEvent, Option<tokio::sync::oneshot::Sender<()>>)>,
-    /// Set once no shard can push any more.
+    /// Set once no shard can push any more, and by the worker when it stops.
+    /// No message is accepted after that.
     closed: bool,
 }
 
@@ -259,6 +263,10 @@ impl HookQueue {
     /// and logged by its kind alone, never its content.
     fn push_message(&self, event: ModuleEvent) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let mut state = self.state();
+        // Once closed, no worker is left to record the event, so no lane may wait for it.
+        if state.closed {
+            return None;
+        }
         if state.messages.len() >= MESSAGE_QUEUE_CAPACITY {
             tracing::warn!(
                 kind = event.kind().as_str(),
@@ -278,6 +286,14 @@ impl HookQueue {
         self.wake.notify_one();
     }
 
+    /// Closes the queue and drops the senders still waiting, which lets their lanes go on. Used once
+    /// the worker has stopped, when nothing queued will ever be recorded.
+    fn abandon(&self) {
+        let mut state = self.state();
+        state.closed = true;
+        state.messages.clear();
+    }
+
     /// Everything pending, and whether the queue is closed. All of it is read under one lock, so
     /// a closed queue that reports no work really is finished.
     fn take(&self) -> Taken {
@@ -294,9 +310,20 @@ impl HookQueue {
     }
 }
 
+/// Abandons the queue when the worker ends, whether it returns, panics or is aborted. The lanes wait
+/// for the messages they hold, so none may stay queued for a worker that is gone.
+struct WorkerExit(Arc<HookQueue>);
+
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        self.0.abandon();
+    }
+}
+
 /// Runs queued hooks one at a time. Ends once the queue is closed and empty, so the hooks of
 /// events handled while the shards were shutting down are not lost.
 async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
+    let _exit = WorkerExit(Arc::clone(&queue));
     loop {
         let taken = queue.take();
         if taken.jobs.is_empty() && taken.messages.is_empty() {
@@ -307,11 +334,15 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
             continue;
         }
         for (event, recorded) in taken.messages {
-            if tokio::time::timeout(RECORD_TIMEOUT, hooks.message(&event))
-                .await
-                .is_err()
-            {
-                tracing::warn!(kind = event.kind().as_str(), "message hook timed out");
+            // A panicking hook counts as not kept; the worker goes on with the next message.
+            let hook = AssertUnwindSafe(hooks.message(&event)).catch_unwind();
+            match tokio::time::timeout(RECORD_TIMEOUT, hook).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => tracing::error!(
+                    kind = event.kind().as_str(),
+                    "message hook panicked; the message was not kept"
+                ),
+                Err(_) => tracing::warn!(kind = event.kind().as_str(), "message hook timed out"),
             }
             // Sent whether or not the hook kept the message: the lane goes on either way.
             if let Some(recorded) = recorded {
@@ -783,6 +814,140 @@ mod tests {
         assert!(!queue.take().closed, "one shard is still running");
         drop(second);
         assert!(queue.take().closed, "the last shard is gone");
+    }
+
+    /// Panics on the first message event it is given, and keeps the id of each later one.
+    #[derive(Default)]
+    struct PanicsOnFirstMessage {
+        calls: std::sync::atomic::AtomicUsize,
+        kept: Mutex<Vec<u64>>,
+    }
+
+    #[async_trait]
+    impl GuildHooks for PanicsOnFirstMessage {
+        async fn message(&self, event: &ModuleEvent) {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(call != 0, "the first message breaks its hook");
+            if let ModuleEvent::MessageDeleted { message_id, .. } = event {
+                self.kept.lock().unwrap().push(message_id.get());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_message_hook_that_panics_does_not_stop_the_worker() {
+        let hooks = Arc::new(PanicsOnFirstMessage::default());
+        let queue = Arc::new(HookQueue::default());
+        let first = queue
+            .push_message(deleted(1, 10))
+            .expect("the queue has room");
+        let second = queue
+            .push_message(deleted(1, 11))
+            .expect("the queue has room");
+        let worker = tokio::spawn(run_hook_worker(
+            Arc::clone(&hooks) as Arc<dyn GuildHooks>,
+            Arc::clone(&queue),
+        ));
+
+        let wait = Duration::from_secs(5);
+        let first = tokio::time::timeout(wait, first)
+            .await
+            .expect("the lane of the panicking message is released");
+        assert!(
+            first.is_ok(),
+            "a message whose hook panicked is still sent to its lane"
+        );
+        let second = tokio::time::timeout(wait, second)
+            .await
+            .expect("the lane of the next message is released");
+        assert!(second.is_ok());
+        assert_eq!(
+            *hooks.kept.lock().unwrap(),
+            [11],
+            "the worker goes on with the next message"
+        );
+
+        queue.close();
+        tokio::time::timeout(wait, worker)
+            .await
+            .expect("the worker ends once the queue is closed")
+            .unwrap();
+    }
+
+    /// Stops in its guild hook: it yields once, so messages can be queued while it waits, then panics.
+    struct PanicsInGuildHook;
+
+    #[async_trait]
+    impl GuildHooks for PanicsInGuildHook {
+        async fn guild_available(&self, _: GuildId, _: &str, _: Option<Locale>) {
+            tokio::task::yield_now().await;
+            panic!("the guild hook breaks");
+        }
+    }
+
+    #[tokio::test]
+    async fn lanes_waiting_on_a_worker_that_stopped_are_released() {
+        let queue = Arc::new(HookQueue::default());
+        queue.push(available(1, "boom"));
+        let worker = tokio::spawn(run_hook_worker(
+            Arc::new(PanicsInGuildHook) as Arc<dyn GuildHooks>,
+            Arc::clone(&queue),
+        ));
+        // The worker takes the job and waits inside the hook, so the message is queued after that.
+        tokio::task::yield_now().await;
+        let queued = queue
+            .push_message(deleted(1, 10))
+            .expect("the queue has room");
+
+        let wait = Duration::from_secs(5);
+        let _ = tokio::time::timeout(wait, queued)
+            .await
+            .expect("a message queued before the worker stopped releases its lane");
+        let stopped = tokio::time::timeout(wait, worker)
+            .await
+            .expect("the worker stops");
+        assert!(stopped.unwrap_err().is_panic());
+        assert!(
+            queue.push_message(deleted(1, 11)).is_none(),
+            "no lane waits for a message once the worker has stopped"
+        );
+    }
+
+    /// Never finishes a message: a worker that takes one stays inside its hook until it is aborted.
+    struct HangsOnMessage;
+
+    #[async_trait]
+    impl GuildHooks for HangsOnMessage {
+        async fn message(&self, _: &ModuleEvent) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn lanes_waiting_on_an_aborted_worker_are_released() {
+        let queue = Arc::new(HookQueue::default());
+        let worker = tokio::spawn(run_hook_worker(
+            Arc::new(HangsOnMessage) as Arc<dyn GuildHooks>,
+            Arc::clone(&queue),
+        ));
+        let taken = queue
+            .push_message(deleted(1, 10))
+            .expect("the queue has room");
+        // The worker takes the first message and waits in its hook; the second one stays queued.
+        tokio::task::yield_now().await;
+        let queued = queue
+            .push_message(deleted(1, 11))
+            .expect("the queue has room");
+        worker.abort();
+
+        let wait = Duration::from_secs(5);
+        let _ = tokio::time::timeout(wait, taken)
+            .await
+            .expect("the lane of the message being handled is released");
+        let _ = tokio::time::timeout(wait, queued)
+            .await
+            .expect("the lane of the queued message is released");
+        assert!(queue.push_message(deleted(1, 12)).is_none());
     }
 
     /// Keeps the deleted messages of the guilds it wants, in the order they came.

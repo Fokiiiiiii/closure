@@ -2381,6 +2381,116 @@ async fn a_message_reaches_the_modules_only_once_it_is_recorded() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_record_within_the_wait_comes_before_the_modules() {
+    let probe = messages_only("late");
+    let h = harness(
+        &[(&probe, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+    let (recorded, done) = tokio::sync::oneshot::channel::<()>();
+
+    h.dispatcher
+        .dispatch_message_after(message(3, 1), done, |_| Permissions::empty());
+    // The history keeps the message 10 seconds after it arrives, well inside the wait.
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    assert!(
+        probe.log().iter().all(|line| !line.starts_with("msg")),
+        "the module must not see the message before it is recorded: {:?}",
+        probe.log()
+    );
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    recorded.send(()).unwrap();
+    h.dispatcher.flush().await;
+    assert!(
+        probe.log().iter().any(|line| line == "msg:1"),
+        "{:?}",
+        probe.log()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_record_past_the_wait_releases_the_lane_at_the_wait() {
+    let probe = messages_only("late");
+    let h = harness(
+        &[(&probe, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+    // The sender stays alive, so the history never finishes this record.
+    let (_history, done) = tokio::sync::oneshot::channel::<()>();
+    let arrived = tokio::time::Instant::now();
+
+    h.dispatcher
+        .dispatch_message_after(message(3, 1), done, |_| Permissions::empty());
+    assert!(
+        wait_until_logged(&probe, "msg:1").await,
+        "the module never saw the message: {:?}",
+        probe.log()
+    );
+    let waited = arrived.elapsed();
+    assert!(
+        waited >= Duration::from_secs(25) && waited < Duration::from_secs(26),
+        "the module saw the message after {waited:?}, not at the 25 second wait"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_wait_counts_from_arrival_not_from_the_lane() {
+    let probe = messages_only("late");
+    let h = harness(
+        &[(&probe, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+    let (first_recorded, first_done) = tokio::sync::oneshot::channel::<()>();
+    let (second_recorded, second_done) = tokio::sync::oneshot::channel::<()>();
+    let arrived = tokio::time::Instant::now();
+
+    h.dispatcher
+        .dispatch_message_after(message(3, 1), first_done, |_| Permissions::empty());
+    h.dispatcher
+        .dispatch_message_after(message(3, 2), second_done, |_| Permissions::empty());
+    // The first message is kept at 20 seconds, so the lane is busy until then. The second is kept
+    // only at 30 seconds after it arrived: it must reach the modules at its own wait, 25 seconds
+    // after arrival, not when the lane frees up.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let _ = first_recorded.send(());
+    });
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let _ = second_recorded.send(());
+    });
+
+    assert!(
+        wait_until_logged(&probe, "msg:2").await,
+        "the module never saw the second message: {:?}",
+        probe.log()
+    );
+    let waited = arrived.elapsed();
+    assert!(
+        waited >= Duration::from_secs(25) && waited < Duration::from_secs(26),
+        "the second message reached the modules after {waited:?}, not at its 25 second wait"
+    );
+}
+
+/// Polls the probe every 100 ms of virtual time. False when `line` is not logged within a minute.
+async fn wait_until_logged(probe: &Probe, line: &str) -> bool {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !probe.log().iter().any(|logged| logged == line) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_text_command_and_its_reply_are_deleted_after_the_guilds_delays() {
     let module = warn_module(Behavior::AnswerCommand);
     let policy = GuildPolicy {
