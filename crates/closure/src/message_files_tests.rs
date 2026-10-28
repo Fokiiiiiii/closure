@@ -88,6 +88,7 @@ fn picture(id: u64) -> AttachmentInfo {
 
 fn message(id: u64, attachments: Vec<AttachmentInfo>) -> MessageInfo {
     MessageInfo {
+        removed_attachments: Vec::new(),
         id: Id::new(id),
         channel_id: Id::new(CHANNEL),
         guild_id: Id::new(GUILD),
@@ -137,7 +138,10 @@ async fn a_deletion_fetches_the_pictures_that_were_not_kept() {
     let fetcher = Arc::new(Served::default());
     let recorder = recorder(&store, &backend, &fetcher);
     recorder
-        .record(&Event::MessageCreated(message(10, vec![picture(1)])), NOW)
+        .record(
+            &mut Event::MessageCreated(message(10, vec![picture(1)])),
+            NOW,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -146,7 +150,7 @@ async fn a_deletion_fetches_the_pictures_that_were_not_kept() {
         "a link is kept, not its bytes, until the message goes"
     );
 
-    recorder.record(&deleted(10), NOW + 60).await.unwrap();
+    recorder.record(&mut deleted(10), NOW + 60).await.unwrap();
 
     assert_eq!(calls(&fetcher), 1);
     assert_eq!(kept(&backend, 10).await, [(1, true)]);
@@ -160,11 +164,14 @@ async fn without_a_module_that_asks_for_files_nothing_is_fetched() {
     let fetcher = Arc::new(Served::default());
     let recorder = recorder(&store, &backend, &fetcher);
     recorder
-        .record(&Event::MessageCreated(message(11, vec![picture(2)])), NOW)
+        .record(
+            &mut Event::MessageCreated(message(11, vec![picture(2)])),
+            NOW,
+        )
         .await
         .unwrap();
 
-    recorder.record(&deleted(11), NOW + 60).await.unwrap();
+    recorder.record(&mut deleted(11), NOW + 60).await.unwrap();
 
     assert_eq!(calls(&fetcher), 0);
     assert!(kept(&backend, 11).await.is_empty());
@@ -178,17 +185,58 @@ async fn a_picture_an_edit_removes_is_fetched_while_the_edit_is_recorded() {
     let fetcher = Arc::new(Served::default());
     let recorder = recorder(&store, &backend, &fetcher);
     recorder
-        .record(&Event::MessageCreated(message(12, vec![picture(3)])), NOW)
+        .record(
+            &mut Event::MessageCreated(message(12, vec![picture(3)])),
+            NOW,
+        )
         .await
         .unwrap();
 
     recorder
-        .record(&Event::MessageUpdated(message(12, Vec::new())), NOW + 60)
+        .record(
+            &mut Event::MessageUpdated(message(12, Vec::new())),
+            NOW + 60,
+        )
         .await
         .unwrap();
 
     assert_eq!(calls(&fetcher), 1);
     assert_eq!(kept(&backend, 12).await, [(3, true)]);
+}
+
+#[tokio::test]
+async fn an_edit_hands_on_only_the_pictures_it_took_away() {
+    let store = store(true);
+    enable(&store, false);
+    let backend = Arc::new(MemoryHistory::default());
+    let fetcher = Arc::new(Served::default());
+    let recorder = recorder(&store, &backend, &fetcher);
+    recorder
+        .record(
+            &mut Event::MessageCreated(message(15, vec![picture(3), picture(4)])),
+            NOW,
+        )
+        .await
+        .unwrap();
+
+    let mut removing = Event::MessageUpdated(message(15, vec![picture(4)]));
+    recorder.record(&mut removing, NOW + 60).await.unwrap();
+    assert_eq!(removed_ids(&removing), [3]);
+
+    let mut text_only = Event::MessageUpdated(message(15, vec![picture(4)]));
+    recorder.record(&mut text_only, NOW + 120).await.unwrap();
+    assert_eq!(removed_ids(&text_only), Vec::<u64>::new());
+}
+
+fn removed_ids(event: &Event) -> Vec<u64> {
+    match event {
+        Event::MessageUpdated(info) => info
+            .removed_attachments
+            .iter()
+            .map(|file| file.id)
+            .collect(),
+        _ => panic!("expected an update"),
+    }
 }
 
 #[tokio::test]
@@ -200,7 +248,10 @@ async fn with_the_setting_on_a_picture_is_kept_as_its_message_arrives() {
     let recorder = recorder(&store, &backend, &fetcher);
 
     recorder
-        .record(&Event::MessageCreated(message(13, vec![picture(4)])), NOW)
+        .record(
+            &mut Event::MessageCreated(message(13, vec![picture(4)])),
+            NOW,
+        )
         .await
         .unwrap();
     // The fetch runs in the background; wait for it, with a bound.
@@ -236,13 +287,13 @@ async fn links_off_the_cdn_and_pictures_too_large_are_recorded_without_bytes() {
     };
     recorder
         .record(
-            &Event::MessageCreated(message(14, vec![elsewhere, huge])),
+            &mut Event::MessageCreated(message(14, vec![elsewhere, huge])),
             NOW,
         )
         .await
         .unwrap();
 
-    recorder.record(&deleted(14), NOW + 60).await.unwrap();
+    recorder.record(&mut deleted(14), NOW + 60).await.unwrap();
 
     assert_eq!(
         calls(&fetcher),
@@ -277,7 +328,7 @@ async fn arrivals_beyond_the_backlog_are_not_queued() {
     for id in 0..200_u64 {
         recorder
             .record(
-                &Event::MessageCreated(message(100 + id, vec![picture(id)])),
+                &mut Event::MessageCreated(message(100 + id, vec![picture(id)])),
                 NOW,
             )
             .await

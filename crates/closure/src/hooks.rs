@@ -113,7 +113,7 @@ impl GuildHooks for AppHooks {
         self.messages.keeps(guild)
     }
 
-    async fn message(&self, event: &ModuleEvent) {
+    async fn message(&self, event: &mut ModuleEvent) {
         if let Err(error) = self.messages.record(event, unix_now()).await {
             tracing::warn!(kind = event.kind().as_str(), %error, "could not keep a message");
         }
@@ -150,6 +150,7 @@ mod tests {
 
     fn message(guild: u64, id: u64) -> ModuleEvent {
         ModuleEvent::MessageCreated(MessageInfo {
+            removed_attachments: Vec::new(),
             id: Id::new(id),
             channel_id: Id::new(5),
             guild_id: Id::new(guild),
@@ -189,8 +190,8 @@ mod tests {
 
         assert!(!hooks.wants_messages(Id::new(1)));
         assert!(hooks.wants_messages(Id::new(2)));
-        hooks.message(&message(1, 10)).await;
-        hooks.message(&message(2, 11)).await;
+        hooks.message(&mut message(1, 10)).await;
+        hooks.message(&mut message(2, 11)).await;
 
         let kept: Vec<i64> =
             sqlx::query_scalar("SELECT message_id FROM saved_messages ORDER BY message_id")

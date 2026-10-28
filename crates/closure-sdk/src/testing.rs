@@ -283,6 +283,7 @@ impl ContextUse {
     #[must_use]
     pub fn on_message(command: &str, message: u64, author: u64, content: &str) -> Self {
         let info = MessageInfo {
+            removed_attachments: Vec::new(),
             id: Id::new(message),
             channel_id: Id::new(5),
             guild_id: Id::new(GUILD),
@@ -906,6 +907,7 @@ impl Harness {
     pub async fn message(&self, message: Message) -> Result<Option<Flow>, ModuleError> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let info = MessageInfo {
+            removed_attachments: Vec::new(),
             id: Id::new(id),
             channel_id: Id::new(message.channel),
             guild_id: Id::new(GUILD),

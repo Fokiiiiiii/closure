@@ -91,18 +91,28 @@ impl MessageRecorder {
     /// Applies one gateway event at unix time `now`. Messages are stored only where
     /// [`Self::keeps`] says so; a deletion is marked wherever it happens, since it adds no text.
     /// Other events are ignored.
-    pub async fn record(&self, event: &Event, now: i64) -> Result<(), HistoryError> {
+    pub async fn record(&self, event: &mut Event, now: i64) -> Result<(), HistoryError> {
+        let updated = matches!(event, Event::MessageUpdated(_));
         match event {
             Event::MessageCreated(info) | Event::MessageUpdated(info) => {
                 if self.keeps(info.guild_id) {
-                    let previous = match event {
-                        Event::MessageUpdated(_) => {
-                            self.backend
-                                .get(info.guild_id, info.channel_id, info.id)
-                                .await?
-                        }
-                        _ => None,
+                    let previous = if updated {
+                        self.backend
+                            .get(info.guild_id, info.channel_id, info.id)
+                            .await?
+                    } else {
+                        None
                     };
+                    if let Some(previous) = &previous {
+                        // What this edit took away: the attachments before it that it no longer has.
+                        let removed: Vec<AttachmentInfo> = previous
+                            .attachments
+                            .iter()
+                            .filter(|old| !info.attachments.iter().any(|new| new.id == old.id))
+                            .cloned()
+                            .collect();
+                        info.removed_attachments = removed;
+                    }
                     let message = SavedMessage::from_info(info);
                     check_text(&message)?;
                     self.backend.save(&message).await?;
@@ -346,6 +356,7 @@ mod tests {
 
     fn info(guild: u64, id: u64, created_at: i64, content: &str) -> MessageInfo {
         MessageInfo {
+            removed_attachments: Vec::new(),
             id: Id::new(id),
             channel_id: Id::new(5),
             guild_id: Id::new(guild),
@@ -380,7 +391,7 @@ mod tests {
         let recorder = recorder(&store, &backend, 7);
         // Guild 1 has no configuration: the module is disabled there by default.
         recorder
-            .record(&created(1, 10, NOW, "hidden"), NOW)
+            .record(&mut created(1, 10, NOW, "hidden"), NOW)
             .await
             .unwrap();
         assert_eq!(
@@ -395,7 +406,7 @@ mod tests {
             .set_guild_yaml(Id::new(2), "modules:\n  reader:\n    enabled: true\n")
             .unwrap();
         recorder
-            .record(&created(2, 11, NOW, "kept"), NOW)
+            .record(&mut created(2, 11, NOW, "kept"), NOW)
             .await
             .unwrap();
         let stored = backend
@@ -418,7 +429,7 @@ mod tests {
         let recorder = recorder(&store, &backend, 7);
         assert!(!recorder.keeps(Id::new(1)));
         recorder
-            .record(&created(1, 10, NOW, "x"), NOW)
+            .record(&mut created(1, 10, NOW, "x"), NOW)
             .await
             .unwrap();
         assert_eq!(
@@ -440,7 +451,7 @@ mod tests {
         let recorder = recorder(&store, &backend, 0);
         assert!(!recorder.keeps(Id::new(2)));
         recorder
-            .record(&created(2, 11, NOW, "x"), NOW)
+            .record(&mut created(2, 11, NOW, "x"), NOW)
             .await
             .unwrap();
         assert_eq!(
@@ -461,14 +472,14 @@ mod tests {
         let backend = Arc::new(MemoryHistory::default());
         let recorder = recorder(&store, &backend, 7);
         recorder
-            .record(&created(2, 11, NOW, "first"), NOW)
+            .record(&mut created(2, 11, NOW, "first"), NOW)
             .await
             .unwrap();
 
         let mut edit = info(2, 11, NOW, "second");
         edit.edited_at = Some(NOW + 5);
         recorder
-            .record(&Event::MessageUpdated(edit), NOW + 5)
+            .record(&mut Event::MessageUpdated(edit), NOW + 5)
             .await
             .unwrap();
         let stored = backend
@@ -481,7 +492,7 @@ mod tests {
 
         // An edit that removes the text leaves no text behind.
         recorder
-            .record(&Event::MessageUpdated(info(2, 11, NOW, "")), NOW + 6)
+            .record(&mut Event::MessageUpdated(info(2, 11, NOW, "")), NOW + 6)
             .await
             .unwrap();
         let stored = backend
@@ -502,13 +513,13 @@ mod tests {
         let recorder = recorder(&store, &backend, 7);
         for id in [11, 12, 13] {
             recorder
-                .record(&created(2, id, NOW, "x"), NOW)
+                .record(&mut created(2, id, NOW, "x"), NOW)
                 .await
                 .unwrap();
         }
         recorder
             .record(
-                &Event::MessageDeleted {
+                &mut Event::MessageDeleted {
                     guild_id: Id::new(2),
                     channel_id: Id::new(5),
                     message_id: Id::new(11),
@@ -519,7 +530,7 @@ mod tests {
             .unwrap();
         recorder
             .record(
-                &Event::MessagesBulkDeleted {
+                &mut Event::MessagesBulkDeleted {
                     guild_id: Id::new(2),
                     channel_id: Id::new(5),
                     message_ids: vec![Id::new(12)],
@@ -543,11 +554,11 @@ mod tests {
         let backend = Arc::new(MemoryHistory::default());
         let recorder = recorder(&store, &backend, 1);
         recorder
-            .record(&created(2, 11, NOW - DAY_SECONDS - 1, "old"), NOW)
+            .record(&mut created(2, 11, NOW - DAY_SECONDS - 1, "old"), NOW)
             .await
             .unwrap();
         recorder
-            .record(&created(2, 12, NOW - DAY_SECONDS + 1, "recent"), NOW)
+            .record(&mut created(2, 12, NOW - DAY_SECONDS + 1, "recent"), NOW)
             .await
             .unwrap();
         assert_eq!(recorder.purge(NOW).await.unwrap(), 1);

@@ -562,6 +562,7 @@ mod tests {
 
     fn message(mentioned_users: &[u64], mentioned_roles: &[u64], everyone: bool) -> MessageInfo {
         MessageInfo {
+            removed_attachments: Vec::new(),
             id: Id::new(1),
             channel_id: Id::new(2),
             guild_id: Id::new(3),

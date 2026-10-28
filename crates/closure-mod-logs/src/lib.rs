@@ -2,8 +2,6 @@
 //! channel. A deleted message is shown with what the history kept of it: its text, and its files when
 //! the host kept them. The files and their posting are the SDK's (`closure_sdk::files`).
 
-use std::collections::HashSet;
-
 use closure_core::capability::Capability;
 use closure_core::error::{CoreError, ModuleError};
 use closure_core::event::{ChannelId, Event, EventKind, MessageId, MessageInfo, UserInfo};
@@ -220,14 +218,10 @@ async fn bulk_deleted(
     Ok(entries)
 }
 
-/// An edit: the new text and files, and the files the edit removed, which the history kept.
+/// An edit: the new text and files, and the files the edit took away (`removed_attachments`).
 async fn edited(ctx: &EventContext, message: &MessageInfo) -> Result<LogEntry, ModuleError> {
-    let current: HashSet<u64> = message.attachments.iter().map(|file| file.id).collect();
-    let removed: Vec<Kept> = files::kept_files(ctx, message.id)
-        .await?
-        .into_iter()
-        .filter(|kept| !current.contains(&kept.id))
-        .collect();
+    let removed =
+        files::files_of_attachments(ctx, message.id, &message.removed_attachments).await?;
     let mut card = message_card(
         ctx,
         label(ctx, "logs-edited"),

@@ -65,6 +65,7 @@ fn attachment(attachment: &Attachment) -> AttachmentInfo {
 
 fn message(message: &Message) -> Option<MessageInfo> {
     Some(MessageInfo {
+        removed_attachments: Vec::new(),
         id: message.id,
         channel_id: message.channel_id,
         guild_id: message.guild_id?,

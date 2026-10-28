@@ -77,6 +77,10 @@ pub struct MessageInfo {
     pub mentions_everyone: bool,
     #[serde(default)]
     pub attachments: Vec<AttachmentInfo>,
+    /// The attachments this edit took away: those the message had before the edit and no longer has.
+    /// Only an edit gets them, and only where the history keeps messages; empty otherwise.
+    #[serde(default)]
+    pub removed_attachments: Vec<AttachmentInfo>,
     /// Number of embeds (link previews included).
     #[serde(default)]
     pub embed_count: u32,
@@ -290,6 +294,10 @@ impl ModalSubmission {
 
 /// What a context-menu command was used on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a context command gets one target and hands it on at once; boxing it would allocate per command"
+)]
 pub enum ContextTarget {
     /// A member or a user (the user's id, name and bot flag).
     User(UserInfo),

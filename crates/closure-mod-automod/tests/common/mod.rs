@@ -115,6 +115,7 @@ pub async fn say_in(harness: &Harness, author: u64, channel: u64, content: &str)
 pub fn custom(author: u64, channel: u64, content: &str) -> MessageInfo {
     static NEXT: AtomicU64 = AtomicU64::new(50_000);
     MessageInfo {
+        removed_attachments: Vec::new(),
         id: Id::new(NEXT.fetch_add(1, Ordering::Relaxed)),
         channel_id: Id::new(channel),
         guild_id: Id::new(GUILD),

@@ -295,6 +295,7 @@ fn a_declaration_that_cannot_work_is_refused_when_the_module_is_built() {
 
 fn message_event(channel: u64, bot: bool, roles: &[u64]) -> Event {
     Event::MessageCreated(closure_core::event::MessageInfo {
+        removed_attachments: Vec::new(),
         id: Id::new(1),
         channel_id: Id::new(channel),
         guild_id: Id::new(1),

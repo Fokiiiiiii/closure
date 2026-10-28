@@ -133,6 +133,7 @@ mod tests {
 
     fn message(channel: u64, bot: bool, roles: &[u64]) -> Event {
         Event::MessageCreated(MessageInfo {
+            removed_attachments: Vec::new(),
             id: Id::new(1),
             channel_id: Id::new(channel),
             guild_id: Id::new(1),

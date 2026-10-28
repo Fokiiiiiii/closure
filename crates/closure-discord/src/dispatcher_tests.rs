@@ -542,6 +542,7 @@ fn user(id: u64) -> UserInfo {
 
 fn message(channel: u64, id: u64) -> Event {
     Event::MessageCreated(MessageInfo {
+        removed_attachments: Vec::new(),
         id: Id::new(id),
         channel_id: Id::new(channel),
         guild_id: Id::new(GUILD),
@@ -2411,7 +2412,7 @@ async fn a_message_reaches_the_modules_only_once_it_is_recorded() {
         DispatcherConfig::default(),
     )
     .await;
-    let (recorded, done) = tokio::sync::oneshot::channel::<()>();
+    let (recorded, done) = tokio::sync::oneshot::channel::<Event>();
 
     h.dispatcher
         .dispatch_message_after(message(3, 1), done, |_| Permissions::empty());
@@ -2422,11 +2423,40 @@ async fn a_message_reaches_the_modules_only_once_it_is_recorded() {
         probe.log()
     );
 
-    recorded.send(()).unwrap();
+    recorded.send(message(3, 1)).unwrap();
     h.dispatcher.flush().await;
     assert!(
         probe.log().iter().any(|line| line == "msg:1"),
         "{:?}",
+        probe.log()
+    );
+}
+
+#[tokio::test]
+async fn a_module_gets_the_event_the_history_hands_back() {
+    let probe = messages_only("late");
+    let h = harness(
+        &[(&probe, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+    let (recorded, done) = tokio::sync::oneshot::channel::<Event>();
+
+    h.dispatcher
+        .dispatch_message_after(message(3, 1), done, |_| Permissions::empty());
+    // The history changed the message while keeping it, and hands the changed event back.
+    recorded.send(message(3, 2)).unwrap();
+    h.dispatcher.flush().await;
+
+    assert!(
+        probe.log().iter().any(|line| line == "msg:2"),
+        "{:?}",
+        probe.log()
+    );
+    assert!(
+        probe.log().iter().all(|line| line != "msg:1"),
+        "the module must get the handed back event, not the one it arrived as: {:?}",
         probe.log()
     );
 }
@@ -2440,7 +2470,7 @@ async fn a_record_within_the_wait_comes_before_the_modules() {
         DispatcherConfig::default(),
     )
     .await;
-    let (recorded, done) = tokio::sync::oneshot::channel::<()>();
+    let (recorded, done) = tokio::sync::oneshot::channel::<Event>();
 
     h.dispatcher
         .dispatch_message_after(message(3, 1), done, |_| Permissions::empty());
@@ -2453,7 +2483,7 @@ async fn a_record_within_the_wait_comes_before_the_modules() {
     );
 
     tokio::time::sleep(Duration::from_secs(1)).await;
-    recorded.send(()).unwrap();
+    recorded.send(message(3, 1)).unwrap();
     h.dispatcher.flush().await;
     assert!(
         probe.log().iter().any(|line| line == "msg:1"),
@@ -2472,7 +2502,7 @@ async fn a_record_past_the_wait_releases_the_lane_at_the_wait() {
     )
     .await;
     // The sender stays alive, so the history never finishes this record.
-    let (_history, done) = tokio::sync::oneshot::channel::<()>();
+    let (_history, done) = tokio::sync::oneshot::channel::<Event>();
     let arrived = tokio::time::Instant::now();
 
     h.dispatcher
@@ -2498,8 +2528,8 @@ async fn the_wait_counts_from_arrival_not_from_the_lane() {
         DispatcherConfig::default(),
     )
     .await;
-    let (first_recorded, first_done) = tokio::sync::oneshot::channel::<()>();
-    let (second_recorded, second_done) = tokio::sync::oneshot::channel::<()>();
+    let (first_recorded, first_done) = tokio::sync::oneshot::channel::<Event>();
+    let (second_recorded, second_done) = tokio::sync::oneshot::channel::<Event>();
     let arrived = tokio::time::Instant::now();
 
     h.dispatcher
@@ -2511,11 +2541,11 @@ async fn the_wait_counts_from_arrival_not_from_the_lane() {
     // after arrival, not when the lane frees up.
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(20)).await;
-        let _ = first_recorded.send(());
+        let _ = first_recorded.send(message(3, 1));
     });
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
-        let _ = second_recorded.send(());
+        let _ = second_recorded.send(message(3, 2));
     });
 
     assert!(

@@ -66,7 +66,9 @@ pub trait GuildHooks: Send + Sync {
 
     /// A message event of a guild that [`Self::wants_messages`] said yes to. Hooks of message
     /// events run in the order the events came, before the guild hooks waiting at the same time.
-    async fn message(&self, _event: &ModuleEvent) {}
+    /// A hook may change the event (the history sets what an edit took away); the modules get it
+    /// as changed.
+    async fn message(&self, _event: &mut ModuleEvent) {}
 }
 
 /// Hooks that do nothing.
@@ -239,7 +241,10 @@ struct HookQueue {
 struct HookQueueState {
     pending: HashMap<GuildId, HookJob>,
     /// Message events in the order they came; every one is kept up to the capacity.
-    messages: VecDeque<(ModuleEvent, Option<tokio::sync::oneshot::Sender<()>>)>,
+    messages: VecDeque<(
+        ModuleEvent,
+        Option<tokio::sync::oneshot::Sender<ModuleEvent>>,
+    )>,
     /// Set once no shard can push any more, and by the worker when it stops.
     /// No message is accepted after that.
     closed: bool,
@@ -249,7 +254,10 @@ struct HookQueueState {
 /// reading of the pending work and the reading of `closed`.
 struct Taken {
     jobs: Vec<HookJob>,
-    messages: Vec<(ModuleEvent, Option<tokio::sync::oneshot::Sender<()>>)>,
+    messages: Vec<(
+        ModuleEvent,
+        Option<tokio::sync::oneshot::Sender<ModuleEvent>>,
+    )>,
     closed: bool,
 }
 
@@ -261,7 +269,10 @@ impl HookQueue {
 
     /// Queues a message event for [`GuildHooks::message`]. Past the capacity the event is dropped
     /// and logged by its kind alone, never its content.
-    fn push_message(&self, event: ModuleEvent) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    fn push_message(
+        &self,
+        event: ModuleEvent,
+    ) -> Option<tokio::sync::oneshot::Receiver<ModuleEvent>> {
         let mut state = self.state();
         // Once closed, no worker is left to record the event, so no lane may wait for it.
         if state.closed {
@@ -333,9 +344,9 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
             queue.wake.notified().await;
             continue;
         }
-        for (event, recorded) in taken.messages {
+        for (mut event, recorded) in taken.messages {
             // A panicking hook counts as not kept; the worker goes on with the next message.
-            let hook = AssertUnwindSafe(hooks.message(&event)).catch_unwind();
+            let hook = AssertUnwindSafe(hooks.message(&mut event)).catch_unwind();
             match tokio::time::timeout(RECORD_TIMEOUT, hook).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => tracing::error!(
@@ -346,7 +357,7 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
             }
             // Sent whether or not the hook kept the message: the lane goes on either way.
             if let Some(recorded) = recorded {
-                let _ = recorded.send(());
+                let _ = recorded.send(event);
             }
         }
         for job in taken.jobs {
@@ -388,7 +399,7 @@ fn offer_message(
     queue: &HookQueue,
     hooks: &dyn GuildHooks,
     event: &ModuleEvent,
-) -> Option<tokio::sync::oneshot::Receiver<()>> {
+) -> Option<tokio::sync::oneshot::Receiver<ModuleEvent>> {
     if message_guild(event).is_some_and(|guild| hooks.wants_messages(guild)) {
         return queue.push_message(event.clone());
     }
@@ -828,7 +839,7 @@ mod tests {
 
     #[async_trait]
     impl GuildHooks for PanicsOnFirstMessage {
-        async fn message(&self, event: &ModuleEvent) {
+        async fn message(&self, event: &mut ModuleEvent) {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert!(call != 0, "the first message breaks its hook");
             if let ModuleEvent::MessageDeleted { message_id, .. } = event {
@@ -919,7 +930,7 @@ mod tests {
 
     #[async_trait]
     impl GuildHooks for HangsOnMessage {
-        async fn message(&self, _: &ModuleEvent) {
+        async fn message(&self, _: &mut ModuleEvent) {
             std::future::pending::<()>().await;
         }
     }
@@ -963,7 +974,7 @@ mod tests {
             guild == twilight_model::id::Id::new(1)
         }
 
-        async fn message(&self, event: &ModuleEvent) {
+        async fn message(&self, event: &mut ModuleEvent) {
             if let ModuleEvent::MessageDeleted { message_id, .. } = event {
                 self.seen.lock().unwrap().push(message_id.get());
             }

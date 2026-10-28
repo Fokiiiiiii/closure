@@ -71,7 +71,12 @@ fn deleted(id: u64) -> Event {
     }
 }
 
-fn edited(id: u64, content: &str, attachments: Vec<AttachmentInfo>) -> Event {
+fn edited(
+    id: u64,
+    content: &str,
+    attachments: Vec<AttachmentInfo>,
+    removed: Vec<AttachmentInfo>,
+) -> Event {
     Event::MessageUpdated(MessageInfo {
         id: Id::new(id),
         channel_id: Id::new(CHANNEL),
@@ -87,6 +92,7 @@ fn edited(id: u64, content: &str, attachments: Vec<AttachmentInfo>) -> Event {
         mentioned_roles: Vec::new(),
         mentions_everyone: false,
         attachments,
+        removed_attachments: removed,
         embed_count: 0,
         sticker_count: 0,
         reply_to: None,
@@ -221,7 +227,7 @@ async fn an_edit_that_removes_a_picture_posts_the_picture() {
         .unwrap();
 
     harness
-        .emit(edited(31, "the new text", Vec::new()))
+        .emit(edited(31, "the new text", Vec::new(), vec![picture(4)]))
         .await
         .unwrap();
 
@@ -243,7 +249,12 @@ async fn an_edit_shows_the_new_text_and_its_attachments() {
     let harness = harness();
 
     harness
-        .emit(edited(30, "now with a picture", vec![picture(3)]))
+        .emit(edited(
+            30,
+            "now with a picture",
+            vec![picture(3)],
+            Vec::new(),
+        ))
         .await
         .unwrap();
 
@@ -263,6 +274,46 @@ async fn an_edit_shows_the_new_text_and_its_attachments() {
         posted[0].embeds.contains("photo.png"),
         "{}",
         posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn an_edit_that_only_changes_the_text_does_not_post_a_picture_an_earlier_edit_removed() {
+    let harness = harness();
+    harness
+        .seed_file(CHANNEL, 32, picture(5), Some(b"removed bytes".to_vec()))
+        .await
+        .unwrap();
+
+    harness
+        .emit(edited(
+            32,
+            "the picture is gone",
+            Vec::new(),
+            vec![picture(5)],
+        ))
+        .await
+        .unwrap();
+    harness
+        .emit(edited(
+            32,
+            "and the text changed again",
+            Vec::new(),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 2, "{:?}", posted.len());
+    assert_eq!(
+        posted[0].files,
+        [("photo.png".to_owned(), b"removed bytes".to_vec())]
+    );
+    assert!(
+        posted[1].files.is_empty(),
+        "the first edit posted the picture already: {:?}",
+        posted[1].files
     );
 }
 

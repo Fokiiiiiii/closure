@@ -6,7 +6,7 @@ use std::fmt;
 
 use closure_core::action::{Action, FileUpload, MAX_EMBEDS, MentionPolicy};
 use closure_core::error::ModuleError;
-use closure_core::event::{ChannelId, MessageId};
+use closure_core::event::{AttachmentInfo, ChannelId, MessageId};
 use closure_core::module::EventContext;
 use twilight_model::channel::message::Embed;
 
@@ -80,6 +80,30 @@ pub async fn kept_files(ctx: &EventContext, message: MessageId) -> Result<Vec<Ke
         kept.push(Kept {
             id: file.attachment.id,
             filename: file.attachment.filename,
+            bytes,
+        });
+    }
+    Ok(kept)
+}
+
+/// The files of the given attachments of a message, in the order given: the bytes the host kept for
+/// each, or none for one it did not keep. The attachments are the ones the host reports, so this
+/// reads nothing else of the history.
+pub async fn files_of_attachments(
+    ctx: &EventContext,
+    message: MessageId,
+    attachments: &[AttachmentInfo],
+) -> Result<Vec<Kept>, ModuleError> {
+    let history = ctx.history();
+    let mut kept = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let bytes = history
+            .file_data(message, attachment.id)
+            .await
+            .map_err(|error| ModuleError::other(error.to_string()))?;
+        kept.push(Kept {
+            id: attachment.id,
+            filename: attachment.filename.clone(),
             bytes,
         });
     }
