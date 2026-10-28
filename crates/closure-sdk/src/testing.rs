@@ -738,12 +738,32 @@ impl Harness {
         &self.api
     }
 
-    /// The embeds of every message the module sent, in order.
-    #[must_use]
+    /// Keeps a file of an attachment of a message of the harness's guild, as the host does.
+    pub async fn seed_file(
+        &self,
+        channel: u64,
+        message: u64,
+        attachment: closure_core::event::AttachmentInfo,
+        data: Option<Vec<u8>>,
+    ) -> Result<(), closure_core::history::HistoryError> {
+        closure_core::history::HistoryBackend::save_file(
+            self.history.as_ref(),
+            Id::new(GUILD),
+            Id::new(channel),
+            Id::new(message),
+            &attachment,
+            data.as_deref(),
+            0,
+        )
+        .await
+    }
+
     pub fn actions(&self) -> Vec<Action> {
         self.api.actions()
     }
 
+    /// The embeds of every message the module sent, in order.
+    #[must_use]
     pub fn sent_embeds(&self) -> Vec<Embed> {
         self.api
             .actions()

@@ -14,6 +14,10 @@ closure-core.workspace = true
 closure-i18n.workspace = true
 dashmap.workspace = true
 futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
 metrics.workspace = true
 # Not used in code: enabling its `ring` feature once makes rustls pick the crypto provider
 # for every TLS user in the process (Twilight, sqlx) without a manual install step.

@@ -2351,6 +2351,35 @@ async fn a_form_asked_for_by_a_text_command_becomes_a_notice_in_the_guilds_langu
     );
 }
 
+#[tokio::test]
+async fn a_message_reaches_the_modules_only_once_it_is_recorded() {
+    let probe = messages_only("late");
+    let h = harness(
+        &[(&probe, true)],
+        limits(64, 1),
+        DispatcherConfig::default(),
+    )
+    .await;
+    let (recorded, done) = tokio::sync::oneshot::channel::<()>();
+
+    h.dispatcher
+        .dispatch_message_after(message(3, 1), done, |_| Permissions::empty());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        probe.log().iter().all(|line| !line.starts_with("msg")),
+        "the module must not see the message before it is recorded: {:?}",
+        probe.log()
+    );
+
+    recorded.send(()).unwrap();
+    h.dispatcher.flush().await;
+    assert!(
+        probe.log().iter().any(|line| line == "msg:1"),
+        "{:?}",
+        probe.log()
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_text_command_and_its_reply_are_deleted_after_the_guilds_delays() {
     let module = warn_module(Behavior::AnswerCommand);

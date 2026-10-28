@@ -1,14 +1,46 @@
 //! Messages kept for modules (see `closure_core::history`).
 
 use async_trait::async_trait;
-use closure_core::event::{ChannelId, GuildId, MessageId, RoleId, UserId};
-use closure_core::history::{HistoryBackend, HistoryError, SavedMessage};
+use closure_core::event::{AttachmentInfo, ChannelId, GuildId, MessageId, RoleId, UserId};
+use closure_core::history::{HistoryBackend, HistoryError, KeptFile, SavedMessage};
 
 use crate::Db;
 use crate::ids::{from_db, to_db};
 
 fn backend(error: impl std::fmt::Display) -> HistoryError {
     HistoryError::Backend(error.to_string())
+}
+
+/// A kept file as the database has it: the ids and the times as plain numbers.
+#[derive(sqlx::FromRow)]
+struct FileRow {
+    channel_id: i64,
+    message_id: i64,
+    attachment_id: i64,
+    filename: String,
+    size: i64,
+    content_type: Option<String>,
+    url: String,
+    stored: bool,
+    kept_at: i64,
+}
+
+impl FileRow {
+    fn into_kept(self) -> Result<KeptFile, HistoryError> {
+        Ok(KeptFile {
+            channel_id: from_db(self.channel_id).map_err(backend)?,
+            message_id: from_db(self.message_id).map_err(backend)?,
+            attachment: AttachmentInfo {
+                id: u64::try_from(self.attachment_id).map_err(backend)?,
+                filename: self.filename,
+                size: u64::try_from(self.size).map_err(backend)?,
+                content_type: self.content_type,
+                url: self.url,
+            },
+            stored: self.stored,
+            kept_at: self.kept_at,
+        })
+    }
 }
 
 /// The columns of a saved message, with the times as unix seconds. A macro so the queries stay
@@ -239,6 +271,117 @@ impl HistoryBackend for Db {
                 .await
                 .map_err(backend)?
                 .rows_affected();
+        sqlx::query("DELETE FROM message_files WHERE kept_at < to_timestamp($1::bigint)")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(removed)
+    }
+
+    async fn save_file(
+        &self,
+        guild: GuildId,
+        channel: ChannelId,
+        message: MessageId,
+        attachment: &AttachmentInfo,
+        data: Option<&[u8]>,
+        at: i64,
+    ) -> Result<(), HistoryError> {
+        sqlx::query(
+            "INSERT INTO message_files
+                (guild_id, message_id, attachment_id, channel_id, filename, size, content_type,
+                 url, stored, data, kept_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, to_timestamp($11::bigint))
+             ON CONFLICT (guild_id, message_id, attachment_id) DO UPDATE SET
+                channel_id = EXCLUDED.channel_id, filename = EXCLUDED.filename,
+                size = EXCLUDED.size, content_type = EXCLUDED.content_type, url = EXCLUDED.url,
+                stored = EXCLUDED.stored, data = EXCLUDED.data, kept_at = EXCLUDED.kept_at",
+        )
+        .bind(to_db(guild).map_err(backend)?)
+        .bind(to_db(message).map_err(backend)?)
+        .bind(i64::try_from(attachment.id).map_err(backend)?)
+        .bind(to_db(channel).map_err(backend)?)
+        .bind(&attachment.filename)
+        .bind(i64::try_from(attachment.size).map_err(backend)?)
+        .bind(attachment.content_type.as_deref())
+        .bind(&attachment.url)
+        .bind(data.is_some())
+        .bind(data)
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn files_of(
+        &self,
+        guild: GuildId,
+        message: MessageId,
+    ) -> Result<Vec<KeptFile>, HistoryError> {
+        let rows: Vec<FileRow> = sqlx::query_as(
+            "SELECT channel_id, message_id, attachment_id, filename, size, content_type, url, stored,
+                    extract(epoch FROM kept_at)::bigint AS kept_at
+             FROM message_files
+             WHERE guild_id = $1 AND message_id = $2
+             ORDER BY kept_at, attachment_id",
+        )
+        .bind(to_db(guild).map_err(backend)?)
+        .bind(to_db(message).map_err(backend)?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        rows.into_iter().map(FileRow::into_kept).collect()
+    }
+
+    async fn file_data(
+        &self,
+        guild: GuildId,
+        message: MessageId,
+        attachment: u64,
+    ) -> Result<Option<Vec<u8>>, HistoryError> {
+        let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(
+            "SELECT data FROM message_files
+             WHERE guild_id = $1 AND message_id = $2 AND attachment_id = $3",
+        )
+        .bind(to_db(guild).map_err(backend)?)
+        .bind(to_db(message).map_err(backend)?)
+        .bind(i64::try_from(attachment).map_err(backend)?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(row.and_then(|(data,)| data))
+    }
+
+    async fn trim_files(&self, guild: GuildId, max_bytes: u64) -> Result<u64, HistoryError> {
+        // A stored file goes when the stored bytes older than it are less than the excess over the
+        // limit: the oldest files go first, and the last of them takes the excess past the limit.
+        let max = i64::try_from(max_bytes).unwrap_or(i64::MAX);
+        let removed = sqlx::query(
+            "WITH kept AS (
+                SELECT message_id, attachment_id, octet_length(data) AS size,
+                       COALESCE(SUM(octet_length(data)) OVER (
+                           ORDER BY kept_at, message_id, attachment_id
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS older
+                FROM message_files
+                WHERE guild_id = $1 AND stored
+             ), total AS (
+                SELECT COALESCE(SUM(size), 0) AS bytes FROM kept
+             )
+             DELETE FROM message_files AS files
+             USING kept, total
+             WHERE files.guild_id = $1
+               AND files.message_id = kept.message_id
+               AND files.attachment_id = kept.attachment_id
+               AND kept.older < total.bytes - $2",
+        )
+        .bind(to_db(guild).map_err(backend)?)
+        .bind(max)
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?
+        .rows_affected();
         Ok(removed)
     }
 }

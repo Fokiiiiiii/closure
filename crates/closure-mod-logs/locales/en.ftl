@@ -12,5 +12,7 @@ logs-channel = Channel
 logs-message = Message
 logs-content = Content
 logs-attachments = Attachments
+logs-removed = Removed by an edit
+logs-files = Files
 logs-no-text = (no text)
 logs-not-kept = The content was not kept

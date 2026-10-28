@@ -57,6 +57,7 @@ impl AppHooks {
             Arc::new(db.clone()),
             Arc::clone(&store),
             message_history_days,
+            Arc::new(closure_discord::HttpFetcher::new()),
         );
         Self {
             db,

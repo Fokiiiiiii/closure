@@ -1016,6 +1016,37 @@ async fn a_text_command_reply_replies_to_the_invoker_and_pings_nobody() {
 }
 
 #[tokio::test]
+async fn a_file_is_sent_as_an_attachment_of_the_message_with_its_name_and_bytes() {
+    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON)]).await;
+    discord
+        .api()
+        .execute(Action::SendFile {
+            channel_id: Id::new(1),
+            content: None,
+            embeds: Vec::new(),
+            file: closure_core::action::FileUpload {
+                filename: "photo.png".into(),
+                data: b"hello file".to_vec(),
+            },
+        })
+        .await
+        .unwrap();
+    let request = &discord.requests()[0];
+    assert_eq!(request.method, "POST");
+    assert!(
+        request.path.ends_with("/channels/1/messages"),
+        "{}",
+        request.path
+    );
+    assert!(
+        request.body.contains("filename=\"photo.png\""),
+        "{}",
+        request.body
+    );
+    assert!(request.body.contains("hello file"), "{}", request.body);
+}
+
+#[tokio::test]
 async fn a_deferred_text_command_is_sent_by_its_first_edit_and_edited_after_that() {
     let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON)]).await;
     let api = discord.api();

@@ -58,6 +58,18 @@ pub struct SavedMessage {
     pub deleted_at: Option<i64>,
 }
 
+/// A file kept for an attachment of a message. `stored` is false when the file could not be fetched:
+/// the record stays, so that the logs can say so.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeptFile {
+    pub channel_id: ChannelId,
+    pub message_id: MessageId,
+    pub attachment: AttachmentInfo,
+    pub stored: bool,
+    /// Unix seconds, when the file was kept.
+    pub kept_at: i64,
+}
+
 impl SavedMessage {
     /// The message as it is kept, from the event that carried it.
     #[must_use]
@@ -141,8 +153,40 @@ pub trait HistoryBackend: Send + Sync {
         limit: usize,
     ) -> Result<Vec<SavedMessage>, HistoryError>;
 
-    /// Removes every message sent before `cutoff`, in every guild; returns how many.
+    /// Removes every message and every file kept before `cutoff`, in every guild; returns how many
+    /// messages.
     async fn purge_before(&self, cutoff: i64) -> Result<u64, HistoryError>;
+
+    /// Keeps the file of an attachment of a message. `data` is `None` when the file could not be
+    /// fetched. Keeping the same attachment again replaces its file.
+    async fn save_file(
+        &self,
+        guild: GuildId,
+        channel: ChannelId,
+        message: MessageId,
+        attachment: &AttachmentInfo,
+        data: Option<&[u8]>,
+        at: i64,
+    ) -> Result<(), HistoryError>;
+
+    /// The files kept for a message, in the order they were kept.
+    async fn files_of(
+        &self,
+        guild: GuildId,
+        message: MessageId,
+    ) -> Result<Vec<KeptFile>, HistoryError>;
+
+    /// The bytes of a kept file, when it was stored.
+    async fn file_data(
+        &self,
+        guild: GuildId,
+        message: MessageId,
+        attachment: u64,
+    ) -> Result<Option<Vec<u8>>, HistoryError>;
+
+    /// Drops the oldest stored files of a guild until their bytes come to at most `max_bytes`;
+    /// returns how many files were dropped.
+    async fn trim_files(&self, guild: GuildId, max_bytes: u64) -> Result<u64, HistoryError>;
 }
 
 /// The backend of a [`MessageHistory`] that has none.
@@ -188,6 +232,35 @@ impl HistoryBackend for NoHistory {
     }
 
     async fn purge_before(&self, _: i64) -> Result<u64, HistoryError> {
+        Err(HistoryError::Unavailable)
+    }
+
+    async fn save_file(
+        &self,
+        _: GuildId,
+        _: ChannelId,
+        _: MessageId,
+        _: &AttachmentInfo,
+        _: Option<&[u8]>,
+        _: i64,
+    ) -> Result<(), HistoryError> {
+        Err(HistoryError::Unavailable)
+    }
+
+    async fn files_of(&self, _: GuildId, _: MessageId) -> Result<Vec<KeptFile>, HistoryError> {
+        Err(HistoryError::Unavailable)
+    }
+
+    async fn file_data(
+        &self,
+        _: GuildId,
+        _: MessageId,
+        _: u64,
+    ) -> Result<Option<Vec<u8>>, HistoryError> {
+        Err(HistoryError::Unavailable)
+    }
+
+    async fn trim_files(&self, _: GuildId, _: u64) -> Result<u64, HistoryError> {
         Err(HistoryError::Unavailable)
     }
 }
@@ -263,6 +336,24 @@ impl MessageHistory {
         self.backend.mark_deleted(self.guild, ids, at).await
     }
 
+    /// The files kept for a message of this guild.
+    pub async fn files_of(&self, message: MessageId) -> Result<Vec<KeptFile>, HistoryError> {
+        self.allowed()?;
+        self.backend.files_of(self.guild, message).await
+    }
+
+    /// The bytes of a file kept for a message of this guild, when it was stored.
+    pub async fn file_data(
+        &self,
+        message: MessageId,
+        attachment: u64,
+    ) -> Result<Option<Vec<u8>>, HistoryError> {
+        self.allowed()?;
+        self.backend
+            .file_data(self.guild, message, attachment)
+            .await
+    }
+
     /// The message with `id` in `channel`, if it was kept.
     pub async fn get(
         &self,
@@ -305,6 +396,14 @@ impl MessageHistory {
 #[derive(Debug, Default)]
 struct GuildMessages {
     by_id: HashMap<MessageId, SavedMessage>,
+    files: Vec<MemoryFile>,
+}
+
+/// A file kept by the memory history, with its bytes when they were fetched.
+#[derive(Debug)]
+struct MemoryFile {
+    kept: KeptFile,
+    data: Option<Vec<u8>>,
 }
 
 /// [`HistoryBackend`] in memory. For tests and for running without a database.
@@ -425,8 +524,92 @@ impl HistoryBackend for MemoryHistory {
                 .by_id
                 .retain(|_, message| message.created_at >= cutoff);
             removed += before - messages.by_id.len();
+            messages.files.retain(|file| file.kept.kept_at >= cutoff);
         }
         Ok(u64::try_from(removed).unwrap_or(u64::MAX))
+    }
+
+    async fn save_file(
+        &self,
+        guild: GuildId,
+        channel: ChannelId,
+        message: MessageId,
+        attachment: &AttachmentInfo,
+        data: Option<&[u8]>,
+        at: i64,
+    ) -> Result<(), HistoryError> {
+        let mut guilds = self.lock();
+        let files = &mut guilds.entry(guild).or_default().files;
+        files.retain(|file| {
+            !(file.kept.message_id == message && file.kept.attachment.id == attachment.id)
+        });
+        files.push(MemoryFile {
+            kept: KeptFile {
+                channel_id: channel,
+                message_id: message,
+                attachment: attachment.clone(),
+                stored: data.is_some(),
+                kept_at: at,
+            },
+            data: data.map(<[u8]>::to_vec),
+        });
+        Ok(())
+    }
+
+    async fn files_of(
+        &self,
+        guild: GuildId,
+        message: MessageId,
+    ) -> Result<Vec<KeptFile>, HistoryError> {
+        let guilds = self.lock();
+        Ok(guilds.get(&guild).map_or_else(Vec::new, |messages| {
+            messages
+                .files
+                .iter()
+                .filter(|file| file.kept.message_id == message)
+                .map(|file| file.kept.clone())
+                .collect()
+        }))
+    }
+
+    async fn file_data(
+        &self,
+        guild: GuildId,
+        message: MessageId,
+        attachment: u64,
+    ) -> Result<Option<Vec<u8>>, HistoryError> {
+        let guilds = self.lock();
+        Ok(guilds
+            .get(&guild)
+            .and_then(|messages| {
+                messages.files.iter().find(|file| {
+                    file.kept.message_id == message && file.kept.attachment.id == attachment
+                })
+            })
+            .and_then(|file| file.data.clone()))
+    }
+
+    async fn trim_files(&self, guild: GuildId, max_bytes: u64) -> Result<u64, HistoryError> {
+        let mut guilds = self.lock();
+        let Some(messages) = guilds.get_mut(&guild) else {
+            return Ok(0);
+        };
+        let size = |file: &MemoryFile| {
+            file.data
+                .as_ref()
+                .map_or(0, |data| u64::try_from(data.len()).unwrap_or(u64::MAX))
+        };
+        let mut total: u64 = messages.files.iter().map(size).sum();
+        let mut removed = 0;
+        while total > max_bytes {
+            let Some(oldest) = messages.files.iter().position(|file| file.data.is_some()) else {
+                break;
+            };
+            total = total.saturating_sub(size(&messages.files[oldest]));
+            messages.files.remove(oldest);
+            removed += 1;
+        }
+        Ok(removed)
     }
 }
 

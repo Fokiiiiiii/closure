@@ -35,8 +35,9 @@ fluent-bundle = "0.16"
 fluent-syntax = "0.12"
 futures-util = "0.3"
 http-body-util = "0.1"
-hyper = { version = "1", default-features = false, features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = { version = "1", default-features = false, features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "rustls-platform-verifier"] }
 jsonschema = { version = "0.60", default-features = false }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }

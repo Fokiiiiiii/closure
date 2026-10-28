@@ -35,6 +35,36 @@ pub(super) fn allowed_mentions(policy: &MentionPolicy) -> AllowedMentions {
 }
 
 impl TwilightApi {
+    pub(super) async fn send_file(
+        &self,
+        channel: ChannelId,
+        content: Option<&str>,
+        embeds: &[Embed],
+        file: &closure_core::action::FileUpload,
+    ) -> Result<Outcome, DiscordError> {
+        // A file is sent without pinging anyone: its name and text come from the host, not a module.
+        let allowed = allowed_mentions(&MentionPolicy::None);
+        let attachments = [twilight_model::http::attachment::Attachment::from_bytes(
+            file.filename.clone(),
+            file.data.clone(),
+            0,
+        )];
+        let mut request = self
+            .http
+            .create_message(channel)
+            .allowed_mentions(Some(&allowed))
+            .attachments(&attachments);
+        if let Some(content) = content {
+            request = request.content(content);
+        }
+        if !embeds.is_empty() {
+            request = request.embeds(embeds);
+        }
+        read(request)
+            .await
+            .map(|message| Outcome::Message(Box::new(message)))
+    }
+
     pub(super) async fn send_message(
         &self,
         channel: ChannelId,

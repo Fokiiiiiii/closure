@@ -8,6 +8,10 @@ use closure_core::module::Module;
 
 pub mod message_history;
 
+#[cfg(test)]
+#[path = "message_files_tests.rs"]
+mod message_files_tests;
+
 /// Every module this build ships. Adding a module means adding it here.
 pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
     Ok(vec![

@@ -41,6 +41,9 @@ pub enum Capability {
     /// Message content is private, so it is granted on its own.
     #[serde(rename = "message_history")]
     ReadMessageHistory,
+    /// Keep the files of the attachments of messages, so that a log can post them after Discord has
+    /// stopped serving them. Off unless a module asks for it and the guild turns it on in its settings.
+    KeepAttachments,
     DeafenMembers,
     MoveMembers,
     ManageThreads,
@@ -108,6 +111,7 @@ impl Capability {
             Self::SendDirectMessages => "send_direct_messages",
             Self::ReadMessages => "read_messages",
             Self::ReadMessageHistory => "message_history",
+            Self::KeepAttachments => "keep_attachments",
             Self::DeafenMembers => "deafen_members",
             Self::MoveMembers => "move_members",
             Self::ManageThreads => "manage_threads",

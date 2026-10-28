@@ -103,6 +103,10 @@ pub enum DispatchError {
     },
 }
 
+/// How long a lane waits for the history to keep a message before it hands the message to modules.
+/// It is longer than a message hook may run, so a slow hook still lets the message through.
+const RECORD_WAIT: Duration = Duration::from_secs(25);
+
 struct Job {
     event: Arc<Event>,
     enqueued: Instant,
@@ -110,6 +114,8 @@ struct Job {
     command: bool,
     /// Where to say how a scheduled job went; dropped unsent if the job was lost on the way.
     outcome: Option<oneshot::Sender<JobOutcome>>,
+    /// Set for a message: the modules see it only once this has fired, when the history has kept it.
+    recorded: Option<oneshot::Receiver<()>>,
 }
 
 /// How a scheduled job went, for whoever keeps the jobs (see [`Dispatcher::run_job`]).
@@ -493,11 +499,31 @@ impl Dispatcher {
         event: Event,
         permissions: impl FnOnce(&MessageInfo) -> Permissions,
     ) {
+        self.dispatch_message_recorded(event, None, permissions);
+    }
+
+    /// Like [`Self::dispatch_message`], but the modules get the event only once `recorded` has fired
+    /// or been dropped: the history has then kept what the event carries.
+    pub fn dispatch_message_after(
+        &self,
+        event: Event,
+        recorded: oneshot::Receiver<()>,
+        permissions: impl FnOnce(&MessageInfo) -> Permissions,
+    ) {
+        self.dispatch_message_recorded(event, Some(recorded), permissions);
+    }
+
+    fn dispatch_message_recorded(
+        &self,
+        event: Event,
+        recorded: Option<oneshot::Receiver<()>>,
+        permissions: impl FnOnce(&MessageInfo) -> Permissions,
+    ) {
         let reading = match &event {
             Event::MessageCreated(message) => self.read_text_command(message, permissions),
             _ => Reading::Ignore,
         };
-        self.enqueue(event, None);
+        self.enqueue_recorded(event, None, recorded);
         match reading {
             Reading::Ignore => {}
             Reading::Run(invocation) => {
@@ -570,6 +596,15 @@ impl Dispatcher {
 
     /// Whether the event was accepted.
     fn enqueue(&self, event: Event, outcome: Option<oneshot::Sender<JobOutcome>>) -> bool {
+        self.enqueue_recorded(event, outcome, None)
+    }
+
+    fn enqueue_recorded(
+        &self,
+        event: Event,
+        outcome: Option<oneshot::Sender<JobOutcome>>,
+        recorded: Option<oneshot::Receiver<()>>,
+    ) -> bool {
         let kind = event.kind().as_str();
         if self.shared.closing.load(Ordering::Acquire) {
             metrics::counter!("closure_events_dropped_total", "reason" => "shutdown").increment(1);
@@ -623,6 +658,7 @@ impl Dispatcher {
             enqueued: Instant::now(),
             command,
             outcome,
+            recorded,
         };
         self.shared.pending_total.fetch_add(1, Ordering::AcqRel);
         if sender.try_send(job).is_err() {
@@ -789,6 +825,11 @@ async fn lane_worker(
             job = receiver.recv() => job,
         };
         let Some(mut job) = job else { break };
+        if let Some(recorded) = job.recorded.take() {
+            // A message is handled once the history has kept it. A recorder that is slow or gone
+            // does not hold the lane for longer than RECORD_WAIT.
+            let _ = tokio::time::timeout(RECORD_WAIT, recorded).await;
+        }
         metrics::histogram!("closure_event_queue_seconds")
             .record(job.enqueued.elapsed().as_secs_f64());
         let handled = AssertUnwindSafe(handle_event(&shared, guild, &state, &job.event))

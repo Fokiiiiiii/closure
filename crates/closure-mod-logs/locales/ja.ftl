@@ -12,5 +12,7 @@ logs-channel = チャンネル
 logs-message = メッセージ
 logs-content = 内容
 logs-attachments = 添付
+logs-removed = 編集で消えた添付
+logs-files = ファイル
 logs-no-text = （本文なし）
 logs-not-kept = 内容は保存されていません

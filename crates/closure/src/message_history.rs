@@ -8,8 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use closure_config::SettingsStore;
 use closure_core::capability::Capability;
-use closure_core::event::{Event, GuildId};
+use closure_core::event::{AttachmentInfo, ChannelId, Event, GuildId, MessageId, MessageInfo};
 use closure_core::history::{HistoryBackend, HistoryError, SavedMessage, check_text};
+
+use closure_core::attachments::{self, ARRIVAL_FETCHES, Fetcher};
 
 const DAY_SECONDS: i64 = 86_400;
 
@@ -35,6 +37,8 @@ pub struct MessageRecorder {
     backend: Arc<dyn HistoryBackend>,
     store: Arc<SettingsStore>,
     retention_days: u32,
+    fetcher: Arc<dyn Fetcher>,
+    arrivals: Arc<tokio::sync::Semaphore>,
 }
 
 impl fmt::Debug for MessageRecorder {
@@ -51,11 +55,14 @@ impl MessageRecorder {
         backend: Arc<dyn HistoryBackend>,
         store: Arc<SettingsStore>,
         retention_days: u32,
+        fetcher: Arc<dyn Fetcher>,
     ) -> Self {
         Self {
             backend,
             store,
             retention_days,
+            fetcher,
+            arrivals: Arc::new(tokio::sync::Semaphore::new(ARRIVAL_FETCHES)),
         }
     }
 
@@ -82,28 +89,185 @@ impl MessageRecorder {
         match event {
             Event::MessageCreated(info) | Event::MessageUpdated(info) => {
                 if self.keeps(info.guild_id) {
+                    let previous = match event {
+                        Event::MessageUpdated(_) => {
+                            self.backend
+                                .get(info.guild_id, info.channel_id, info.id)
+                                .await?
+                        }
+                        _ => None,
+                    };
                     let message = SavedMessage::from_info(info);
                     check_text(&message)?;
                     self.backend.save(&message).await?;
+                    self.keep_files(info, previous.as_ref(), now).await?;
                 }
                 Ok(())
             }
             Event::MessageDeleted {
                 guild_id,
+                channel_id,
                 message_id,
-                ..
             } => {
                 self.backend
                     .mark_deleted(*guild_id, &[*message_id], now)
+                    .await?;
+                self.fetch_deleted(*guild_id, *channel_id, &[*message_id], now)
                     .await
             }
             Event::MessagesBulkDeleted {
                 guild_id,
+                channel_id,
                 message_ids,
-                ..
-            } => self.backend.mark_deleted(*guild_id, message_ids, now).await,
+            } => {
+                self.backend
+                    .mark_deleted(*guild_id, message_ids, now)
+                    .await?;
+                self.fetch_deleted(*guild_id, *channel_id, message_ids, now)
+                    .await
+            }
             _ => Ok(()),
         }
+    }
+
+    /// Whether an enabled module of `guild` asks for the files of attachments.
+    fn wants_files(&self, guild: GuildId) -> bool {
+        self.retention_days > 0
+            && self
+                .store
+                .settings(guild)
+                .effective
+                .modules
+                .values()
+                .any(|module| {
+                    module.enabled && module.capabilities.contains(Capability::KeepAttachments)
+                })
+    }
+
+    /// Whether the files of new attachments are kept as their messages arrive: a module that asks for
+    /// them is enabled, and its `keep_attachments` setting is on. Off by default.
+    fn keeps_files(&self, guild: GuildId) -> bool {
+        self.retention_days > 0
+            && self
+                .store
+                .settings(guild)
+                .effective
+                .modules
+                .values()
+                .any(|module| {
+                    module.enabled
+                        && module.capabilities.contains(Capability::KeepAttachments)
+                        && module
+                            .config
+                            .get("keep_attachments")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                })
+    }
+
+    /// The files of a message that arrives or is edited. A new attachment is kept in the background
+    /// when the setting is on; an attachment the edit removed is fetched now, while Discord may still
+    /// serve it.
+    async fn keep_files(
+        &self,
+        info: &MessageInfo,
+        previous: Option<&SavedMessage>,
+        now: i64,
+    ) -> Result<(), HistoryError> {
+        if !self.wants_files(info.guild_id) {
+            return Ok(());
+        }
+        if self.keeps_files(info.guild_id) {
+            self.keep_in_background(
+                info.guild_id,
+                info.channel_id,
+                info.id,
+                info.attachments.clone(),
+                now,
+            );
+        }
+        if let Some(previous) = previous {
+            let removed: Vec<AttachmentInfo> = previous
+                .attachments
+                .iter()
+                .filter(|old| !info.attachments.iter().any(|new| new.id == old.id))
+                .cloned()
+                .collect();
+            attachments::keep_missing(
+                self.backend.as_ref(),
+                self.fetcher.as_ref(),
+                info.guild_id,
+                info.channel_id,
+                info.id,
+                &removed,
+                now,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn keep_in_background(
+        &self,
+        guild: GuildId,
+        channel: ChannelId,
+        message: MessageId,
+        attachments: Vec<AttachmentInfo>,
+        now: i64,
+    ) {
+        if attachments.is_empty() {
+            return;
+        }
+        let backend = Arc::clone(&self.backend);
+        let fetcher = Arc::clone(&self.fetcher);
+        let arrivals = Arc::clone(&self.arrivals);
+        tokio::spawn(async move {
+            let Ok(_permit) = arrivals.acquire_owned().await else {
+                return;
+            };
+            if let Err(error) = attachments::keep_missing(
+                backend.as_ref(),
+                fetcher.as_ref(),
+                guild,
+                channel,
+                message,
+                &attachments,
+                now,
+            )
+            .await
+            {
+                tracing::warn!(%error, "could not keep the attachments of a message");
+            }
+        });
+    }
+
+    /// The files of deleted messages that are not kept yet, fetched now: Discord serves an attachment
+    /// only for a while after its message is gone.
+    async fn fetch_deleted(
+        &self,
+        guild: GuildId,
+        channel: ChannelId,
+        messages: &[MessageId],
+        now: i64,
+    ) -> Result<(), HistoryError> {
+        if !self.wants_files(guild) {
+            return Ok(());
+        }
+        for message in messages {
+            if let Some(saved) = self.backend.get(guild, channel, *message).await? {
+                attachments::keep_missing(
+                    self.backend.as_ref(),
+                    self.fetcher.as_ref(),
+                    guild,
+                    channel,
+                    *message,
+                    &saved.attachments,
+                    now,
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Removes the messages sent before the retention allows, at unix time `now`; returns how many.
@@ -137,6 +301,16 @@ mod tests {
         Arc::new(SettingsStore::new(ConfigCompiler::new(registry).unwrap()))
     }
 
+    /// Serves nothing: these tests keep no files.
+    struct Unreachable;
+
+    #[async_trait::async_trait]
+    impl Fetcher for Unreachable {
+        async fn fetch(&self, _: &str) -> Result<Vec<u8>, String> {
+            Err("offline".into())
+        }
+    }
+
     fn recorder(
         store: &Arc<SettingsStore>,
         backend: &Arc<MemoryHistory>,
@@ -146,6 +320,7 @@ mod tests {
             Arc::clone(backend) as Arc<dyn HistoryBackend>,
             Arc::clone(store),
             days,
+            Arc::new(Unreachable),
         )
     }
 

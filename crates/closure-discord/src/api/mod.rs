@@ -639,6 +639,15 @@ impl TwilightApi {
                 self.get_reaction_users(*channel_id, *message_id, emoji, *after, *limit)
                     .await
             }
+            Action::SendFile {
+                channel_id,
+                content,
+                embeds,
+                file,
+            } => {
+                self.send_file(*channel_id, content.as_deref(), embeds, file)
+                    .await
+            }
             Action::SendMessage {
                 channel_id,
                 content,

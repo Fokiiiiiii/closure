@@ -11,6 +11,10 @@ mod config;
 mod error;
 mod guilds;
 mod history;
+
+#[cfg(test)]
+#[path = "history_file_tests.rs"]
+mod history_file_tests;
 mod ids;
 mod scheduler;
 mod storage;
@@ -147,6 +151,7 @@ mod tests {
                 "guild_config",
                 "guild_config_history",
                 "guilds",
+                "message_files",
                 "module_counters",
                 "module_kv",
                 "saved_messages",

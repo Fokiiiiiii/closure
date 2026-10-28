@@ -28,6 +28,9 @@ use crate::text_commands;
 
 /// How long a hook may take before the gateway moves on without it.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the history may take to keep one message, fetching its attachments when a deletion or an
+/// edit needs them. Longer than an ordinary hook, and shorter than the wait of the lanes.
+const RECORD_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How many message events may wait for their hook. Past it the newest is dropped and logged:
 /// keeping them all would let a slow database grow memory without bound.
@@ -233,7 +236,7 @@ struct HookQueue {
 struct HookQueueState {
     pending: HashMap<GuildId, HookJob>,
     /// Message events in the order they came; every one is kept up to the capacity.
-    messages: VecDeque<ModuleEvent>,
+    messages: VecDeque<(ModuleEvent, Option<tokio::sync::oneshot::Sender<()>>)>,
     /// Set once no shard can push any more.
     closed: bool,
 }
@@ -242,7 +245,7 @@ struct HookQueueState {
 /// reading of the pending work and the reading of `closed`.
 struct Taken {
     jobs: Vec<HookJob>,
-    messages: Vec<ModuleEvent>,
+    messages: Vec<(ModuleEvent, Option<tokio::sync::oneshot::Sender<()>>)>,
     closed: bool,
 }
 
@@ -254,17 +257,19 @@ impl HookQueue {
 
     /// Queues a message event for [`GuildHooks::message`]. Past the capacity the event is dropped
     /// and logged by its kind alone, never its content.
-    fn push_message(&self, event: ModuleEvent) {
+    fn push_message(&self, event: ModuleEvent) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let mut state = self.state();
         if state.messages.len() >= MESSAGE_QUEUE_CAPACITY {
             tracing::warn!(
                 kind = event.kind().as_str(),
                 "message hooks are behind; a message event was dropped"
             );
-            return;
+            return None;
         }
-        state.messages.push_back(event);
+        let (done, recorded) = tokio::sync::oneshot::channel();
+        state.messages.push_back((event, Some(done)));
         self.wake.notify_one();
+        Some(recorded)
     }
 
     /// Declares that nothing will be pushed any more, so the worker may end once it is idle.
@@ -301,12 +306,16 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
             queue.wake.notified().await;
             continue;
         }
-        for event in &taken.messages {
-            if tokio::time::timeout(HOOK_TIMEOUT, hooks.message(event))
+        for (event, recorded) in taken.messages {
+            if tokio::time::timeout(RECORD_TIMEOUT, hooks.message(&event))
                 .await
                 .is_err()
             {
                 tracing::warn!(kind = event.kind().as_str(), "message hook timed out");
+            }
+            // Sent whether or not the hook kept the message: the lane goes on either way.
+            if let Some(recorded) = recorded {
+                let _ = recorded.send(());
             }
         }
         for job in taken.jobs {
@@ -341,10 +350,15 @@ fn message_guild(event: &ModuleEvent) -> Option<GuildId> {
 
 /// Queues a message event when its guild wants messages. The check comes first, so an event of a
 /// guild that keeps none is never copied.
-fn offer_message(queue: &HookQueue, hooks: &dyn GuildHooks, event: &ModuleEvent) {
+fn offer_message(
+    queue: &HookQueue,
+    hooks: &dyn GuildHooks,
+    event: &ModuleEvent,
+) -> Option<tokio::sync::oneshot::Receiver<()>> {
     if message_guild(event).is_some_and(|guild| hooks.wants_messages(guild)) {
-        queue.push_message(event.clone());
+        return queue.push_message(event.clone());
     }
+    None
 }
 
 /// A label for an error that is safe to log.
@@ -487,7 +501,7 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
     }
 
     for converted in convert::events(event, &before) {
-        offer_message(&context.hooks, &*context.guild_hooks, &converted);
+        let recorded = offer_message(&context.hooks, &*context.guild_hooks, &converted);
         let hook = match &converted {
             ModuleEvent::GuildAvailable {
                 guild_id,
@@ -501,9 +515,18 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
             ModuleEvent::GuildRemoved { guild_id } => Some(HookJob::Removed { guild: *guild_id }),
             _ => None,
         };
-        context.dispatcher.dispatch_message(converted, |message| {
-            text_commands::invoker_permissions(&context.cache, message)
-        });
+        match recorded {
+            Some(recorded) => {
+                context
+                    .dispatcher
+                    .dispatch_message_after(converted, recorded, |message| {
+                        text_commands::invoker_permissions(&context.cache, message)
+                    });
+            }
+            None => context.dispatcher.dispatch_message(converted, |message| {
+                text_commands::invoker_permissions(&context.cache, message)
+            }),
+        }
         if let Some(job) = hook {
             context.hooks.push(job);
         }
@@ -818,8 +841,11 @@ mod tests {
             ModuleEvent::MessageDeleted { message_id, .. } => message_id.get(),
             _ => panic!("only deletions were pushed"),
         };
-        assert_eq!(id_of(&taken.messages[0]), 1);
-        assert_eq!(id_of(&taken.messages[MESSAGE_QUEUE_CAPACITY - 1]), capacity);
+        assert_eq!(id_of(&taken.messages[0].0), 1);
+        assert_eq!(
+            id_of(&taken.messages[MESSAGE_QUEUE_CAPACITY - 1].0),
+            capacity
+        );
     }
 
     #[test]

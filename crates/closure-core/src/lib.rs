@@ -7,12 +7,17 @@
 //! tests and future Lua/WASM adapters can all be written against it.
 
 pub mod action;
+pub mod attachments;
 pub mod capability;
 pub mod cases;
 pub mod client;
 pub mod error;
 pub mod event;
 pub mod history;
+
+#[cfg(test)]
+#[path = "history_file_tests.rs"]
+mod history_file_tests;
 pub mod interaction;
 pub mod latency;
 pub mod locale;

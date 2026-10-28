@@ -386,10 +386,38 @@ pub enum InteractionResponse {
     },
 }
 
+/// A file to upload with a message. Its bytes are never printed, only their number.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileUpload {
+    pub filename: String,
+    pub data: Vec<u8>,
+}
+
+impl fmt::Debug for FileUpload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileUpload")
+            .field("filename", &self.filename)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
+}
+
+/// Discord takes at most this many bytes in one message, files included.
+pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+/// The longest name a file may have, in characters.
+pub const MAX_FILENAME_CHARS: usize = 255;
+
 /// Every Discord operation available to modules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
+    /// A message with one file attached: the bytes the host kept of it (see `file`).
+    SendFile {
+        channel_id: ChannelId,
+        content: Option<String>,
+        embeds: Vec<Embed>,
+        file: FileUpload,
+    },
     SendMessage {
         channel_id: ChannelId,
         content: Option<String>,
@@ -1314,6 +1342,7 @@ impl Action {
             | Self::RemoveReaction { .. }
             | Self::RemoveAllReactions { .. } => Capability::ManageMessages,
             Self::SendMessage { .. }
+            | Self::SendFile { .. }
             | Self::EditMessage { .. }
             | Self::JoinThread { .. }
             | Self::LeaveThread { .. }
@@ -1424,6 +1453,7 @@ impl Action {
             | Self::MoveMember { guild_id, .. }
             | Self::DisconnectMember { guild_id, .. } => Some(*guild_id),
             Self::SendMessage { .. }
+            | Self::SendFile { .. }
             | Self::EditMessage { .. }
             | Self::DeleteMessage { .. }
             | Self::BulkDeleteMessages { .. }
@@ -1487,6 +1517,7 @@ impl Action {
                 .into_iter()
                 .collect(),
             Self::SendMessage { channel_id, .. }
+            | Self::SendFile { channel_id, .. }
             | Self::EditMessage { channel_id, .. }
             | Self::GetMessage { channel_id, .. }
             | Self::GetMessages { channel_id, .. }
@@ -1575,6 +1606,7 @@ impl Action {
             | Self::Followup { token, .. }
             | Self::EditResponse { token, .. } => Some(token),
             Self::SendMessage { .. }
+            | Self::SendFile { .. }
             | Self::EditMessage { .. }
             | Self::DeleteMessage { .. }
             | Self::BulkDeleteMessages { .. }
@@ -1696,6 +1728,7 @@ impl Action {
             Self::RemoveAllReactions { .. } => "remove_all_reactions",
             Self::GetReactionUsers { .. } => "get_reaction_users",
             Self::SendMessage { .. } => "send_message",
+            Self::SendFile { .. } => "send_file",
             Self::SendDirectMessage { .. } => "send_direct_message",
             Self::EditMessage { .. } => "edit_message",
             Self::DeleteMessage { .. } => "delete_message",
@@ -1759,6 +1792,22 @@ impl Action {
             | Self::CreateScheduledEvent { .. }
             | Self::EditScheduledEvent { .. }
             | Self::CreateEmoji { .. } => check_new_limits(self),
+            Self::SendFile {
+                content,
+                embeds,
+                file,
+                ..
+            } => {
+                check_new_message(content.as_deref(), embeds)?;
+                ensure(
+                    !file.filename.is_empty()
+                        && file.filename.chars().count() <= MAX_FILENAME_CHARS,
+                    || format!("a file name is 1 to {MAX_FILENAME_CHARS} characters"),
+                )?;
+                ensure(file.data.len() <= MAX_UPLOAD_BYTES, || {
+                    format!("a file is at most {MAX_UPLOAD_BYTES} bytes")
+                })
+            }
             Self::SendMessage {
                 content, embeds, ..
             }
