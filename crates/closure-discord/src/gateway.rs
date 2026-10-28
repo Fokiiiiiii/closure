@@ -360,8 +360,11 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
                     HookJob::Removed { guild } => hooks.guild_removed(*guild).await,
                 }
             };
-            if tokio::time::timeout(HOOK_TIMEOUT, hook).await.is_err() {
-                tracing::warn!(?job, "guild hook timed out");
+            // A panicking hook is logged without its message; the worker goes on with the next job.
+            match tokio::time::timeout(HOOK_TIMEOUT, AssertUnwindSafe(hook).catch_unwind()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => tracing::error!("guild hook panicked; the worker goes on"),
+                Err(_) => tracing::warn!(?job, "guild hook timed out"),
             }
         }
     }
@@ -874,42 +877,40 @@ mod tests {
             .unwrap();
     }
 
-    /// Stops in its guild hook: it yields once, so messages can be queued while it waits, then panics.
-    struct PanicsInGuildHook;
+    /// Panics for guild 1 and keeps the guilds of the other arrivals.
+    #[derive(Default)]
+    struct PanicsInGuildHook {
+        kept: Mutex<Vec<u64>>,
+    }
 
     #[async_trait]
     impl GuildHooks for PanicsInGuildHook {
-        async fn guild_available(&self, _: GuildId, _: &str, _: Option<Locale>) {
-            tokio::task::yield_now().await;
-            panic!("the guild hook breaks");
+        async fn guild_available(&self, guild: GuildId, _: &str, _: Option<Locale>) {
+            assert!(guild.get() != 1, "the guild hook breaks");
+            self.kept.lock().unwrap().push(guild.get());
         }
     }
 
     #[tokio::test]
-    async fn lanes_waiting_on_a_worker_that_stopped_are_released() {
+    async fn a_guild_hook_that_panics_does_not_stop_the_worker() {
+        let hooks = Arc::new(PanicsInGuildHook::default());
         let queue = Arc::new(HookQueue::default());
         queue.push(available(1, "boom"));
+        queue.push(available(2, "fine"));
+        queue.close();
         let worker = tokio::spawn(run_hook_worker(
-            Arc::new(PanicsInGuildHook) as Arc<dyn GuildHooks>,
+            Arc::clone(&hooks) as Arc<dyn GuildHooks>,
             Arc::clone(&queue),
         ));
-        // The worker takes the job and waits inside the hook, so the message is queued after that.
-        tokio::task::yield_now().await;
-        let queued = queue
-            .push_message(deleted(1, 10))
-            .expect("the queue has room");
 
-        let wait = Duration::from_secs(5);
-        let _ = tokio::time::timeout(wait, queued)
+        tokio::time::timeout(Duration::from_secs(5), worker)
             .await
-            .expect("a message queued before the worker stopped releases its lane");
-        let stopped = tokio::time::timeout(wait, worker)
-            .await
-            .expect("the worker stops");
-        assert!(stopped.unwrap_err().is_panic());
-        assert!(
-            queue.push_message(deleted(1, 11)).is_none(),
-            "no lane waits for a message once the worker has stopped"
+            .expect("the worker ends once the closed queue is empty")
+            .expect("a panicking guild hook does not end the worker");
+        assert_eq!(
+            *hooks.kept.lock().unwrap(),
+            [2],
+            "the guild hook after the panic still runs"
         );
     }
 

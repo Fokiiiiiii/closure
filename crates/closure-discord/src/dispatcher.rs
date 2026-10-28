@@ -983,7 +983,7 @@ async fn handle_event(
     for group in receivers.chunk_by(|a, b| a.1 == b.1) {
         let calls = group
             .iter()
-            .map(|(module, _)| call_module(shared, guild, state, Arc::clone(module), event));
+            .map(|(module, _)| call_module(shared, guild, state, Arc::clone(module), event, None));
         let verdicts = futures_util::future::join_all(calls).await;
         if verdicts
             .iter()
@@ -1006,7 +1006,7 @@ async fn handle_job(
     let Some(module) = shared.registry.get(&job.module) else {
         return JobOutcome::Gone;
     };
-    match call_module(shared, guild, state, Arc::clone(module), event).await {
+    match call_module(shared, guild, state, Arc::clone(module), event, None).await {
         Verdict::Done(Flow::Stop) => JobOutcome::Dropped,
         Verdict::Done(_) => JobOutcome::Done,
         Verdict::Failed(error) => JobOutcome::Failed(error.to_string()),
@@ -1034,6 +1034,7 @@ async fn call_module(
     state: &Arc<GuildState>,
     module: Arc<dyn Module>,
     event: &Arc<Event>,
+    deadline: Option<Duration>,
 ) -> Verdict {
     let id = module.manifest().id.clone();
     let Some(settings) = shared.settings.module(guild, &id).filter(|s| s.enabled) else {
@@ -1054,6 +1055,10 @@ async fn call_module(
     let ctx = context_for(shared, guild, &id, &settings);
     // Read per call, so a changed timeout applies to the very next event.
     let handler_timeout = shared.settings.limits(guild).handler_timeout;
+    let handler_timeout = match deadline {
+        Some(deadline) => handler_timeout.min(deadline),
+        None => handler_timeout,
+    };
     let started = Instant::now();
     let announcing = matches!(**event, Event::CaseCreated(_));
     let mut task = tokio::spawn({
@@ -1226,7 +1231,7 @@ async fn handle_interaction(
         return;
     }
 
-    let verdict = call_module(shared, guild, state, Arc::clone(module), event).await;
+    let verdict = call_module(shared, guild, state, Arc::clone(module), event, None).await;
     let message = match verdict {
         Verdict::Done(_) => return,
         Verdict::Failed(ModuleError::Discord(error)) => {
@@ -1265,12 +1270,17 @@ async fn handle_autocomplete(
     {
         return answer_without_choices(shared, query).await;
     }
-    let call = call_module(shared, guild, state, Arc::clone(module), event);
-    // A module that answered is done; one that did not gets the empty answer.
-    if !matches!(
-        tokio::time::timeout(AUTOCOMPLETE_DEADLINE, call).await,
-        Ok(Verdict::Done(_))
-    ) {
+    // A module that answered is done; one that did not, or overran the deadline, gets the empty answer.
+    let verdict = call_module(
+        shared,
+        guild,
+        state,
+        Arc::clone(module),
+        event,
+        Some(AUTOCOMPLETE_DEADLINE),
+    )
+    .await;
+    if !matches!(verdict, Verdict::Done(_)) {
         answer_without_choices(shared, query).await;
     }
 }

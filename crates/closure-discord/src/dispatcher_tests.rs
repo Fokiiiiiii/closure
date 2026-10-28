@@ -1368,6 +1368,57 @@ async fn an_autocomplete_nobody_may_answer_gets_no_choices_instead_of_nothing() 
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_autocomplete_that_overruns_its_deadline_is_stopped_and_returns_its_trial() {
+    let slow = Probe::with_command("slow", "warn");
+    slow.set(Behavior::Fail);
+    let config = DispatcherConfig {
+        breaker: BreakerConfig {
+            threshold: 1,
+            cooldown: Duration::from_secs(30),
+        },
+        ..DispatcherConfig::default()
+    };
+    // Longer than the autocomplete deadline, so only that deadline can end the call.
+    let limits = RuntimeLimits {
+        handler_timeout: Duration::from_secs(10),
+        queue_capacity: 64,
+        concurrency: 4,
+    };
+    let h = harness(&[(&slow, true)], limits, config).await;
+
+    let scenario = async {
+        // A failure opens the breaker; the call after its cooldown is the trial.
+        h.dispatcher.dispatch(autocomplete("warn"));
+        h.dispatcher.flush().await;
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        slow.set(Behavior::Hang);
+        h.dispatcher.dispatch(autocomplete("warn"));
+        h.dispatcher.flush().await;
+        assert_eq!(
+            slow.running.load(Ordering::SeqCst),
+            0,
+            "the handler that overran the deadline is stopped"
+        );
+
+        // The overrun counts as a failure, so the breaker is open again. After its cooldown
+        // the next call must be let through, which needs the trial to have been given back.
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        slow.set(Behavior::Ok);
+        let before = slow.log().len();
+        h.dispatcher.dispatch(autocomplete("warn"));
+        h.dispatcher.flush().await;
+        assert_eq!(
+            slow.log().len(),
+            before + 1,
+            "the call after the cooldown is not refused"
+        );
+    };
+    tokio::time::timeout(Duration::from_secs(120), scenario)
+        .await
+        .expect("the scenario ends; it does not hang");
+}
+
 fn click(custom_id: &str) -> Event {
     Event::Component(closure_core::event::ComponentInvocation {
         interaction_id: Id::new(51),
