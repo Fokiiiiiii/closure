@@ -429,6 +429,7 @@ dependencies = [
  "closure-i18n",
  "closure-mod-automod",
  "closure-mod-diagnostics",
+ "closure-mod-logs",
  "closure-mod-moderation",
  "dotenvy",
  "metrics-exporter-prometheus",
@@ -578,6 +579,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "closure-mod-logs"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "twilight-model",
 ]
 
 [[package]]

@@ -22,6 +22,7 @@ closure-sdk = { path = "crates/closure-sdk" }
 closure-sdk-macros = { path = "crates/closure-sdk-macros" }
 closure-mod-automod = { path = "crates/closure-mod-automod" }
 closure-mod-diagnostics = { path = "crates/closure-mod-diagnostics" }
+closure-mod-logs = { path = "crates/closure-mod-logs" }
 closure-mod-moderation = { path = "crates/closure-mod-moderation" }
 
 anyhow = "1"

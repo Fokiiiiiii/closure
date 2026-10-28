@@ -1,0 +1,16 @@
+logs-edited = Message edited
+logs-deleted = Message deleted
+logs-bulk = { $count } messages deleted
+logs-bulk-unknown = { $count } of them were not kept
+logs-joined = Member joined
+logs-left = Member left
+logs-banned = Member banned
+logs-unbanned = Member unbanned
+logs-author = Author
+logs-member = Member
+logs-channel = Channel
+logs-message = Message
+logs-content = Content
+logs-attachments = Attachments
+logs-no-text = (no text)
+logs-not-kept = The content was not kept

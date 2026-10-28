@@ -1,0 +1,16 @@
+logs-edited = メッセージ編集
+logs-deleted = メッセージ削除
+logs-bulk = { $count } 件のメッセージを一括削除
+logs-bulk-unknown = うち { $count } 件は内容が保存されていません
+logs-joined = メンバー参加
+logs-left = メンバー退出
+logs-banned = BAN
+logs-unbanned = BAN 解除
+logs-author = 投稿者
+logs-member = メンバー
+logs-channel = チャンネル
+logs-message = メッセージ
+logs-content = 内容
+logs-attachments = 添付
+logs-no-text = （本文なし）
+logs-not-kept = 内容は保存されていません

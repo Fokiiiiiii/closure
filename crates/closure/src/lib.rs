@@ -12,6 +12,7 @@ pub mod message_history;
 pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
     Ok(vec![
         Arc::new(closure_mod_diagnostics::module()?),
+        Arc::new(closure_mod_logs::module()?),
         Arc::new(closure_mod_moderation::module()?),
         Arc::new(closure_mod_automod::module()?),
     ])

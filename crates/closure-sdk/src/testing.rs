@@ -740,6 +740,10 @@ impl Harness {
 
     /// The embeds of every message the module sent, in order.
     #[must_use]
+    pub fn actions(&self) -> Vec<Action> {
+        self.api.actions()
+    }
+
     pub fn sent_embeds(&self) -> Vec<Embed> {
         self.api
             .actions()

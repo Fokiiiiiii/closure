@@ -21,6 +21,7 @@ closure-discord.workspace = true
 closure-i18n.workspace = true
 closure-mod-automod.workspace = true
 closure-mod-diagnostics.workspace = true
+closure-mod-logs.workspace = true
 closure-mod-moderation.workspace = true
 dotenvy.workspace = true
 metrics-exporter-prometheus.workspace = true
