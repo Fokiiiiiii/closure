@@ -31,7 +31,9 @@ for about a day, so a link alone cannot show a picture later.
   is deleted, or an edit removes an attachment, the host fetches the file then, while Discord may
   still serve it, and the log posts it. A file that cannot be fetched is listed as not kept.
 - **`keep_attachments: true`.** The host fetches each new attachment as its message arrives, and
-  keeps it. The log then posts the kept file even when Discord no longer serves it. This uses storage:
+  keeps it. At most 64 arrivals wait for their files at once; an arrival past that is not kept as it
+  arrives, and its files are fetched only when a deletion or an edit needs them. The log then posts
+  the kept file even when Discord no longer serves it. This uses storage:
   the files of a guild are capped at 256 MiB, and the oldest go first. Files are kept for the same
   period as the message history (seven days by default).
 

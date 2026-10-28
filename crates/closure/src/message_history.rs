@@ -15,6 +15,10 @@ use closure_core::attachments::{self, ARRIVAL_FETCHES, Fetcher};
 
 const DAY_SECONDS: i64 = 86_400;
 
+/// How many arrivals may wait for their files at once. Past it an arrival is not kept as it comes;
+/// its files are fetched later, when a deletion or an edit needs them.
+pub(crate) const BACKLOG_LIMIT: usize = 64;
+
 /// The time now, in Unix seconds.
 #[must_use]
 pub fn unix_now() -> i64 {
@@ -39,6 +43,7 @@ pub struct MessageRecorder {
     retention_days: u32,
     fetcher: Arc<dyn Fetcher>,
     arrivals: Arc<tokio::sync::Semaphore>,
+    backlog: Arc<tokio::sync::Semaphore>,
 }
 
 impl fmt::Debug for MessageRecorder {
@@ -63,6 +68,7 @@ impl MessageRecorder {
             retention_days,
             fetcher,
             arrivals: Arc::new(tokio::sync::Semaphore::new(ARRIVAL_FETCHES)),
+            backlog: Arc::new(tokio::sync::Semaphore::new(BACKLOG_LIMIT)),
         }
     }
 
@@ -218,10 +224,24 @@ impl MessageRecorder {
         if attachments.is_empty() {
             return;
         }
+        // Past the backlog an arrival is not kept as it comes; a deletion or an edit still
+        // fetches its files.
+        let Ok(backlog) = Arc::clone(&self.backlog).try_acquire_owned() else {
+            tracing::warn!(
+                %guild,
+                %channel,
+                %message,
+                limit = BACKLOG_LIMIT,
+                "too many arrivals wait for their files; this one is not kept as it arrives"
+            );
+            return;
+        };
         let backend = Arc::clone(&self.backend);
         let fetcher = Arc::clone(&self.fetcher);
         let arrivals = Arc::clone(&self.arrivals);
         tokio::spawn(async move {
+            // Held until the task ends, so the backlog counts the arrivals that have not finished.
+            let _backlog = backlog;
             let Ok(_permit) = arrivals.acquire_owned().await else {
                 return;
             };

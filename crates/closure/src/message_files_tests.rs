@@ -15,7 +15,7 @@ use closure_core::registry::ModuleRegistry;
 use closure_core::testing::StubModule;
 use twilight_model::id::Id;
 
-use crate::message_history::MessageRecorder;
+use crate::message_history::{BACKLOG_LIMIT, MessageRecorder};
 
 const GUILD: u64 = 2;
 const CHANNEL: u64 = 5;
@@ -250,4 +250,45 @@ async fn links_off_the_cdn_and_pictures_too_large_are_recorded_without_bytes() {
         "nothing off the CDN or too large is fetched"
     );
     assert_eq!(kept(&backend, 14).await, [(5, false), (6, false)]);
+}
+
+/// Never answers: a fetch that starts stays in progress for good.
+struct Stalled;
+
+#[async_trait]
+impl Fetcher for Stalled {
+    async fn fetch(&self, _url: &str) -> Result<Vec<u8>, String> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn arrivals_beyond_the_backlog_are_not_queued() {
+    let store = store(true);
+    enable(&store, true);
+    let backend = Arc::new(MemoryHistory::default());
+    let recorder = MessageRecorder::new(
+        Arc::clone(&backend) as Arc<dyn HistoryBackend>,
+        Arc::clone(&store),
+        7,
+        Arc::new(Stalled) as Arc<dyn Fetcher>,
+    );
+
+    for id in 0..200_u64 {
+        recorder
+            .record(
+                &Event::MessageCreated(message(100 + id, vec![picture(id)])),
+                NOW,
+            )
+            .await
+            .unwrap();
+    }
+
+    // Every arrival still waiting for its files holds a clone of the backend. Two more are the
+    // test's own handle and the recorder's.
+    assert!(
+        Arc::strong_count(&backend) <= BACKLOG_LIMIT + 2,
+        "{} clones of the backend are alive: more arrivals wait than the backlog allows",
+        Arc::strong_count(&backend)
+    );
 }

@@ -10,6 +10,24 @@ use closure_core::event::{ChannelId, MessageId};
 use closure_core::module::EventContext;
 use twilight_model::channel::message::Embed;
 
+/// The most characters Discord takes in the embeds of one message, all of them together.
+const MAX_EMBED_CHARS: usize = 6000;
+
+/// The characters of an embed that count toward [`MAX_EMBED_CHARS`]: the title, the
+/// description, the author's name, the footer's text, and each field's name and value.
+fn embed_chars(embed: &Embed) -> usize {
+    let len = |text: &str| text.chars().count();
+    embed.title.as_deref().map_or(0, len)
+        + embed.description.as_deref().map_or(0, len)
+        + embed.author.as_ref().map_or(0, |author| len(&author.name))
+        + embed.footer.as_ref().map_or(0, |footer| len(&footer.text))
+        + embed
+            .fields
+            .iter()
+            .map(|field| len(&field.name) + len(&field.value))
+            .sum::<usize>()
+}
+
 /// One file a message carried, as the history has it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Kept {
@@ -76,7 +94,8 @@ pub struct LogEntry {
 }
 
 /// Posts the entries to `channel`, in order. Entries without files share messages, as many embeds to a
-/// message as Discord takes; a file goes in a message of its own, with the embed of its entry.
+/// message as Discord takes and as many characters as `MAX_EMBED_CHARS` allows; a file goes in a
+/// message of its own, with the embed of its entry.
 pub async fn post(
     ctx: &EventContext,
     channel: ChannelId,
@@ -85,6 +104,10 @@ pub async fn post(
     let mut pending: Vec<Embed> = Vec::new();
     for entry in entries {
         if entry.files.is_empty() {
+            let chars = embed_chars(&entry.embed);
+            if pending.iter().map(embed_chars).sum::<usize>() + chars > MAX_EMBED_CHARS {
+                flush(ctx, channel, &mut pending).await?;
+            }
             pending.push(entry.embed);
             if pending.len() == MAX_EMBEDS {
                 flush(ctx, channel, &mut pending).await?;
