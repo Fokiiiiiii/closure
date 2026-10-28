@@ -49,7 +49,9 @@ impl FakeDiscord {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     return;
                 };
-                let recorded = read_request(&mut socket).await;
+                let Some(recorded) = read_request(&mut socket).await else {
+                    continue;
+                };
                 seen.lock().unwrap().push(recorded);
 
                 let (status, body) = responses[served.min(responses.len() - 1)];
@@ -85,12 +87,15 @@ impl FakeDiscord {
     }
 }
 
-async fn read_request(socket: &mut tokio::net::TcpStream) -> Recorded {
+async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end = loop {
         let read = socket.read(&mut chunk).await.unwrap();
-        assert!(read > 0, "connection closed before the headers ended");
+        if read == 0 {
+            // A client that gave up before it sent a request, as an abandoned lookup does.
+            return None;
+        }
         buffer.extend_from_slice(&chunk[..read]);
         if let Some(position) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
             break position + 4;
@@ -117,12 +122,12 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Recorded {
         buffer.extend_from_slice(&chunk[..read]);
     }
     let body = String::from_utf8_lossy(&buffer[header_end..header_end + length]).into_owned();
-    Recorded {
+    Some(Recorded {
         method,
         path,
         headers,
         body,
-    }
+    })
 }
 
 fn reason(text: &str) -> Reason {
