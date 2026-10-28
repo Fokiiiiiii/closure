@@ -144,6 +144,27 @@ async fn group_identical_messages_needs_every_counted_message_to_be_the_same() {
 }
 
 #[tokio::test]
+async fn group_identical_messages_does_not_take_attachment_only_posts_for_a_text() {
+    let trigger = json!({
+        "type": "spam", "measure": "messages", "amount": 3, "within": "10s",
+        "group_identical_messages": true
+    });
+    let harness = flood(trigger, delete());
+    say(&harness, MEMBER, "hello").await;
+    for _ in 0..2 {
+        harness
+            .message(Message::new(MEMBER, CHANNEL).attachment("a.png", 10))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        deletions(&harness),
+        0,
+        "two posts without text are not the same text as hello"
+    );
+}
+
+#[tokio::test]
 async fn duplicates_counts_the_most_often_repeated_text() {
     let trigger = json!({ "type": "spam", "measure": "duplicates", "amount": 3, "within": "10s" });
     let repeated = flood(trigger.clone(), delete());

@@ -260,11 +260,12 @@ pub fn measure(measure: Measure, message: &MessageInfo) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// The count of a window: the sum of its measures, after the options that drop or refuse some.
 fn tally(entries: &[&Recent], spam: &Spam) -> u64 {
+    // A message without text matches no other message, not even one without text.
+    let bodyless = entries.iter().filter(|e| e.tag.is_none()).count();
     if spam.group_identical_messages {
         let texts: HashSet<&str> = entries.iter().filter_map(|e| e.tag.as_deref()).collect();
-        if texts.len() != 1 {
+        if texts.len() + bodyless != 1 {
             return 0;
         }
     }
@@ -273,7 +274,8 @@ fn tally(entries: &[&Recent], spam: &Spam) -> u64 {
         for tag in entries.iter().filter_map(|e| e.tag.as_deref()) {
             *copies.entry(tag).or_default() += 1;
         }
-        return copies.values().copied().max().unwrap_or(0);
+        let most = copies.values().copied().max().unwrap_or(0);
+        return most.max(u64::from(bodyless > 0));
     }
     let mut seen = HashSet::new();
     entries
