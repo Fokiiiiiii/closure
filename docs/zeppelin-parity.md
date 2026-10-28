@@ -68,6 +68,44 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | config overrides | closure-config has overrides |
 | text commands with a prefix (`!warn @user spam`) | `prefix` per guild; the words fill the options of the slash command of the same name, which runs with the same handler and checks (see [text commands](writing-modules.md#text-commands)) |
 
+## Order of the missing features
+
+The order is chosen by three things: whether the platform already has the pieces (events, jobs,
+buttons, storage), how much a moderation bot needs the feature, and the roadmap's rule that the
+platform comes first. Events that closure does not deliver yet (voice state, user updates, invites,
+guild and emoji updates) block the features that need them; those wait for M12 in the
+[roadmap](roadmap.md).
+
+**P1: the platform has everything; do these first**
+
+1. Logs: an event log of edits, deletions, joins, leaves and bans, posted to a channel. The events
+   exist (message updated and deleted, member joined and left, bans). The largest gap for moderation.
+2. WelcomeMessage: a message on join, with templates.
+3. A Slowmode command for moderators (the action exists).
+4. AutoReactions and AutoDelete: a reaction on every message in a channel, or deletion after N seconds.
+   These use the message events and the existing actions and jobs.
+
+**P2: a module of its own, with no new platform**
+
+5. Tags and CommandAliases: stored text as a command, and aliases of commands.
+6. Reminders and Post: scheduled messages, on the jobs system.
+7. Roles: ReactionRoles, RoleButtons, SelfGrantableRoles and PingableRoles as one module. The reaction
+   events and the buttons exist; the role hierarchy checks apply.
+8. Starboard: reaction events and a fetch of the message.
+
+**P3: waits for a platform piece, or for a decision**
+
+9. NameHistory and UsernameSaver: nickname changes come from member updates, but username changes
+   need the user-update event (M12).
+10. LocateUser and CompanionChannels: they need the voice state events (M12).
+11. Leveling: storage, message events and role rewards. Large.
+12. UrlThreatDetection: needs the restricted HTTP client (M13) and an outside service.
+13. GuildStats, CustomEvents and InternalPoster: the value is unclear; decide later.
+
+**Not planned, until the owner says otherwise:** Casino and Grok, and the internal plugins
+(GuildInfoSaver, GuildMemberCache, GuildConfigReloader, TemporaryGuildProfile, GuildAccessMonitor).
+closure does without them.
+
 ## Deliberately not taken
 
 These are in Zeppelin and are left out on purpose, for now:
