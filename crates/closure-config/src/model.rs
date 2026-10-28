@@ -56,6 +56,20 @@ fn optional_prefix_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema
     })
 }
 
+/// The longest a text command's message or its reply may wait before it is deleted: a day.
+pub(crate) const MAX_DELETE_AFTER_SECONDS: u32 = 86_400;
+
+fn optional_delete_after_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [{
+            "type": "integer",
+            "minimum": 1,
+            "maximum": MAX_DELETE_AFTER_SECONDS,
+            "description": "Seconds after which the message is deleted, 1 to 86400. Unset, it is kept."
+        }, { "type": "null" }]
+    })
+}
+
 fn optional_emoji_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "anyOf": [{
@@ -299,6 +313,12 @@ pub struct GuildOverrides {
     #[schemars(schema_with = "optional_prefix_schema")]
     pub prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_delete_after_schema")]
+    pub prefix_delete_command_after: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_delete_after_schema")]
+    pub prefix_delete_reply_after: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "optional_emoji_schema")]
     pub success_emoji: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,6 +352,8 @@ pub struct EffectiveConfig {
     /// The zone as a label such as `UTC+09:00`.
     pub timezone: Option<String>,
     pub prefix: Option<String>,
+    pub prefix_delete_command_after: Option<u32>,
+    pub prefix_delete_reply_after: Option<u32>,
     pub success_emoji: String,
     pub error_emoji: String,
     pub limits: Limits,

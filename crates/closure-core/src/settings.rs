@@ -28,6 +28,10 @@ pub struct GuildPolicy {
     pub timezone: Option<Timezone>,
     /// The prefix of text commands; `None` turns them off.
     pub prefix: Option<String>,
+    /// How long after a text command its message is deleted; `None` keeps it.
+    pub prefix_delete_command_after: Option<Duration>,
+    /// How long after its reply a text command's reply is deleted; `None` keeps it.
+    pub prefix_delete_reply_after: Option<Duration>,
     /// Put in front of the text of a success reply, followed by a space; empty for none.
     pub success_emoji: String,
     /// Put in front of the text of an error reply, followed by a space; empty for none.
@@ -41,6 +45,8 @@ impl Default for GuildPolicy {
             moderator_roles: Vec::new(),
             timezone: None,
             prefix: None,
+            prefix_delete_command_after: None,
+            prefix_delete_reply_after: None,
             success_emoji: "✅".to_owned(),
             error_emoji: "❌".to_owned(),
         }

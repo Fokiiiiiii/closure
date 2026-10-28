@@ -2146,6 +2146,19 @@ async fn text_harness(
     prefix: Option<&str>,
     locale: Locale,
 ) -> Harness {
+    let policy = GuildPolicy {
+        prefix: prefix.map(str::to_owned),
+        ..GuildPolicy::default()
+    };
+    text_harness_with(probes, policy, locale).await
+}
+
+/// [`text_harness`] with the whole guild policy, for the settings that go beyond the prefix.
+async fn text_harness_with(
+    probes: &[(&Arc<Probe>, bool)],
+    policy: GuildPolicy,
+    locale: Locale,
+) -> Harness {
     let registry = Arc::new(
         ModuleRegistry::new(
             probes
@@ -2165,10 +2178,7 @@ async fn text_harness(
             },
         )
     }));
-    settings.policy = Arc::new(GuildPolicy {
-        prefix: prefix.map(str::to_owned),
-        ..GuildPolicy::default()
-    });
+    settings.policy = Arc::new(policy);
     settings.locale = locale;
     settings.limits = limits(64, 4);
     let api = Arc::new(MockApi::default());
@@ -2339,6 +2349,43 @@ async fn a_form_asked_for_by_a_text_command_becomes_a_notice_in_the_guilds_langu
             true
         )
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_text_command_and_its_reply_are_deleted_after_the_guilds_delays() {
+    let module = warn_module(Behavior::AnswerCommand);
+    let policy = GuildPolicy {
+        prefix: Some("!".to_owned()),
+        prefix_delete_command_after: Some(Duration::from_secs(1)),
+        prefix_delete_reply_after: Some(Duration::from_secs(3)),
+        ..GuildPolicy::default()
+    };
+    let h = text_harness_with(&[(&module, true)], policy, Locale::En).await;
+
+    h.dispatcher
+        .dispatch_message(text_message(44, "!warn <@5>"), |_| Permissions::empty());
+    h.dispatcher.flush().await;
+
+    let deleted = || -> Vec<(u64, u64)> {
+        h.api
+            .actions()
+            .iter()
+            .filter_map(|action| match action {
+                Action::DeleteMessage {
+                    channel_id,
+                    message_id,
+                    ..
+                } => Some((channel_id.get(), message_id.get())),
+                _ => None,
+            })
+            .collect()
+    };
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(deleted(), [(3, 44)], "the command goes first");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let deleted = deleted();
+    assert_eq!(deleted.len(), 2, "{deleted:?}");
+    assert_ne!(deleted[1].1, 44, "the reply is a message of its own");
 }
 
 #[tokio::test]

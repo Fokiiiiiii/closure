@@ -19,6 +19,8 @@ log_channel: 123456789012345678
 moderator_roles: [111111111111111111, 222222222222222222]
 timezone: Asia/Tokyo       # the zone of a date typed without one
 prefix: "!"                # text commands; unset, they are off
+prefix_delete_command_after: 5   # delete a text command 5 seconds after its reply; unset, kept
+prefix_delete_reply_after: 30    # delete the reply 30 seconds after it is sent; unset, kept
 
 limits:                    # override single values of the preset
   handler_timeout_secs: 20
@@ -45,6 +47,7 @@ modules:
 | `moderator_roles` | Roles whose members may use moderation features (at most 100). |
 | `timezone` | The zone of a date and time typed in a command without one; see [time zone, prefix and emojis](#time-zone-prefix-and-emojis). |
 | `prefix` | The prefix of text commands, 1 to 10 characters without spaces. Unset, text commands are off. |
+| `prefix_delete_command_after`, `prefix_delete_reply_after` | Delete a text command's message, or its reply, this many seconds after the reply is sent: 1 to 86400. Unset, it is kept. |
 | `success_emoji`, `error_emoji` | The emoji in front of success and error replies; see [time zone, prefix and emojis](#time-zone-prefix-and-emojis). |
 | `limits` | Per-server resource limits; see below. |
 | `permissions` | Levels of roles and members, and what is decided about single permission keys; see below. |
@@ -96,6 +99,12 @@ timezone: UTC-5    # America/New_York in winter; use UTC-4 from March to Novembe
 `prefix` is 1 to 10 characters without spaces, such as `!` or `>>`. A message starting with it runs
 the slash command of the same name (`!warn @user spam`); see [text commands](writing-modules.md#text-commands).
 An empty prefix is refused: leave the key out to turn text commands off.
+
+`prefix_delete_command_after` and `prefix_delete_reply_after` set the delays after which the message
+that ran a text command and its reply are deleted, each on its own. The bot may always delete its own
+reply. Deleting the command message needs the Manage Messages permission; without it the message is
+kept, and the failure is logged at debug level. A command whose answer is deferred and then sent by an
+edit is not covered: only an answer sent at once is.
 
 `success_emoji` and `error_emoji` go in front of the text of a success or an error reply, followed by a
 space, so `✅ Warned user 7` reads as the success it is. The default is `✅` and `❌`. Each is a Unicode

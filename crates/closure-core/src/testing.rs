@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use twilight_model::channel::{Channel, Message};
 use twilight_model::guild::{Guild, Member, Role};
 
-use crate::action::{Action, Outcome, OverwriteTarget};
+use crate::action::{Action, InteractionResponse, Outcome, OverwriteTarget};
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
 use crate::event::{ChannelId, Event, GuildId, RoleId, UserId};
@@ -202,6 +202,14 @@ impl MockApi {
             Action::PruneCount { .. } | Action::Prune { .. } => Ok(Outcome::Count(0)),
             Action::ListScheduledEvents { .. } => Ok(Outcome::ScheduledEvents(vec![])),
             Action::ListEmojis { .. } => Ok(Outcome::Emojis(vec![])),
+            // A text command's reply is a message sent in the channel of the command.
+            Action::Respond {
+                token,
+                response: InteractionResponse::Message { .. },
+                ..
+            } => Ok(token
+                .text_command_message()
+                .map_or(Outcome::None, |(channel, _)| self.sent(channel))),
             // Writes that return a new object are recorded but answered with `Outcome::None`.
             _ => Ok(Outcome::None),
         }

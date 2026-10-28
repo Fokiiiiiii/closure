@@ -3,14 +3,15 @@
 //! options in their declared order.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use closure_core::action::{Action, InteractionReply, InteractionResponse, Outcome};
+use closure_core::action::{Action, InteractionReply, InteractionResponse, Outcome, Reason};
 use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
 use closure_core::event::{
     ApplicationId, AttachmentInfo, ChannelId, CommandInvocation, CommandOption, CommandOptionValue,
-    GuildId, InteractionToken, Mentionable, MessageInfo, UserId,
+    GuildId, InteractionToken, Mentionable, MessageId, MessageInfo, UserId,
 };
 use closure_core::interaction::InteractionGuilds;
 use closure_core::locale::{Args, Locale, Translator};
@@ -455,6 +456,17 @@ pub(crate) fn invoker_permissions(cache: &InMemoryCache, message: &MessageInfo) 
     }
 }
 
+/// The audit log reason of the messages a guild's text-command delays delete.
+const CLEANUP_REASON: &str = "Text command cleanup";
+
+/// The messages a text command's answer deletes later, with the guild's delays.
+struct Deletions {
+    channel: ChannelId,
+    command: MessageId,
+    command_after: Option<Duration>,
+    reply_after: Option<Duration>,
+}
+
 /// Stands in for the host's API for the one answer a text command cannot give: a form. The
 /// module is told so in the guild's language, and nothing is shown.
 pub(crate) struct TextCommandApi {
@@ -477,6 +489,64 @@ impl TextCommandApi {
             settings,
             translator,
         }
+    }
+
+    /// What answering `action` leaves to delete, when it answers a text command in a guild whose
+    /// policy sets a delay.
+    fn deletions(&self, action: &Action) -> Option<Deletions> {
+        let Action::Respond {
+            token,
+            response: InteractionResponse::Message { .. },
+            ..
+        } = action
+        else {
+            return None;
+        };
+        let (channel, command) = token.text_command_message()?;
+        let policy = self.settings.policy(self.interactions.guild_of(token)?);
+        if policy.prefix_delete_command_after.is_none()
+            && policy.prefix_delete_reply_after.is_none()
+        {
+            return None;
+        }
+        Some(Deletions {
+            channel,
+            command,
+            command_after: policy.prefix_delete_command_after,
+            reply_after: policy.prefix_delete_reply_after,
+        })
+    }
+
+    /// Schedules the deletions once the answer has been sent: the reply is the message `outcome`
+    /// names, so a reply that was not sent leaves nothing to delete.
+    fn schedule_deletions(&self, deletions: &Deletions, reason: &Reason, outcome: &Outcome) {
+        if let Some(after) = deletions.command_after {
+            self.delete_after(deletions.channel, deletions.command, after, reason.clone());
+        }
+        if let (Some(after), Outcome::Message(reply)) = (deletions.reply_after, outcome) {
+            self.delete_after(deletions.channel, reply.id, after, reason.clone());
+        }
+    }
+
+    fn delete_after(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+        after: Duration,
+        reason: Reason,
+    ) {
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            let action = Action::DeleteMessage {
+                channel_id: channel,
+                message_id: message,
+                reason,
+            };
+            if let Err(error) = inner.execute(action).await {
+                tracing::debug!(%error, "could not delete a text command or its reply");
+            }
+        });
     }
 }
 
@@ -512,7 +582,15 @@ impl DiscordApi for TextCommandApi {
                     })
                     .await
             }
-            other => self.inner.execute(other).await,
+            other => {
+                let Some(deletions) = self.deletions(&other) else {
+                    return self.inner.execute(other).await;
+                };
+                let reason = Reason::new(CLEANUP_REASON)?;
+                let outcome = self.inner.execute(other).await?;
+                self.schedule_deletions(&deletions, &reason, &outcome);
+                Ok(outcome)
+            }
         }
     }
 

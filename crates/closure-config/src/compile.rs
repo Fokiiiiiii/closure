@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use closure_core::capability::CapabilitySet;
 use closure_core::module::{ModuleId, ModuleManifest, ModuleRuntime};
@@ -14,7 +15,7 @@ use twilight_model::id::Id;
 use crate::error::{ConfigError, Issue};
 use crate::model::{
     CURRENT_VERSION, EffectiveConfig, GuildOverrides, GuildSettings, KeyOverride, LevelSetting,
-    ModuleEffective, ModuleOverride, Principals,
+    MAX_DELETE_AFTER_SECONDS, ModuleEffective, ModuleOverride, Principals,
 };
 
 const MAX_MODERATOR_ROLES: usize = 100;
@@ -222,6 +223,8 @@ fn compile_with(
     let PolicyText {
         timezone,
         prefix,
+        prefix_delete_command_after,
+        prefix_delete_reply_after,
         success_emoji,
         error_emoji,
     } = compile_policy_text(overrides, &mut issues);
@@ -265,6 +268,8 @@ fn compile_with(
         moderator_roles: moderator_roles.clone(),
         timezone,
         prefix: prefix.clone(),
+        prefix_delete_command_after: prefix_delete_command_after.map(as_duration),
+        prefix_delete_reply_after: prefix_delete_reply_after.map(as_duration),
         success_emoji: success_emoji.clone(),
         error_emoji: error_emoji.clone(),
     });
@@ -277,6 +282,8 @@ fn compile_with(
             moderator_roles,
             timezone: timezone.map(Timezone::label),
             prefix,
+            prefix_delete_command_after,
+            prefix_delete_reply_after,
             success_emoji,
             error_emoji,
             limits,
@@ -293,6 +300,8 @@ fn compile_with(
 struct PolicyText {
     timezone: Option<Timezone>,
     prefix: Option<String>,
+    prefix_delete_command_after: Option<u32>,
+    prefix_delete_reply_after: Option<u32>,
     success_emoji: String,
     error_emoji: String,
 }
@@ -311,6 +320,16 @@ fn compile_policy_text(overrides: &GuildOverrides, issues: &mut Vec<Issue>) -> P
     PolicyText {
         timezone,
         prefix: compile_prefix(overrides.prefix.as_deref(), issues),
+        prefix_delete_command_after: compile_delete_after(
+            "prefix_delete_command_after",
+            overrides.prefix_delete_command_after,
+            issues,
+        ),
+        prefix_delete_reply_after: compile_delete_after(
+            "prefix_delete_reply_after",
+            overrides.prefix_delete_reply_after,
+            issues,
+        ),
         success_emoji: compile_emoji(
             "success_emoji",
             overrides.success_emoji.as_deref(),
@@ -339,6 +358,28 @@ fn compile_prefix(text: Option<&str>, issues: &mut Vec<Issue>) -> Option<String>
         format!("a prefix is 1 to {MAX_PREFIX_CHARS} characters without spaces"),
     ));
     None
+}
+
+/// A delay before a text command's message or its reply is deleted, when the guild set one.
+fn compile_delete_after(
+    key: &'static str,
+    seconds: Option<u32>,
+    issues: &mut Vec<Issue>,
+) -> Option<u32> {
+    let seconds = seconds?;
+    if (1..=MAX_DELETE_AFTER_SECONDS).contains(&seconds) {
+        return Some(seconds);
+    }
+    issues.push(Issue::new(
+        key,
+        "invalid",
+        format!("the delay is 1 to {MAX_DELETE_AFTER_SECONDS} seconds"),
+    ));
+    None
+}
+
+fn as_duration(seconds: u32) -> Duration {
+    Duration::from_secs(u64::from(seconds))
 }
 
 /// An emoji the replies put in front of their text. Empty means none, and an unset one is
@@ -834,6 +875,36 @@ error_emoji: ''
                 [("prefix".to_owned(), "invalid")],
                 "{bad:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_text_command_delays_are_one_second_to_a_day() {
+        let settings = compiled(
+            "
+prefix_delete_command_after: 5
+prefix_delete_reply_after: 86400
+",
+        )
+        .unwrap();
+        let policy = &settings.policy;
+        assert_eq!(
+            policy.prefix_delete_command_after,
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            policy.prefix_delete_reply_after,
+            Some(Duration::from_secs(86_400))
+        );
+        assert_eq!(settings.effective.prefix_delete_command_after, Some(5));
+        for key in ["prefix_delete_command_after", "prefix_delete_reply_after"] {
+            for bad in ["0", "86401"] {
+                assert_eq!(
+                    issues_of(&format!("{key}: {bad}")),
+                    [(key.to_owned(), "invalid")],
+                    "{key}: {bad}"
+                );
+            }
         }
     }
 
