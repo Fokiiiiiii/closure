@@ -260,6 +260,7 @@ pub fn measure(measure: Measure, message: &MessageInfo) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+/// The count of a window: the sum of its measures, after the options that drop or refuse some.
 fn tally(entries: &[&Recent], spam: &Spam) -> u64 {
     // A message without text matches no other message, not even one without text.
     let bodyless = entries.iter().filter(|e| e.tag.is_none()).count();
