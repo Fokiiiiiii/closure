@@ -745,7 +745,7 @@ mod tests {
 
     #[test]
     fn an_update_leaves_empty_what_the_payload_did_not_carry() {
-        // Without the content intent Discord sends no content; without member data, no roles.
+        // An update carries its text, empty included; without member data there are no roles.
         let mut json = message_json(Some("1"));
         json["content"] = json!("");
         json["attachments"] = json!([]);

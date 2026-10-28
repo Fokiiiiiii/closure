@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_edit_updates_the_text_and_an_update_without_text_keeps_it() {
+    async fn an_edit_updates_the_text_even_when_it_is_emptied() {
         let store = store();
         store
             .set_guild_yaml(Id::new(2), "modules:\n  reader:\n    enabled: true\n")
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(stored.content, "second");
         assert_eq!(stored.edited_at, Some(NOW + 5));
 
-        // Discord sends no text without the content intent.
+        // An edit that removes the text leaves no text behind.
         recorder
             .record(&Event::MessageUpdated(info(2, 11, NOW, "")), NOW + 6)
             .await
@@ -489,7 +489,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(stored.content, "second");
+        assert_eq!(stored.content, "");
     }
 
     #[tokio::test]

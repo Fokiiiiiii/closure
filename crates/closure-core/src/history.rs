@@ -454,9 +454,6 @@ impl HistoryBackend for MemoryHistory {
         if let Some(old) = messages.by_id.get(&message.id) {
             stored.created_at = old.created_at;
             stored.deleted_at = old.deleted_at;
-            if stored.content.is_empty() {
-                stored.content.clone_from(&old.content);
-            }
             stored.edited_at = stored.edited_at.or(old.edited_at);
         }
         messages.by_id.insert(stored.id, stored);
@@ -704,7 +701,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_update_without_text_keeps_the_stored_text() {
+    async fn an_update_with_empty_text_clears_the_stored_text() {
         let backend = Arc::new(MemoryHistory::default());
         let history = history(&backend, 1);
         history.save(&saved(10, 5, 7, 100, "kept")).await.unwrap();
@@ -712,7 +709,7 @@ mod tests {
         update.edited_at = Some(200);
         history.save(&update).await.unwrap();
         let stored = history.get(Id::new(5), Id::new(10)).await.unwrap().unwrap();
-        assert_eq!(stored.content, "kept");
+        assert_eq!(stored.content, "");
         assert_eq!(stored.edited_at, Some(200));
     }
 
