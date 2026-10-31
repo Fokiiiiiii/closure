@@ -84,6 +84,7 @@ mod tests {
     fn a_message_has_its_content_author_and_channel() {
         let info = MessageInfo {
             removed_attachments: Vec::new(),
+            previous_content: None,
             id: Id::new(1),
             channel_id: Id::new(2),
             guild_id: Id::new(3),

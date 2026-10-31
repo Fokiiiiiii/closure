@@ -2,16 +2,21 @@
 //! channel. A deleted message is shown with what the history kept of it: its text, and its files when
 //! the host kept them. The files and their posting are the SDK's (`closure_sdk::files`).
 
+use std::time::Duration;
+
 use closure_core::capability::Capability;
 use closure_core::error::{CoreError, ModuleError};
-use closure_core::event::{ChannelId, Event, EventKind, MessageId, MessageInfo, UserInfo};
+use closure_core::event::{
+    AttachmentInfo, ChannelId, Event, EventKind, MemberInfo, MessageId, MessageInfo, UserInfo,
+};
 use closure_core::history::SavedMessage;
 use closure_core::locale::Locale;
 use closure_core::module::EventContext;
 use closure_core::subscription::{Flow, Subscription};
 use closure_sdk::files::{self, Kept, LogEntry};
 use closure_sdk::{
-    Args, Color, EmbedBuilder, Intents, ModuleBuilder, SdkModule, parse_module_config,
+    Args, Color, EmbedBuilder, Intents, ModuleBuilder, SdkModule, TimeStyle, duration,
+    parse_module_config,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -127,12 +132,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             ..
         } if config.message_deletes => bulk_deleted(&ctx, *channel_id, message_ids).await?,
         Event::MemberJoined(member) if config.member_joins => {
-            vec![member_entry(
-                &ctx,
-                "logs-joined",
-                Color::Success,
-                &member.user,
-            )?]
+            vec![joined_entry(&ctx, member)?]
         }
         Event::MemberLeft { user, .. } if config.member_leaves => {
             vec![member_entry(&ctx, "logs-left", Color::Info, user)?]
@@ -207,7 +207,8 @@ async fn bulk_deleted(
     let mut summary = card(
         ctx.t_in(ctx.locale, "logs-bulk", &Args::new().with("count", count)),
         Color::Error,
-    );
+    )
+    .timestamp(ctx.now());
     if unkept > 0 {
         let note = ctx.t_in(
             ctx.locale,
@@ -226,29 +227,42 @@ async fn bulk_deleted(
     Ok(entries)
 }
 
-/// An edit: the new text and files, and the files the edit took away (`removed_attachments`).
+/// An edit: the text before and after it, the message, and the files the edit took away
+/// (`removed_attachments`).
 async fn edited(ctx: &EventContext, message: &MessageInfo) -> Result<LogEntry, ModuleError> {
     let removed =
         files::files_of_attachments(ctx, message.id, &message.removed_attachments).await?;
-    let mut card = message_card(
+    let card = message_card(
         ctx,
         label(ctx, "logs-edited"),
         Color::Warning,
         message.author.id.get(),
         message.channel_id.get(),
-        &message.content,
-        &message.attachments,
+        message.id.get(),
+        message.created_at,
     );
-    if !removed.is_empty() {
-        card = card.field(label(ctx, "logs-removed"), names(ctx, &removed), false);
-    }
+    let card = match &message.previous_content {
+        Some(before) => text_field(ctx, card, "logs-before", before),
+        None => card.field(
+            label(ctx, "logs-before"),
+            label(ctx, "logs-not-kept"),
+            false,
+        ),
+    };
+    let card = text_field(ctx, card, "logs-after", &message.content);
+    let card = attachments_field(ctx, card, &message.attachments);
+    let card = if removed.is_empty() {
+        card
+    } else {
+        card.field(label(ctx, "logs-removed"), names(ctx, &removed), false)
+    };
     Ok(LogEntry {
         embed: build(card)?,
         files: removed.iter().filter_map(Kept::upload).collect(),
     })
 }
 
-/// A saved message with its author, channel, text and the files that were kept of it.
+/// A saved message with its author, channel, id, text and the files that were kept of it.
 fn saved_card(
     ctx: &EventContext,
     title: &str,
@@ -262,9 +276,11 @@ fn saved_card(
         color,
         saved.author.get(),
         saved.channel_id.get(),
-        &saved.content,
-        &saved.attachments,
+        saved.id.get(),
+        saved.created_at,
     );
+    let card = text_field(ctx, card, "logs-content", &saved.content);
+    let card = attachments_field(ctx, card, &saved.attachments);
     if kept.is_empty() {
         card
     } else {
@@ -272,29 +288,49 @@ fn saved_card(
     }
 }
 
-/// A message with its author, channel, text and attachments.
+/// A message's author, channel and id, and when it was sent. The card carries the time of the
+/// change it shows, as its timestamp.
 fn message_card(
     ctx: &EventContext,
     title: String,
     color: Color,
     author: u64,
     channel: u64,
-    text: &str,
-    attachments: &[closure_core::event::AttachmentInfo],
+    message: u64,
+    sent: i64,
 ) -> EmbedBuilder {
-    let content = if text.is_empty() {
-        label(ctx, "logs-no-text")
-    } else {
-        clip(text, FIELD_LIMIT)
-    };
-    let card = card(title, color)
+    card(title, color)
         .field(
             label(ctx, "logs-author"),
             format!("<@{author}> ({author})"),
             true,
         )
         .field(label(ctx, "logs-channel"), format!("<#{channel}>"), true)
-        .field(label(ctx, "logs-content"), content, false);
+        .field(label(ctx, "logs-message"), message.to_string(), true)
+        .field(
+            label(ctx, "logs-posted"),
+            duration::timestamp(sent, TimeStyle::ShortDateTime),
+            true,
+        )
+        .timestamp(ctx.now())
+}
+
+/// A text as a field. An empty one says that there is no text.
+fn text_field(ctx: &EventContext, card: EmbedBuilder, key: &str, text: &str) -> EmbedBuilder {
+    let value = if text.is_empty() {
+        label(ctx, "logs-no-text")
+    } else {
+        clip(text, FIELD_LIMIT)
+    };
+    card.field(label(ctx, key), value, false)
+}
+
+/// The names of the attachments as a field, when there are any.
+fn attachments_field(
+    ctx: &EventContext,
+    card: EmbedBuilder,
+    attachments: &[AttachmentInfo],
+) -> EmbedBuilder {
     if attachments.is_empty() {
         return card;
     }
@@ -319,6 +355,34 @@ fn unkept_card(ctx: &EventContext, channel: u64, message: u64) -> EmbedBuilder {
             label(ctx, "logs-not-kept"),
             false,
         )
+        .timestamp(ctx.now())
+}
+
+/// A join: the member, when the account was made and how old it is, and when the member joined.
+fn joined_entry(ctx: &EventContext, member: &MemberInfo) -> Result<LogEntry, ModuleError> {
+    let now = ctx.now();
+    let created = duration::snowflake_time(member.user.id.get());
+    let age = Duration::from_secs(u64::try_from(now - created).unwrap_or(0));
+    let card = member_card(ctx, "logs-joined", Color::Success, &member.user)
+        .field(
+            label(ctx, "logs-created"),
+            duration::timestamp(created, TimeStyle::ShortDateTime),
+            true,
+        )
+        .field(
+            label(ctx, "logs-age"),
+            duration::format_in(ctx, ctx.locale, age),
+            true,
+        )
+        .field(
+            label(ctx, "logs-joined-at"),
+            duration::timestamp(member.joined_at.unwrap_or(now), TimeStyle::ShortDateTime),
+            true,
+        );
+    Ok(LogEntry {
+        embed: build(card)?,
+        files: Vec::new(),
+    })
 }
 
 fn member_entry(
@@ -327,15 +391,19 @@ fn member_entry(
     color: Color,
     user: &UserInfo,
 ) -> Result<LogEntry, ModuleError> {
-    let card = card(label(ctx, title), color).field(
+    Ok(LogEntry {
+        embed: build(member_card(ctx, title, color, user))?,
+        files: Vec::new(),
+    })
+}
+
+/// A card about a member: its title, and the member it is about.
+fn member_card(ctx: &EventContext, title: &str, color: Color, user: &UserInfo) -> EmbedBuilder {
+    card(label(ctx, title), color).field(
         label(ctx, "logs-member"),
         format!("<@{}> ({})", user.id.get(), user.name),
         false,
-    );
-    Ok(LogEntry {
-        embed: build(card)?,
-        files: Vec::new(),
-    })
+    )
 }
 
 /// The names of files, one to a line; a file that was not kept says so.

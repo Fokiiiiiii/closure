@@ -138,6 +138,7 @@ fn commands() -> Vec<CommandSpec> {
 fn message(content: &str) -> MessageInfo {
     MessageInfo {
         removed_attachments: Vec::new(),
+        previous_content: None,
         id: Id::new(44),
         channel_id: Id::new(3),
         guild_id: Id::new(1),

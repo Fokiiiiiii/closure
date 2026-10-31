@@ -115,7 +115,7 @@ fn member_join(
     if !only_new {
         return Some(Hit::about(say(ctx, "detail-join", &Args::new()), context));
     }
-    let made = account_made(context.user_id()?.get());
+    let made = duration::snowflake_time(context.user_id()?.get());
     let age = ctx.now() - made;
     let fresh = age >= 0 && u64::try_from(age).is_ok_and(|age| age < threshold.as_secs());
     fresh.then(|| {
@@ -129,12 +129,6 @@ fn member_join(
         );
         Hit::about(say(ctx, "detail-join-new", &args), context)
     })
-}
-
-/// When the account with this user id was made, in Unix seconds. Discord's snowflakes carry it.
-pub fn account_made(user: u64) -> i64 {
-    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
-    i64::try_from(((user >> 22) + DISCORD_EPOCH_MS) / 1_000).unwrap_or(i64::MAX)
 }
 
 /// Roles added to (or removed from) the member, when one of the roles of the trigger is among them.

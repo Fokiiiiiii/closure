@@ -81,6 +81,10 @@ pub struct MessageInfo {
     /// Only an edit gets them, and only where the history keeps messages; empty otherwise.
     #[serde(default)]
     pub removed_attachments: Vec<AttachmentInfo>,
+    /// The text the message had before this edit. Only an edit gets it, and only where the history
+    /// keeps messages; `None` otherwise.
+    #[serde(default)]
+    pub previous_content: Option<String>,
     /// Number of embeds (link previews included).
     #[serde(default)]
     pub embed_count: u32,

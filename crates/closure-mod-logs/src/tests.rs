@@ -95,6 +95,7 @@ fn edited(
         mentions_everyone: false,
         attachments,
         removed_attachments: removed,
+        previous_content: None,
         embed_count: 0,
         sticker_count: 0,
         reply_to: None,
@@ -489,6 +490,117 @@ async fn showcase_an_edit_that_removes_a_picture_shows_the_picture() {
         .unwrap();
 
     assert_eq!(sent(&harness).len(), 1);
+}
+
+/// A user id whose snowflake says the account was made at `unix_seconds`.
+fn user_made_at(unix_seconds: u64) -> u64 {
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    (((unix_seconds * 1_000) - DISCORD_EPOCH_MS) << 22) | 1
+}
+
+#[tokio::test]
+async fn a_join_shows_when_the_account_was_made_and_when_the_member_joined() {
+    let harness = harness();
+    let member = MemberInfo {
+        guild_id: Id::new(GUILD),
+        user: UserInfo {
+            id: Id::new(user_made_at(1_600_000_000)),
+            name: "newcomer".into(),
+            bot: false,
+        },
+        roles: Vec::new(),
+        nick: None,
+        joined_at: Some(1_650_000_000),
+        timed_out_until: None,
+    };
+
+    harness.emit(Event::MemberJoined(member)).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("<t:1600000000:f>"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("<t:1650000000:f>"),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_message_shows_its_id_and_when_it_was_posted_and_is_stamped_with_the_deletion() {
+    let harness = harness();
+    harness
+        .seed_message(saved(10, "look at this", Vec::new()))
+        .await
+        .unwrap();
+
+    harness.emit(deleted(10)).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains(r#""value":"10""#),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("<t:1700000000:f>"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("\"timestamp\""),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn an_edit_shows_the_text_before_and_after_it() {
+    let harness = harness();
+    let mut edit = edited(33, "the new text", Vec::new(), Vec::new());
+    if let Event::MessageUpdated(info) = &mut edit {
+        info.previous_content = Some("the old text".into());
+    }
+
+    harness.emit(edit).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("the old text"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("the new text"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(posted[0].embeds.contains("Before"), "{}", posted[0].embeds);
+    assert!(posted[0].embeds.contains("After"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn an_edit_whose_text_before_it_the_history_did_not_keep_says_so() {
+    let harness = harness();
+
+    harness
+        .emit(edited(34, "the new text", Vec::new(), Vec::new()))
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("The content was not kept"),
+        "{}",
+        posted[0].embeds
+    );
 }
 
 #[test]

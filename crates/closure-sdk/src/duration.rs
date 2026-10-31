@@ -88,6 +88,13 @@ pub fn timestamp(unix_seconds: i64, style: TimeStyle) -> String {
     format!("<t:{unix_seconds}:{}>", style.code())
 }
 
+/// When Discord made the object with this snowflake id, in Unix seconds: the id carries the time.
+#[must_use]
+pub fn snowflake_time(id: u64) -> i64 {
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    i64::try_from(((id >> 22) + DISCORD_EPOCH_MS) / 1_000).unwrap_or(i64::MAX)
+}
+
 /// A length of time in `locale`, in its two largest units that are not zero. Weeks are counted in
 /// days. Used for what is said to a member or to the log, in the server's language.
 #[must_use]
@@ -120,7 +127,7 @@ mod tests {
 
     use closure_core::schedule::MAX_DELAY;
 
-    use super::{DurationError, TimeStyle, parse, timestamp};
+    use super::{DurationError, TimeStyle, parse, snowflake_time, timestamp};
 
     #[test]
     fn parses_the_usual_forms() {
@@ -162,6 +169,14 @@ mod tests {
     fn ten_years_is_the_longest_allowed() {
         assert_eq!(parse("3650d"), Ok(MAX_DELAY));
         assert_eq!(parse("3651d"), Err(DurationError::TooLarge));
+    }
+
+    #[test]
+    fn a_snowflake_says_when_its_object_was_made() {
+        // Discord's snowflake: milliseconds since its epoch, then the worker and sequence bits.
+        let id = ((1_600_000_000_000 - 1_420_070_400_000) << 22) | 1;
+
+        assert_eq!(snowflake_time(id), 1_600_000_000);
     }
 
     #[test]

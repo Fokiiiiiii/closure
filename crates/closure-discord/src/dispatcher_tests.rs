@@ -543,6 +543,7 @@ fn user(id: u64) -> UserInfo {
 fn message(channel: u64, id: u64) -> Event {
     Event::MessageCreated(MessageInfo {
         removed_attachments: Vec::new(),
+        previous_content: None,
         id: Id::new(id),
         channel_id: Id::new(channel),
         guild_id: Id::new(GUILD),

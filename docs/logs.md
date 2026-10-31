@@ -21,6 +21,16 @@ modules:
       keep_attachments: false       # see Files below
 ```
 
+## What an entry shows
+
+- **Join.** The member, when the account was made and how old it is, and when the member joined.
+- **Edit.** The text before the edit and after it, the message's id and when it was posted, and the
+  files the edit took away. The text before an edit is the text the history held when the edit
+  arrived, so the text an edit replaced is shown but the one before it is not. Without the history
+  (its message history is off for the guild) the text before says that it was not kept.
+- **Deletion.** The text, the files and the id of the message, and when it was posted. The entry is
+  stamped with the time of the deletion.
+
 ## Files
 
 A message's text is kept by the message history, which is on for a guild while a module there holds

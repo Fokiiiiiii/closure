@@ -157,6 +157,7 @@ mod tests {
     fn message(guild: u64, id: u64) -> ModuleEvent {
         ModuleEvent::MessageCreated(MessageInfo {
             removed_attachments: Vec::new(),
+            previous_content: None,
             id: Id::new(id),
             channel_id: Id::new(5),
             guild_id: Id::new(guild),

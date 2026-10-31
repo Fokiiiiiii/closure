@@ -89,6 +89,7 @@ fn picture(id: u64) -> AttachmentInfo {
 fn message(id: u64, attachments: Vec<AttachmentInfo>) -> MessageInfo {
     MessageInfo {
         removed_attachments: Vec::new(),
+        previous_content: None,
         id: Id::new(id),
         channel_id: Id::new(CHANNEL),
         guild_id: Id::new(GUILD),

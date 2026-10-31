@@ -125,6 +125,7 @@ impl MessageRecorder {
                             .cloned()
                             .collect();
                         info.removed_attachments = removed;
+                        info.previous_content = Some(previous.content.clone());
                     }
                     let message = SavedMessage::from_info(info);
                     check_text(&message)?;
@@ -398,6 +399,7 @@ mod tests {
     fn info(guild: u64, id: u64, created_at: i64, content: &str) -> MessageInfo {
         MessageInfo {
             removed_attachments: Vec::new(),
+            previous_content: None,
             id: Id::new(id),
             channel_id: Id::new(5),
             guild_id: Id::new(guild),
@@ -617,6 +619,37 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    /// The text an edit replaced, as the recorder hands it on.
+    fn previous_content(event: &Event) -> Option<&str> {
+        match event {
+            Event::MessageUpdated(info) => info.previous_content.as_deref(),
+            _ => panic!("expected an update"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_edit_carries_the_text_it_replaced() {
+        let store = store();
+        store
+            .set_guild_yaml(Id::new(2), "modules:\n  reader:\n    enabled: true\n")
+            .unwrap();
+        let backend = Arc::new(MemoryHistory::default());
+        let recorder = recorder(&store, &backend, 7);
+        recorder
+            .record(&mut created(2, 11, NOW, "first"), NOW)
+            .await
+            .unwrap();
+
+        let mut edit = Event::MessageUpdated(info(2, 11, NOW, "second"));
+        recorder.record(&mut edit, NOW + 5).await.unwrap();
+        assert_eq!(previous_content(&edit), Some("first"));
+
+        // A message the history does not hold has no text before its edit to show.
+        let mut unknown = Event::MessageUpdated(info(2, 12, NOW, "x"));
+        recorder.record(&mut unknown, NOW + 5).await.unwrap();
+        assert_eq!(previous_content(&unknown), None);
     }
 
     #[test]
