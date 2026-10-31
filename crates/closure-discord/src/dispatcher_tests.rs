@@ -3204,3 +3204,91 @@ async fn a_module_reads_a_kept_message_only_with_the_capability() {
         "history:error:the module is not granted the capability `message_history`"
     );
 }
+
+/// Counts the calls a backend gets. It answers a standing search with nothing, so only the count
+/// shows which method was called.
+#[derive(Default)]
+struct StandingCounter {
+    standing: std::sync::atomic::AtomicUsize,
+    listed: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl CaseBackend for StandingCounter {
+    async fn create(&self, _: &ModuleId, _: GuildId, _: NewCase) -> Result<Case, CaseError> {
+        Err(CaseError::Unavailable)
+    }
+
+    async fn get(&self, _: GuildId, _: i64) -> Result<Option<Case>, CaseError> {
+        Err(CaseError::Unavailable)
+    }
+
+    async fn list_for_target(
+        &self,
+        _: GuildId,
+        _: UserId,
+        _: Option<i64>,
+        _: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        self.listed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
+    async fn list_recent(
+        &self,
+        _: GuildId,
+        _: Option<i64>,
+        _: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        Err(CaseError::Unavailable)
+    }
+
+    async fn revoke(
+        &self,
+        _: GuildId,
+        _: i64,
+        _: UserId,
+        _: Option<String>,
+    ) -> Result<Case, CaseError> {
+        Err(CaseError::Unavailable)
+    }
+
+    async fn list_standing(
+        &self,
+        _: GuildId,
+        _: UserId,
+        _: &str,
+        _: i64,
+        _: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        self.standing
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn a_standing_search_is_answered_by_the_backend_itself() {
+    let backend = Arc::new(StandingCounter::default());
+    let cases = NotifyingCases {
+        inner: Arc::clone(&backend) as Arc<dyn CaseBackend>,
+        shared: Weak::new(),
+    };
+
+    let found = cases
+        .list_standing(Id::new(GUILD), Id::new(5), "ban", 0, 10)
+        .await;
+
+    assert_eq!(found, Ok(Vec::new()));
+    assert_eq!(
+        backend.standing.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the search reaches the backend's own query"
+    );
+    assert_eq!(
+        backend.listed.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the search is not paged through the listings"
+    );
+}

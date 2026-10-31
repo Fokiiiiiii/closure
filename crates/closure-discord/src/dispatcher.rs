@@ -322,6 +322,19 @@ impl CaseBackend for NotifyingCases {
         self.inner.list_recent(guild, before, limit).await
     }
 
+    async fn list_standing(
+        &self,
+        guild: GuildId,
+        target: UserId,
+        kind: &str,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        self.inner
+            .list_standing(guild, target, kind, now, limit)
+            .await
+    }
+
     async fn revoke(
         &self,
         guild: GuildId,
