@@ -371,7 +371,7 @@ let manifest = ModuleManifest::new(ModuleId::new("warn")?, "Warnings", env!("CAR
   intents, and you receive only the events you subscribe to. Slash command events are the
   exception: a `Command` event goes only to the module that owns the command, so a module does
   not need to subscribe to `EventKind::Command` to receive its own commands.
-- Commands are data (`CommandSpec`): name, English description, options or subcommands (one level),
+- Commands are data (`CommandSpec`): name, English description, options, or subcommands (in groups, at most two levels),
   default member permissions. Required options come before optional ones.
 - Permissions are keys (`warn.add`: two to four dot-separated parts, the first being your module's
   id) with the level a member needs by default. Servers change levels and allow or deny single

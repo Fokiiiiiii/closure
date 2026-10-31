@@ -6,8 +6,8 @@ closure is a moderation bot built around a small, strict core. Everything a feat
 events, Discord actions, per-server configuration, translations — is provided by that core, so
 new features are modules that cannot weaken it.
 
-**Status:** the foundation is in place (core, configuration, Discord layer, HTTP API, one
-example module). The moderation features themselves are the next step.
+**Status:** the foundation is in place (core, configuration, Discord layer, HTTP API), and four
+modules are built on it: moderation, automod, logs and diagnostics.
 
 ## What the foundation gives you
 

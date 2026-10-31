@@ -309,9 +309,9 @@ ban. The message is in the server's language and gives the reason.
   fail the action. The reply says that the message could not be delivered. A member who is not in
   the server gets no note: Discord answers that it cannot find the member.
 - Discord limits how many direct messages a bot may send, so a burst of actions can miss some.
-- The duration in a message is worded in the language of the command, which the SDK chooses. The
-  direct message shows the length only; the reply of `/timeout`, `/ban` and `/vcmute` also shows the end as
-  a Discord timestamp when a date was given.
+- The duration in a direct message is worded in the server's language; the reply to the command is
+  worded in the command's language. The direct message shows the length only; the reply of
+  `/timeout`, `/ban` and `/vcmute` also shows the end as a Discord timestamp when a date was given.
 
 ## Durations as a date and time
 

@@ -8,7 +8,7 @@ bot; a computer only downloads the result and runs it. A local build of the whol
 
 | Workflow | When | What |
 | --- | --- | --- |
-| `CI` (`.github/workflows/ci.yml`) | every push to `main`, every pull request, weekly, by hand | `fmt`, `clippy -D warnings`, the tests against a real PostgreSQL, the generated references (`closure-xtask docs --check`) and `cargo deny` as parallel jobs. A newer push cancels the running check of the same branch. The cache is written by `main` only. The weekly run exists because new security advisories appear without any change here. |
+| `CI` (`.github/workflows/ci.yml`) | every push to `main`, every pull request, weekly, by hand | `fmt`, `clippy -D warnings`, the tests against a real PostgreSQL, the generated references (`closure-xtask docs --check`) and `cargo deny` as parallel jobs on a push or a pull request. A newer push cancels the running check of the same branch. The cache is written by `main` only. The weekly run only runs `cargo deny`, because new security advisories appear without any change here. |
 | `Release` (`.github/workflows/release.yml`) | a tag `v*`, or by hand | Release binaries for Linux x86_64, Linux aarch64 and macOS arm64 (`tar.gz` and a `sha256` each). A tag also makes a GitHub release with them and publishes the container image to `ghcr.io/fokiiiiiii/closure` (amd64 and arm64). A manual run only builds the binaries and keeps them for 14 days as a preview, even when it is started on a tag; it never makes a release or publishes the image. |
 | Dependabot (`.github/dependabot.yml`) | weekly | One pull request for minor and patch updates of the Cargo tree, one for the actions. |
 

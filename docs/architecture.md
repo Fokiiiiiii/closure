@@ -181,7 +181,7 @@ returned actions into `ApiClient::execute` calls. Nothing else in the system wou
 - Jobs of a guild the bot has left stay in the table; they fail (Discord refuses the module) and
   are removed two weeks after they were given up on. Nothing yet shows the jobs of a guild to its
   administrators.
-- Subcommand *groups* (two levels of nesting) are not supported; one level is.
+- Subcommand *groups* hold subcommands only, and a command has at most two levels.
 - A stored document that fails to parse makes `GET /v1/guilds/{id}/config` return 500 for that
   guild, and a replacement needs the revision from the database.
 - One process per bot; shard ranges are not configurable.
