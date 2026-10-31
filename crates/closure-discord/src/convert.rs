@@ -1113,6 +1113,64 @@ mod tests {
         assert!(matches!(events.as_slice(), [Event::MemberUpdated(_)]));
     }
 
+    fn nickname_update(nick: Option<&str>) -> Gateway {
+        let update: MemberUpdate = serde_json::from_value(json!({
+            "guild_id": "1", "roles": [], "pending": false, "user": user_json("7", false),
+            "joined_at": "2026-10-24T00:00:00.000000+00:00", "nick": nick
+        }))
+        .unwrap();
+        Gateway::MemberUpdate(Box::new(update))
+    }
+
+    fn nickname_changes(events: &[Event]) -> Vec<(Option<String>, Option<String>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::NicknameChanged { before, after, .. } => {
+                    Some((before.clone(), after.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn before_nickname(nick: &str) -> Before {
+        Before {
+            member: Some((Some(nick.to_owned()), None)),
+            ..Before::default()
+        }
+    }
+
+    #[test]
+    fn a_nickname_change_is_the_difference_to_the_cached_nickname() {
+        let events = events(&nickname_update(Some("new")), &before_nickname("old"));
+        assert_eq!(
+            nickname_changes(&events),
+            vec![(Some("old".to_owned()), Some("new".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn a_nickname_removed_is_a_change_to_none() {
+        let events = events(&nickname_update(None), &before_nickname("old"));
+        assert_eq!(
+            nickname_changes(&events),
+            vec![(Some("old".to_owned()), None)]
+        );
+    }
+
+    #[test]
+    fn an_update_that_keeps_the_nickname_says_nothing_about_it() {
+        let events = events(&nickname_update(Some("same")), &before_nickname("same"));
+        assert!(nickname_changes(&events).is_empty());
+    }
+
+    #[test]
+    fn no_nickname_change_is_said_without_the_member_the_bot_knew_before() {
+        let events = events(&nickname_update(Some("new")), &Before::default());
+        assert!(nickname_changes(&events).is_empty());
+    }
+
     fn thread_json(id: &str, archived: bool, newly_created: Option<bool>) -> Value {
         json!({
             "id": id, "type": 11, "guild_id": "1", "name": "t", "parent_id": "2", "owner_id": "7",
