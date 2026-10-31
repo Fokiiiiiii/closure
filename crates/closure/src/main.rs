@@ -6,6 +6,7 @@
 
 mod app;
 mod args;
+mod changes;
 mod hooks;
 mod sync;
 

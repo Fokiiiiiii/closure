@@ -189,6 +189,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::changes::ConfigChanges;
     use closure_config::{ConfigCompiler, parse_overrides};
     use closure_core::module::{Module, ModuleId, ModuleManifest};
     use closure_core::registry::ModuleRegistry;
@@ -196,7 +197,6 @@ mod tests {
     use closure_core::testing::StubModule;
     use serde_json::json;
     use sqlx::PgPool;
-    use tokio::sync::mpsc::UnboundedReceiver;
     use twilight_model::id::Id;
 
     use super::*;
@@ -243,14 +243,13 @@ mod tests {
         assert_eq!(value, None);
     }
 
-    /// A store whose change hook sends every reported guild to the returned receiver.
-    fn store_with_reports() -> (Arc<SettingsStore>, UnboundedReceiver<GuildId>) {
+    /// A store whose change hook queues every reported guild in the returned queue.
+    fn store_with_reports() -> (Arc<SettingsStore>, Arc<ConfigChanges>) {
         let store = store();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        store.set_change_hook(move |guild| {
-            let _ = tx.send(guild);
-        });
-        (store, rx)
+        let changes = Arc::new(ConfigChanges::default());
+        let reports = Arc::clone(&changes);
+        store.set_change_hook(move |guild| reports.push(guild));
+        (store, changes)
     }
 
     /// What the admin API does on a save: it writes the document, then installs it.
@@ -264,60 +263,63 @@ mod tests {
 
     #[test]
     fn a_document_is_reported_only_when_its_effective_config_changes() {
-        let (store, mut reports) = store_with_reports();
+        let (store, reports) = store_with_reports();
         let guild = Id::new(5);
         let doc = |yaml: &str| parse_overrides(yaml).unwrap();
         // An empty document is the defaults already, so installing it changes nothing.
         assert!(apply(&store, guild, 1, &doc(""), true));
         assert!(apply(&store, guild, 2, &doc(""), true));
-        assert!(reports.try_recv().is_err());
+        assert!(reports.try_next().is_none());
         assert!(apply(&store, guild, 3, &doc("prefix: '?'"), true));
-        assert_eq!(reports.try_recv().ok(), Some(guild));
+        assert_eq!(reports.try_next(), Some(guild));
         assert!(
             !apply(&store, guild, 2, &doc(""), true),
             "an older revision is kept out"
         );
-        assert!(reports.try_recv().is_err());
+        assert!(reports.try_next().is_none());
     }
 
     #[sqlx::test(migrations = "../closure-db/migrations")]
     async fn an_api_save_is_reported_once_and_the_reload_after_it_adds_nothing(pool: PgPool) {
         let db = Db::from_pool(pool);
-        let (store, mut reports) = store_with_reports();
+        let (store, reports) = store_with_reports();
         let guild = Id::new(1);
         api_save(&db, &store, guild, "language: ja").await;
-        assert_eq!(reports.try_recv().ok(), Some(guild), "the save is a change");
+        assert_eq!(reports.try_next(), Some(guild), "the save is a change");
 
         // The notification that the save sent arrives afterwards.
         reload(&db, &store, guild, true).await.unwrap();
-        assert!(reports.try_recv().is_err(), "the reload reported it again");
+        assert!(reports.try_next().is_none(), "the reload reported it again");
     }
 
     #[sqlx::test(migrations = "../closure-db/migrations")]
     async fn a_reload_before_the_api_install_reports_once(pool: PgPool) {
         let db = Db::from_pool(pool);
-        let (store, mut reports) = store_with_reports();
+        let (store, reports) = store_with_reports();
         let guild = Id::new(1);
         let overrides = parse_overrides("language: ja").unwrap();
         let revision = db.save_config(guild, None, &overrides, None).await.unwrap();
 
         reload(&db, &store, guild, true).await.unwrap();
-        assert_eq!(reports.try_recv().ok(), Some(guild));
+        assert_eq!(reports.try_next(), Some(guild));
 
         // The save path installs the same revision once the reload has already done so.
         let settings = store.compiler().compile(&overrides).unwrap();
         assert!(store.install(guild, revision, settings));
-        assert!(reports.try_recv().is_err(), "the install reported it again");
+        assert!(
+            reports.try_next().is_none(),
+            "the install reported it again"
+        );
     }
 
     #[sqlx::test(migrations = "../closure-db/migrations")]
     async fn each_later_edit_is_reported_once(pool: PgPool) {
         let db = Db::from_pool(pool);
-        let (store, mut reports) = store_with_reports();
+        let (store, reports) = store_with_reports();
         let guild = Id::new(1);
         let first = save(&db, 1, "language: ja").await;
         reload(&db, &store, guild, true).await.unwrap();
-        assert_eq!(reports.try_recv().ok(), Some(guild));
+        assert_eq!(reports.try_next(), Some(guild));
 
         let edit = parse_overrides("language: en").unwrap();
         db.save_config(guild, Some(first), &edit, None)
@@ -325,9 +327,9 @@ mod tests {
             .unwrap();
         reload(&db, &store, guild, true).await.unwrap();
         reload(&db, &store, guild, true).await.unwrap();
-        assert_eq!(reports.try_recv().ok(), Some(guild));
+        assert_eq!(reports.try_next(), Some(guild));
         assert!(
-            reports.try_recv().is_err(),
+            reports.try_next().is_none(),
             "a duplicate reload reported again"
         );
     }
@@ -335,11 +337,11 @@ mod tests {
     #[sqlx::test(migrations = "../closure-db/migrations")]
     async fn start_up_and_rejoin_loads_are_not_reported(pool: PgPool) {
         let db = Db::from_pool(pool);
-        let (store, mut reports) = store_with_reports();
+        let (store, reports) = store_with_reports();
         save(&db, 1, "language: ja").await;
         assert_eq!(load_all(&db, &store).await.unwrap(), 1);
         reload_one(&db, &store, Id::new(1)).await.unwrap();
-        assert!(reports.try_recv().is_err());
+        assert!(reports.try_next().is_none());
     }
 
     #[tokio::test]

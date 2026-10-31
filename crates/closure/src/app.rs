@@ -27,7 +27,6 @@ use closure_discord::{
 use closure_i18n::TranslatorBuilder;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use secrecy::SecretString;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use twilight_http::Client;
@@ -35,6 +34,7 @@ use twilight_model::id::Id;
 use twilight_model::id::marker::ApplicationMarker;
 
 use crate::args::Args;
+use crate::changes::ConfigChanges;
 use crate::hooks::{AppHooks, reconcile_guilds};
 use crate::sync;
 
@@ -261,7 +261,7 @@ async fn serve(
     metrics: PrometheusHandle,
     shutdown: &CancellationToken,
     started: &mut Started,
-    (config_changes_tx, config_changes_rx): (UnboundedSender<GuildId>, UnboundedReceiver<GuildId>),
+    config_changes: Arc<ConfigChanges>,
 ) -> Result<bool> {
     let application_id = Id::new(args.application_id.get());
     let http = Arc::new(Client::new(args.discord_token.clone()));
@@ -302,7 +302,7 @@ async fn serve(
     )));
     let dispatch_changes = dispatcher.clone();
     started.changes_task = Some(tokio::spawn(forward_config_changes(
-        config_changes_rx,
+        Arc::clone(&config_changes),
         move |guild_id| dispatch_changes.try_dispatch(ModuleEvent::ConfigChanged { guild_id }),
         shutdown.clone(),
     )));
@@ -321,7 +321,7 @@ async fn serve(
         db.clone(),
         Arc::clone(&core.store),
         args.message_history_days,
-        config_changes_tx,
+        Arc::clone(&config_changes),
     ));
     started.hooks = Some(Arc::clone(&hooks));
     let gateway = started.gateway.insert(
@@ -364,17 +364,14 @@ const HAND_OVER_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// A refused hand-over (the dispatcher is full or closing) is retried a few times; after that the
 /// change is dropped with a warning, so a busy dispatcher never holds up the reload.
 async fn forward_config_changes(
-    mut changes: UnboundedReceiver<GuildId>,
+    changes: Arc<ConfigChanges>,
     mut hand_over: impl FnMut(GuildId) -> bool + Send + 'static,
     shutdown: CancellationToken,
 ) {
     loop {
         let guild_id = tokio::select! {
             () = shutdown.cancelled() => return,
-            guild = changes.recv() => match guild {
-                Some(guild) => guild,
-                None => return,
-            },
+            guild = changes.next() => guild,
         };
         for attempt in 1..=HAND_OVER_ATTEMPTS {
             if hand_over(guild_id) {
@@ -424,13 +421,10 @@ pub async fn run(args: Args) -> Result<()> {
         .context("could not apply the database migrations")?;
 
     let shutdown = CancellationToken::new();
-    let config_changes = tokio::sync::mpsc::unbounded_channel();
-    // Installs report through this channel; `serve` hands what arrives to the modules. A closed
-    // channel only means the process is shutting down.
-    let reports = config_changes.0.clone();
-    core.store.set_change_hook(move |guild| {
-        let _ = reports.send(guild);
-    });
+    let config_changes = Arc::new(ConfigChanges::default());
+    // Installs report through this queue; `serve` hands what waits in it to the modules.
+    let reports = Arc::clone(&config_changes);
+    core.store.set_change_hook(move |guild| reports.push(guild));
     let sync_task = sync::start(db.clone(), Arc::clone(&core.store), shutdown.clone())
         .await
         .context("could not load guild configurations")?;
@@ -539,7 +533,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_hand_over_is_retried_and_the_next_guild_still_gets_its_change() {
         let attempts = Arc::new(std::sync::Mutex::new(Vec::<GuildId>::new()));
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let changes = Arc::new(ConfigChanges::default());
         let shutdown = CancellationToken::new();
         let hand_over = {
             let attempts = Arc::clone(&attempts);
@@ -551,9 +545,13 @@ mod tests {
                 guild == Id::new(1) && tries >= 3
             }
         };
-        let task = tokio::spawn(forward_config_changes(rx, hand_over, shutdown.clone()));
-        tx.send(Id::new(1)).unwrap();
-        tx.send(Id::new(2)).unwrap();
+        let task = tokio::spawn(forward_config_changes(
+            Arc::clone(&changes),
+            hand_over,
+            shutdown.clone(),
+        ));
+        changes.push(Id::new(1));
+        changes.push(Id::new(2));
 
         let expected = 3 + HAND_OVER_ATTEMPTS;
         tokio::time::timeout(Duration::from_secs(5), async {

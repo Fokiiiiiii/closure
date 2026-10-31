@@ -9,8 +9,8 @@ use closure_core::event::{Event as ModuleEvent, GuildId};
 use closure_core::locale::Locale;
 use closure_db::Db;
 use closure_discord::GuildHooks;
-use tokio::sync::mpsc::UnboundedSender;
 
+use crate::changes::ConfigChanges;
 use crate::sync;
 
 /// Keeps persistent state in step with the guilds the bot is in. Failures are logged and never
@@ -20,7 +20,7 @@ pub struct AppHooks {
     store: Arc<SettingsStore>,
     messages: MessageRecorder,
     /// Where the guilds whose configuration to announce are sent (see [`crate::app`]).
-    changes: UnboundedSender<GuildId>,
+    changes: Arc<ConfigChanges>,
     announced: Announced,
 }
 
@@ -52,7 +52,7 @@ impl AppHooks {
         db: Db,
         store: Arc<SettingsStore>,
         message_history_days: u32,
-        changes: UnboundedSender<GuildId>,
+        changes: Arc<ConfigChanges>,
     ) -> Self {
         let messages = MessageRecorder::new(
             Arc::new(db.clone()),
@@ -102,7 +102,7 @@ impl GuildHooks for AppHooks {
         }
         // Once per arrival, after the guild's event: the modules set up what their settings need.
         if self.store.is_configured(guild) && self.announced.first(guild) {
-            let _ = self.changes.send(guild);
+            self.changes.push(guild);
         }
     }
 
@@ -192,7 +192,7 @@ mod tests {
             db,
             Arc::clone(&store),
             7,
-            tokio::sync::mpsc::unbounded_channel().0,
+            Arc::new(ConfigChanges::default()),
         );
 
         assert!(!hooks.wants_messages(Id::new(1)));
@@ -216,7 +216,7 @@ mod tests {
             db,
             Arc::clone(&store),
             7,
-            tokio::sync::mpsc::unbounded_channel().0,
+            Arc::new(ConfigChanges::default()),
         );
 
         hooks
@@ -240,7 +240,7 @@ mod tests {
             db.clone(),
             Arc::clone(&store),
             7,
-            tokio::sync::mpsc::unbounded_channel().0,
+            Arc::new(ConfigChanges::default()),
         );
         let guild = Id::new(5);
         db.save_config(guild, None, &parse_overrides("language: ja").unwrap(), None)
@@ -293,7 +293,7 @@ mod tests {
     #[sqlx::test(migrations = "../closure-db/migrations")]
     async fn database_failures_do_not_panic_or_block(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
-        let hooks = AppHooks::new(db, store(), 7, tokio::sync::mpsc::unbounded_channel().0);
+        let hooks = AppHooks::new(db, store(), 7, Arc::new(ConfigChanges::default()));
         pool.close().await;
         hooks
             .guild_available(Id::new(5), "Test", Some(Locale::Ja))
