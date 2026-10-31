@@ -827,7 +827,6 @@ async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
     .await
 }
 
-/// The module, still open for a test to build on.
 const REMOVE_ROLES_DOC: &str = "config-moderation-remove_roles_on_mute";
 const RESTORE_ROLES_DOC: &str = "config-moderation-restore_roles_on_mute";
 
