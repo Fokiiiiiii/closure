@@ -647,8 +647,13 @@ dependencies = [
  "clap",
  "closure",
  "closure-core",
+ "closure-discord",
  "closure-i18n",
+ "dotenvy",
  "serde_json",
+ "tokio",
+ "twilight-http",
+ "twilight-model",
 ]
 
 [[package]]

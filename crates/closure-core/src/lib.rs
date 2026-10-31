@@ -11,6 +11,10 @@ pub mod attachments;
 pub mod capability;
 pub mod cases;
 pub mod client;
+mod dump;
+#[cfg(test)]
+#[path = "dump_tests.rs"]
+mod dump_tests;
 pub mod error;
 pub mod event;
 pub mod history;

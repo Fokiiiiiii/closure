@@ -327,10 +327,12 @@ impl DiscordApi for MockApi {
             _ => None,
         };
         if let Some(error) = role_failure {
+            crate::dump::record(&action);
             lock(&self.actions).push(action);
             return Err(error);
         }
         let answer = self.answer(&action);
+        crate::dump::record(&action);
         lock(&self.actions).push(action);
         match lock(&self.failure).clone() {
             Some(error) => Err(error),

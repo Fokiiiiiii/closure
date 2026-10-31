@@ -4,6 +4,7 @@
 //! nothing and fails when a file on disk differs from what would be generated.
 
 mod docs;
+mod replay;
 mod scaffold;
 
 use std::collections::BTreeMap;
@@ -40,6 +41,16 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Posts the messages recorded by a test run (`CLOSURE_DUMP_DIR`) to a test channel.
+    /// Needs `DISCORD_TOKEN`, from the environment or from `.env`. See docs/preview.md.
+    Replay {
+        /// The directory with the `.jsonl` dumps of the test run.
+        #[arg(long)]
+        dir: PathBuf,
+        /// The test channel to post to.
+        #[arg(long)]
+        channel: u64,
+    },
 }
 
 fn main() -> ExitCode {
@@ -59,6 +70,7 @@ fn run(command: &Command) -> Result<bool> {
     match command {
         Command::Docs { check } => docs(*check),
         Command::NewModule { id, dry_run } => new_module(id, *dry_run),
+        Command::Replay { dir, channel } => replay::run(dir, *channel),
     }
 }
 
