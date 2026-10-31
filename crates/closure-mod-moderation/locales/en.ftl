@@ -86,11 +86,11 @@ option-unban-user = user
 option-unban-reason = reason
     .description = Why
 timeout-too-long = Discord allows a timeout of 28 days at most.
-timed-out = Timed out { $user } for { $duration } — case #{ $number }.
+timed-out = Timed out { $user } until { $until } — case #{ $number }.
 untimed-out = Removed the timeout of { $user } — case #{ $number }.
 kicked = Kicked { $user } — case #{ $number }.
 banned = Banned { $user } — case #{ $number }.
-banned-for = Banned { $user } for { $duration } — case #{ $number }.
+banned-for = Banned { $user } until { $until } — case #{ $number }.
 ban-delete-days-range = Delete days must be 0 to 7.
 unbanned = Unbanned { $user } — case #{ $number }.
 escalated = Escalation: { $action } — case #{ $number }.
@@ -100,10 +100,10 @@ escalation-reason = { $count ->
     [one] Automatic: { $count } active warning (case #{ $case })
    *[other] Automatic: { $count } active warnings (case #{ $case })
 }
-escalation-timeout = timed out for { $duration }
+escalation-timeout = timed out until { $until }
 escalation-kick = kicked
 escalation-ban = banned
-escalation-ban-for = banned for { $duration }
+escalation-ban-for = banned until { $until }
 command-vcmute = vcmute
     .description = Mute a member in voice channels, for a while or until it is lifted
 option-vcmute-user = user
@@ -121,7 +121,7 @@ option-vcunmute-reason = reason
 timeout-role-missing = Set timeout_role in the moderation settings.
 voice-role-missing = Set voice_mute_role in the moderation settings.
 voice-muted = Muted { $user } in voice — case #{ $number }.
-voice-muted-for = Muted { $user } in voice for { $duration } — case #{ $number }.
+voice-muted-for = Muted { $user } in voice until { $until } — case #{ $number }.
 voice-unmuted = Removed the voice mute of { $user } — case #{ $number }.
 template-placeholder = Template
 template-pick-timeout = Pick a template to time out { $user }.

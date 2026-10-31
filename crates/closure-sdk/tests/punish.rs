@@ -555,7 +555,7 @@ async fn a_timeout_is_applied_before_the_direct_message_and_expires_with_its_cas
     assert_eq!(case.target, Id::new(MEMBER));
     assert_eq!(case.reason.as_deref(), Some("spam"));
     assert_eq!(case.expires_at, Some(case.created_at + 3_600));
-    assert!(dm_contents(&harness)[0].contains("1 hour"));
+    assert!(dm_contents(&harness)[0].contains(&ends(&harness, 1).await));
     assert!(dm_contents(&harness)[0].contains("spam"));
     assert_eq!(harness.jobs(), 0, "Discord's timeout has no timer");
 }
@@ -913,6 +913,12 @@ async fn a_ban_deletes_the_days_it_is_given_and_refuses_more_than_seven() {
     assert!(cases_of(&harness, FREE).await.is_empty());
 }
 
+/// The Discord markup of when case `number` ends, as the direct messages show it.
+async fn ends(harness: &Harness, number: i64) -> String {
+    let case = harness.cases().get(number).await.unwrap().unwrap();
+    format!("<t:{}:f>", case.expires_at.unwrap())
+}
+
 #[tokio::test]
 async fn a_timed_ban_is_lifted_when_its_time_is_up() {
     let harness = harness();
@@ -921,7 +927,7 @@ async fn a_timed_ban_is_lifted_when_its_time_is_up() {
         .await
         .unwrap();
     assert!(text(&replies).contains("case #1"), "{replies:?}");
-    assert!(dm_contents(&harness)[0].contains("1 day"));
+    assert!(dm_contents(&harness)[0].contains(&ends(&harness, 1).await));
     assert_eq!(harness.jobs(), 1);
 
     let case = harness.cases().get(1).await.unwrap().unwrap();
@@ -1146,7 +1152,7 @@ async fn a_voice_mute_with_a_duration_is_lifted_when_its_time_is_up() {
         .invoke(mute_of(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
-    assert!(dm_contents(&harness)[0].contains("1 hour"));
+    assert!(dm_contents(&harness)[0].contains(&ends(&harness, 1).await));
     let case = harness.cases().get(1).await.unwrap().unwrap();
     assert_eq!(case.expires_at, Some(case.created_at + 3_600));
     assert_eq!(harness.jobs(), 1);

@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use closure_sdk::duration::{TimeStyle, parse as parse_duration, timestamp};
+use closure_sdk::duration::{TimeStyle, ends_at, parse as parse_duration, timestamp};
 use closure_sdk::embed::{escape, truncate};
 use closure_sdk::modlog;
 use closure_sdk::punish::{
@@ -505,13 +505,19 @@ fn escalation_phrase(cx: &CommandCx, escalation: Escalation) -> String {
     match escalation {
         Escalation::Timeout(duration) => cx.t(
             "escalation-timeout",
-            &Args::new().with("duration", cx.format_duration(duration)),
+            &Args::new().with(
+                "until",
+                ends_at(cx.now(), duration, TimeStyle::ShortDateTime),
+            ),
         ),
         Escalation::Kick => cx.t("escalation-kick", &Args::new()),
         Escalation::Ban(None) => cx.t("escalation-ban", &Args::new()),
         Escalation::Ban(Some(duration)) => cx.t(
             "escalation-ban-for",
-            &Args::new().with("duration", cx.format_duration(duration)),
+            &Args::new().with(
+                "until",
+                ends_at(cx.now(), duration, TimeStyle::ShortDateTime),
+            ),
         ),
     }
 }

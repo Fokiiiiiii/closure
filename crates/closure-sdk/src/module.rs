@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use closure_core::capability::Capability;
@@ -31,6 +31,7 @@ use twilight_model::guild::Permissions;
 use crate::args::CommandArgs;
 use crate::cooldown::{Cooldown, Cooldowns};
 use crate::cx::{AutocompleteCx, CommandCx, ComponentCx, ContextCx, Cx, JobCx, ModalCx, REPLIES};
+use crate::duration::{TimeStyle, ends_at};
 use crate::embed::Tone;
 use crate::error::UserError;
 use crate::ui::CustomId;
@@ -1245,7 +1246,14 @@ impl SdkModule {
             },
             UserError::Cooldown { remaining } => cx.core_message(
                 "sdk-cooldown",
-                &Args::new().with("seconds", remaining.as_secs() + 1),
+                &Args::new().with(
+                    "retry",
+                    ends_at(
+                        cx.now(),
+                        remaining + Duration::from_secs(1),
+                        TimeStyle::Relative,
+                    ),
+                ),
             ),
             UserError::Target(problem) => cx.core_message(problem.key(), &Args::new()),
         };

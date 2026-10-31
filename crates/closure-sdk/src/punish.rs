@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Embed;
 
 use crate::dm::{self, DirectMessage, Sent};
-use crate::duration::format_in;
+use crate::duration::{TimeStyle, ends_at};
 use crate::embed::{DESCRIPTION_LIMIT, EmbedBuilder, escape, truncate};
 use crate::modlog;
 
@@ -323,7 +323,10 @@ impl<'a> Punisher<'a> {
                 "timeout",
                 "punish-dm-timed-out",
                 &Args::new()
-                    .with("duration", format_in(self.ctx, self.ctx.locale, duration))
+                    .with(
+                        "until",
+                        ends_at(self.ctx.now(), duration, TimeStyle::ShortDateTime),
+                    )
                     .with("reason", reason_text),
             )
             .await;
@@ -413,7 +416,10 @@ impl<'a> Punisher<'a> {
                     "ban",
                     "punish-dm-banned-for",
                     &Args::new()
-                        .with("duration", format_in(self.ctx, self.ctx.locale, duration))
+                        .with(
+                            "until",
+                            ends_at(self.ctx.now(), duration, TimeStyle::ShortDateTime),
+                        )
                         .with("reason", dm_reason(self.ctx, reason.as_deref())),
                 )
                 .await
@@ -517,7 +523,10 @@ impl<'a> Punisher<'a> {
                     "vcmute",
                     "punish-dm-voice-muted-for",
                     &Args::new()
-                        .with("duration", format_in(self.ctx, self.ctx.locale, duration))
+                        .with(
+                            "until",
+                            ends_at(self.ctx.now(), duration, TimeStyle::ShortDateTime),
+                        )
                         .with("reason", reason_text),
                 )
                 .await

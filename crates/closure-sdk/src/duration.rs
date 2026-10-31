@@ -95,6 +95,14 @@ pub fn snowflake_time(id: u64) -> i64 {
     i64::try_from(((id >> 22) + DISCORD_EPOCH_MS) / 1_000).unwrap_or(i64::MAX)
 }
 
+/// The Discord markup of the moment `duration` after `now`, in seconds since the Unix epoch. A wait or
+/// a punishment shows when it ends this way, in each reader's own time zone.
+#[must_use]
+pub fn ends_at(now: i64, duration: Duration, style: TimeStyle) -> String {
+    let end = now.saturating_add(i64::try_from(duration.as_secs()).unwrap_or(i64::MAX));
+    timestamp(end, style)
+}
+
 /// A length of time in `locale`, in its two largest units that are not zero. Weeks are counted in
 /// days. Used for what is said to a member or to the log, in the server's language.
 #[must_use]
@@ -127,7 +135,7 @@ mod tests {
 
     use closure_core::schedule::MAX_DELAY;
 
-    use super::{DurationError, TimeStyle, parse, snowflake_time, timestamp};
+    use super::{DurationError, TimeStyle, ends_at, parse, snowflake_time, timestamp};
 
     #[test]
     fn parses_the_usual_forms() {
@@ -169,6 +177,18 @@ mod tests {
     fn ten_years_is_the_longest_allowed() {
         assert_eq!(parse("3650d"), Ok(MAX_DELAY));
         assert_eq!(parse("3651d"), Err(DurationError::TooLarge));
+    }
+
+    #[test]
+    fn a_span_from_now_is_the_moment_it_ends_at() {
+        assert_eq!(
+            ends_at(
+                1_700_000_000,
+                Duration::from_secs(90),
+                TimeStyle::ShortDateTime
+            ),
+            "<t:1700000090:f>"
+        );
     }
 
     #[test]

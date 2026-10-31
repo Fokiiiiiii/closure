@@ -174,7 +174,7 @@ status-scope-channel = チャンネルごと
 status-scope-overall = 全体
 
 detail-join = サーバーに参加した
-detail-join-new = アカウント作成から { $age } で参加した
+detail-join-new = { $created }に作成されたアカウントで参加した
 detail-join-spam = { $window } 以内に { $count } 人が参加した
 detail-join-burst = 同じ参加の集中に含まれるメンバー
 detail-leave = サーバーから退出した
@@ -217,7 +217,7 @@ status-antiraid-invalid = アンレイドの設定が正しくないため無効
 antiraid-off = アンレイドが設定されていません。automod の設定に antiraid の項目が必要です。
 antiraid-view = レベル: { $level }、{ $since } に { $by } が設定、{ $until }。隔離中のメンバー: { $quarantined }。
 antiraid-by-rule = ルール
-antiraid-until = { $at } まで
+antiraid-until = <t:{ $at }:f> まで
 antiraid-no-end = 終了時刻はありません
 antiraid-already = アンレイドのレベルは既に { $level } です。
 antiraid-set-done = アンレイドのレベルを { $old } から { $new } に変更しました。変更: { $changed }、失敗: { $failed }。

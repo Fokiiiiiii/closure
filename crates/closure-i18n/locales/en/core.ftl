@@ -20,7 +20,7 @@ sdk-not-yours = That is not for you.
 sdk-gone = That is no longer available.
 sdk-permission-level = You are not allowed to do that here. It needs level { $required } and you are at level { $actual }.
 sdk-permission-denied = You are not allowed to do that here.
-sdk-cooldown = Please wait { $seconds } more second(s) before using that again.
+sdk-cooldown = Please try again { $retry }.
 sdk-bad-argument = The value of `{ $option }` is missing or not valid.
 sdk-unit-day = { $n ->
     [one] { $n } day
@@ -66,11 +66,11 @@ modlog-revoked-by = By { $who } { $when }
 # Punishments the SDK gives (closure-sdk `punish`): the direct messages, the notes and the errors.
 punish-dm-warned = You were warned in a server. Reason: { $reason } (Active warnings: { $active })
 punish-dm-kicked = You were kicked from a server. Reason: { $reason }
-punish-dm-timed-out = You were timed out in a server for { $duration }. Reason: { $reason }
+punish-dm-timed-out = You were timed out in a server until { $until }. Reason: { $reason }
 punish-dm-banned = You were banned from a server. Reason: { $reason }
-punish-dm-banned-for = You were banned from a server for { $duration }. Reason: { $reason }
+punish-dm-banned-for = You were banned from a server until { $until }. Reason: { $reason }
 punish-dm-voice-muted = You were muted in voice channels in a server. Reason: { $reason }
-punish-dm-voice-muted-for = You were muted in voice channels in a server for { $duration }. Reason: { $reason }
+punish-dm-voice-muted-for = You were muted in voice channels in a server until { $until }. Reason: { $reason }
 punish-dm-not-delivered = (The direct message could not be delivered.)
 punish-reason-none = no reason given
 punish-timeout-no-timer = The timeout does not end by itself: its timer could not be set.

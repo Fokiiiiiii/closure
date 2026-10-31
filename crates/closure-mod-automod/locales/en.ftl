@@ -174,7 +174,7 @@ status-scope-channel = per channel
 status-scope-overall = overall
 
 detail-join = joined the server
-detail-join-new = joined with an account made { $age } ago
+detail-join-new = joined with an account made { $created }
 detail-join-spam = { $count } members joined within { $window }
 detail-join-burst = another member of the same join burst
 detail-leave = left the server

@@ -184,9 +184,11 @@ async fn the_cooldown_holds_a_user_back_and_says_for_how_long() {
     harness.invoke(warn(7).roles([10])).await.unwrap();
     harness.advance(Duration::from_secs(3));
     let replies = harness.invoke(warn(7).roles([10])).await.unwrap();
-    assert_eq!(
-        texts(&replies),
-        ["❌ Please wait 8 more second(s) before using that again."]
+    let shown = texts(&replies);
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert!(
+        shown[0].starts_with("❌ Please try again <t:") && shown[0].ends_with(":R>."),
+        "{shown:?}"
     );
     assert!(replies[0].ephemeral);
     // Someone else is not held back, and after the period the user is free again.

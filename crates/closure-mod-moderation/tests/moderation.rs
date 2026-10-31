@@ -223,13 +223,19 @@ async fn a_punishment_is_acknowledged_before_discord_is_asked_and_answered_by_an
     );
 }
 
+/// The Discord markup of when case `number` ends, as the replies and the direct messages show it.
+async fn ends(harness: &Harness, number: i64) -> String {
+    let case = harness.cases().get(number).await.unwrap().unwrap();
+    format!("<t:{}:f>", case.expires_at.unwrap())
+}
+
 #[tokio::test]
 async fn a_second_warning_counts_the_active_ones_and_the_cooldown_holds_the_first_back() {
     let harness = harness();
     harness.invoke(warn(MEMBER, Some("a"))).await.unwrap();
 
     let held = harness.invoke(warn(MEMBER, Some("b"))).await.unwrap();
-    assert!(text(&held).to_lowercase().contains("wait"), "{held:?}");
+    assert!(text(&held).contains("try again"), "{held:?}");
     assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
 
     harness.advance(Duration::from_secs(3));
@@ -825,7 +831,10 @@ async fn a_timeout_is_applied_before_the_direct_message_and_expires_with_its_cas
         .await
         .unwrap();
     assert!(text(&replies).contains("case #1"), "{replies:?}");
-    assert!(text(&replies).contains("1 hour"), "{replies:?}");
+    assert!(
+        text(&replies).contains(&ends(&harness, 1).await),
+        "{replies:?}"
+    );
     assert_eq!(sequence(&harness), ["timeout", "dm"], "{replies:?}");
     assert!(harness.api().actions().iter().any(|action| matches!(
         action,
@@ -1072,7 +1081,10 @@ async fn a_timed_ban_is_lifted_when_its_time_is_up() {
         .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
         .await
         .unwrap();
-    assert!(text(&replies).contains("1 day"), "{replies:?}");
+    assert!(
+        text(&replies).contains(&ends(&harness, 1).await),
+        "{replies:?}"
+    );
     assert_eq!(harness.jobs(), 1);
 
     let case = harness.cases().get(1).await.unwrap().unwrap();
@@ -1297,17 +1309,20 @@ async fn a_closed_direct_message_does_not_fail_a_ban() {
 }
 
 #[tokio::test]
-async fn the_message_to_the_member_names_the_time_in_the_language_of_the_server() {
+async fn the_message_to_the_member_is_in_the_server_language_and_shows_the_end_as_a_timestamp() {
     let harness = harness();
     // The server speaks English; the moderator reads Japanese.
     let replies = harness
         .invoke(ban(MEMBER, Some("raid"), Some("1h"), None).locale(Locale::Ja))
         .await
         .unwrap();
-    assert!(text(&replies).contains("1時間"), "{replies:?}");
+    assert!(
+        text(&replies).contains(&format!("{} まで BAN", ends(&harness, 1).await)),
+        "{replies:?}"
+    );
     let direct = dm_contents(&harness);
     assert_eq!(direct.len(), 1, "{direct:?}");
-    assert!(direct[0].contains("1 hour"), "{direct:?}");
+    assert!(direct[0].contains(&ends(&harness, 1).await), "{direct:?}");
     assert!(!direct[0].contains("1時間"), "{direct:?}");
 
     harness.advance(Duration::from_secs(5));
@@ -1316,7 +1331,7 @@ async fn the_message_to_the_member_names_the_time_in_the_language_of_the_server(
         .await
         .unwrap();
     let direct = dm_contents(&harness);
-    assert!(direct[1].contains("2 hours"), "{direct:?}");
+    assert!(direct[1].contains(&ends(&harness, 2).await), "{direct:?}");
 }
 
 // ---- escalation ----
@@ -1355,7 +1370,10 @@ async fn the_third_warning_times_the_member_out_once_and_says_so() {
     let third = warn_times(&harness, MEMBER, 1).await;
     assert!(text(&third).contains("case #3"), "{third:?}");
     assert!(
-        text(&third).contains("Escalation: timed out for 1 hour — case #4."),
+        text(&third).contains(&format!(
+            "Escalation: timed out until {} — case #4.",
+            ends(&harness, 4).await
+        )),
         "{third:?}"
     );
     assert_eq!(
@@ -1455,7 +1473,10 @@ async fn a_ban_escalation_bans_for_good_or_sets_a_timer_for_a_timed_one() {
     }));
     let replies = timed.invoke(warn(MEMBER, Some("raid"))).await.unwrap();
     assert!(
-        text(&replies).contains("Escalation: banned for 1 day — case #2."),
+        text(&replies).contains(&format!(
+            "Escalation: banned until {} — case #2.",
+            ends(&timed, 2).await
+        )),
         "{replies:?}"
     );
     assert_eq!(timed.jobs(), 1);
@@ -1505,7 +1526,8 @@ async fn a_failed_escalation_leaves_the_warning_and_no_escalation_case() {
     let replies = warn_times(&harness, MEMBER, 1).await;
     assert!(text(&replies).contains("case #3"), "{replies:?}");
     assert!(
-        text(&replies).contains("Escalation to timed out for 1 hour failed; the warning stands."),
+        text(&replies).contains("Escalation to timed out until <t:")
+            && text(&replies).contains("failed; the warning stands."),
         "{replies:?}"
     );
     assert_eq!(cases_of(&harness, MEMBER).await.len(), 3);
@@ -1578,7 +1600,10 @@ async fn once_the_warnings_expire_the_same_count_escalates_again() {
     assert!(!text(&two).contains("Escalation"), "{two:?}");
     let three = warn_times(&harness, MEMBER, 1).await;
     assert!(
-        text(&three).contains("Escalation: timed out for 1 hour"),
+        text(&three).contains(&format!(
+            "Escalation: timed out until {} — case #8.",
+            ends(&harness, 8).await
+        )),
         "{three:?}"
     );
     assert_eq!(cases_of_kind(&harness, MEMBER, "timeout").await, 2);
@@ -1598,7 +1623,10 @@ async fn a_revoked_warning_is_not_counted() {
     assert!(!text(&third).contains("Escalation"), "{third:?}");
     let fourth = warn_times(&harness, MEMBER, 1).await;
     assert!(
-        text(&fourth).contains("Escalation: timed out for 1 hour"),
+        text(&fourth).contains(&format!(
+            "Escalation: timed out until {} — case #5.",
+            ends(&harness, 5).await
+        )),
         "{fourth:?}"
     );
     assert_eq!(cases_of_kind(&harness, MEMBER, "timeout").await, 1);
@@ -1616,7 +1644,7 @@ async fn the_escalation_speaks_the_server_language_in_its_reason_and_reply() {
         .await
         .unwrap();
     assert!(
-        text(&replies).contains("1時間のタイムアウト"),
+        text(&replies).contains(&format!("{}までのタイムアウト", ends(&harness, 2).await)),
         "{replies:?}"
     );
     let case = harness.cases().get(2).await.unwrap().unwrap();
@@ -2164,7 +2192,10 @@ async fn an_escalated_timeout_by_role_adds_the_role() {
     }));
     let replies = harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
     assert!(
-        text(&replies).contains("Escalation: timed out for 1 hour — case #2."),
+        text(&replies).contains(&format!(
+            "Escalation: timed out until {} — case #2.",
+            ends(&harness, 2).await
+        )),
         "{replies:?}"
     );
     assert_eq!(sequence(&harness), ["dm", "role+", "dm"]);
@@ -2198,8 +2229,11 @@ async fn a_voice_mute_with_a_duration_is_lifted_when_its_time_is_up() {
         .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
         .await
         .unwrap();
-    assert!(text(&replies).contains("1 hour"), "{replies:?}");
-    assert!(dm_contents(&harness)[0].contains("1 hour"));
+    assert!(
+        text(&replies).contains(&ends(&harness, 1).await),
+        "{replies:?}"
+    );
+    assert!(dm_contents(&harness)[0].contains(&ends(&harness, 1).await));
     let case = harness.cases().get(1).await.unwrap().unwrap();
     assert_eq!(case.expires_at, Some(case.created_at + 3_600));
     assert_eq!(harness.jobs(), 1);
@@ -2613,7 +2647,7 @@ async fn a_timeout_without_a_duration_takes_the_template_duration_and_keeps_the_
         edit_of(&picked)
             .expect("the picker is replaced")
             .content
-            .contains("2 hours"),
+            .contains(&ends(&harness, 1).await),
         "{picked:?}"
     );
     assert_eq!(sequence(&harness), ["timeout", "dm"]);
@@ -2652,7 +2686,7 @@ async fn a_ban_without_a_reason_takes_the_template_reason_and_a_given_duration_w
     assert_eq!(case.expires_at, Some(case.created_at + 7_200));
     assert_eq!(harness.jobs(), 1, "the timer of the two hour ban");
     assert_eq!(sequence(&harness), ["dm", "ban"]);
-    assert!(dm_contents(&harness)[0].contains("2 hours"));
+    assert!(dm_contents(&harness)[0].contains(&ends(&harness, 1).await));
 }
 
 #[tokio::test]

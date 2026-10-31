@@ -2,8 +2,6 @@
 //! channel. A deleted message is shown with what the history kept of it: its text, and its files when
 //! the host kept them. The files and their posting are the SDK's (`closure_sdk::files`).
 
-use std::time::Duration;
-
 use closure_core::capability::Capability;
 use closure_core::error::{CoreError, ModuleError};
 use closure_core::event::{
@@ -362,7 +360,6 @@ fn unkept_card(ctx: &EventContext, channel: u64, message: u64) -> EmbedBuilder {
 fn joined_entry(ctx: &EventContext, member: &MemberInfo) -> Result<LogEntry, ModuleError> {
     let now = ctx.now();
     let created = duration::snowflake_time(member.user.id.get());
-    let age = Duration::from_secs(u64::try_from(now - created).unwrap_or(0));
     let card = member_card(ctx, "logs-joined", Color::Success, &member.user)
         .field(
             label(ctx, "logs-created"),
@@ -371,7 +368,7 @@ fn joined_entry(ctx: &EventContext, member: &MemberInfo) -> Result<LogEntry, Mod
         )
         .field(
             label(ctx, "logs-age"),
-            duration::format_in(ctx, ctx.locale, age),
+            duration::timestamp(created, TimeStyle::Relative),
             true,
         )
         .field(

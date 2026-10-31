@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use closure_sdk::duration::{TimeStyle, parse as parse_duration, timestamp};
+use closure_sdk::duration::{TimeStyle, ends_at, parse as parse_duration};
 use closure_sdk::embed::truncate;
 use closure_sdk::punish::Method;
 use closure_sdk::ui::{self, CustomId};
@@ -466,14 +466,8 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
         .with("user", mention(user))
         .with("number", case.number);
     if let Some(duration) = duration {
-        let mut shown = cx.format_duration(duration);
-        // A moment given as a date shows its end too, as a Discord timestamp.
-        if punishment.duration.as_ref().is_some_and(Span::is_moment) {
-            let seconds = i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
-            let end = timestamp(cx.now().saturating_add(seconds), TimeStyle::LongDateTime);
-            shown = format!("{shown} ({end})");
-        }
-        words = words.with("duration", shown);
+        let until = ends_at(cx.now(), duration, TimeStyle::ShortDateTime);
+        words = words.with("until", until);
     }
     let mut text = with_notes(
         cx.t(punishment.kind.reply_key(duration.is_some()), &words),

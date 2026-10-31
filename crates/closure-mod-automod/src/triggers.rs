@@ -120,12 +120,8 @@ fn member_join(
     let fresh = age >= 0 && u64::try_from(age).is_ok_and(|age| age < threshold.as_secs());
     fresh.then(|| {
         let args = Args::new().with(
-            "age",
-            duration::format_in(
-                ctx,
-                ctx.locale,
-                std::time::Duration::from_secs(u64::try_from(age).unwrap_or(0)),
-            ),
+            "created",
+            duration::timestamp(made, duration::TimeStyle::Relative),
         );
         Hit::about(say(ctx, "detail-join-new", &args), context)
     })
