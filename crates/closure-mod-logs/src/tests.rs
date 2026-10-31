@@ -1610,6 +1610,54 @@ async fn a_member_who_gains_many_roles_is_logged_with_the_roles_that_fit() {
 }
 
 #[tokio::test]
+async fn a_bot_leaving_is_not_logged() {
+    let harness = harness();
+    let bot_user = UserInfo {
+        id: Id::new(40),
+        name: "some-bot".into(),
+        bot: true,
+    };
+
+    harness
+        .emit(Event::MemberLeft {
+            guild_id: Id::new(GUILD),
+            user: bot_user,
+        })
+        .await
+        .unwrap();
+
+    assert!(sent(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn a_change_the_bot_made_to_a_channel_is_not_logged() {
+    let harness = harness();
+    harness.set_bot_id(Some(Id::new(55)));
+    harness.api().add_audit_entry(overwrite_audit(
+        AuditLogEventType::ChannelOverwriteCreate,
+        CHANNEL,
+        9,
+        55,
+    ));
+    let mut after = channel_info("general", None);
+    after.overwrites = vec![role_overwrite(
+        9,
+        Permissions::VIEW_CHANNEL,
+        Permissions::empty(),
+    )];
+
+    harness
+        .emit(Event::ChannelChanged {
+            before: channel_info("general", None),
+            after,
+        })
+        .await
+        .unwrap();
+
+    assert!(sent(&harness).is_empty());
+}
+
+#[tokio::test]
 async fn an_edit_that_leaves_the_text_as_it_was_is_not_logged() {
     let harness = harness();
 

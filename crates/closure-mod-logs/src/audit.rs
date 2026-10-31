@@ -28,6 +28,13 @@ pub(crate) struct AuditEntry {
     reason: Option<String>,
 }
 
+impl AuditEntry {
+    /// Whether the change was made by `user`, when it is known.
+    pub(crate) fn made_by(&self, user: Option<UserId>) -> bool {
+        self.by.is_some() && self.by == user
+    }
+}
+
 /// The audit log action of the change an event reports, and the id it names as the target. `None` for an
 /// event that is not a change of a named target, or whose kind the configuration leaves out.
 fn audited_change(config: &Config, event: &Event) -> Option<(AuditLogEventType, u64)> {

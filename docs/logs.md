@@ -33,6 +33,9 @@ modules:
 
 ## What an entry shows
 
+- **Bots.** Nothing about a bot is logged: not its messages, its joins or leaves, its roles, bans or timeouts,
+  and not the roles and channel overwrites the bot itself sets for its restrictions. The moderation actions
+  the bot carries out for a moderator are logged, with the bot named as the one who made them.
 - **Join.** The member, when the account was made and how old it is, and when the member joined.
 - **Edit.** The text before the edit and after it, the message's id and when it was posted, and the
   files the edit took away. The text before an edit is the text the history held when the edit

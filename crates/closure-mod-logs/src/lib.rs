@@ -175,6 +175,9 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     let Some(channel) = destination(&ctx, &config)? else {
         return Ok(Flow::Continue);
     };
+    if about_a_bot(&ctx, &event).await {
+        return Ok(Flow::Continue);
+    }
     let entries = match &event {
         Event::MessageUpdated(message) if config.message_edits && edit_is_logged(message) => {
             vec![edited(&ctx, message).await?]
@@ -242,6 +245,13 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
                 } else {
                     change_audit_of(&ctx, &config, &event).await
                 };
+                // The bot's own housekeeping (its restriction roles and the overwrites it sets) is not
+                // logged. Its moderation actions are, with the bot named as the one who made them.
+                if is_housekeeping(&event)
+                    && audit.as_ref().is_some_and(|audit| audit.made_by(ctx.bot()))
+                {
+                    return Ok(Flow::Continue);
+                }
                 entries
                     .into_iter()
                     .map(|entry| add_audit(&ctx, entry, audit.as_ref()))
@@ -252,6 +262,45 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     };
     files::post(&ctx, channel, entries).await?;
     Ok(Flow::Continue)
+}
+
+/// Whether an event is about a bot: a bot's message, or a bot's member events. Those are not logged.
+/// A deleted message is about a bot when the history kept it from one.
+async fn about_a_bot(ctx: &EventContext, event: &Event) -> bool {
+    match event {
+        Event::MessageUpdated(message) => message.author.bot,
+        Event::MessageDeleted {
+            channel_id,
+            message_id,
+            ..
+        } => matches!(
+            ctx.history().get(*channel_id, *message_id).await,
+            Ok(Some(saved)) if saved.author_bot
+        ),
+        Event::MemberJoined(member) => member.user.bot,
+        Event::RolesChanged(change) => change.user.bot,
+        Event::MemberLeft { user, .. }
+        | Event::BanAdded { user, .. }
+        | Event::BanRemoved { user, .. }
+        | Event::NicknameChanged { user, .. }
+        | Event::TimeoutChanged { user, .. }
+        | Event::VoiceStateChanged { user, .. } => user.bot,
+        _ => false,
+    }
+}
+
+/// Whether a change is the bot's housekeeping: roles and channels, which it sets up for its own
+/// restrictions.
+fn is_housekeeping(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::RoleCreated(_)
+            | Event::RoleChanged { .. }
+            | Event::RoleDeleted { .. }
+            | Event::ChannelCreated(_)
+            | Event::ChannelChanged { .. }
+            | Event::ChannelDeleted(_)
+    )
 }
 
 /// The entries of the events that describe a change of a channel, a thread or a role. `None` for any
@@ -475,6 +524,8 @@ async fn bulk_deleted(
             .await
             .map_err(|error| ModuleError::other(error.to_string()))?;
         match saved {
+            // A message a bot wrote is not logged.
+            Some(saved) if saved.author_bot => {}
             Some(_) => entries.push(deleted(ctx, channel, *message).await?),
             None => unkept += 1,
         }
