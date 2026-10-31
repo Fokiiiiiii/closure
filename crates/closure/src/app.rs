@@ -41,6 +41,7 @@ use crate::sync;
 const GATEWAY_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const DISPATCHER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const ATTACHMENT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct GatewayReadiness(Arc<GatewayHealth>);
 
@@ -226,6 +227,7 @@ struct Started {
     api_task: Option<JoinHandle<()>>,
     jobs_task: Option<JoinHandle<()>>,
     changes_task: Option<JoinHandle<()>>,
+    hooks: Option<Arc<AppHooks>>,
 }
 
 /// Starts everything that talks to Discord and waits until the process is asked to stop.
@@ -300,6 +302,7 @@ async fn serve(
         args.message_history_days,
         config_changes_tx,
     ));
+    started.hooks = Some(Arc::clone(&hooks));
     let gateway = started.gateway.insert(
         start_gateway(
             &http,
@@ -449,6 +452,9 @@ pub async fn run(args: Args) -> Result<()> {
     }
     if let Some(dispatcher) = &started.dispatcher {
         dispatcher.shutdown(DISPATCHER_DRAIN_TIMEOUT).await;
+    }
+    if let Some(hooks) = &started.hooks {
+        hooks.finish_attachments(ATTACHMENT_STOP_TIMEOUT).await;
     }
     if let Some(task) = started.api_task {
         stop_task(task, "HTTP API").await;

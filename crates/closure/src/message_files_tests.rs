@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use closure_config::{ConfigCompiler, SettingsStore};
-use closure_core::attachments::{Fetcher, MAX_FILE_BYTES};
+use closure_core::attachments::{ARRIVAL_FETCHES, Fetcher, MAX_FILE_BYTES};
 use closure_core::capability::Capability;
 use closure_core::event::{AttachmentInfo, Event, MessageInfo, UserInfo};
 use closure_core::history::{HistoryBackend, MemoryHistory};
@@ -342,4 +342,127 @@ async fn arrivals_beyond_the_backlog_are_not_queued() {
         "{} clones of the backend are alive: more arrivals wait than the backlog allows",
         Arc::strong_count(&backend)
     );
+}
+
+/// Serves the bytes after a pause, so a keep is still running when the recorder is finished.
+struct Slow;
+
+#[async_trait]
+impl Fetcher for Slow {
+    async fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(format!("bytes of {url}").into_bytes())
+    }
+}
+
+/// Serves the bytes after a pause, and records the most fetches that ran at once.
+#[derive(Default)]
+struct Measured {
+    running: AtomicUsize,
+    most: AtomicUsize,
+}
+
+#[async_trait]
+impl Fetcher for Measured {
+    async fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        let running = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(running, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        self.running.fetch_sub(1, Ordering::SeqCst);
+        Ok(format!("bytes of {url}").into_bytes())
+    }
+}
+
+#[tokio::test]
+async fn a_bulk_deletion_fetches_its_messages_a_few_at_once() {
+    let store = store(true);
+    enable(&store, false);
+    let backend = Arc::new(MemoryHistory::default());
+    let fetcher = Arc::new(Measured::default());
+    let recorder = MessageRecorder::new(
+        Arc::clone(&backend) as Arc<dyn HistoryBackend>,
+        Arc::clone(&store),
+        7,
+        Arc::clone(&fetcher) as Arc<dyn Fetcher>,
+    );
+    let ids: Vec<u64> = (20..30).collect();
+    for id in &ids {
+        recorder
+            .record(
+                &mut Event::MessageCreated(message(*id, vec![picture(*id)])),
+                NOW,
+            )
+            .await
+            .unwrap();
+    }
+
+    recorder
+        .record(
+            &mut Event::MessagesBulkDeleted {
+                guild_id: Id::new(GUILD),
+                channel_id: Id::new(CHANNEL),
+                message_ids: ids.iter().map(|id| Id::new(*id)).collect(),
+            },
+            NOW + 60,
+        )
+        .await
+        .unwrap();
+
+    let most = fetcher.most.load(Ordering::SeqCst);
+    assert!(most > 1, "the fetches overlap: {most} at most");
+    assert!(most <= ARRIVAL_FETCHES, "{most} fetches ran at once");
+    for id in ids {
+        assert_eq!(kept(&backend, id).await, [(id, true)]);
+    }
+}
+
+#[tokio::test]
+async fn finish_waits_for_the_pictures_still_being_kept() {
+    let store = store(true);
+    enable(&store, true);
+    let backend = Arc::new(MemoryHistory::default());
+    let recorder = MessageRecorder::new(
+        Arc::clone(&backend) as Arc<dyn HistoryBackend>,
+        Arc::clone(&store),
+        7,
+        Arc::new(Slow) as Arc<dyn Fetcher>,
+    );
+    recorder
+        .record(
+            &mut Event::MessageCreated(message(15, vec![picture(4)])),
+            NOW,
+        )
+        .await
+        .unwrap();
+
+    recorder.finish(std::time::Duration::from_secs(5)).await;
+
+    assert_eq!(kept(&backend, 15).await, [(4, true)]);
+}
+
+#[tokio::test]
+async fn finish_stops_the_pictures_that_do_not_finish_in_time() {
+    let store = store(true);
+    enable(&store, true);
+    let backend = Arc::new(MemoryHistory::default());
+    let recorder = MessageRecorder::new(
+        Arc::clone(&backend) as Arc<dyn HistoryBackend>,
+        Arc::clone(&store),
+        7,
+        Arc::new(Stalled) as Arc<dyn Fetcher>,
+    );
+    recorder
+        .record(
+            &mut Event::MessageCreated(message(16, vec![picture(4)])),
+            NOW,
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        recorder.finish(std::time::Duration::from_millis(10)),
+    )
+    .await
+    .expect("finish returns once the pictures still being kept are stopped");
 }

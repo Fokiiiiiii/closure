@@ -24,6 +24,7 @@ closure-mod-diagnostics.workspace = true
 closure-mod-logs.workspace = true
 closure-mod-moderation.workspace = true
 dotenvy.workspace = true
+futures-util.workspace = true
 metrics-exporter-prometheus.workspace = true
 secrecy.workspace = true
 serde_json.workspace = true

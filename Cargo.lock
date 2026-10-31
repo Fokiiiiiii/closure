@@ -432,6 +432,7 @@ dependencies = [
  "closure-mod-logs",
  "closure-mod-moderation",
  "dotenvy",
+ "futures-util",
  "metrics-exporter-prometheus",
  "secrecy",
  "serde_json",

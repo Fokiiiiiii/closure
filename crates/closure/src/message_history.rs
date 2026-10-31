@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use closure_config::SettingsStore;
 use closure_core::capability::Capability;
@@ -12,12 +12,19 @@ use closure_core::event::{AttachmentInfo, ChannelId, Event, GuildId, MessageId, 
 use closure_core::history::{HistoryBackend, HistoryError, SavedMessage, check_text};
 
 use closure_core::attachments::{self, ARRIVAL_FETCHES, Fetcher};
+use futures_util::{StreamExt, TryStreamExt, stream};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 const DAY_SECONDS: i64 = 86_400;
 
 /// How many arrivals may wait for their files at once. Past it an arrival is not kept as it comes;
 /// its files are fetched later, when a deletion or an edit needs them.
 pub(crate) const BACKLOG_LIMIT: usize = 64;
+
+/// How many deleted messages have their files fetched at once. As many as arrivals: a deletion waits
+/// for its fetches, and the same host serves both.
+const DELETED_FETCHES: usize = ARRIVAL_FETCHES;
 
 /// The time now, in Unix seconds.
 #[must_use]
@@ -44,6 +51,10 @@ pub struct MessageRecorder {
     fetcher: Arc<dyn Fetcher>,
     arrivals: Arc<tokio::sync::Semaphore>,
     backlog: Arc<tokio::sync::Semaphore>,
+    /// The keeps of attachments that run in the background; [`Self::finish`] waits for them.
+    background: TaskTracker,
+    /// Cancelled when [`Self::finish`] stops waiting, so the keeps still running end.
+    abort: CancellationToken,
 }
 
 impl fmt::Debug for MessageRecorder {
@@ -69,6 +80,8 @@ impl MessageRecorder {
             fetcher,
             arrivals: Arc::new(tokio::sync::Semaphore::new(ARRIVAL_FETCHES)),
             backlog: Arc::new(tokio::sync::Semaphore::new(BACKLOG_LIMIT)),
+            background: TaskTracker::new(),
+            abort: CancellationToken::new(),
         }
     }
 
@@ -249,24 +262,31 @@ impl MessageRecorder {
         let backend = Arc::clone(&self.backend);
         let fetcher = Arc::clone(&self.fetcher);
         let arrivals = Arc::clone(&self.arrivals);
-        tokio::spawn(async move {
+        let abort = self.abort.clone();
+        self.background.spawn(async move {
             // Held until the task ends, so the backlog counts the arrivals that have not finished.
             let _backlog = backlog;
-            let Ok(_permit) = arrivals.acquire_owned().await else {
-                return;
+            let keeping = async {
+                let Ok(_permit) = arrivals.acquire_owned().await else {
+                    return;
+                };
+                if let Err(error) = attachments::keep_missing(
+                    backend.as_ref(),
+                    fetcher.as_ref(),
+                    guild,
+                    channel,
+                    message,
+                    &attachments,
+                    now,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "could not keep the attachments of a message");
+                }
             };
-            if let Err(error) = attachments::keep_missing(
-                backend.as_ref(),
-                fetcher.as_ref(),
-                guild,
-                channel,
-                message,
-                &attachments,
-                now,
-            )
-            .await
-            {
-                tracing::warn!(%error, "could not keep the attachments of a message");
+            tokio::select! {
+                () = abort.cancelled() => {}
+                () = keeping => {}
             }
         });
     }
@@ -283,21 +303,42 @@ impl MessageRecorder {
         if !self.wants_files(guild) {
             return Ok(());
         }
-        for message in messages {
-            if let Some(saved) = self.backend.get(guild, channel, *message).await? {
-                attachments::keep_missing(
-                    self.backend.as_ref(),
-                    self.fetcher.as_ref(),
-                    guild,
-                    channel,
-                    *message,
-                    &saved.attachments,
-                    now,
-                )
-                .await?;
-            }
+        stream::iter(messages)
+            .map(Ok::<_, HistoryError>)
+            .try_for_each_concurrent(DELETED_FETCHES, |message| async move {
+                if let Some(saved) = self.backend.get(guild, channel, *message).await? {
+                    attachments::keep_missing(
+                        self.backend.as_ref(),
+                        self.fetcher.as_ref(),
+                        guild,
+                        channel,
+                        *message,
+                        &saved.attachments,
+                        now,
+                    )
+                    .await?;
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    /// Waits up to `grace` for the attachment files still being kept. Those still running after that
+    /// are stopped, so the database is not closed under them.
+    pub async fn finish(&self, grace: Duration) {
+        self.background.close();
+        if tokio::time::timeout(grace, self.background.wait())
+            .await
+            .is_ok()
+        {
+            return;
         }
-        Ok(())
+        tracing::warn!(
+            ?grace,
+            "attachment files are still being kept; stopping them"
+        );
+        self.abort.cancel();
+        self.background.wait().await;
     }
 
     /// Removes the messages sent before the retention allows, at unix time `now`; returns how many.

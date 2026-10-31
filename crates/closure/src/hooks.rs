@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use closure::message_history::{MessageRecorder, unix_now};
@@ -66,6 +67,11 @@ impl AppHooks {
             changes,
             announced: Announced::default(),
         }
+    }
+
+    /// Waits for the attachment files still being kept; see [`MessageRecorder::finish`].
+    pub async fn finish_attachments(&self, grace: Duration) {
+        self.messages.finish(grace).await;
     }
 }
 
