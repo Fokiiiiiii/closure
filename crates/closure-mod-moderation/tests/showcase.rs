@@ -5,8 +5,8 @@
 
 use closure_core::event::CommandOptionValue;
 use closure_mod_moderation::builder;
-use closure_sdk::Level;
 use closure_sdk::testing::{Harness, Invocation, Reply};
+use closure_sdk::{Level, Locale};
 use serde_json::json;
 use twilight_model::guild::Role;
 use twilight_model::id::Id;
@@ -51,6 +51,7 @@ fn harness() -> Harness {
     harness
         .api()
         .set_not_a_member(Id::new(GUILD), Id::new(TARGET));
+    harness.set_guild_locale(Locale::Ja);
     harness
 }
 
@@ -78,7 +79,10 @@ async fn showcase_warning_shows_its_case() {
 
     let replies = h.invoke(invocation).await.unwrap();
 
-    assert!(card(&replies).embeds[0].title.is_some());
+    assert_eq!(
+        card(&replies).embeds[0].title.as_deref(),
+        Some("ケース #1 · 警告")
+    );
 }
 
 #[tokio::test]
@@ -140,4 +144,207 @@ async fn showcase_note_shows_its_case() {
     let replies = h.invoke(invocation).await.unwrap();
 
     assert!(!card(&replies).embeds.is_empty());
+}
+
+/// A command a moderator runs, with the moderator role.
+fn moderator_runs(name: &str) -> Invocation {
+    Invocation::new(name)
+        .user(MODERATOR)
+        .roles([MODERATOR_ROLE])
+}
+
+/// A command an admin runs, with the admin role.
+fn admin_runs(name: &str) -> Invocation {
+    Invocation::new(name).user(MODERATOR).roles([ADMIN_ROLE])
+}
+
+#[tokio::test]
+async fn showcase_untimeout_shows_its_case() {
+    let h = harness();
+    h.invoke(
+        moderator_runs("timeout")
+            .option("user", user(TARGET))
+            .option("duration", text("1h"))
+            .option("reason", text("flooding the chat")),
+    )
+    .await
+    .unwrap();
+
+    let replies = h
+        .invoke(
+            moderator_runs("untimeout")
+                .option("user", user(TARGET))
+                .option("reason", text("apologised")),
+        )
+        .await
+        .unwrap();
+
+    assert!(card(&replies).embeds[0].description.is_some());
+}
+
+#[tokio::test]
+async fn showcase_ban_for_good_shows_its_case() {
+    let h = harness();
+    let replies = h
+        .invoke(
+            admin_runs("ban")
+                .option("user", user(TARGET))
+                .option("reason", text("doxxing another member")),
+        )
+        .await
+        .unwrap();
+
+    assert!(card(&replies).embeds[0].title.is_some());
+}
+
+#[tokio::test]
+async fn showcase_unban_shows_its_case() {
+    let h = harness();
+    h.invoke(
+        admin_runs("ban")
+            .option("user", user(TARGET))
+            .option("duration", text("7d"))
+            .option("reason", text("raid")),
+    )
+    .await
+    .unwrap();
+
+    let replies = h
+        .invoke(
+            admin_runs("unban")
+                .option("user", user(TARGET))
+                .option("reason", text("appeal accepted")),
+        )
+        .await
+        .unwrap();
+
+    assert!(card(&replies).embeds[0].description.is_some());
+}
+
+#[tokio::test]
+async fn showcase_voice_mute_shows_its_case() {
+    let h = harness();
+    let replies = h
+        .invoke(
+            moderator_runs("vcmute")
+                .option("user", user(TARGET))
+                .option("duration", text("1h"))
+                .option("reason", text("shouting over the stage")),
+        )
+        .await
+        .unwrap();
+
+    assert!(card(&replies).embeds[0].title.is_some());
+}
+
+#[tokio::test]
+async fn showcase_voice_unmute_shows_its_case() {
+    let h = harness();
+    h.invoke(
+        moderator_runs("vcmute")
+            .option("user", user(TARGET))
+            .option("reason", text("shouting over the stage")),
+    )
+    .await
+    .unwrap();
+
+    let replies = h
+        .invoke(
+            moderator_runs("vcunmute")
+                .option("user", user(TARGET))
+                .option("reason", text("calmed down")),
+        )
+        .await
+        .unwrap();
+
+    assert!(card(&replies).embeds[0].description.is_some());
+}
+
+#[tokio::test]
+async fn showcase_warnings_lists_the_active_warnings() {
+    let h = harness();
+    h.invoke(
+        moderator_runs("warn")
+            .option("user", user(TARGET))
+            .option("reason", text("spam links in #general")),
+    )
+    .await
+    .unwrap();
+
+    let replies = h
+        .invoke(moderator_runs("warnings").option("user", user(TARGET)))
+        .await
+        .unwrap();
+
+    assert!(!card(&replies).embeds.is_empty());
+}
+
+#[tokio::test]
+async fn showcase_case_view_shows_the_case() {
+    let h = harness();
+    h.invoke(
+        moderator_runs("warn")
+            .option("user", user(TARGET))
+            .option("reason", text("spam links in #general")),
+    )
+    .await
+    .unwrap();
+
+    let replies = h
+        .invoke(
+            moderator_runs("case")
+                .subcommand("view")
+                .option("number", CommandOptionValue::Integer(1)),
+        )
+        .await
+        .unwrap();
+
+    assert!(card(&replies).embeds[0].title.is_some());
+}
+
+#[tokio::test]
+async fn showcase_case_list_shows_the_cases_of_a_member() {
+    let h = harness();
+    h.invoke(
+        moderator_runs("warn")
+            .option("user", user(TARGET))
+            .option("reason", text("spam links in #general")),
+    )
+    .await
+    .unwrap();
+
+    let replies = h
+        .invoke(
+            moderator_runs("case")
+                .subcommand("list")
+                .option("user", user(TARGET)),
+        )
+        .await
+        .unwrap();
+
+    assert!(!card(&replies).embeds.is_empty());
+}
+
+#[tokio::test]
+async fn showcase_case_revoke_shows_the_case() {
+    let h = harness();
+    h.invoke(
+        moderator_runs("warn")
+            .option("user", user(TARGET))
+            .option("reason", text("spam links in #general")),
+    )
+    .await
+    .unwrap();
+
+    let replies = h
+        .invoke(
+            moderator_runs("case")
+                .subcommand("revoke")
+                .option("number", CommandOptionValue::Integer(1))
+                .option("reason", text("appeal accepted")),
+        )
+        .await
+        .unwrap();
+
+    assert!(card(&replies).embeds[0].description.is_some());
 }
