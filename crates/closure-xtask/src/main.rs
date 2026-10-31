@@ -3,6 +3,7 @@
 //! `docs` writes `docs/reference/<module>.md` from the shipped modules; `docs --check` writes
 //! nothing and fails when a file on disk differs from what would be generated.
 
+mod clear;
 mod docs;
 mod replay;
 mod scaffold;
@@ -50,9 +51,16 @@ enum Command {
         /// The test channel to post to.
         #[arg(long)]
         channel: u64,
-        /// Only counts what would be posted: sends nothing and needs no token.
+    },
+    /// Deletes the bot's own messages in a test channel posted at or after `--after`, so that a
+    /// replay can start over. Needs `DISCORD_TOKEN`.
+    Clear {
+        /// The test channel to clear.
         #[arg(long)]
-        dry_run: bool,
+        channel: u64,
+        /// Unix time in seconds; the bot's messages posted before it are kept.
+        #[arg(long)]
+        after: i64,
     },
 }
 
@@ -73,11 +81,8 @@ fn run(command: &Command) -> Result<bool> {
     match command {
         Command::Docs { check } => docs(*check),
         Command::NewModule { id, dry_run } => new_module(id, *dry_run),
-        Command::Replay {
-            dir,
-            channel,
-            dry_run,
-        } => replay::run(dir, *channel, *dry_run),
+        Command::Replay { dir, channel } => replay::run(dir, *channel),
+        Command::Clear { channel, after } => clear::run(*channel, *after),
     }
 }
 

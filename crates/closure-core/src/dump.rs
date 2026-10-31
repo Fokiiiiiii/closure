@@ -45,8 +45,7 @@ pub fn record_in(dir: Option<&Path>, action: &Action) -> io::Result<()> {
     let Some(dir) = dir else {
         return Ok(());
     };
-    let mut line = serde_json::to_string(action)
-        .unwrap_or_else(|error| panic!("an action serialises to JSON: {error}"));
+    let mut line = line_of(action);
     line.push('\n');
     fs::create_dir_all(dir)?;
     let _guard = WRITES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -55,4 +54,15 @@ pub fn record_in(dir: Option<&Path>, action: &Action) -> io::Result<()> {
         .append(true)
         .open(dump_file(dir))?;
     file.write_all(line.as_bytes())
+}
+
+/// The action as one JSON object, with the name of the test thread that made it under `test`.
+fn line_of(action: &Action) -> String {
+    let mut value = serde_json::to_value(action)
+        .unwrap_or_else(|error| panic!("an action serialises to JSON: {error}"));
+    if let Some(object) = value.as_object_mut() {
+        let test = std::thread::current().name().unwrap_or_default().to_owned();
+        object.insert("test".to_owned(), test.into());
+    }
+    value.to_string()
 }

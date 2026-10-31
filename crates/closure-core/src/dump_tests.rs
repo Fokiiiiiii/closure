@@ -37,6 +37,17 @@ fn appends_one_json_line_per_action_to_the_process_file() {
 }
 
 #[test]
+fn each_line_names_the_test_that_made_it() {
+    let dir = scratch("names");
+
+    record_in(Some(&dir), &sample("named")).unwrap();
+
+    let text = fs::read_to_string(dump_file(&dir)).unwrap();
+    let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(value["test"], std::thread::current().name().unwrap());
+}
+
+#[test]
 fn records_nothing_without_a_directory() {
     let dir = scratch("none");
 

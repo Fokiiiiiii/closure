@@ -1,7 +1,9 @@
 //! Replays the actions of a test run as messages on a test server (see `docs/preview.md`).
 //!
-//! The dumps are written by closure-core while `CLOSURE_DUMP_DIR` is set. Only the text of what
-//! the bot says is posted, and without mentions: file names and buttons are dropped. Operations
+//! The dumps are written by closure-core while `CLOSURE_DUMP_DIR` is set. Only what the bot says is
+//! posted, without mentions: the text of messages, of direct messages (under a `DM to` line) and of
+//! replies. Each message starts with the test that made it. Messages that only repeat a kind already
+//! posted, that are too short to read, or that carry the test fixtures' ids are left out. Operations
 //! that say nothing on their own (role changes, bans, timeouts, deletions) are counted instead.
 //!
 //! The token is `DISCORD_TOKEN`, read the way the bot reads it: from the environment, or from
@@ -23,9 +25,13 @@ use twilight_model::channel::message::Embed;
 use twilight_model::id::Id;
 
 /// The variable the bot reads its token from.
-const TOKEN_VARIABLE: &str = "DISCORD_TOKEN";
+pub(crate) const TOKEN_VARIABLE: &str = "DISCORD_TOKEN";
 /// How much of a message's opening tells its kind apart from another message of the same kind.
 const TEMPLATE_CHARS: usize = 25;
+/// Messages with less text than this are left out: they are progress lines or test values.
+const MIN_TEXT_CHARS: usize = 15;
+/// The ids and names that only the test fixtures use.
+const FIXTURE_MARKERS: [&str; 4] = ["<@7>", "<@9999>", "(7)", "(9999)"];
 const USAGE: &str = "usage: closure-xtask replay --dir <dir> --channel <channel id>";
 
 /// What a replay would send, and what it leaves out.
@@ -33,15 +39,25 @@ const USAGE: &str = "usage: closure-xtask replay --dir <dir> --channel <channel 
 pub struct Plan {
     /// The messages to send, in the order of the dumps.
     pub posts: Vec<Action>,
-    /// The actions that are not sent, counted by kind (`add_role`, `respond/defer`, ...).
+    /// Actions that are not messages, counted by kind (`add_role`, `respond/defer`, ...).
     pub skipped: BTreeMap<String, usize>,
-    /// Messages of a kind that an earlier message already showed (see `template_key`). Left out.
+    /// Messages of a kind that an earlier message already showed (see `template_key`).
     pub similar: usize,
+    /// Messages with too little text to read.
+    pub short: usize,
+    /// Messages that carry the test fixtures' ids (see `FIXTURE_MARKERS`).
+    pub fixtures: usize,
 }
 
-/// What one action becomes: a message to send with its key, or the kind it is counted under.
+/// What one action becomes.
 enum Step {
+    /// A message, with the key of its kind.
     Send { post: Box<Action>, key: String },
+    /// A message with too little text to read.
+    Short,
+    /// A message that carries the test fixtures' ids.
+    Fixture,
+    /// An action that is not a message, counted under this label.
     Skip(String),
 }
 
@@ -50,20 +66,23 @@ enum Step {
 ///
 /// # Errors
 ///
-/// Fails before sending anything when the token is missing, the directory cannot be read, or a
-/// line is not a recorded action.
-pub fn run(dir: &Path, channel_id: u64, dry_run: bool) -> Result<bool> {
-    // A missing `.env` is normal; variables already set in the environment win.
-    let _ = dotenvy::dotenv();
-    let token = std::env::var(TOKEN_VARIABLE)
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    replay(dir, channel_id, token, dry_run)
+/// Fails before sending anything when the directory cannot be read, a line is not a recorded
+/// action, or the token is missing.
+pub fn run(dir: &Path, channel_id: u64) -> Result<bool> {
+    replay(dir, channel_id, token_from_env())
 }
 
-/// [`run`] with the token given instead of read from the environment. A dry run only counts what
-/// would be sent, so it needs no token.
-fn replay(dir: &Path, channel_id: u64, token: Option<String>, dry_run: bool) -> Result<bool> {
+/// The token from the environment, or from `.env` when the variable is not set there. A missing
+/// `.env` is normal.
+pub(crate) fn token_from_env() -> Option<String> {
+    let _ = dotenvy::dotenv();
+    std::env::var(TOKEN_VARIABLE)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// [`run`] with the token given instead of read from the environment.
+fn replay(dir: &Path, channel_id: u64, token: Option<String>) -> Result<bool> {
     let channel: ChannelId =
         Id::new_checked(channel_id).context("--channel must be a non-zero id")?;
     let lines = dump_lines(dir)?;
@@ -71,17 +90,14 @@ fn replay(dir: &Path, channel_id: u64, token: Option<String>, dry_run: bool) -> 
         posts,
         skipped,
         similar,
+        short,
+        fixtures,
     } = plan(lines.iter().map(String::as_str), channel)?;
-
-    let total = posts.len();
-    if dry_run {
-        println!("would send {total} message(s); {similar} similar message(s) left out");
-        print_skipped(&skipped);
-        return Ok(true);
-    }
     let Some(token) = token else {
         bail!("{TOKEN_VARIABLE} is not set (in the environment or in .env)\n{USAGE}");
     };
+
+    let total = posts.len();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -99,18 +115,13 @@ fn replay(dir: &Path, channel_id: u64, token: Option<String>, dry_run: bool) -> 
         failures
     });
 
+    let not_messages: usize = skipped.values().sum();
     println!(
-        "sent {} of {total} message(s); {similar} similar message(s) left out",
+        "sent {} of {total} message(s); left out {similar} similar, {short} too short, \
+         {fixtures} with test ids, {not_messages} that are not messages",
         total - failures
     );
-    print_skipped(&skipped);
     Ok(failures == 0)
-}
-
-fn print_skipped(skipped: &BTreeMap<String, usize>) {
-    for (kind, count) in skipped {
-        println!("not sent, {kind}: {count}");
-    }
 }
 
 /// The lines of every `.jsonl` dump in `dir`, file by file in name order. The order between
@@ -158,33 +169,60 @@ pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) ->
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned();
+        let test = value
+            .get("test")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         let action: Action = serde_json::from_value(value)
             .with_context(|| format!("line {number}: not a recorded action"))?;
         match step(action, &kind, channel) {
             Step::Send { post, key } => {
                 if seen.insert(key) {
-                    plan.posts.push(*post);
+                    plan.posts.push(named(*post, &test));
                 } else {
                     plan.similar += 1;
                 }
             }
+            Step::Short => plan.short += 1,
+            Step::Fixture => plan.fixtures += 1,
             Step::Skip(label) => *plan.skipped.entry(label).or_default() += 1,
         }
     }
     Ok(plan)
 }
 
+/// The message with the test that made it written before its text, so that a reader can tell where
+/// it came from. A message without a test name is sent as it is.
+fn named(mut post: Action, test: &str) -> Action {
+    if test.is_empty() {
+        return post;
+    }
+    if let Action::SendMessage { content, .. } = &mut post {
+        let label = format!("テスト `{test}`");
+        *content = Some(match content.take() {
+            Some(body) => format!("{label}\n{body}"),
+            None => label,
+        });
+    }
+    post
+}
+
 /// The key of a message's kind: the opening of its text with every number masked, so that a
 /// warning or a ban is sent once however many numbers it names. A message without text is keyed by
 /// its whole content, so that different embeds are never merged.
 fn template_key(content: Option<&str>, embeds: &[Embed]) -> String {
-    let text = content
-        .map(str::to_owned)
-        .or_else(|| embeds.iter().find_map(embed_text));
-    match text {
+    match text_of(content, embeds) {
         Some(text) => mask_numbers(&text).chars().take(TEMPLATE_CHARS).collect(),
         None => format!("{embeds:?}"),
     }
+}
+
+/// The text a message shows first: its content, or else the first embed's description or last field.
+fn text_of(content: Option<&str>, embeds: &[Embed]) -> Option<String> {
+    content
+        .map(str::to_owned)
+        .or_else(|| embeds.iter().find_map(embed_text))
 }
 
 /// The text an embed shows: its description, or else the value of its last field.
@@ -193,6 +231,21 @@ fn embed_text(embed: &Embed) -> Option<String> {
         .description
         .clone()
         .or_else(|| embed.fields.last().map(|field| field.value.clone()))
+}
+
+/// Everything a message shows, as one text: its content, and the titles, descriptions and fields of
+/// its embeds.
+fn all_text(content: Option<&str>, embeds: &[Embed]) -> String {
+    let mut parts: Vec<&str> = content.into_iter().collect();
+    for embed in embeds {
+        parts.extend(embed.title.as_deref());
+        parts.extend(embed.description.as_deref());
+        for field in &embed.fields {
+            parts.push(field.name.as_str());
+            parts.push(field.value.as_str());
+        }
+    }
+    parts.join("\n")
 }
 
 /// The text with every run of digits replaced by one `#`.
@@ -257,6 +310,18 @@ fn message(channel: ChannelId, content: Option<String>, embeds: Vec<Embed>, kind
     if content.is_none() && embeds.is_empty() {
         return Step::Skip(format!("{kind}/empty"));
     }
+    let everything = all_text(content.as_deref(), &embeds);
+    if FIXTURE_MARKERS
+        .iter()
+        .any(|marker| everything.contains(marker))
+    {
+        return Step::Fixture;
+    }
+    if text_of(content.as_deref(), &embeds)
+        .is_some_and(|text| text.chars().count() < MIN_TEXT_CHARS)
+    {
+        return Step::Short;
+    }
     let key = template_key(content.as_deref(), &embeds);
     Step::Send {
         post: Box::new(Action::SendMessage {
@@ -285,7 +350,9 @@ fn response_kind(response: &InteractionResponse) -> &'static str {
 mod tests {
     use std::fs;
 
-    use closure_core::action::{Action, InteractionReply, InteractionResponse, Reason};
+    use closure_core::action::{
+        Action, InteractionReply, InteractionResponse, MentionPolicy, Reason,
+    };
     use closure_core::event::{
         ChannelId, GuildId, InteractionId, InteractionToken, RoleId, UserId,
     };
@@ -308,7 +375,7 @@ mod tests {
             content: Some(text.to_owned()),
             embeds: vec![],
             reply_to: None,
-            mentions: closure_core::action::MentionPolicy::None,
+            mentions: MentionPolicy::None,
         }
     }
 
@@ -338,7 +405,7 @@ mod tests {
             token: InteractionToken::new("token"),
             response: InteractionResponse::Message {
                 reply: InteractionReply {
-                    content: Some("pong".to_owned()),
+                    content: Some("Pong! The bot is up".to_owned()),
                     ..Default::default()
                 },
             },
@@ -346,7 +413,7 @@ mod tests {
 
         let plan = plan_of(&[respond]);
 
-        assert_eq!(plan.posts, vec![sent("pong")]);
+        assert_eq!(plan.posts, vec![sent("Pong! The bot is up")]);
         assert!(plan.skipped.is_empty());
     }
 
@@ -381,17 +448,24 @@ mod tests {
 
     #[test]
     fn messages_that_differ_only_in_numbers_are_posted_once() {
-        let plan = plan_of(&[sent("hello 1"), sent("hello 2"), sent("hello 1")]);
+        let plan = plan_of(&[
+            sent("Muted for 10 minutes in voice"),
+            sent("Muted for 20 minutes in voice"),
+            sent("Muted for 10 minutes in voice"),
+        ]);
 
-        assert_eq!(plan.posts, vec![sent("hello 1")]);
+        assert_eq!(plan.posts, vec![sent("Muted for 10 minutes in voice")]);
         assert_eq!(plan.similar, 2);
     }
 
     #[test]
     fn messages_with_other_words_are_all_posted() {
-        let plan = plan_of(&[sent("hello 1"), sent("bye 1")]);
+        let plan = plan_of(&[
+            sent("Muted for 10 minutes in voice"),
+            sent("Banned for 10 minutes in voice"),
+        ]);
 
-        assert_eq!(plan.posts, vec![sent("hello 1"), sent("bye 1")]);
+        assert_eq!(plan.posts.len(), 2);
         assert_eq!(plan.similar, 0);
     }
 
@@ -416,7 +490,7 @@ mod tests {
             content: None,
             embeds: vec![embed(title)],
             reply_to: None,
-            mentions: closure_core::action::MentionPolicy::None,
+            mentions: MentionPolicy::None,
         };
 
         let plan = plan_of(&[card("a"), card("b")]);
@@ -431,13 +505,44 @@ mod tests {
             content: None,
             embeds: vec![],
             reply_to: None,
-            mentions: closure_core::action::MentionPolicy::None,
+            mentions: MentionPolicy::None,
         };
 
         let plan = plan_of(&[empty]);
 
         assert!(plan.posts.is_empty());
         assert_eq!(plan.skipped.get("send_message/empty"), Some(&1));
+    }
+
+    #[test]
+    fn a_message_that_carries_a_fixture_id_is_left_out() {
+        let plan = plan_of(&[sent("You were warned <@7> for spam")]);
+
+        assert!(plan.posts.is_empty());
+        assert_eq!(plan.fixtures, 1);
+    }
+
+    #[test]
+    fn a_short_message_is_left_out() {
+        let plan = plan_of(&[sent("hi")]);
+
+        assert!(plan.posts.is_empty());
+        assert_eq!(plan.short, 1);
+    }
+
+    #[test]
+    fn a_message_is_prefixed_with_the_test_that_made_it() {
+        let mut value = serde_json::to_value(sent("Muted for 10 minutes in voice")).unwrap();
+        value["test"] = json!("client::tests::example");
+
+        let plan = plan([value.to_string().as_str()], channel()).unwrap();
+
+        assert_eq!(
+            plan.posts,
+            vec![sent(
+                "テスト `client::tests::example`\nMuted for 10 minutes in voice"
+            )]
+        );
     }
 
     #[test]
@@ -456,7 +561,7 @@ mod tests {
     fn without_a_token_nothing_is_sent() {
         let dir = test_dir("without-token");
 
-        let error = replay(&dir, 100, None, false).unwrap_err();
+        let error = replay(&dir, 100, None).unwrap_err();
         let _ = fs::remove_dir_all(&dir);
 
         assert!(error.to_string().contains("DISCORD_TOKEN"));
@@ -466,17 +571,7 @@ mod tests {
     fn an_empty_dump_is_replayed_through_a_client_made_on_the_runtime() {
         let dir = test_dir("empty");
 
-        let outcome = replay(&dir, 100, Some("token".to_owned()), false);
-        let _ = fs::remove_dir_all(&dir);
-
-        assert!(outcome.unwrap());
-    }
-
-    #[test]
-    fn a_dry_run_needs_no_token_and_sends_nothing() {
-        let dir = test_dir("dry-run");
-
-        let outcome = replay(&dir, 100, None, true);
+        let outcome = replay(&dir, 100, Some("token".to_owned()));
         let _ = fs::remove_dir_all(&dir);
 
         assert!(outcome.unwrap());
