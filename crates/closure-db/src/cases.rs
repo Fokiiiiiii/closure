@@ -181,6 +181,33 @@ impl CaseBackend for Db {
         rows.into_iter().map(case_from_row).collect()
     }
 
+    async fn list_standing(
+        &self,
+        guild: GuildId,
+        target: UserId,
+        kind: &str,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        let rows: Vec<CaseRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            case_columns!(),
+            " FROM cases
+             WHERE guild_id = $1 AND target = $2 AND kind = $3 AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > to_timestamp($4::bigint))
+             ORDER BY number DESC LIMIT $5"
+        ))
+        .bind(to_db(guild).map_err(backend)?)
+        .bind(to_db(target).map_err(backend)?)
+        .bind(kind)
+        .bind(now)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        rows.into_iter().map(case_from_row).collect()
+    }
+
     async fn revoke(
         &self,
         guild: GuildId,
@@ -438,6 +465,41 @@ mod tests {
         let elsewhere = cases(&db, "warn", 2);
         assert_eq!(elsewhere.get(1).await.unwrap(), None);
         assert!(elsewhere.recent(None, 10).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    async fn the_standing_search_skips_other_kinds_revoked_and_ended_cases(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let warn = cases(&db, "warn", 1);
+        let ban = |expires_at: Option<i64>| NewCase {
+            kind: CaseKind::new("ban").unwrap(),
+            target: Id::new(5),
+            moderator: Id::new(9),
+            reason: None,
+            expires_at,
+        };
+        warn.create(ban(Some(1_900_000_000))).await.unwrap();
+        warn.create(ban(Some(1_600_000_000))).await.unwrap();
+        warn.create(ban(None)).await.unwrap();
+        warn.create(new_case(5, None)).await.unwrap();
+        warn.create(ban(None)).await.unwrap();
+        warn.revoke(3, Id::new(8), None).await.unwrap();
+
+        let standing = warn
+            .standing(Id::new(5), "ban", 1_700_000_000, 10)
+            .await
+            .unwrap();
+        assert_eq!(numbers(&standing), [5, 1]);
+        assert_eq!(
+            numbers(
+                &warn
+                    .standing(Id::new(5), "ban", 1_700_000_000, 1)
+                    .await
+                    .unwrap()
+            ),
+            [5]
+        );
     }
 
     /// Runs the same calls and records what each answered, to compare the two backends.

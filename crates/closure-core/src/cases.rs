@@ -164,6 +164,33 @@ pub trait CaseBackend: Send + Sync {
         by: UserId,
         reason: Option<String>,
     ) -> Result<Case, CaseError>;
+
+    /// The cases of `kind` against `target` that stand at `now` (unix seconds): not revoked, and
+    /// not past their expiry. Newest first, at most `limit`. The default pages through
+    /// [`Self::list_for_target`]; a backend that can filter in its own query should override it.
+    async fn list_standing(
+        &self,
+        guild: GuildId,
+        target: UserId,
+        kind: &str,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        let mut found = Vec::new();
+        let mut before = None;
+        while found.len() < limit {
+            let page = self
+                .list_for_target(guild, target, before, MAX_PAGE)
+                .await?;
+            before = page.last().map(|case| case.number);
+            found.extend(page.iter().filter(|case| stands(case, kind, now)).cloned());
+            if page.len() < MAX_PAGE {
+                break;
+            }
+        }
+        found.truncate(limit);
+        Ok(found)
+    }
 }
 
 /// The backend of a [`Cases`] that has none.
@@ -321,6 +348,29 @@ impl Cases {
         check_reason(reason.as_deref())?;
         self.backend.revoke(self.guild, number, by, reason).await
     }
+
+    /// Every case of `kind` against `target` that stands at `now` (unix seconds), newest first, at
+    /// most `limit`. Unlike [`Self::for_target`], the limit is not capped at [`MAX_PAGE`]: this
+    /// checks a state, it does not show a page.
+    pub async fn standing(
+        &self,
+        target: UserId,
+        kind: &str,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        self.allowed()?;
+        self.backend
+            .list_standing(self.guild, target, kind, now, limit)
+            .await
+    }
+}
+
+/// Whether `case` stands at `now`: of `kind`, not revoked, and not past its expiry.
+fn stands(case: &Case, kind: &str, now: i64) -> bool {
+    case.kind.as_str() == kind
+        && case.revoked.is_none()
+        && case.expires_at.is_none_or(|at| at > now)
 }
 
 #[derive(Debug, Default)]
@@ -802,6 +852,42 @@ mod tests {
         assert!(
             elsewhere
                 .for_target(Id::new(5), None, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn standing_finds_the_cases_of_one_kind_that_have_not_ended_however_old() {
+        let f = fixture();
+        let warn = f.cases("warn", 1);
+        let ban = |expires_at: Option<i64>| NewCase {
+            kind: CaseKind::new("ban").unwrap(),
+            target: Id::new(5),
+            moderator: Id::new(9),
+            reason: None,
+            expires_at,
+        };
+        warn.create(ban(Some(1_700_000_100))).await.unwrap();
+        warn.create(ban(Some(1_699_999_999))).await.unwrap();
+        warn.create(ban(None)).await.unwrap();
+        warn.create(new_case(5, None)).await.unwrap();
+        warn.create(ban(None)).await.unwrap();
+        warn.revoke(3, Id::new(9), None).await.unwrap();
+
+        let standing = warn
+            .standing(Id::new(5), "ban", 1_700_000_000, 10)
+            .await
+            .unwrap();
+        assert_eq!(numbers(&standing), [5, 1]);
+        let newest = warn
+            .standing(Id::new(5), "ban", 1_700_000_000, 1)
+            .await
+            .unwrap();
+        assert_eq!(numbers(&newest), [5]);
+        assert!(
+            warn.standing(Id::new(6), "ban", 1_700_000_000, 10)
                 .await
                 .unwrap()
                 .is_empty()

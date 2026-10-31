@@ -34,11 +34,8 @@ const MAX_BAN_DELETE_SECONDS: u32 = 7 * 86_400;
 const DAY: i64 = 86_400;
 /// How long a voice unmute that Discord refuses waits before it is tried again.
 const POSTPONE: Duration = Duration::from_secs(600);
-/// How many cases a page of [`Cases::for_target`] holds at most.
-const PAGE: usize = 25;
-/// How many cases back an active warning is looked for. shortcut: a member with more cases than
-/// this has the older warnings left out of the count, upgrade with an index on the target.
-const SCAN: usize = 100;
+/// How many times a ban's case is recorded before the ban is reported as unrecorded.
+const RECORD_ATTEMPTS: usize = 3;
 /// How many role ids a member's stripped roles are remembered with, at most.
 pub(super) const STRIP_LIMIT: usize = 250;
 
@@ -367,7 +364,7 @@ impl<'a> Punisher<'a> {
             case.number,
             format!("removed by case #{}", case.number),
         )
-        .await;
+        .await?;
         Ok(case)
     }
 
@@ -433,7 +430,7 @@ impl<'a> Punisher<'a> {
             )
             .await?;
         let expires_at = duration.map(|duration| self.ctx.now() + secs(duration));
-        let case = self.record("ban", target, reason, expires_at).await?;
+        let case = self.record_ban(target, reason, expires_at).await?;
         // A new ban replaces the timer of an earlier one, which would lift this ban too early.
         let _ = self.ctx.scheduler().cancel(&unban_key(target)).await;
         // The ban holds even when its timer cannot be set; the note says so.
@@ -469,7 +466,7 @@ impl<'a> Punisher<'a> {
             case.number,
             format!("unbanned by case #{}", case.number),
         )
-        .await;
+        .await?;
         Ok(case)
     }
 
@@ -483,7 +480,6 @@ impl<'a> Punisher<'a> {
         let now = self.ctx.now();
         let reason_text = dm_reason(self.ctx, reason.as_deref());
         let role = self.mute_in_voice(target, reason.as_deref()).await?;
-        let stripped = self.strip_for(target, role, RestrictionRole::Voice).await?;
         let expires_at = duration.map(|duration| now + secs(duration));
         let case = self.record("vcmute", target, reason, expires_at).await?;
         // A new mute replaces the timer of an earlier one, which would lift this mute too early.
@@ -496,6 +492,7 @@ impl<'a> Punisher<'a> {
                 .then_some(Note::NoVoiceTimer),
             None => None,
         };
+        let stripped = self.strip_for(target, role, RestrictionRole::Voice).await?;
         let note = match duration {
             Some(duration) => {
                 self.notify(
@@ -559,7 +556,7 @@ impl<'a> Punisher<'a> {
             case.number,
             format!("removed by case #{}", case.number),
         )
-        .await;
+        .await?;
         Ok(case)
     }
 
@@ -612,10 +609,10 @@ impl<'a> Punisher<'a> {
         .await
         {
             Ok(skipped) => Ok((skipped > 0).then_some(Note::RolesNotStripped(skipped))),
-            // Nothing was taken off when the strip could not be remembered: logged, not refused.
+            // The roles that stayed on are not taken off silently: the caller is told.
             Err(error) => {
-                tracing::warn!(user = %target, %error, "could not take the roles off a punished member");
-                Ok(None)
+                tracing::error!(user = %target, %error, "could not take the roles off a punished member");
+                Err(error.into())
             }
         }
     }
@@ -784,35 +781,77 @@ impl<'a> Punisher<'a> {
 
     /// Revokes what the lift `lift` undoes: the case that `undoing` names, else the newest case of
     /// `kind` that stands, with `reason`. The undo button has always written `removed by case #N`
-    /// for a named case, whatever its kind.
-    async fn revoke_lifted(&self, target: UserId, kind: &str, lift: i64, reason: String) {
+    /// for a named case, whatever its kind. The Discord action is done already, so a revoke that
+    /// fails is logged and returned, not undone.
+    async fn revoke_lifted(
+        &self,
+        target: UserId,
+        kind: &str,
+        lift: i64,
+        reason: String,
+    ) -> Result<(), UserError> {
         match self.undoing {
             Some(number) => {
-                let _ = self
-                    .ctx
-                    .cases()
-                    .revoke(
-                        number,
-                        self.moderator.id,
-                        Some(format!("removed by case #{lift}")),
-                    )
-                    .await;
+                self.revoke_case(number, format!("removed by case #{lift}"))
+                    .await
             }
             None => self.revoke_latest(target, kind, reason).await,
         }
     }
 
-    /// Revokes the newest case of `kind` that still stands against `target`. Best effort: the
-    /// Discord action is done already.
-    async fn revoke_latest(&self, target: UserId, kind: &str, reason: String) {
-        if let Ok(cases) = active_cases(self.ctx.cases(), target, kind, self.ctx.now(), 1).await
-            && let Some(case) = cases.first()
+    /// Revokes the case `number` with `reason`. A failure is logged with the case number.
+    async fn revoke_case(&self, number: i64, reason: String) -> Result<(), UserError> {
+        if let Err(error) = self
+            .ctx
+            .cases()
+            .revoke(number, self.moderator.id, Some(reason))
+            .await
         {
-            let _ = self
-                .ctx
-                .cases()
-                .revoke(case.number, self.moderator.id, Some(reason))
-                .await;
+            tracing::error!(case = number, %error, "a lifted case could not be revoked");
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Revokes the newest case of `kind` that still stands against `target`, if there is one.
+    async fn revoke_latest(
+        &self,
+        target: UserId,
+        kind: &str,
+        reason: String,
+    ) -> Result<(), UserError> {
+        let standing = active_cases(self.ctx.cases(), target, kind, self.ctx.now(), 1).await?;
+        match standing.first() {
+            Some(case) => self.revoke_case(case.number, reason).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Records a ban that Discord has applied already. A recording that fails is tried again, up to
+    /// [`RECORD_ATTEMPTS`] times. When it still fails, the error says the ban went through without
+    /// its case, and the log records the member and the kind.
+    async fn record_ban(
+        &self,
+        target: UserId,
+        reason: Option<String>,
+        expires_at: Option<i64>,
+    ) -> Result<Case, UserError> {
+        let mut attempt = 1;
+        loop {
+            match self.record("ban", target, reason.clone(), expires_at).await {
+                Ok(case) => return Ok(case),
+                Err(error) if attempt < RECORD_ATTEMPTS => {
+                    tracing::warn!(user = %target, attempt, ?error, "a ban could not be recorded, trying again");
+                    attempt += 1;
+                }
+                Err(error) => {
+                    tracing::error!(user = %target, kind = "ban", ?error, "a ban went through but its case could not be recorded");
+                    return Err(ModuleError::other(format!(
+                        "the ban of {target} went through, but its case could not be recorded: {error:?}"
+                    ))
+                    .into());
+                }
+            }
         }
     }
 
@@ -926,15 +965,8 @@ fn count(len: usize) -> i64 {
     i64::try_from(len).unwrap_or(i64::MAX)
 }
 
-/// Whether a case of `kind` still stands at `now`: not revoked, and not past its expiry.
-fn stands(case: &Case, kind: &str, now: i64) -> bool {
-    case.kind.as_str() == kind
-        && case.revoked.is_none()
-        && case.expires_at.is_none_or(|at| at > now)
-}
-
-/// The cases of `kind` against `target` that still stand, newest first, at most `wanted`. Looks
-/// back over at most [`SCAN`] cases.
+/// The cases of `kind` against `target` that still stand at `now`, newest first, at most `wanted`.
+/// The search covers every case of the member: a case is not missed for being old.
 async fn active_cases(
     cases: &Cases,
     target: UserId,
@@ -942,20 +974,7 @@ async fn active_cases(
     now: i64,
     wanted: usize,
 ) -> Result<Vec<Case>, CaseError> {
-    let mut found = Vec::new();
-    let mut before = None;
-    let mut looked = 0;
-    while found.len() < wanted && looked < SCAN {
-        let page = cases.for_target(target, before, PAGE).await?;
-        looked += page.len();
-        before = page.last().map(|case| case.number);
-        found.extend(page.iter().filter(|case| stands(case, kind, now)).cloned());
-        if page.len() < PAGE {
-            break;
-        }
-    }
-    found.truncate(wanted);
-    Ok(found)
+    cases.standing(target, kind, now, wanted).await
 }
 
 /// Whether a case of `kind` other than `case` stands against `user` at the job's time. A ban lift

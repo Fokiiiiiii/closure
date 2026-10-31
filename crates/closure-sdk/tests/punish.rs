@@ -231,6 +231,22 @@ async fn undo_voice_unmute(cx: CommandCx, args: Undo) -> Result<(), UserError> {
     answer_case(&cx, case).await
 }
 
+/// A ban whose reason is not checked against the length a command option allows, so that its
+/// case cannot be recorded.
+#[derive(CommandArgs)]
+struct RawBan {
+    /// Member
+    user: UserId,
+    /// Why
+    reason: Option<String>,
+}
+
+async fn ban_raw(cx: CommandCx, args: RawBan) -> Result<(), UserError> {
+    let punisher = setup(&cx, Moderator::of(cx.user()))?;
+    let done = punisher.ban(args.user, None, 0, args.reason).await?;
+    answer(&cx, &punisher, done).await
+}
+
 fn module() -> ModuleBuilder {
     let builder = ModuleBuilder::new("punisher", "Punisher", "0.1.0")
         .unwrap()
@@ -267,7 +283,8 @@ fn module() -> ModuleBuilder {
         .command(
             Command::<Undo>::new("undo_vcunmute", "Lift a voice mute, undoing a case")
                 .handler(undo_voice_unmute),
-        );
+        )
+        .command(Command::<RawBan>::new("ban_raw", "Ban, reason unchecked").handler(ban_raw));
     punish::jobs(builder)
 }
 
@@ -2076,5 +2093,93 @@ async fn undoing_an_older_voice_mute_lifts_nothing_while_a_newer_one_stands() {
         cases_of(&harness, MEMBER).await.len(),
         2,
         "no lift recorded"
+    );
+}
+
+// ---- a failure is reported, not hidden: the lift, the recording and the roles ----
+
+#[tokio::test]
+async fn an_undo_of_a_case_already_revoked_is_reported_not_hidden() {
+    let harness = harness();
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
+    harness.cases().revoke(1, Id::new(BOT), None).await.unwrap();
+
+    let result = harness.invoke(undo_of("undo_unban", MEMBER, 1)).await;
+    assert!(result.is_err(), "the failed revoke is reported: {result:?}");
+}
+
+#[tokio::test]
+async fn a_ban_that_cannot_be_recorded_says_the_ban_went_through() {
+    let harness = harness();
+    // A reason longer than a case keeps: the recording fails after Discord has banned.
+    let reason = "a".repeat(513);
+    let result = harness
+        .invoke(with_reason(
+            target("ban_raw", MEMBER),
+            Some(reason.as_str()),
+        ))
+        .await;
+    let message = match result {
+        Err(error) => format!("{error:?}"),
+        Ok(replies) => panic!("the failure is reported, not answered: {replies:?}"),
+    };
+    assert!(message.contains("went through"), "{message}");
+    assert_eq!(sequence(&harness).last(), Some(&"ban"), "Discord banned");
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_role_timeout_whose_roles_cannot_be_read_fails_the_command() {
+    let harness = harness();
+    harness
+        .api()
+        .set_roles(Id::new(1), vec![guild_role(700, 1)]);
+    harness
+        .api()
+        .set_member(Id::new(1), member_with_roles(MEMBER, &[700]));
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30", "strip_remove": true }));
+    // The role is given first; the member read that takes the other roles off is the second call.
+    harness
+        .api()
+        .fail_nth(2, DiscordError::Forbidden("missing permission".to_owned()));
+
+    let result = harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await;
+    assert!(
+        role_changed(&harness, 30, true),
+        "the timeout role was given"
+    );
+    assert!(
+        result.is_err(),
+        "the roles left on are reported: {result:?}"
+    );
+}
+
+// ---- a timed ban lift looks past the newest cases for an older ban that stands ----
+
+#[tokio::test]
+async fn a_timed_ban_lift_finds_an_older_ban_behind_a_hundred_other_cases() {
+    let harness = harness();
+    other_module_case(&harness, "ban", MEMBER, None).await;
+    harness
+        .invoke(ban_of(MEMBER, Some("raid"), Some("1d"), None))
+        .await
+        .unwrap();
+    for _ in 0..120 {
+        other_module_case(&harness, "warn", MEMBER, None).await;
+    }
+
+    harness.advance(Duration::from_secs(DAY));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert!(
+        !sequence(&harness).contains(&"unban"),
+        "the older ban still stands: {:?}",
+        sequence(&harness)
     );
 }
