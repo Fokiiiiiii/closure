@@ -50,66 +50,19 @@ Show whether dry run is on and which rules run
 - Japanese name: `状態`
 - Japanese description: ドライランの設定と、動いているルールを表示します
 
-#### `/automod counters`
+#### `/automod counter`
 
-Look at and change the counters of automod
+
 
 - Japanese name: `カウンター`
-- Japanese description: automod のカウンターを見る・変更する
-
-##### `/automod counters view`
-
-Show the value of a counter
-
-- Japanese name: `view`
-- Japanese description: カウンターの値を表示する
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `counter` | counter | string | yes | - | The counter |
-| `user` | user | user | no | - | The member the counter is kept for |
-| `channel` | channel | channel | no | - | The channel the counter is kept for |
-
-##### `/automod counters set`
-
-Set the value of a counter
-
-- Japanese name: `set`
-- Japanese description: カウンターの値を設定する
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `counter` | counter | string | yes | - | The counter |
-| `value` | value | integer | yes | - | The new value |
-| `user` | user | user | no | - | The member the counter is kept for |
-| `channel` | channel | channel | no | - | The channel the counter is kept for |
-
-##### `/automod counters add`
-
-Add to a counter
-
-- Japanese name: `add`
-- Japanese description: カウンターに加算する
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `counter` | counter | string | yes | - | The counter |
-| `amount` | amount | integer | yes | - | How much to add; a negative number takes away |
-| `user` | user | user | no | - | The member the counter is kept for |
-| `channel` | channel | channel | no | - | The channel the counter is kept for |
-
-##### `/automod counters reset`
-
-Put a counter back to its start
-
-- Japanese name: `reset`
-- Japanese description: カウンターを初期値に戻す
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `counter` | counter | string | yes | - | The counter |
-| `user` | user | user | no | - | The member the counter is kept for; with no scope given, every scope is reset |
-| `channel` | channel | channel | no | - | The channel the counter is kept for; with no scope given, every scope is reset |
+| `counter` | カウンター | string | yes | - |  |
+| `action` | 操作 | string | yes | choices: view = view, set = set, add = add, reset = reset |  |
+| `value` | 値 | integer | no | - |  |
+| `user` | ユーザー | user | no | - |  |
+| `channel` | チャンネル | channel | no | - |  |
 
 #### `/automod antiraid`
 

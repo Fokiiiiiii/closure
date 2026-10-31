@@ -15,47 +15,19 @@ use crate::context::{Context, Who};
 use crate::counter::{self, Missing, Op};
 use crate::engine::{self, Loaded, State};
 
+/// `/automod counter`: a counter, what to do with it, and the member or channel it is kept for.
 #[derive(CommandArgs)]
-pub struct View {
+pub struct CounterArgs {
     /// The counter
     pub counter: String,
-    /// The member the counter is kept for
+    /// What to do: view the counter, set it to a value, add to it, or reset it to its start
+    #[arg(choices = ["view", "set", "add", "reset"])]
+    pub action: String,
+    /// The value to set, or the amount to add (a negative number takes away); not needed for view or reset
+    pub value: Option<i64>,
+    /// The member the counter is kept for; with reset and no scope given, every scope is reset
     pub user: Option<UserId>,
-    /// The channel the counter is kept for
-    pub channel: Option<ChannelId>,
-}
-
-#[derive(CommandArgs)]
-pub struct Set {
-    /// The counter
-    pub counter: String,
-    /// The new value
-    pub value: i64,
-    /// The member the counter is kept for
-    pub user: Option<UserId>,
-    /// The channel the counter is kept for
-    pub channel: Option<ChannelId>,
-}
-
-#[derive(CommandArgs)]
-pub struct Add {
-    /// The counter
-    pub counter: String,
-    /// How much to add; a negative number takes away
-    pub amount: i64,
-    /// The member the counter is kept for
-    pub user: Option<UserId>,
-    /// The channel the counter is kept for
-    pub channel: Option<ChannelId>,
-}
-
-#[derive(CommandArgs)]
-pub struct Reset {
-    /// The counter
-    pub counter: String,
-    /// The member the counter is kept for; with no scope given, every scope is reset
-    pub user: Option<UserId>,
-    /// The channel the counter is kept for; with no scope given, every scope is reset
+    /// The channel the counter is kept for; with reset and no scope given, every scope is reset
     pub channel: Option<ChannelId>,
 }
 
@@ -75,68 +47,83 @@ pub struct AntiraidRelease {
     pub user: UserId,
 }
 
-pub async fn view(state: Arc<State>, cx: CommandCx, args: View) -> Result<(), UserError> {
-    let loaded = load(&state, &cx)?;
-    let def = match lookup(&loaded, &cx, &args.counter) {
+/// `/automod counter`: looks at, sets, adds to, or resets a counter, as the action says.
+pub async fn counter(state: Arc<State>, cx: CommandCx, args: CounterArgs) -> Result<(), UserError> {
+    let CounterArgs {
+        counter,
+        action,
+        value,
+        user,
+        channel,
+    } = args;
+    match (action.as_str(), value) {
+        ("view", _) => view(&state, &cx, &counter, user, channel).await,
+        ("reset", _) => reset(&state, &cx, &counter, user, channel).await,
+        ("set", Some(value)) => change(&state, &cx, &counter, user, channel, Op::Set(value)).await,
+        ("add", Some(amount)) => {
+            change(&state, &cx, &counter, user, channel, Op::Add(amount)).await
+        }
+        ("set" | "add", None) => {
+            cx.reply_private_t("counter-value-needed", &Args::new())
+                .await
+        }
+        _ => {
+            cx.reply_private_t("counter-action-unknown", &Args::new())
+                .await
+        }
+    }
+}
+
+async fn view(
+    state: &State,
+    cx: &CommandCx,
+    name: &str,
+    user: Option<UserId>,
+    channel: Option<ChannelId>,
+) -> Result<(), UserError> {
+    let loaded = load(state, cx)?;
+    let def = match lookup(&loaded, cx, name) {
         Ok(def) => def,
         Err(text) => return cx.reply_private(text).await,
     };
-    let (user, channel) = scope_of(&def, args.user, args.channel);
-    if let Some(text) = missing(&cx, &def, user, channel) {
+    let (user, channel) = scope_of(&def, user, channel);
+    if let Some(text) = missing(cx, &def, user, channel) {
         return cx.reply_private(text).await;
     }
-    let counters = counters_of(&cx, &loaded)?;
+    let counters = counters_of(cx, &loaded)?;
     let value = counters
         .get(&def.name, channel, user, cx.now())
         .await
         .map_err(counter_error)?;
-    reply_value(&cx, &def.name, user, channel, value).await
+    reply_value(cx, &def.name, user, channel, value).await
 }
 
-pub async fn set(state: Arc<State>, cx: CommandCx, args: Set) -> Result<(), UserError> {
-    change(
-        &state,
-        &cx,
-        &args.counter,
-        args.user,
-        args.channel,
-        Op::Set(args.value),
-    )
-    .await
-}
-
-pub async fn add(state: Arc<State>, cx: CommandCx, args: Add) -> Result<(), UserError> {
-    change(
-        &state,
-        &cx,
-        &args.counter,
-        args.user,
-        args.channel,
-        Op::Add(args.amount),
-    )
-    .await
-}
-
-pub async fn reset(state: Arc<State>, cx: CommandCx, args: Reset) -> Result<(), UserError> {
-    let loaded = load(&state, &cx)?;
-    let def = match lookup(&loaded, &cx, &args.counter) {
+async fn reset(
+    state: &State,
+    cx: &CommandCx,
+    name: &str,
+    user: Option<UserId>,
+    channel: Option<ChannelId>,
+) -> Result<(), UserError> {
+    let loaded = load(state, cx)?;
+    let def = match lookup(&loaded, cx, name) {
         Ok(def) => def,
         Err(text) => return cx.reply_private(text).await,
     };
-    let counters = counters_of(&cx, &loaded)?;
-    let (user, channel) = scope_of(&def, args.user, args.channel);
-    if args.user.is_none() && args.channel.is_none() {
+    let counters = counters_of(cx, &loaded)?;
+    let (scoped_user, scoped_channel) = scope_of(&def, user, channel);
+    if user.is_none() && channel.is_none() {
         counters.reset_all(&def.name).await.map_err(counter_error)?;
     } else {
-        if let Some(text) = missing(&cx, &def, user, channel) {
+        if let Some(text) = missing(cx, &def, scoped_user, scoped_channel) {
             return cx.reply_private(text).await;
         }
         counters
-            .reset(&def.name, channel, user)
+            .reset(&def.name, scoped_channel, scoped_user)
             .await
             .map_err(counter_error)?;
     }
-    let scope = scope_label(&cx, user, channel);
+    let scope = scope_label(cx, scoped_user, scoped_channel);
     let text = cx.t(
         "counter-reset",
         &Args::new()

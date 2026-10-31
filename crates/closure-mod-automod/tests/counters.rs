@@ -46,11 +46,12 @@ fn scoped_to(mut invocation: Invocation, user: Option<u64>, channel: Option<u64>
     invocation
 }
 
-/// `/automod counters <sub> <counter>` run by a moderator.
+/// `/automod counter <counter> action:<sub>` run by a moderator.
 fn command(sub: &str, counter: &str) -> Invocation {
     Invocation::new("automod")
-        .subcommand(&format!("counters {sub}"))
+        .subcommand("counter")
         .option("counter", CommandOptionValue::String(counter.to_owned()))
+        .option("action", CommandOptionValue::String(sub.to_owned()))
         .roles([MODERATOR_ROLE])
 }
 
@@ -100,6 +101,23 @@ async fn add_to_counter_keeps_a_count_for_each_member() {
     assert_eq!(
         value(&harness, "strikes", Some(OTHER_MEMBER), None).await,
         1
+    );
+}
+
+#[tokio::test]
+async fn set_and_add_need_a_value_and_an_unknown_action_is_refused() {
+    let harness = with(json!({ "strikes": {} }), rules(&[]));
+    let replies = harness.invoke(command("set", "strikes")).await.unwrap();
+    assert!(
+        text_of(&replies).contains("Give a value"),
+        "{}",
+        text_of(&replies)
+    );
+    let replies = harness.invoke(command("bump", "strikes")).await.unwrap();
+    assert!(
+        text_of(&replies).contains("Choose view, set, add or reset"),
+        "{}",
+        text_of(&replies)
     );
 }
 
@@ -190,7 +208,7 @@ async fn add_and_set_change_the_value_the_view_shows() {
         .unwrap();
     harness
         .invoke(scoped_to(
-            command("add", "strikes").option("amount", CommandOptionValue::Integer(2)),
+            command("add", "strikes").option("value", CommandOptionValue::Integer(2)),
             Some(MEMBER),
             None,
         ))
@@ -228,7 +246,7 @@ async fn the_counter_commands_need_the_permission() {
     let refused = harness
         .invoke(
             scoped_to(
-                command("add", "strikes").option("amount", CommandOptionValue::Integer(5)),
+                command("add", "strikes").option("value", CommandOptionValue::Integer(5)),
                 Some(MEMBER),
                 None,
             )
@@ -483,7 +501,7 @@ async fn a_counter_trigger_fired_before_a_failing_action_still_runs_its_rule() {
 }
 
 #[tokio::test]
-async fn the_counters_are_a_group_of_automod_and_the_old_command_is_gone() {
+async fn the_counter_is_a_command_of_automod_and_the_old_group_is_gone() {
     let harness = with(json!({ "strikes": { "per_user": true } }), json!({}));
     let old = Invocation::new("automod-counters")
         .subcommand("view")

@@ -398,14 +398,15 @@ rules:
   levels of this are run; a trigger fired deeper is dropped and reported as an error.
 - At most 10 counters, each with at most 10 triggers.
 
-Counters are read and changed with `/automod counters`, by a member with the `automod.counters`
-permission (moderators by default):
+Counters are read and changed with `/automod counter`, by a member with the `automod.counters`
+permission (moderators by default). `action` is `view`, `set`, `add` or `reset`; `set` and `add` take a
+`value` (the new value, or the amount to add):
 
 ```text
-/automod counters view counter:strikes user:@member
-/automod counters set counter:strikes value:0 user:@member
-/automod counters add counter:strikes amount:2 user:@member
-/automod counters reset counter:strikes              (every scope, back to initial_value)
+/automod counter counter:strikes action:view user:@member
+/automod counter counter:strikes action:set value:0 user:@member
+/automod counter counter:strikes action:add value:2 user:@member
+/automod counter counter:strikes action:reset                  (every scope, back to initial_value)
 ```
 
 `view` shows the current value, with the decay that has passed. A change made by a command runs the
