@@ -139,7 +139,8 @@ impl MockApi {
             // A created role gets the next id, so a test can tell the roles it made apart.
             Action::CreateRole { guild_id, spec, .. } => {
                 let id = 500 + u64::try_from(lock(&self.actions).len()).unwrap_or(0);
-                let role = created_role(id, &spec.name);
+                let mut role = created_role(id, &spec.name);
+                role.colors.primary_color = spec.color;
                 lock(&self.roles)
                     .entry(*guild_id)
                     .or_default()

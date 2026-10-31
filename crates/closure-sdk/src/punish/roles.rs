@@ -7,7 +7,9 @@ use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use closure_core::action::{Action, NewRole, Outcome, OverwriteSpec, OverwriteTarget, Reason};
+use closure_core::action::{
+    Action, NewRole, Outcome, OverwriteSpec, OverwriteTarget, Reason, RolePatch,
+};
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{ChannelId, RoleId, UserId};
 use closure_core::locale::Args;
@@ -210,6 +212,37 @@ pub async fn ensure_role(
     result
 }
 
+/// Gives a remembered role the name and the colour of now, when they differ: a role made before the names
+/// were in the guild's language, or before the roles were red. A failure is logged, and the role is used as
+/// it is.
+async fn refresh(ctx: &EventContext, roles: &[Role], role: RoleId, name: &str) {
+    let Some(current) = roles.iter().find(|current| current.id == role) else {
+        return;
+    };
+    let colour = Color::Error.value();
+    if current.name == name && current.colors.primary_color == colour {
+        return;
+    }
+    let patch = RolePatch {
+        name: Some(name.to_owned()),
+        color: Some(colour),
+        ..RolePatch::default()
+    };
+    let reason = Reason::truncated(&ctx.t_core(ctx.locale, "role-updated-reason", &Args::new()));
+    if let Err(error) = ctx
+        .api
+        .execute(Action::EditRole {
+            guild_id: ctx.guild_id,
+            role_id: role,
+            patch,
+            reason,
+        })
+        .await
+    {
+        tracing::warn!(role = role.get(), %error, "could not update the name and colour of a restriction role");
+    }
+}
+
 async fn ensure_role_now(
     ctx: &EventContext,
     which: RestrictionRole,
@@ -232,6 +265,7 @@ async fn ensure_role_now(
         .filter(|id| roles.iter().any(|role| role.id == *id && safe(role)));
     let name = which.role_name(ctx);
     let role = if let Some(role) = kept {
+        refresh(ctx, &roles, role, &name).await;
         role
     } else if let Some(found) = roles
         .iter()

@@ -98,3 +98,4 @@ replay-direct-message = DM の宛先: { $user }
 role-name-timeout = ミュート
 role-name-voice = VCミュート
 role-name-quarantine = 隔離
+role-updated-reason = 制限に使うロールを Closure が更新しました。

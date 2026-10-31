@@ -65,7 +65,8 @@ well, to show the replies of this module to the invoking user only or to everyon
   off when the time is up. There is no 28-day limit. Without a configured role, Closure creates one
   the first time it is needed, and reuses it afterwards:
 
-  - The roles are named in the server's language: `Mute` and `VC mute` in English, `ミュート` and `VCミュート` in Japanese. They are red. A role with that name (without regard to case)
+  - The roles are named in the server's language: `Mute` and `VC mute` in English, `ミュート` and `VCミュート` in Japanese. They are red. A role the bot made under
+    the older names is renamed and made red the next time it is used. A role with that name (without regard to case)
     that already exists is used instead, so two modules of one server share one role. Only a safe one
     is used: no permissions at all, not managed by an integration, not @everyone, and below the bot's
     highest role. A same-named role that is not safe is ignored, and the module creates its own.

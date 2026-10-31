@@ -5,7 +5,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use closure_core::action::{Action, OverwriteTarget};
+use closure_core::action::{Action, Outcome, OverwriteTarget};
+use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
 use closure_core::event::Event;
 use closure_sdk::punish::{self, RestrictionRole, channel_created, ensure_role};
@@ -687,4 +688,52 @@ async fn restriction_roles_are_created_red() {
         })
         .collect();
     assert_eq!(colors, [0x00F0_4747, 0x00F0_4747]);
+}
+
+#[tokio::test]
+async fn a_role_made_under_the_old_names_is_renamed_and_made_red_when_used_again() {
+    let harness = Harness::new(module(None)).unwrap();
+    harness.config_changed().await.unwrap();
+    let Outcome::Roles(roles) = harness
+        .api()
+        .execute(Action::ListRoles {
+            guild_id: Id::new(GUILD),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("the roles are listed");
+    };
+    // The roles as an older version named them, with no colour.
+    let older: Vec<Role> = roles
+        .into_iter()
+        .map(|mut role| {
+            role.name = match role.name.as_str() {
+                "Mute" => "Timed out".to_owned(),
+                _ => "Voice muted".to_owned(),
+            };
+            role.colors.primary_color = 0;
+            role
+        })
+        .collect();
+    harness.api().set_roles(Id::new(GUILD), older);
+
+    harness.config_changed().await.unwrap();
+
+    let edits: Vec<(String, Option<u32>)> = harness
+        .api()
+        .actions()
+        .into_iter()
+        .filter_map(|action| match action {
+            Action::EditRole { patch, .. } => Some((patch.name.unwrap_or_default(), patch.color)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        edits,
+        [
+            ("Mute".to_owned(), Some(0x00F0_4747)),
+            ("VC mute".to_owned(), Some(0x00F0_4747)),
+        ]
+    );
 }

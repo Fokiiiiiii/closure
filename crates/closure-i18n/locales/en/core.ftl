@@ -110,3 +110,4 @@ replay-direct-message = DM to { $user }
 role-name-timeout = Mute
 role-name-voice = VC mute
 role-name-quarantine = Quarantine
+role-updated-reason = Closure updated the role that restrictions give.
