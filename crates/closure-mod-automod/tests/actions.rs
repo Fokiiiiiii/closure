@@ -368,6 +368,48 @@ fn the_role_settings_of_automod_take_false_true_or_role_ids() {
     assert!(!accepted(json!({ "restore_roles_on_mute": ["role"] })));
 }
 
+#[test]
+fn a_regex_that_does_not_compile_is_refused_at_the_path_of_its_rule() {
+    let registry = std::sync::Arc::new(
+        closure_core::registry::ModuleRegistry::new(vec![std::sync::Arc::new(
+            closure_mod_automod::module().unwrap(),
+        )
+            as std::sync::Arc<dyn closure_core::module::Module>])
+        .unwrap(),
+    );
+    let compiler = closure_config::ConfigCompiler::new(registry).unwrap();
+    // The problems of a document: none when it is accepted.
+    let problems = |trigger: Value| {
+        let config = json!({
+            "rules": { "spoiler": { "triggers": [trigger], "actions": [{ "do": "delete" }] } }
+        });
+        let yaml = format!(
+            "modules:\n  automod:\n    config: {}\n",
+            serde_json::to_string(&config).unwrap()
+        );
+        match compiler.compile(&closure_config::parse_overrides(&yaml).unwrap()) {
+            Ok(_) => Vec::new(),
+            Err(error) => error.issues().to_vec(),
+        }
+    };
+    let at_rule = "modules.automod.config.rules.spoiler";
+    assert!(problems(json!({ "type": "regex", "patterns": ["spo+iler"] })).is_empty());
+    assert!(problems(json!({ "type": "links", "include_regex": ["^https://"] })).is_empty());
+
+    let broken = problems(json!({ "type": "regex", "patterns": ["("] }));
+    assert!(
+        broken.iter().any(|issue| issue.path.starts_with(at_rule)),
+        "{broken:?}"
+    );
+    let broken_link = problems(json!({ "type": "links", "include_regex": ["("] }));
+    assert!(
+        broken_link
+            .iter()
+            .any(|issue| issue.path.starts_with(at_rule)),
+        "{broken_link:?}"
+    );
+}
+
 #[tokio::test]
 async fn kick_kicks_the_member_and_records_a_kick_case() {
     let harness = with_rules(spoiler_rule(json!([{ "do": "kick" }])));

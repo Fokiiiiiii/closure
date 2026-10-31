@@ -72,12 +72,13 @@ impl ConfigCompiler {
                     message,
                 }
             })?;
-            let validator =
-                jsonschema::validator_for(&manifest.config_schema).map_err(|error| {
-                    ConfigError::BadModuleSchema {
-                        module: manifest.id.to_string(),
-                        message: error.to_string(),
-                    }
+            // Formats are checked too, so a `regex` that does not compile is refused as a problem.
+            let validator = jsonschema::options()
+                .should_validate_formats(true)
+                .build(&manifest.config_schema)
+                .map_err(|error| ConfigError::BadModuleSchema {
+                    module: manifest.id.to_string(),
+                    message: error.to_string(),
                 })?;
             validators.insert(manifest.id.clone(), validator);
         }

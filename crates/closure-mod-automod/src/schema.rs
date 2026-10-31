@@ -299,7 +299,7 @@ fn trigger() -> Value {
             "regex",
             json!({
                 "patterns": { "type": "array", "minItems": 1, "maxItems": 20,
-                              "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+                              "items": { "type": "string", "minLength": 1, "maxLength": 200, "format": "regex" } },
                 "case_sensitive": { "type": "boolean" },
                 "normalize": { "type": "boolean" },
                 "strip_markdown": { "type": "boolean" },
@@ -316,9 +316,9 @@ fn trigger() -> Value {
                 "include_subdomains": { "type": "boolean" },
                 "only_real_links": { "type": "boolean" },
                 "include_regex": { "type": "array", "maxItems": 50,
-                                   "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+                                   "items": { "type": "string", "minLength": 1, "maxLength": 200, "format": "regex" } },
                 "exclude_regex": { "type": "array", "maxItems": 50,
-                                   "items": { "type": "string", "minLength": 1, "maxLength": 200 } }
+                                   "items": { "type": "string", "minLength": 1, "maxLength": 200, "format": "regex" } }
             }),
             &[],
         ),
