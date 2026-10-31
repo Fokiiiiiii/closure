@@ -1,10 +1,10 @@
-//! Replays the actions of a test run as messages on a test server (see `docs/preview.md`).
+//! Replays the showcase of a test run as messages on a test server (see `docs/preview.md`).
 //!
-//! The dumps are written by closure-core while `CLOSURE_DUMP_DIR` is set. Only what the bot says is
-//! posted, without mentions: the text of messages, of direct messages (under a `DM to` line) and of
-//! replies. Each message starts with the test that made it. Messages that only repeat a kind already
-//! posted, that are too short to read, or that carry the test fixtures' ids are left out. Operations
-//! that say nothing on their own (role changes, bans, timeouts, deletions) are counted instead.
+//! The dumps are written by closure-core while `CLOSURE_DUMP_DIR` is set. Only the tests whose names
+//! start with `showcase::` make the showcase, and the messages they produce are posted as they are,
+//! without mentions. Direct messages are posted under a `DM to` line. Messages that repeat a kind
+//! already posted, that are too short to read, or that carry the test fixtures' ids are left out, as
+//! are the actions that say nothing on their own (role changes, bans, timeouts, deletions).
 //!
 //! The token is `DISCORD_TOKEN`, read the way the bot reads it: from the environment, or from
 //! `.env` when that file exists. The token is never printed.
@@ -26,6 +26,8 @@ use twilight_model::id::Id;
 
 /// The variable the bot reads its token from.
 pub(crate) const TOKEN_VARIABLE: &str = "DISCORD_TOKEN";
+/// The name prefix of the tests that make the showcase.
+const SHOWCASE_PREFIX: &str = "showcase::";
 /// How much of a message's opening tells its kind apart from another message of the same kind.
 const TEMPLATE_CHARS: usize = 25;
 /// Messages with less text than this are left out: they are progress lines or test values.
@@ -41,6 +43,8 @@ pub struct Plan {
     pub posts: Vec<Action>,
     /// Actions that are not messages, counted by kind (`add_role`, `respond/defer`, ...).
     pub skipped: BTreeMap<String, usize>,
+    /// Actions of tests outside the showcase.
+    pub outside: usize,
     /// Messages of a kind that an earlier message already showed (see `template_key`).
     pub similar: usize,
     /// Messages with too little text to read.
@@ -89,6 +93,7 @@ fn replay(dir: &Path, channel_id: u64, token: Option<String>) -> Result<bool> {
     let Plan {
         posts,
         skipped,
+        outside,
         similar,
         short,
         fixtures,
@@ -117,8 +122,8 @@ fn replay(dir: &Path, channel_id: u64, token: Option<String>) -> Result<bool> {
 
     let not_messages: usize = skipped.values().sum();
     println!(
-        "sent {} of {total} message(s); left out {similar} similar, {short} too short, \
-         {fixtures} with test ids, {not_messages} that are not messages",
+        "sent {} of {total} message(s); left out {outside} outside the showcase, {similar} similar, \
+         {short} too short, {fixtures} with test ids, {not_messages} that are not messages",
         total - failures
     );
     Ok(failures == 0)
@@ -176,10 +181,14 @@ pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) ->
             .to_owned();
         let action: Action = serde_json::from_value(value)
             .with_context(|| format!("line {number}: not a recorded action"))?;
+        if !test.starts_with(SHOWCASE_PREFIX) {
+            plan.outside += 1;
+            continue;
+        }
         match step(action, &kind, channel) {
             Step::Send { post, key } => {
                 if seen.insert(key) {
-                    plan.posts.push(named(*post, &test));
+                    plan.posts.push(*post);
                 } else {
                     plan.similar += 1;
                 }
@@ -190,22 +199,6 @@ pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) ->
         }
     }
     Ok(plan)
-}
-
-/// The message with the test that made it written before its text, so that a reader can tell where
-/// it came from. A message without a test name is sent as it is.
-fn named(mut post: Action, test: &str) -> Action {
-    if test.is_empty() {
-        return post;
-    }
-    if let Action::SendMessage { content, .. } = &mut post {
-        let label = format!("テスト `{test}`");
-        *content = Some(match content.take() {
-            Some(body) => format!("{label}\n{body}"),
-            None => label,
-        });
-    }
-    post
 }
 
 /// The key of a message's kind: the opening of its text with every number masked, so that a
@@ -365,8 +358,11 @@ mod tests {
         ChannelId::new(100)
     }
 
+    /// The line a showcase test records for `action`.
     fn line(action: &Action) -> String {
-        serde_json::to_string(action).unwrap()
+        let mut value = serde_json::to_value(action).unwrap();
+        value["test"] = json!("showcase::example");
+        value.to_string()
     }
 
     fn sent(text: &str) -> Action {
@@ -531,18 +527,15 @@ mod tests {
     }
 
     #[test]
-    fn a_message_is_prefixed_with_the_test_that_made_it() {
-        let mut value = serde_json::to_value(sent("Muted for 10 minutes in voice")).unwrap();
-        value["test"] = json!("client::tests::example");
+    fn only_the_showcase_is_posted() {
+        let mut other = serde_json::to_value(sent("Banned for 10 minutes in voice")).unwrap();
+        other["test"] = json!("client::tests::example");
+        let showcase = line(&sent("Muted for 10 minutes in voice"));
 
-        let plan = plan([value.to_string().as_str()], channel()).unwrap();
+        let plan = plan([other.to_string().as_str(), showcase.as_str()], channel()).unwrap();
 
-        assert_eq!(
-            plan.posts,
-            vec![sent(
-                "テスト `client::tests::example`\nMuted for 10 minutes in voice"
-            )]
-        );
+        assert_eq!(plan.posts, vec![sent("Muted for 10 minutes in voice")]);
+        assert_eq!(plan.outside, 1);
     }
 
     #[test]

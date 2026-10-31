@@ -49,7 +49,7 @@ async fn a_reply_carries_the_embed() {
     let embed = &replies[0].embeds[0];
     assert_eq!(embed.title.as_deref(), Some("t"));
     assert_eq!(embed.fields.len(), 1);
-    assert_eq!(embed.color, Some(0x00FE_E75C));
+    assert_eq!(embed.color, Some(0x00FA_A61A));
 }
 
 #[tokio::test]

@@ -14,8 +14,8 @@ use closure_sdk::embed::truncate;
 use closure_sdk::punish::Method;
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{
-    Args, Color, CommandCx, ComponentCx, Cx, EmbedBuilder, InteractionRef, InteractionReply,
-    ModuleError, Reason, Span, Tone, UserError, UserId,
+    Args, Case, Color, CommandCx, ComponentCx, Cx, EmbedBuilder, InteractionRef, InteractionReply,
+    ModuleError, Reason, Span, UserError, UserId, modlog,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -231,14 +231,6 @@ pub(crate) fn text_reply(text: String) -> Result<InteractionReply, UserError> {
     embed_reply(Color::Info, text)
 }
 
-/// The reply of an action that went through: the Success tone, with the guild's emoji in front.
-pub(crate) fn success_reply<I: InteractionRef + 'static>(
-    cx: &Cx<I>,
-    text: String,
-) -> Result<InteractionReply, UserError> {
-    embed_reply(Color::Success, cx.tone_text(Tone::Success, text))
-}
-
 fn embed_reply(color: Color, text: String) -> Result<InteractionReply, UserError> {
     let embed = EmbedBuilder::new()
         .description(text)
@@ -330,10 +322,14 @@ pub(crate) async fn punish(
         return Ok(());
     };
     let done = carry_out(cx, config, punishment).await?;
+    let embed = modlog::embed(cx.ctx(), &done.case)
+        .description(done.text)
+        .build()?;
     cx.reply_with(InteractionReply {
+        embeds: vec![embed],
         components: undo::row(done.undo),
         ephemeral: true,
-        ..success_reply(cx, done.text)?
+        ..InteractionReply::default()
     })
     .await
 }
@@ -368,9 +364,15 @@ pub(crate) async fn pick(cx: ComponentCx) -> Result<(), UserError> {
         template
     };
     let done = carry_out(&cx, &config, punishment.filled(&template)).await?;
-    let mut reply = success_reply(&cx, done.text)?;
-    reply.components = undo::row(done.undo);
-    cx.update(reply).await
+    let embed = modlog::embed(cx.ctx(), &done.case)
+        .description(done.text)
+        .build()?;
+    cx.update(InteractionReply {
+        embeds: vec![embed],
+        components: undo::row(done.undo),
+        ..InteractionReply::default()
+    })
+    .await
 }
 
 /// The template's reason with `{user}`, `{moderator}` and `{server}` filled in. The server's name is
@@ -422,6 +424,7 @@ fn expand(text: &str, values: &[(&str, String)]) -> String {
 /// A punishment's reply as text, and the undo button that lifts the punishment again.
 pub(crate) struct Carried {
     pub(crate) text: String,
+    pub(crate) case: Case,
     pub(crate) undo: Option<Component>,
 }
 
@@ -480,13 +483,11 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
         text.push('\n');
         text.push_str(&history::line(cx, before));
     }
-    Ok(Carried {
-        text,
-        undo: punishment
-            .kind
-            .undo()
-            .map(|kind| undo::button(cx, kind, user, case.number)),
-    })
+    let undo = punishment
+        .kind
+        .undo()
+        .map(|kind| undo::button(cx, kind, user, case.number));
+    Ok(Carried { text, case, undo })
 }
 
 /// The settings of the templates.

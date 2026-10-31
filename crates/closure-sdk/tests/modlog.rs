@@ -307,13 +307,13 @@ async fn the_color_and_title_follow_the_kind() {
     let harness = Harness::new(module()).unwrap();
     harness.set_log_channel(77);
     let kinds = [
-        ("warn", 0x00FE_E75C, "Warning"),
-        ("timeout", 0x00FE_E75C, "Timeout"),
-        ("kick", 0x00FE_E75C, "Kick"),
-        ("ban", 0x00ED_4245, "Ban"),
-        ("unban", 0x0057_F287, "Unban"),
-        ("note", 0x0058_65F2, "Note"),
-        ("custom", 0x0058_65F2, "custom"),
+        ("warn", 0x00FA_A61A, "Warning"),
+        ("timeout", 0x00FA_A61A, "Timeout"),
+        ("kick", 0x00FA_A61A, "Kick"),
+        ("ban", 0x00F0_4747, "Ban"),
+        ("unban", 0x0043_B581, "Unban"),
+        ("note", 0x002B_2D31, "Note"),
+        ("custom", 0x002B_2D31, "custom"),
     ];
     for (kind, _, _) in kinds {
         harness.invoke(record("log", kind)).await.unwrap();

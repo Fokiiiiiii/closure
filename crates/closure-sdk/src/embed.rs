@@ -33,10 +33,10 @@ pub enum Color {
 impl Color {
     fn value(self) -> u32 {
         match self {
-            Self::Success => 0x0057_F287,
-            Self::Warning => 0x00FE_E75C,
-            Self::Error => 0x00ED_4245,
-            Self::Info => 0x0058_65F2,
+            Self::Success => 0x0043_B581,
+            Self::Warning => 0x00FA_A61A,
+            Self::Error => 0x00F0_4747,
+            Self::Info => 0x002B_2D31,
             Self::Rgb(value) => value,
         }
     }
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(embed.title.as_deref(), Some("title"));
         assert_eq!(embed.description.as_deref(), Some("description"));
         assert_eq!(embed.url.as_deref(), Some("https://example.com"));
-        assert_eq!(embed.color, Some(0x00FE_E75C));
+        assert_eq!(embed.color, Some(0x00FA_A61A));
         assert_eq!(
             embed.fields,
             vec![EmbedField {
@@ -382,10 +382,10 @@ mod tests {
                 .unwrap()
                 .color
         };
-        assert_eq!(value(Color::Success), Some(0x0057_F287));
-        assert_eq!(value(Color::Warning), Some(0x00FE_E75C));
-        assert_eq!(value(Color::Error), Some(0x00ED_4245));
-        assert_eq!(value(Color::Info), Some(0x0058_65F2));
+        assert_eq!(value(Color::Success), Some(0x0043_B581));
+        assert_eq!(value(Color::Warning), Some(0x00FA_A61A));
+        assert_eq!(value(Color::Error), Some(0x00F0_4747));
+        assert_eq!(value(Color::Info), Some(0x002B_2D31));
         assert_eq!(value(Color::Rgb(0xFF_FFFF)), Some(0xFF_FFFF));
     }
 

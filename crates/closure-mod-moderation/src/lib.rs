@@ -579,7 +579,9 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
         &notes,
     );
     text.extend(escalation.map(|line| format!("\n{line}")));
+    let embed = modlog::embed(cx.ctx(), &case).description(text).build()?;
     cx.reply_with(InteractionReply {
+        embeds: vec![embed],
         components: undo::row(Some(undo::button(
             &cx,
             undo::Kind::Warn,
@@ -587,7 +589,7 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
             case.number,
         ))),
         ephemeral: true,
-        ..templates::success_reply(&cx, text)?
+        ..InteractionReply::default()
     })
     .await
 }

@@ -374,21 +374,21 @@ async fn a_warning_is_posted_to_the_log_channel_when_there_is_one() {
 // ---- tones ----
 
 #[tokio::test]
-async fn a_confirmed_punishment_is_a_success_with_the_guild_emoji_and_a_list_stays_info() {
-    const SUCCESS_COLOUR: u32 = 0x0057_F287;
-    const INFO_COLOUR: u32 = 0x0058_65F2;
+async fn a_punishment_is_a_case_card_in_the_colour_of_its_kind_and_a_list_stays_info() {
+    const WARNING_COLOUR: u32 = 0x00FA_A61A;
+    const INFO_COLOUR: u32 = 0x002B_2D31;
     let harness = harness();
     let warned = harness.invoke(warn(MEMBER, Some("tone"))).await.unwrap();
     assert_eq!(
         answer(&warned).embeds[0].color,
-        Some(SUCCESS_COLOUR),
+        Some(WARNING_COLOUR),
         "{warned:?}"
     );
     assert!(
         answer(&warned).embeds[0]
-            .description
+            .title
             .as_deref()
-            .is_some_and(|text| text.starts_with("✅ ")),
+            .is_some_and(|title| title.contains("Case #1")),
         "{warned:?}"
     );
     let timed = harness
@@ -397,7 +397,7 @@ async fn a_confirmed_punishment_is_a_success_with_the_guild_emoji_and_a_list_sta
         .unwrap();
     assert_eq!(
         answer(&timed).embeds[0].color,
-        Some(SUCCESS_COLOUR),
+        Some(WARNING_COLOUR),
         "{timed:?}"
     );
     let listed = harness.invoke(warnings(MEMBER)).await.unwrap();
@@ -1227,7 +1227,7 @@ async fn every_action_is_posted_to_the_log_under_its_kind() {
             "Case #5 · Unban",
         ]
     );
-    assert_eq!(embeds[1].color, Some(0x0057_F287), "the lift is green");
+    assert_eq!(embeds[1].color, Some(0x0043_B581), "the lift is green");
 }
 
 #[tokio::test]

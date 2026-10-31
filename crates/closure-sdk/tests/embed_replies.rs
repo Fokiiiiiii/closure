@@ -8,10 +8,10 @@ use closure_sdk::{Command, ModuleBuilder, Tone, UserError};
 use serde::Deserialize;
 use serde_json::json;
 
-const INFO: u32 = 0x0058_65F2;
-const SUCCESS: u32 = 0x0057_F287;
-const WARNING: u32 = 0x00FE_E75C;
-const ERROR: u32 = 0x00ED_4245;
+const INFO: u32 = 0x002B_2D31;
+const SUCCESS: u32 = 0x0043_B581;
+const WARNING: u32 = 0x00FA_A61A;
+const ERROR: u32 = 0x00F0_4747;
 
 const EN: &str = "
 secret = Only for you.
