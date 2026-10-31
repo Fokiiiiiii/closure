@@ -36,6 +36,8 @@ const DAY: i64 = 86_400;
 const POSTPONE: Duration = Duration::from_secs(600);
 /// How many times a ban's case is recorded before the ban is reported as unrecorded.
 const RECORD_ATTEMPTS: usize = 3;
+/// The case number of a ban whose case could not be recorded. No case has it.
+const UNRECORDED_CASE: i64 = 0;
 /// How many role ids a member's stripped roles are remembered with, at most.
 pub(super) const STRIP_LIMIT: usize = 250;
 
@@ -430,17 +432,26 @@ impl<'a> Punisher<'a> {
             )
             .await?;
         let expires_at = duration.map(|duration| self.ctx.now() + secs(duration));
-        let case = self.record_ban(target, reason, expires_at).await?;
+        let recorded = self.record_ban(target, reason, expires_at).await;
         // A new ban replaces the timer of an earlier one, which would lift this ban too early.
         let _ = self.ctx.scheduler().cancel(&unban_key(target)).await;
-        // The ban holds even when its timer cannot be set; the note says so.
+        // The ban holds even when its case is not recorded, so its timer is set all the same.
         let timer = match duration {
-            Some(duration) => schedule_unban(self.ctx, target, case.number, duration)
-                .await
-                .is_err()
-                .then_some(Note::NoUnbanTimer),
+            Some(duration) => {
+                let case = recorded
+                    .as_ref()
+                    .map_or(UNRECORDED_CASE, |case| case.number);
+                match schedule_unban(self.ctx, target, case, duration).await {
+                    Ok(()) => None,
+                    Err(error) => {
+                        tracing::error!(user = %target, ?error, "a timed ban has no unban timer");
+                        Some(Note::NoUnbanTimer)
+                    }
+                }
+            }
             None => None,
         };
+        let case = recorded?;
         Ok(Done {
             case,
             notes: [note, timer].into_iter().flatten().collect(),
@@ -870,7 +881,8 @@ impl<'a> Punisher<'a> {
     }
 }
 
-/// The payload of an `unban` job: the member, and the case of the ban it lifts.
+/// The payload of an `unban` job: the member, and the case of the ban it lifts, or
+/// [`UNRECORDED_CASE`] when that case could not be recorded.
 #[derive(Debug, Serialize, Deserialize)]
 struct Unban {
     user: u64,
@@ -1066,7 +1078,10 @@ async fn lift_ban(cx: JobCx) -> Result<(), ModuleError> {
     if another_stands(cx.ctx(), user, "ban", payload.case).await? {
         return Ok(());
     }
-    let reason = Reason::truncated(&format!("the ban of case #{} ran out", payload.case));
+    let reason = Reason::truncated(&match payload.case {
+        UNRECORDED_CASE => "the ban ran out".to_owned(),
+        case => format!("the ban of case #{case} ran out"),
+    });
     match cx.api().unban(cx.guild_id(), user, reason).await {
         Ok(()) | Err(DiscordError::NotFound) => Ok(()),
         Err(error) => Err(ModuleError::Discord(error)),

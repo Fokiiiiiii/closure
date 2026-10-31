@@ -292,6 +292,17 @@ fn harness() -> Harness {
     Harness::new(module()).unwrap()
 }
 
+/// A module that can ban but has no cases: a ban goes through, and its case cannot be recorded.
+fn module_without_cases() -> ModuleBuilder {
+    let builder = ModuleBuilder::new("no_cases", "No cases", "0.1.0")
+        .unwrap()
+        .capability(Capability::BanMembers)
+        .capability(Capability::Schedule)
+        .config(json!({ "type": "object", "properties": {} }), json!({}))
+        .command(Command::<Ban>::new("ban", "Ban").handler(ban));
+    punish::jobs(builder)
+}
+
 fn target(name: &str, user: u64) -> Invocation {
     Invocation::new(name).option("user", CommandOptionValue::User(Id::new(user)))
 }
@@ -1000,6 +1011,38 @@ async fn a_ban_for_good_that_replaces_a_timed_one_drops_its_timer() {
         .await
         .unwrap();
     assert_eq!(harness.jobs(), 0, "the old timer would lift the new ban");
+}
+
+#[tokio::test]
+async fn a_timed_ban_is_still_timed_when_its_case_cannot_be_recorded() {
+    let harness = Harness::new(module_without_cases()).unwrap();
+    assert!(
+        harness
+            .invoke(ban_of(MEMBER, Some("raid"), Some("1d"), None))
+            .await
+            .is_err(),
+        "the reply says the case could not be recorded"
+    );
+    assert!(sequence(&harness).contains(&"ban"), "the ban went through");
+    assert_eq!(harness.jobs(), 1, "the ban still has its timer");
+}
+
+/// The timer of a ban whose case was not recorded lifts the ban when it is due.
+#[tokio::test]
+async fn a_timer_of_an_unrecorded_ban_lifts_it_when_due() {
+    let harness = harness();
+    harness
+        .scheduler()
+        .job("unban", &json!({ "user": MEMBER, "case": 0 }))
+        .unwrap()
+        .key(&format!("unban:{MEMBER}"))
+        .after(Duration::from_secs(60))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(60));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.len() == 1 && ended[0].is_ok(), "{ended:?}");
+    assert_eq!(sequence(&harness), ["unban"]);
 }
 
 #[tokio::test]
