@@ -84,7 +84,12 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .capability(Capability::SendMessages)
             .capability(Capability::ReadMessageHistory)
             .capability(Capability::KeepAttachments)
-            .intents(Intents::GUILD_MESSAGES | Intents::GUILD_MEMBERS | Intents::GUILD_MODERATION)
+            .intents(
+                Intents::GUILD_MESSAGES
+                    | Intents::GUILD_MEMBERS
+                    | Intents::GUILD_MODERATION
+                    | Intents::MESSAGE_CONTENT,
+            )
             .on(Subscription::new(EventKind::MessageUpdated), on_event)
             .on(Subscription::new(EventKind::MessageDeleted), on_event)
             .on(Subscription::new(EventKind::MessagesBulkDeleted), on_event)

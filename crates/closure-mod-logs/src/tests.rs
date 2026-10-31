@@ -402,6 +402,13 @@ fn the_module_reads_the_history_and_keeps_files_it_asks_for() {
     assert!(capabilities.contains(Capability::ReadMessageHistory));
     assert!(capabilities.contains(Capability::KeepAttachments));
 }
+#[test]
+fn the_module_asks_for_message_content_so_that_it_can_post_the_text() {
+    let module = module().unwrap();
+
+    assert!(module.manifest().intents.contains(Intents::MESSAGE_CONTENT));
+}
+
 
 #[test]
 fn both_languages_define_the_same_messages() {
