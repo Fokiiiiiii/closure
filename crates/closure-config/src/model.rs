@@ -59,6 +59,10 @@ fn optional_prefix_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema
 /// The longest a text command's message or its reply may wait before it is deleted: a day.
 pub(crate) const MAX_DELETE_AFTER_SECONDS: u32 = 86_400;
 
+/// How long a text command's reply stays when the guild sets no delay for it: about the time a moderator
+/// needs to read it.
+pub(crate) const DEFAULT_REPLY_DELETE_AFTER_SECONDS: u32 = 30;
+
 fn optional_delete_after_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "anyOf": [{

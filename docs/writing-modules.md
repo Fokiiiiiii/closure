@@ -663,13 +663,16 @@ registered for it: a module needs no extra code.
   duration or span with spaces needs quotes unless it is the last option.
 - **Attachments** come with the message, in order; a text command takes no words for them.
 - **Usage.** Words that do not fit (a missing required option, a bad value, extra words) are answered
-  with a short usage line such as `Usage: !warn <user> [reason]`, in the guild's language, sent
-  privately as an `ephemeral` reply is; nothing runs. A command word that names no enabled command is ignored: the message is just chat.
-- **Replies.** A reply is sent as a reply to the message that asked, with no mentions. `defer` sends
-  nothing, and the first `edit_response` sends the reply; later edits change it (for 15 minutes).
-  An `ephemeral` reply is sent to the author's direct messages, so that nobody else in the channel
-  sees it. When the author does not accept direct messages, the reply is not sent and the failure is
-  logged.
+  with a short usage line such as `Usage: !warn <user> [reason]`, in the guild's language, in the channel.
+  The line is taken back after 30 seconds, and nothing runs. A command word that names no enabled
+  command is ignored: the message is just chat.
+- **Replies.** A reply is sent as a reply to the message that asked, with no mentions, and it is taken
+  back after the guild's reply delay (30 seconds unless set). `defer` sends nothing, and the first
+  `edit_response` sends the reply; later edits change it (for 15 minutes).
+- **Private replies.** An `ephemeral` reply is sent to the author's direct messages, so that nobody else
+  in the channel sees it. When Discord refuses the direct message, the author is told in the channel, in
+  the guild's language, to allow direct messages from the server or to use the slash command; that notice
+  is taken back after 30 seconds.
 - **Forms.** A modal cannot be shown to a text command. The module gets its answer, and the author is
   told in the guild's language to use the slash command.
 - **What the host does not know.** The invoker's permissions are computed from the cache: the owner

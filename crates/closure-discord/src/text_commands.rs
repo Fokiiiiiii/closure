@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use closure_core::action::{Action, InteractionReply, InteractionResponse, Outcome, Reason};
+use closure_core::action::{Action, InteractionResponse, MentionPolicy, Outcome, Reason};
 use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
 use closure_core::event::{
@@ -459,6 +459,10 @@ pub(crate) fn invoker_permissions(cache: &InMemoryCache, message: &MessageInfo) 
     }
 }
 
+/// How long a notice about a text command stays in the channel, for the invoker to read. Prefix
+/// replies are taken back after it, unless the guild sets its own delay for them.
+pub(crate) const NOTICE_LIFETIME: Duration = Duration::from_secs(30);
+
 /// The audit log reason of the messages a guild's text-command delays delete.
 const CLEANUP_REASON: &str = "Text command cleanup";
 
@@ -538,6 +542,57 @@ impl TextCommandApi {
         }
     }
 
+    fn locale_of(&self, token: &InteractionToken) -> Locale {
+        self.interactions
+            .guild_of(token)
+            .map_or(Locale::DEFAULT, |guild| self.settings.locale(guild))
+    }
+
+    /// The token of a reply that the invoker of a text command gets privately: a message or a
+    /// follow-up that is ephemeral, or an edit of such a reply.
+    fn answer_of(action: &Action) -> Option<InteractionToken> {
+        let (token, private) = match action {
+            Action::Respond {
+                token,
+                response: InteractionResponse::Message { reply },
+                ..
+            }
+            | Action::Followup { token, reply }
+            | Action::EditResponse { token, reply } => (token, reply.ephemeral),
+            _ => return None,
+        };
+        (private && token.text_command_message().is_some()).then(|| token.clone())
+    }
+
+    /// Posts `text` in the channel of a text command, as a reply to the command, and takes it back
+    /// after `NOTICE_LIFETIME`. A notice is what the host says about a command: nothing in it is
+    /// private.
+    async fn notice(
+        &self,
+        token: &InteractionToken,
+        text: &str,
+        color: u32,
+    ) -> Result<Outcome, DiscordError> {
+        let Some((channel, invoker)) = token.text_command_message() else {
+            return Ok(Outcome::None);
+        };
+        let outcome = self
+            .inner
+            .execute(Action::SendMessage {
+                channel_id: channel,
+                content: None,
+                embeds: vec![notice::embed(text, color)],
+                reply_to: Some(invoker),
+                mentions: MentionPolicy::default(),
+            })
+            .await?;
+        if let Outcome::Message(sent) = &outcome {
+            let reason = Reason::new(CLEANUP_REASON)?;
+            self.delete_after(channel, sent.id, NOTICE_LIFETIME, reason);
+        }
+        Ok(outcome)
+    }
+
     fn delete_after(
         &self,
         channel: ChannelId,
@@ -570,41 +625,46 @@ impl DiscordApi for TextCommandApi {
     async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
         match action {
             Action::Respond {
-                interaction_id,
                 token,
                 response: InteractionResponse::Modal(_),
+                ..
             } if token.text_command_message().is_some() => {
-                let locale = self
-                    .interactions
-                    .guild_of(&token)
-                    .map_or(Locale::DEFAULT, |guild| self.settings.locale(guild));
+                let locale = self.locale_of(&token);
                 let content = self.translator.translate(
                     locale,
                     CORE_NAMESPACE,
                     "text-command-forms",
                     &Args::new(),
                 );
-                let reply = InteractionReply {
-                    embeds: vec![notice::embed(&content, notice::INFO)],
-                    ephemeral: true,
-                    ..InteractionReply::default()
-                };
-                self.inner
-                    .execute(Action::Respond {
-                        interaction_id,
-                        token,
-                        response: InteractionResponse::Message { reply },
-                    })
-                    .await
+                self.notice(&token, &content, notice::INFO).await
             }
             other => {
-                let Some(deletions) = self.deletions(&other) else {
-                    return self.inner.execute(other).await;
-                };
+                let answered_in_private = Self::answer_of(&other);
+                let deletions = self.deletions(&other);
                 let reason = Reason::new(CLEANUP_REASON)?;
-                let outcome = self.inner.execute(other).await?;
-                self.schedule_deletions(&deletions, &reason, &outcome);
-                Ok(outcome)
+                match self.inner.execute(other).await {
+                    Ok(outcome) => {
+                        if let Some(deletions) = &deletions {
+                            self.schedule_deletions(deletions, &reason, &outcome);
+                        }
+                        Ok(outcome)
+                    }
+                    // Discord refuses a direct message to someone who does not accept them. The answer
+                    // cannot reach the invoker, so they are told in the channel instead.
+                    Err(error) => match answered_in_private {
+                        Some(token) if matches!(error, DiscordError::Forbidden(_)) => {
+                            let content = self.translator.translate(
+                                self.locale_of(&token),
+                                CORE_NAMESPACE,
+                                "text-command-private-refused",
+                                &Args::new(),
+                            );
+                            self.notice(&token, &content, notice::WAIT).await?;
+                            Ok(Outcome::None)
+                        }
+                        _ => Err(error),
+                    },
+                }
             }
         }
     }

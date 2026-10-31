@@ -15,14 +15,14 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use closure_core::action::{Action, InteractionReply, InteractionResponse, Outcome, Reason};
+use closure_core::action::{Action, InteractionReply, MentionPolicy, Outcome, Reason};
 use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::cases::{Case, CaseBackend, CaseError, Cases, MemoryCases, NewCase};
 use closure_core::client::{ApiClient, DiscordApi};
-use closure_core::error::{DiscordError, ModuleError};
+use closure_core::error::ModuleError;
 use closure_core::event::{
     AutocompleteInvocation, CommandInvocation, ContextTarget, Event, GuildId, InteractionRef,
-    MessageInfo, UserId,
+    InteractionToken, MessageInfo, UserId,
 };
 use closure_core::history::{HistoryBackend, MemoryHistory, MessageHistory};
 use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
@@ -49,18 +49,15 @@ use twilight_model::id::Id;
 
 use crate::breaker::{Breaker, BreakerConfig, Ticket};
 use crate::notice;
-use crate::text_commands::{Reader, Reading, TextCommandApi};
+use crate::text_commands::{NOTICE_LIFETIME, Reader, Reading, TextCommandApi};
 
 /// How long `shutdown` waits for lanes to stop once they were told to abort.
 /// Most usage lines answered at once. A usage line costs a Discord call, so an answer past this is
 /// dropped rather than queued: a flood of incomplete commands must not spawn a task for each.
 const MAX_USAGE_REPLIES: usize = 16;
 
-/// Most notices that a text command's private answer could not be sent, shown at once.
-const MAX_PRIVATE_NOTICES: usize = 16;
-
-/// How long such a notice stays in the channel before it is taken back.
-const PRIVATE_NOTICE_LIFETIME: Duration = Duration::from_secs(30);
+/// Most notices about text commands shown at once.
+const MAX_NOTICES: usize = 16;
 
 const HARD_STOP_WAIT: Duration = Duration::from_secs(2);
 
@@ -262,8 +259,8 @@ struct Shared {
     pending_total: AtomicUsize,
     /// The answers to incomplete text commands still allowed to run at once.
     usage_replies: Arc<Semaphore>,
-    /// The notices, shown in the channel, that a private answer to a text command was not sent.
-    private_notices: Arc<Semaphore>,
+    /// The notices about text commands that are shown in their channels.
+    notices: Arc<Semaphore>,
     closing: AtomicBool,
     cancel: CancellationToken,
     /// Cancelled when the grace period of `shutdown` ran out: lanes stop taking work and running
@@ -519,7 +516,7 @@ impl Dispatcher {
             wedged: DashMap::new(),
             pending_total: AtomicUsize::new(0),
             usage_replies: Arc::new(Semaphore::new(MAX_USAGE_REPLIES)),
-            private_notices: Arc::new(Semaphore::new(MAX_PRIVATE_NOTICES)),
+            notices: Arc::new(Semaphore::new(MAX_NOTICES)),
             closing: AtomicBool::new(false),
             cancel: CancellationToken::new(),
             abort: CancellationToken::new(),
@@ -1432,6 +1429,12 @@ async fn reply(shared: &Shared, invocation: &dyn InteractionRef, message: String
 
 /// [`reply`] as an embed of `color`.
 async fn reply_in(shared: &Shared, invocation: &dyn InteractionRef, message: String, color: u32) {
+    // A text command has no interaction to answer privately: what the host says about it is a notice in
+    // the channel, which is taken back after a while.
+    if invocation.token().text_command_message().is_some() {
+        notice_in_channel(shared, invocation.token(), message, color);
+        return;
+    }
     let granted: CapabilitySet = [Capability::RespondToInteractions].into_iter().collect();
     let client = ApiClient::new(Arc::clone(&shared.api), granted, ModuleId::system());
     let reply = InteractionReply {
@@ -1447,70 +1450,51 @@ async fn reply_in(shared: &Shared, invocation: &dyn InteractionRef, message: Str
             Ok(())
         }
     };
-    let text_command = invocation.token().text_command_message().is_some();
     match tokio::time::timeout(REPLY_TIMEOUT, attempt).await {
         Ok(Ok(())) => {}
-        // Discord refuses a direct message to someone who does not accept them: the invoker is told
-        // in the channel, since the answer itself cannot reach them.
-        Ok(Err(error)) if text_command && matches!(error, DiscordError::Forbidden(_)) => {
-            tracing::debug!(%error, "could not send a text command's private answer");
-            notice_private_refused(shared, invocation);
-        }
-        // A text command's reply is refused in a channel the bot may not write to: nothing to act on.
-        Ok(Err(error)) if text_command => {
-            tracing::debug!(%error, "could not reply to a text command");
-        }
         Ok(Err(error)) => tracing::warn!(%error, "could not tell the user a command failed"),
         Err(_) => tracing::warn!("timed out telling the user a command failed"),
     }
 }
 
-/// Puts a notice in the channel in place of a private answer to a text command that Discord would not
-/// deliver. The notice names no content and is taken back after `PRIVATE_NOTICE_LIFETIME`; at most
-/// `MAX_PRIVATE_NOTICES` are shown at once, and past that one is skipped.
-fn notice_private_refused(shared: &Shared, invocation: &dyn InteractionRef) {
+/// Posts a host notice in the channel of a text command, as a reply to the command, and takes it back
+/// after `NOTICE_LIFETIME`. At most `MAX_NOTICES` are shown at once; past that one is skipped.
+fn notice_in_channel(shared: &Shared, token: &InteractionToken, message: String, color: u32) {
     if shared.closing.load(Ordering::Acquire) {
         return;
     }
-    let Ok(place) = Arc::clone(&shared.private_notices).try_acquire_owned() else {
-        tracing::debug!("too many notices of refused private answers are shown; one is skipped");
+    let Some((channel, invoker)) = token.text_command_message() else {
         return;
     };
-    let locale = invocation
-        .locale()
-        .unwrap_or_else(|| shared.settings.locale(invocation.guild_id()));
-    let message = text(shared, locale, "text-command-private-refused");
-    let show = Action::Respond {
-        interaction_id: invocation.interaction_id(),
-        token: invocation.token().clone(),
-        response: InteractionResponse::Message {
-            reply: InteractionReply {
-                content: None,
-                embeds: vec![notice::embed(&message, notice::WAIT)],
-                components: Vec::new(),
-                ephemeral: false,
-            },
-        },
+    let Ok(place) = Arc::clone(&shared.notices).try_acquire_owned() else {
+        tracing::debug!("too many notices about text commands are shown; one is skipped");
+        return;
+    };
+    let show = Action::SendMessage {
+        channel_id: channel,
+        content: None,
+        embeds: vec![notice::embed(&message, color)],
+        reply_to: Some(invoker),
+        mentions: MentionPolicy::default(),
     };
     let api = Arc::clone(&shared.api);
     let cancel = shared.cancel.clone();
-    let channel_id = invocation.channel_id();
     shared.tracker.spawn(async move {
         let _place = place;
         let Ok(Outcome::Message(sent)) = api.execute(show).await else {
-            tracing::debug!("could not show the notice of a refused private answer");
+            tracing::debug!("could not show a notice about a text command");
             return;
         };
         tokio::select! {
             () = cancel.cancelled() => {}
-            () = tokio::time::sleep(PRIVATE_NOTICE_LIFETIME) => {
+            () = tokio::time::sleep(NOTICE_LIFETIME) => {
                 let take_back = Action::DeleteMessage {
-                    channel_id,
+                    channel_id: channel,
                     message_id: sent.id,
                     reason: Reason::truncated(&message),
                 };
                 if let Err(error) = api.execute(take_back).await {
-                    tracing::debug!(%error, "could not take back the notice of a refused private answer");
+                    tracing::debug!(%error, "could not take back a notice about a text command");
                 }
             }
         }

@@ -318,7 +318,14 @@ mod tests {
     fn the_guild_policy_follows_the_document() {
         let store = store();
         let guild = Id::new(1);
-        assert_eq!(*store.policy(guild), GuildPolicy::default());
+        // A guild with no document gets the defaults, which keep text command replies for 30 seconds.
+        assert_eq!(
+            *store.policy(guild),
+            GuildPolicy {
+                prefix_delete_reply_after: Some(std::time::Duration::from_secs(30)),
+                ..GuildPolicy::default()
+            }
+        );
 
         store
             .set_guild_yaml(guild, "log_channel: 99\nmoderator_roles: [5, 6]\n")
@@ -327,8 +334,8 @@ mod tests {
         assert_eq!(policy.log_channel, Some(Id::new(99)));
         assert!(policy.is_moderator(&[Id::new(6)]));
         assert_eq!(
-            *store.policy(Id::new(2)),
-            GuildPolicy::default(),
+            store.policy(Id::new(2)).log_channel,
+            None,
             "other guilds are unaffected"
         );
     }

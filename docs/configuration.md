@@ -20,7 +20,7 @@ moderator_roles: [111111111111111111, 222222222222222222]
 timezone: Asia/Tokyo       # the zone of a date typed without one
 prefix: "!"                # text commands; unset, they are off
 prefix_delete_command_after: 5   # delete a text command 5 seconds after its reply; unset, kept
-prefix_delete_reply_after: 30    # delete the reply 30 seconds after it is sent; unset, kept
+prefix_delete_reply_after: 30    # delete the reply 30 seconds after it is sent (the default)
 
 limits:                    # override single values of the preset
   handler_timeout_secs: 20
@@ -101,8 +101,9 @@ the slash command of the same name (`!warn @user spam`); see [text commands](wri
 An empty prefix is refused: leave the key out to turn text commands off.
 
 `prefix_delete_command_after` and `prefix_delete_reply_after` set the delays after which the message
-that ran a text command and its reply are deleted, each on its own. The bot may always delete its own
-reply. Deleting the command message needs the Manage Messages permission; without it the message is
+that ran a text command and its reply are deleted, each on its own. The reply is deleted after 30
+seconds unless the guild sets `prefix_delete_reply_after`; the command message is kept unless the guild
+sets `prefix_delete_command_after`. The bot may always delete its own reply. Deleting the command message needs the Manage Messages permission; without it the message is
 kept, and the failure is logged at debug level. A command whose answer is deferred and then sent by an
 edit is not covered: only an answer sent at once is.
 

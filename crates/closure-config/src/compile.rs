@@ -14,8 +14,9 @@ use twilight_model::id::Id;
 
 use crate::error::{ConfigError, Issue};
 use crate::model::{
-    CURRENT_VERSION, EffectiveConfig, GuildOverrides, GuildSettings, KeyOverride, LevelSetting,
-    MAX_DELETE_AFTER_SECONDS, ModuleEffective, ModuleOverride, Principals,
+    CURRENT_VERSION, DEFAULT_REPLY_DELETE_AFTER_SECONDS, EffectiveConfig, GuildOverrides,
+    GuildSettings, KeyOverride, LevelSetting, MAX_DELETE_AFTER_SECONDS, ModuleEffective,
+    ModuleOverride, Principals,
 };
 
 const MAX_MODERATOR_ROLES: usize = 100;
@@ -326,10 +327,13 @@ fn compile_policy_text(overrides: &GuildOverrides, issues: &mut Vec<Issue>) -> P
             overrides.prefix_delete_command_after,
             issues,
         ),
-        prefix_delete_reply_after: compile_delete_after(
-            "prefix_delete_reply_after",
-            overrides.prefix_delete_reply_after,
-            issues,
+        prefix_delete_reply_after: Some(
+            compile_delete_after(
+                "prefix_delete_reply_after",
+                overrides.prefix_delete_reply_after,
+                issues,
+            )
+            .unwrap_or(DEFAULT_REPLY_DELETE_AFTER_SECONDS),
         ),
         success_emoji: compile_emoji(
             "success_emoji",

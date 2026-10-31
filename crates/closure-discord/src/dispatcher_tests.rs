@@ -1223,6 +1223,14 @@ async fn a_module_can_only_do_what_it_was_granted() {
 }
 
 fn reply_text(action: &Action) -> (String, bool) {
+    // A notice about a text command is posted in its channel, so it is not private.
+    if let Action::SendMessage { embeds, .. } = action {
+        let text = embeds
+            .first()
+            .and_then(|embed| embed.description.clone())
+            .unwrap();
+        return (text, false);
+    }
     let Action::Respond {
         response: InteractionResponse::Message { reply },
         ..
@@ -2400,7 +2408,7 @@ async fn a_text_command_with_missing_words_is_answered_with_its_usage_and_runs_n
     assert_eq!(actions.len(), 1, "{actions:?}");
     assert_eq!(
         reply_text(&actions[0]),
-        ("使い方: !warn <user> [reason]".to_owned(), true)
+        ("使い方: !warn <user> [reason]".to_owned(), false)
     );
 }
 
@@ -2462,7 +2470,7 @@ async fn a_refused_text_command_is_explained_in_the_guilds_language() {
     assert_eq!(actions.len(), 1, "{actions:?}");
     assert_eq!(
         reply_text(&actions[0]),
-        ("I don't have permission to do that.".to_owned(), true)
+        ("I don't have permission to do that.".to_owned(), false)
     );
 }
 
@@ -2482,7 +2490,7 @@ async fn a_form_asked_for_by_a_text_command_becomes_a_notice_in_the_guilds_langu
         (
             "テキストコマンドではフォームを使えません。スラッシュコマンドを使ってください。"
                 .to_owned(),
-            true
+            false
         )
     );
 }
