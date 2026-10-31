@@ -227,8 +227,8 @@ async fn bulk_deleted(
     Ok(entries)
 }
 
-/// An edit: the text before and after it, the message, and the files the edit took away
-/// (`removed_attachments`).
+/// An edit: the message, its files, the files the edit took away (`removed_attachments`), and the
+/// text before the edit and after it.
 async fn edited(ctx: &EventContext, message: &MessageInfo) -> Result<LogEntry, ModuleError> {
     let removed =
         files::files_of_attachments(ctx, message.id, &message.removed_attachments).await?;
@@ -241,6 +241,12 @@ async fn edited(ctx: &EventContext, message: &MessageInfo) -> Result<LogEntry, M
         message.id.get(),
         message.created_at,
     );
+    let card = attachments_field(ctx, card, &message.attachments);
+    let card = if removed.is_empty() {
+        card
+    } else {
+        card.field(label(ctx, "logs-removed"), names(ctx, &removed), false)
+    };
     let card = match &message.previous_content {
         Some(before) => text_field(ctx, card, "logs-before", before),
         None => card.field(
@@ -250,19 +256,13 @@ async fn edited(ctx: &EventContext, message: &MessageInfo) -> Result<LogEntry, M
         ),
     };
     let card = text_field(ctx, card, "logs-after", &message.content);
-    let card = attachments_field(ctx, card, &message.attachments);
-    let card = if removed.is_empty() {
-        card
-    } else {
-        card.field(label(ctx, "logs-removed"), names(ctx, &removed), false)
-    };
     Ok(LogEntry {
         embed: build(card)?,
         files: removed.iter().filter_map(Kept::upload).collect(),
     })
 }
 
-/// A saved message with its author, channel, id, text and the files that were kept of it.
+/// A saved message with its author, channel, id, the files that were kept of it, and its text.
 fn saved_card(
     ctx: &EventContext,
     title: &str,
@@ -279,13 +279,13 @@ fn saved_card(
         saved.id.get(),
         saved.created_at,
     );
-    let card = text_field(ctx, card, "logs-content", &saved.content);
     let card = attachments_field(ctx, card, &saved.attachments);
-    if kept.is_empty() {
+    let card = if kept.is_empty() {
         card
     } else {
         card.field(label(ctx, "logs-files"), names(ctx, kept), false)
-    }
+    };
+    text_field(ctx, card, "logs-content", &saved.content)
 }
 
 /// A message's author, channel and id, and when it was sent. The card carries the time of the

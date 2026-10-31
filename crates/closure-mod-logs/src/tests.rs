@@ -105,6 +105,14 @@ fn edited(
     })
 }
 
+/// The edit as the recorder hands it on: the text it replaced is `previous`.
+fn replacing(mut event: Event, previous: &str) -> Event {
+    if let Event::MessageUpdated(info) = &mut event {
+        info.previous_content = Some(previous.into());
+    }
+    event
+}
+
 /// What the module posted: the channel, the text, the JSON of the embeds, and each file's name and bytes.
 struct Posted {
     channel: u64,
@@ -485,11 +493,123 @@ async fn showcase_an_edit_that_removes_a_picture_shows_the_picture() {
         .unwrap();
 
     harness
-        .emit(edited(31, "the new text", Vec::new(), vec![picture(4)]))
+        .emit(replacing(
+            edited(
+                31,
+                "写真を消して、文章だけ直しました。",
+                Vec::new(),
+                vec![picture(4)],
+            ),
+            "写真付きで投稿しました。",
+        ))
         .await
         .unwrap();
 
-    assert_eq!(sent(&harness).len(), 1);
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("photo.png"),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn showcase_a_deleted_message_shows_its_text_and_when_it_was_posted() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+    harness
+        .seed_message(saved(
+            20,
+            "明日の会議の資料を共有します。確認をお願いします。",
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+
+    harness.emit(deleted(20)).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("明日の会議の資料"),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn showcase_an_edit_shows_the_text_before_and_after_it() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+
+    harness
+        .emit(replacing(
+            edited(
+                21,
+                "明日の会議は十時からに変更します。",
+                Vec::new(),
+                Vec::new(),
+            ),
+            "明日の会議は九時からです。",
+        ))
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("九時からです"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("十時からに変更"),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn showcase_a_bulk_deletion_shows_a_summary_and_each_message_it_kept() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+    harness
+        .seed_message(saved(
+            22,
+            "来週の発表資料に差し替えをお願いします。",
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    harness
+        .seed_message(saved(23, "議事録のURLは後で共有します。", Vec::new()))
+        .await
+        .unwrap();
+
+    harness
+        .emit(Event::MessagesBulkDeleted {
+            guild_id: Id::new(GUILD),
+            channel_id: Id::new(CHANNEL),
+            message_ids: vec![Id::new(22), Id::new(23)],
+        })
+        .await
+        .unwrap();
+
+    // The entries without files share one message: the summary, then each message kept.
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("一括削除"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("差し替え"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(posted[0].embeds.contains("議事録"), "{}", posted[0].embeds);
 }
 
 /// A user id whose snowflake says the account was made at `unix_seconds`.
@@ -562,12 +682,13 @@ async fn a_deleted_message_shows_its_id_and_when_it_was_posted_and_is_stamped_wi
 #[tokio::test]
 async fn an_edit_shows_the_text_before_and_after_it() {
     let harness = harness();
-    let mut edit = edited(33, "the new text", Vec::new(), Vec::new());
-    if let Event::MessageUpdated(info) = &mut edit {
-        info.previous_content = Some("the old text".into());
-    }
-
-    harness.emit(edit).await.unwrap();
+    harness
+        .emit(replacing(
+            edited(33, "the new text", Vec::new(), Vec::new()),
+            "the old text",
+        ))
+        .await
+        .unwrap();
 
     let posted = sent(&harness);
     assert_eq!(posted.len(), 1, "{:?}", posted.len());
