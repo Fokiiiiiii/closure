@@ -276,12 +276,10 @@ mod tests {
 
     #[test]
     fn names_and_dotted_paths_are_replaced() {
-        let values = Values::new()
-            .with("user", user())
-            .with("server", "Zeppelin");
+        let values = Values::new().with("user", user()).with("server", "Example");
         assert_eq!(
             render("{server}: {user.name} is level {user.level}", &values),
-            Ok("Zeppelin: Ann is level 3".to_owned())
+            Ok("Example: Ann is level 3".to_owned())
         );
     }
 

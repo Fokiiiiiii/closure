@@ -1,6 +1,6 @@
 //! Recent actions: what members did in the last moments, kept in memory so a module can count a
 //! burst (messages, mentions, joins) and act once per burst. Nothing is persisted: a restart
-//! starts empty, as in Zeppelin.
+//! starts empty.
 //!
 //! A window starts inclusively: an action exactly `within` seconds old still counts. The
 //! filters gate a window: when the selected actions do not span enough distinct groups or

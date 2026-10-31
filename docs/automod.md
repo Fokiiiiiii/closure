@@ -520,7 +520,7 @@ one got in some other way.
 - `distinct_users`, thread parents for spam, presets, `changePerms`, `startThread` and
   `archiveThread`, coordinated spam, and the
   `match_visible_names` and `match_custom_status` matchers of the older automod are not in this
-  version (see [the parity list](zeppelin-parity.md)).
+  version (see [the parity list](parity.md)).
 - A slowmode is not set again to the same value within ten minutes; a different value is set at once.
 - The regexes are linear in the length of the text, and a rule's patterns are compiled once when it
   is read. The rules are read again whenever the configuration changes.

@@ -1,5 +1,5 @@
 //! Values for the usual contexts of a module: a user, a guild, a message. The names follow
-//! Zeppelin's where closure has the same data, and Discord ids are text, as they are there.
+//! the reference bot's where closure has the same data, and Discord ids are text, as they are there.
 
 use std::collections::BTreeMap;
 
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn a_guild_has_its_id_and_name() {
-        let values = Values::new().with("guild", guild(Id::new(9), "Zeppelin"));
-        assert_eq!(render("{guild.name} ({guild.id})", &values), "Zeppelin (9)");
+        let values = Values::new().with("guild", guild(Id::new(9), "Example"));
+        assert_eq!(render("{guild.name} ({guild.id})", &values), "Example (9)");
     }
 }

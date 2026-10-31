@@ -77,8 +77,7 @@ pub fn record(scan: &Scan<'_>, rule: &Rule, context: &Context, now: i64) {
 /// Decides whether a spam trigger trips on `message`. Only a new message counts.
 ///
 /// A burst that tripped marks the member's key as handled for the window: until it passes, the
-/// messages of that member join the burst (they are deleted, with no second punishment), as
-/// Zeppelin's spam trigger does.
+/// messages of that member join the burst (they are deleted, with no second punishment).
 pub fn evaluate(
     scan: &Scan<'_>,
     rule: &str,

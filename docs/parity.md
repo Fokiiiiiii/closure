@@ -1,11 +1,11 @@
-# Zeppelin parity
+# Parity with the reference bot
 
-The owner's TypeScript bot (a Zeppelin fork, `zeppelin-private`) is the reference for what closure's
+The owner's TypeScript bot is the reference for what closure's
 moderation modules should do: "basically the same spec". This is what that bot has, read from its
 source (`backend/src/plugins/*/types.ts`, `Automod/{triggers,actions}`), and where closure stands.
 It is a checklist, not a promise; the order of work is in [roadmap](roadmap.md).
 
-## Zeppelin's automod
+## The reference bot's automod
 
 A rule is an entry of a record (`rules: { my_filter: {...} }`) with:
 `enabled`, `pretty_name`, `presets`, `affects_bots`, `affects_self`, `conditions.member_age`
@@ -45,7 +45,7 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 
 ## Where closure stands
 
-| Zeppelin | closure |
+| Reference bot | closure |
 | --- | --- |
 | rule record, OR triggers, action map | list of rules, one check each, ordered actions |
 | `cooldown`, `allow_further_rules`, `conditions.member_age`, `affects_bots/self` | `cooldown` (per rule and member), `continue_after_match`, `scope` (channels, roles, bots, moderators, `member_age`). No `presets` |
@@ -61,10 +61,10 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | `antiraid_level` | `antiraid_level` (the level changed, to or from the levels named). Its context carries `{level}` and `{old}` |
 | 19 actions | `delete`, `purge`, `warn`, `timeout`, `kick`, `ban`, `reply` (with `auto_delete`), `alert`, `addRoles` (`add_roles`), `removeRoles` (`remove_roles`), `changeNickname` (`set_nickname`), `setSlowmode` (`slowmode`), `addToCounter` (`add_to_counter`), `setCounter` (`set_counter`), `setAntiraidLevel` (`set_antiraid_level`). Templates with `{user}`, `{rule}`, `{detail}` and more |
 | antiraid levels: `antiraid_levels` (none, low, medium, high, lockdown) with their slowmode, invite pause and quarantine | the module's `antiraid` section: named levels (the first is calm), per-level `slowmode` (restored when the level goes down), `pause_invites` (only when antiraid paused them), `quarantine` (new members of that level; the role is created as `Quarantine` when none is given, and it is never released automatically: `/automod antiraid release` or `release-all`), `notify_channel`; `/automod antiraid view\|set\|clear\|release\|release-all`. A timed level goes back to calm |
-| counters | the module's `counters`: per member, per channel or overall, lazy decay, triggers and reverses, changed by actions and by `/automod counters`. Zeppelin's counter commands are `/automod counters view\|set\|add\|reset` here |
+| counters | the module's `counters`: per member, per channel or overall, lazy decay, triggers and reverses, changed by actions and by `/automod counters`. The reference bot's counter commands are `/automod counters view\|set\|add\|reset` here |
 | message history for spam, `clean`, logs | available as the `message_history` capability: messages kept for `--message-history-days` (7 by default), with edits and deletions (see [writing modules](writing-modules.md#message-history)) |
 | `Logs` event log | the `logs` module: edits, deletions (with the text and attachments the history kept), joins, leaves and bans, to a channel. The old text of an edited message is not kept. Files are fetched when a deletion or an edit needs them, and kept as they arrive with `keep_attachments` (see [logs](logs.md)) |
-| Mutes / ModActions / Warnings message templates | fixed texts; `{user}` `{moderator}` `{server}` in templates. `closure_sdk::template` has `{name}` and `{a.b}` only, with no functions (Zeppelin's `if`, `plural`, `round`... are not ported) |
+| Mutes / ModActions / Warnings message templates | fixed texts; `{user}` `{moderator}` `{server}` in templates. `closure_sdk::template` has `{name}` and `{a.b}` only, with no functions (the reference bot's `if`, `plural`, `round`... are not ported) |
 | config overrides | closure-config has overrides |
 | text commands with a prefix (`!warn @user spam`) | `prefix` per guild; the words fill the options of the slash command of the same name, which runs with the same handler and checks (see [text commands](writing-modules.md#text-commands)) |
 
@@ -108,7 +108,7 @@ closure does without them.
 
 ## Deliberately not taken
 
-These are in Zeppelin and are left out on purpose, for now:
+These are in the reference bot and are left out on purpose, for now:
 
 - `presets`: a rule is written out in full; a preset would be a second source of truth.
 - `changePerms`: channel permission edits are a moderator's decision, not a rule's.

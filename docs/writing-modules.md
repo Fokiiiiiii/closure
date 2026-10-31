@@ -630,7 +630,7 @@ then `render(&values)`, or `template::render(text, &values)` in one step.
   another variable, are errors with their character position.
 - There are no functions. A render stops at 4,000 characters.
 - `template::values::user`, `guild` and `message` build the usual maps (ids are text, as in
-  Zeppelin); `Values::from_json` takes a JSON object of data.
+  the reference bot); `Values::from_json` takes a JSON object of data.
 
 ## More actions and their capabilities
 

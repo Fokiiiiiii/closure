@@ -1,6 +1,6 @@
 //! Counters: named integers kept per guild, and per channel or per user as the definition says,
 //! that decay over time and fire triggers when they cross a condition. The module's config gives
-//! the definitions; this keeps the values (Zeppelin's Counters plugin).
+//! the definitions; this keeps the values.
 //!
 //! Every change is one compare-and-set write of the scope's entry, so two handlers changing the
 //! same counter cannot lose an update. A conflict is retried a few times, then reported as
@@ -25,7 +25,7 @@ use closure_core::storage::{Expect, StorageError, Store, check_key};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// The largest value a counter holds, as in Zeppelin. Values are clamped to `0..=MAX`.
+/// The largest value a counter holds. Values are clamped to `0..=MAX`.
 pub const MAX_COUNTER_VALUE: i64 = 2_147_483_647;
 /// The longest counter name. The store key `counter:<name>:<channel>:<user>` must fit its limit.
 const MAX_NAME_CHARS: usize = 64;
@@ -113,7 +113,7 @@ impl Condition {
     }
 }
 
-/// Changes the counter by `amount` every `every`, as Zeppelin's `decay`.
+/// Changes the counter by `amount` every `every`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decay {
     pub amount: i64,
@@ -325,7 +325,7 @@ impl Counters {
     }
 
     /// The definition and the store key of one scope. Scopes the definition does not use are
-    /// left out of the key, as Zeppelin does.
+    /// left out of the key.
     fn locate(
         &self,
         name: &str,
