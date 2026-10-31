@@ -17,8 +17,7 @@ use closure_core::event::{
 use closure_core::locale::{Args, Locale};
 use closure_core::module::{
     ChoiceValue, CommandSpec, ContextCommandSpec, ContextKind, EventContext, Module, ModuleId,
-    ModuleManifest, OptionChoice, OptionKind, OptionSpec, SubcommandSpec, TEXTS_KEY, catalog_text,
-    resolve_descriptions,
+    ModuleManifest, OptionChoice, OptionKind, OptionSpec, SubcommandSpec, TEXTS_KEY,
 };
 use closure_core::permission::{PermissionKey, PermissionSpec};
 use closure_core::schedule::ScheduledJob;
@@ -833,20 +832,6 @@ impl ModuleBuilder {
         }
     }
 
-    /// Gives the schema's descriptions their text: the module's default language first, then the
-    /// SDK's own settings, which come from the core catalog.
-    fn resolve_schema_descriptions(manifest: &mut ModuleManifest) {
-        let default_source = manifest
-            .catalogs
-            .iter()
-            .find(|catalog| catalog.locale == Locale::DEFAULT)
-            .map(|catalog| catalog.source.clone())
-            .unwrap_or_default();
-        resolve_descriptions(&mut manifest.config_schema, &|key| {
-            catalog_text(&default_source, key).or_else(|| catalog_text(closure_i18n::CORE_EN, key))
-        });
-    }
-
     /// The module, or what is wrong with its declaration.
     pub fn build(mut self) -> Result<SdkModule, CoreError> {
         self.manifest.description = Self::module_description(&self.manifest);
@@ -921,7 +906,6 @@ impl ModuleBuilder {
                 );
             })
             .is_some();
-        Self::resolve_schema_descriptions(&mut self.manifest);
         if !added {
             self.problem.get_or_insert(
                 self.invalid(

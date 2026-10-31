@@ -236,10 +236,14 @@ fn push_configuration(out: &mut String, manifest: &ModuleManifest) {
         "Set under `modules.{}.config` in a server's configuration; see [configuration](../configuration.md).\n",
         manifest.id
     );
-    let properties = manifest
-        .config_schema
-        .get("properties")
-        .and_then(Value::as_object);
+    let mut schema = manifest.config_schema.clone();
+    closure_core::module::localize_descriptions(
+        &mut schema,
+        &manifest.catalogs,
+        Locale::DEFAULT,
+        &|key| closure_core::module::catalog_text(closure_i18n::CORE_EN, key),
+    );
+    let properties = schema.get("properties").and_then(Value::as_object);
     match properties {
         Some(properties) if !properties.is_empty() => {
             out.push_str(

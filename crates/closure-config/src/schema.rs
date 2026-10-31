@@ -26,6 +26,16 @@ pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> 
 /// [`document_schema`] for one view: the basic one keeps only the settings a simple form edits
 /// (see [`view`]), and is still a schema of an override, so the same contract holds for it.
 pub fn document_schema_for(registry: &ModuleRegistry, view: View) -> Result<Value, ConfigError> {
+    document_schema_in(registry, view, Locale::DEFAULT)
+}
+
+/// [`document_schema_for`] with the descriptions in `locale`; a setting with no text in it is described in
+/// the default language.
+pub fn document_schema_in(
+    registry: &ModuleRegistry,
+    view: View,
+    locale: Locale,
+) -> Result<Value, ConfigError> {
     let mut schema = serde_json::to_value(schemars::schema_for!(GuildOverrides))
         .map_err(|error| ConfigError::Serialize(error.to_string()))?;
     // The numbers of the document; what is an id (a string or a number) is not one of them.
@@ -56,7 +66,7 @@ pub fn document_schema_for(registry: &ModuleRegistry, view: View) -> Result<Valu
     let mut languages = vec![json!("auto")];
     languages.extend(Locale::ALL.iter().map(|locale| json!(locale.tag())));
 
-    let module_properties = module_entries(registry, view)?;
+    let module_properties = module_entries(registry, view, locale)?;
 
     if let Some(Value::Object(properties)) = schema.pointer_mut("/properties") {
         properties.insert(
@@ -91,10 +101,17 @@ pub fn document_schema_for(registry: &ModuleRegistry, view: View) -> Result<Valu
         root.insert("type".into(), json!(["object", "null"]));
     }
     // The descriptions name entries of the core catalog.
-    closure_core::module::resolve_descriptions(&mut schema, &|key| {
-        closure_core::module::catalog_text(closure_i18n::CORE_EN, key)
-    });
+    closure_core::module::resolve_descriptions(&mut schema, &core_lookup(locale));
     Ok(schema)
+}
+
+/// The text of a shared catalog key in `locale`; the English text where the locale has none.
+fn core_lookup(locale: Locale) -> impl Fn(&str) -> Option<String> {
+    let source = match locale {
+        Locale::Ja => closure_i18n::CORE_JA,
+        _ => closure_i18n::CORE_EN,
+    };
+    move |key| closure_core::module::catalog_text(source, key)
 }
 
 /// The published entry of each module, keyed by id. The basic view has no capabilities in it, and
@@ -102,16 +119,24 @@ pub fn document_schema_for(registry: &ModuleRegistry, view: View) -> Result<Valu
 fn module_entries(
     registry: &ModuleRegistry,
     view: View,
+    locale: Locale,
 ) -> Result<Map<String, Value>, ConfigError> {
     let mut module_properties = Map::new();
     for module in registry.iter() {
         let manifest = module.manifest();
+        let mut config_schema = manifest.config_schema.clone();
+        closure_core::module::localize_descriptions(
+            &mut config_schema,
+            &manifest.catalogs,
+            locale,
+            &core_lookup(locale),
+        );
         let module_id = manifest.id.to_string();
         let refuse = |message: String| ConfigError::BadModuleSchema {
             module: module_id.clone(),
             message,
         };
-        check_supported(&manifest.config_schema).map_err(refuse)?;
+        check_supported(&config_schema).map_err(refuse)?;
         let mut properties = Map::new();
         // The parser also reads `"yes"` and the like as a boolean.
         properties.insert(
@@ -137,8 +162,8 @@ fn module_entries(
             );
         }
         let config = match view {
-            View::Advanced => Some(published_config_schema(&module_id, &manifest.config_schema)),
-            View::Basic => view::basic_schema(&manifest.config_schema, false)
+            View::Advanced => Some(published_config_schema(&module_id, &config_schema)),
+            View::Basic => view::basic_schema(&config_schema, false)
                 .map(|basic| published_config_schema(&module_id, &basic)),
         };
         if let Some(config) = config {
@@ -1936,5 +1961,23 @@ mod tests {
             }
         }))
         .unwrap();
+    }
+
+    #[test]
+    fn the_schema_in_japanese_describes_the_settings_in_japanese() {
+        let japanese = document_schema_in(&registry(), View::Advanced, Locale::Ja).unwrap();
+        let english = document_schema(&registry()).unwrap();
+        assert_eq!(
+            japanese.pointer("/properties/language/description"),
+            Some(&json!(
+                "ボットのメッセージの言語。`auto` はサーバーのコミュニティの言語に従います。"
+            ))
+        );
+        assert_eq!(
+            english.pointer("/properties/language/description"),
+            Some(&json!(
+                "Language of the bot's messages; `auto` follows the server's community locale."
+            ))
+        );
     }
 }

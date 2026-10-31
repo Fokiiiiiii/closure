@@ -971,6 +971,27 @@ pub fn resolve_descriptions(
     }
 }
 
+/// Gives the descriptions of a schema their text in `locale`: the module's own catalog in that locale, then
+/// its default catalog, then the shared `core` text. A key with no text stays as it is.
+pub fn localize_descriptions(
+    schema: &mut serde_json::Value,
+    catalogs: &[Catalog],
+    locale: Locale,
+    core: &dyn Fn(&str) -> Option<String>,
+) {
+    let text_in = |wanted: Locale, key: &str| {
+        catalogs
+            .iter()
+            .find(|catalog| catalog.locale == wanted)
+            .and_then(|catalog| catalog_text(&catalog.source, key))
+    };
+    resolve_descriptions(schema, &|key| {
+        text_in(locale, key)
+            .or_else(|| text_in(Locale::DEFAULT, key))
+            .or_else(|| core(key))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

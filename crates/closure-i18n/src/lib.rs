@@ -20,7 +20,7 @@ use unic_langid::LanguageIdentifier;
 pub const CORE_NAMESPACE: &str = "core";
 
 pub const CORE_EN: &str = include_str!("../locales/en/core.ftl");
-const CORE_JA: &str = include_str!("../locales/ja/core.ftl");
+pub const CORE_JA: &str = include_str!("../locales/ja/core.ftl");
 
 #[derive(Debug, thiserror::Error)]
 pub enum I18nError {

@@ -162,7 +162,9 @@ second window. A new `handler_timeout_secs` and `queue_capacity` apply to the ne
 
 ## Checking a document
 
-`GET /v1/schema` returns the JSON Schema of the whole document, including every module's section.
+`GET /v1/schema` returns the JSON Schema of the whole document, including every module's section. Its
+descriptions are in English unless `?locale=ja` asks for Japanese; a setting with no Japanese text is
+in English.
 A document holds only what differs from the defaults, so the published schema is the one of an
 **override**, made from each module's own schema. Its contract: it never rejects an override
 that the bot accepts. It may let one through that the bot then refuses, because the bot judges

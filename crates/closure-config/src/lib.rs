@@ -20,7 +20,7 @@ pub use model::{
     CURRENT_VERSION, EffectiveConfig, GuildOverrides, GuildSettings, Language, Limits,
     LimitsOverride, ModuleEffective, ModuleOverride, Preset,
 };
-pub use schema::{document_schema, document_schema_for};
+pub use schema::{document_schema, document_schema_for, document_schema_in};
 pub use store::SettingsStore;
 pub use view::{BASIC_KEYS, View, basic_view, merge_basic};
 pub use yaml::{effective_to_yaml, overrides_to_yaml, parse_overrides};

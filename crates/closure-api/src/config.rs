@@ -86,6 +86,7 @@ fn expected_revision(headers: &HeaderMap) -> Result<Option<i64>, ApiError> {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ViewQuery {
     view: Option<String>,
+    locale: Option<String>,
 }
 
 /// Advanced unless asked otherwise, so a request that names no view behaves as it always did.
@@ -94,6 +95,16 @@ pub(crate) fn view_of(query: &ViewQuery) -> Result<View, ApiError> {
         None => Ok(View::Advanced),
         Some(name) => View::parse(name)
             .ok_or_else(|| ApiError::BadRequest("view must be `basic` or `advanced`".into())),
+    }
+}
+
+/// The language of the descriptions a read shows; English unless asked for another one that exists.
+pub(crate) fn locale_of(query: &ViewQuery) -> Result<closure_core::locale::Locale, ApiError> {
+    match query.locale.as_deref() {
+        None => Ok(closure_core::locale::Locale::DEFAULT),
+        Some(tag) => tag.parse().map_err(|_| {
+            ApiError::BadRequest("locale must be a language tag the bot speaks".into())
+        }),
     }
 }
 

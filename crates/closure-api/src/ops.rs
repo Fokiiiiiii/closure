@@ -56,6 +56,9 @@ pub(crate) async fn schema(
     Query(query): Query<ViewQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let view = view_of(&query)?;
+    let locale = crate::config::locale_of(&query)?;
     let registry = state.inner.settings.compiler().registry();
-    Ok(Json(closure_config::document_schema_for(registry, view)?))
+    Ok(Json(closure_config::document_schema_in(
+        registry, view, locale,
+    )?))
 }
