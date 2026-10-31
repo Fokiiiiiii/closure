@@ -1322,6 +1322,57 @@ async fn unknown_commands_are_answered_instead_of_ignored() {
     assert_eq!(h.api.actions().len(), 1);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_command_still_waiting_in_its_lane_at_the_deadline_is_answered_busy_and_not_run() {
+    let module = Probe::with_command("warn", "warn");
+    let gate = Arc::new(Semaphore::new(0));
+    module.set(Behavior::Gate(Arc::clone(&gate)));
+    let mut patient = limits(64, 4);
+    patient.handler_timeout = Duration::from_secs(30);
+    let h = harness(&[(&module, true)], patient, DispatcherConfig::default()).await;
+    let loaded = module.log().len();
+
+    h.dispatcher.dispatch(command("warn", Some(Locale::En)));
+    h.dispatcher.dispatch(command("warn", Some(Locale::En)));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // The second command is answered while the first still runs.
+    let actions = h.api.actions();
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    let (text, ephemeral) = reply_text(&actions[0]);
+    assert!(text.contains("busy"), "{text}");
+    assert!(ephemeral);
+
+    gate.add_permits(10);
+    h.dispatcher.flush().await;
+    assert_eq!(module.log().len(), loaded + 1, "only the first command ran");
+    assert_eq!(
+        h.api.actions().len(),
+        1,
+        "the late command is not answered twice"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_command_that_starts_before_the_deadline_is_not_answered_busy() {
+    let module = Probe::with_command("warn", "warn");
+    let gate = Arc::new(Semaphore::new(0));
+    module.set(Behavior::Gate(Arc::clone(&gate)));
+    let mut patient = limits(64, 4);
+    patient.handler_timeout = Duration::from_secs(30);
+    let h = harness(&[(&module, true)], patient, DispatcherConfig::default()).await;
+    let loaded = module.log().len();
+
+    h.dispatcher.dispatch(command("warn", Some(Locale::En)));
+    h.dispatcher.dispatch(command("warn", Some(Locale::En)));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    gate.add_permits(10);
+    h.dispatcher.flush().await;
+
+    assert_eq!(module.log().len(), loaded + 2, "both commands ran");
+    assert!(h.api.actions().is_empty(), "{:?}", h.api.actions());
+}
+
 fn autocomplete(command: &str) -> Event {
     Event::Autocomplete(closure_core::event::AutocompleteInvocation {
         interaction_id: Id::new(52),

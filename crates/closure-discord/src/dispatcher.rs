@@ -107,6 +107,10 @@ pub enum DispatchError {
 /// Queue time counts. Past it the message goes to the modules without waiting for the history.
 const RECORD_WAIT: Duration = Duration::from_secs(25);
 
+/// How long an interaction may wait in its lane before it is answered as busy and not run. Discord
+/// allows three seconds for the first answer; this leaves time for the answer to arrive.
+const INTERACTION_DEADLINE: Duration = Duration::from_millis(2_500);
+
 struct Job {
     event: Arc<Event>,
     enqueued: Instant,
@@ -118,6 +122,9 @@ struct Job {
     /// `RECORD_WAIT` after the message arrived. The history sends whether or not it kept the message;
     /// a dropped sender ends the wait too.
     recorded: Option<oneshot::Receiver<Event>>,
+    /// Set by whichever takes the job first: the lane that runs it, or the deadline of an
+    /// interaction that answers it as busy (see `answer_when_busy`).
+    claim: Arc<AtomicBool>,
 }
 
 /// How a scheduled job went, for whoever keeps the jobs (see [`Dispatcher::run_job`]).
@@ -669,12 +676,25 @@ impl Dispatcher {
         }
 
         let sender = lanes.sender_for(&event).clone();
+        let enqueued = Instant::now();
+        let event = Arc::new(event);
+        let claim = Arc::new(AtomicBool::new(false));
+        if command {
+            self.shared.tracker.spawn(answer_when_busy(
+                Arc::clone(&self.shared),
+                guild,
+                Arc::clone(&event),
+                Arc::clone(&claim),
+                enqueued + INTERACTION_DEADLINE,
+            ));
+        }
         let job = Job {
-            event: Arc::new(event),
-            enqueued: Instant::now(),
+            event,
+            enqueued,
             command,
             outcome,
             recorded,
+            claim,
         };
         self.shared.pending_total.fetch_add(1, Ordering::AcqRel);
         if sender.try_send(job).is_err() {
@@ -841,6 +861,11 @@ async fn lane_worker(
             job = receiver.recv() => job,
         };
         let Some(mut job) = job else { break };
+        if job.claim.swap(true, Ordering::AcqRel) {
+            // It was answered as busy while it waited, so it is not run.
+            settle(&shared, &state, &job);
+            continue;
+        }
         if let Some(recorded) = job.recorded.take() {
             // The wait runs from the arrival, so the time spent in the queue counts.
             // Past RECORD_WAIT the message goes to the modules without waiting for the history.
@@ -1312,6 +1337,46 @@ async fn answer_without_choices(shared: &Shared, query: &AutocompleteInvocation)
         Ok(Err(error)) => tracing::warn!(%error, "could not answer an autocomplete request"),
         Err(_) => tracing::warn!("timed out answering an autocomplete request"),
     }
+}
+
+/// Answers an interaction still waiting in its lane at the deadline, and keeps it from running.
+/// Discord gives an interaction three seconds for its first answer, so this cannot wait for the lane.
+/// A command run late would act after the user was told it had not been done.
+async fn answer_when_busy(
+    shared: Arc<Shared>,
+    guild: GuildId,
+    event: Arc<Event>,
+    claim: Arc<AtomicBool>,
+    deadline: Instant,
+) {
+    tokio::select! {
+        () = shared.abort.cancelled() => return,
+        () = tokio::time::sleep_until(deadline) => {}
+    }
+    if claim.swap(true, Ordering::AcqRel) {
+        // The lane took it in time.
+        return;
+    }
+    metrics::counter!("closure_interactions_busy_total").increment(1);
+    tracing::warn!(%guild, kind = event.kind().as_str(), "an interaction waited too long in its lane; it is answered as busy");
+    answer_busy(&shared, guild, &event).await;
+}
+
+/// Says the bot is busy, in the invoker's language. An autocomplete gets no choices, which is all
+/// Discord takes there.
+async fn answer_busy(shared: &Shared, guild: GuildId, event: &Event) {
+    let invocation: &dyn InteractionRef = match event {
+        Event::Command(invocation) => invocation,
+        Event::ContextCommand(invocation) => invocation,
+        Event::Component(click) => click,
+        Event::Modal(submission) => submission,
+        Event::Autocomplete(query) => return answer_without_choices(shared, query).await,
+        _ => return,
+    };
+    let locale = invocation
+        .locale()
+        .unwrap_or_else(|| shared.settings.locale(guild));
+    reply(shared, invocation, text(shared, locale, "error-busy")).await;
 }
 
 fn text(shared: &Shared, locale: Locale, key: &str) -> String {
