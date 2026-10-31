@@ -204,7 +204,7 @@ fn compile_with(
         });
     }
 
-    let mut issues = Vec::new();
+    let mut issues = stored_text_issues(overrides);
     let preset = overrides.preset.unwrap_or_default();
     let mut limits = preset.limits();
     if let Some(limits_override) = &overrides.limits {
@@ -702,7 +702,7 @@ fn compile_module(
         issues.push(Issue::new(
             format!("modules.{id}.config"),
             "invalid_module_config",
-            "text must not contain the NUL character (U+0000)",
+            NUL_REFUSED,
         ));
     }
     if let Some(validator) = validator {
@@ -723,6 +723,23 @@ fn compile_module(
         capabilities,
         config,
     }
+}
+
+/// The problem with text PostgreSQL cannot store.
+const NUL_REFUSED: &str = "text must not contain the NUL character (U+0000)";
+
+/// The issues with stored text PostgreSQL cannot hold. Module configs are checked per module in
+/// `compile_module`, which also sees the bot-wide defaults.
+fn stored_text_issues(overrides: &GuildOverrides) -> Vec<Issue> {
+    // Cannot fail: the same serialization succeeded for the size check in compile_with.
+    let document = serde_json::to_value(overrides).unwrap_or(Value::Null);
+    document
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(field, value)| field.as_str() != "modules" && contains_nul(value))
+        .map(|(field, _)| Issue::new(field, "invalid", NUL_REFUSED))
+        .collect()
 }
 
 fn contains_nul(value: &Value) -> bool {
@@ -1409,6 +1426,36 @@ modules:
             error.issues().iter().any(|i| i.message.contains("NUL")),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn a_nul_in_the_prefix_is_refused_as_an_issue() {
+        let overrides = GuildOverrides {
+            prefix: Some("a\u{0}b".to_owned()),
+            ..GuildOverrides::default()
+        };
+        let Err(ConfigError::Invalid(issues)) = compiler().compile(&overrides) else {
+            panic!("a prefix with U+0000 must be refused");
+        };
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| (issue.path.as_str(), issue.code))
+                .collect::<Vec<_>>(),
+            [("prefix", "invalid")]
+        );
+    }
+
+    #[test]
+    fn text_without_nul_is_accepted_whatever_else_it_holds() {
+        for ok in ["\u{1}", "✨", "!\u{7f}"] {
+            let overrides = GuildOverrides {
+                prefix: Some(ok.to_owned()),
+                ..GuildOverrides::default()
+            };
+            let settings = compiler().compile(&overrides).unwrap();
+            assert_eq!(settings.policy.prefix.as_deref(), Some(ok));
+        }
     }
 
     #[test]
