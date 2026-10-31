@@ -826,12 +826,7 @@ fn member(id: u64) -> UserInfo {
 
 fn overwrite_audit(kind: AuditLogEventType, channel: u64, target: u64, by: u64) -> AuditLogEntry {
     let mut entry = audit(kind, channel, by, None, 5);
-    entry.options = Some(
-        serde_json::from_value(
-            json!({ "channel_id": channel.to_string(), "id": target.to_string() }),
-        )
-        .unwrap(),
-    );
+    entry.options = Some(serde_json::from_value(json!({ "id": target.to_string() })).unwrap());
     entry
 }
 
