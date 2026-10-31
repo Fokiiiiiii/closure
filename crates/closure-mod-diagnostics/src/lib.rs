@@ -227,6 +227,19 @@ mod tests {
             .map(|field| field.value.clone())
     }
 
+    #[tokio::test]
+    async fn showcase_ping_answers_with_the_latency_of_the_bot() {
+        let h = harness();
+        h.set_guild_locale(Locale::Ja);
+
+        let replies = h
+            .invoke(Invocation::new("ping").locale(Locale::Ja))
+            .await
+            .unwrap();
+
+        assert!(!replies.last().unwrap().embeds.is_empty());
+    }
+
     #[test]
     fn the_delay_is_the_time_since_discord_created_the_interaction() {
         let created = 1_700_000_000_000;

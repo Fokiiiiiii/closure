@@ -4,6 +4,7 @@ use closure_core::error::DiscordError;
 use closure_core::event::{AttachmentInfo, Event, MemberInfo, MessageInfo, UserInfo};
 use closure_core::history::SavedMessage;
 use closure_core::module::Module;
+use closure_sdk::Locale;
 use closure_sdk::testing::Harness;
 use serde_json::json;
 use twilight_model::id::Id;
@@ -427,6 +428,67 @@ async fn joins_leaves_and_bans_are_logged() {
     assert!(texts[1].contains("Member left"));
     assert!(texts[2].contains("Member banned"));
     assert!(texts[3].contains("Member unbanned"));
+}
+
+#[tokio::test]
+async fn showcase_members_who_join_leave_and_are_banned_are_logged() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+    let user = UserInfo {
+        id: Id::new(40),
+        name: "newcomer".into(),
+        bot: false,
+    };
+    let member = MemberInfo {
+        guild_id: Id::new(GUILD),
+        user: user.clone(),
+        roles: Vec::new(),
+        nick: None,
+        joined_at: None,
+        timed_out_until: None,
+    };
+
+    harness.emit(Event::MemberJoined(member)).await.unwrap();
+    harness
+        .emit(Event::MemberLeft {
+            guild_id: Id::new(GUILD),
+            user: user.clone(),
+        })
+        .await
+        .unwrap();
+    harness
+        .emit(Event::BanAdded {
+            guild_id: Id::new(GUILD),
+            user: user.clone(),
+        })
+        .await
+        .unwrap();
+    harness
+        .emit(Event::BanRemoved {
+            guild_id: Id::new(GUILD),
+            user,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(sent(&harness).len(), 4);
+}
+
+#[tokio::test]
+async fn showcase_an_edit_that_removes_a_picture_shows_the_picture() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+    harness
+        .seed_file(CHANNEL, 31, picture(4), Some(b"removed bytes".to_vec()))
+        .await
+        .unwrap();
+
+    harness
+        .emit(edited(31, "the new text", Vec::new(), vec![picture(4)]))
+        .await
+        .unwrap();
+
+    assert_eq!(sent(&harness).len(), 1);
 }
 
 #[test]

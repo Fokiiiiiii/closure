@@ -17,6 +17,8 @@ const MODERATOR_ROLE: u64 = 1_100_000_000_000_000_001;
 const ADMIN_ROLE: u64 = 1_100_000_000_000_000_002;
 const MODERATOR: u64 = 298_765_432_109_876_543;
 const TARGET: u64 = 512_345_678_901_234_567;
+/// The channel the moderation log posts its case cards to.
+const LOG: u64 = 77;
 
 fn role(id: u64, position: i64) -> Role {
     serde_json::from_value(json!({
@@ -52,6 +54,7 @@ fn harness() -> Harness {
         .api()
         .set_not_a_member(Id::new(GUILD), Id::new(TARGET));
     harness.set_guild_locale(Locale::Ja);
+    harness.set_log_channel(LOG);
     harness
 }
 

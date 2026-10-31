@@ -182,7 +182,11 @@ pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) ->
             .to_owned();
         let action: Action = serde_json::from_value(value)
             .with_context(|| format!("line {number}: not a recorded action"))?;
-        if !test.starts_with(SHOWCASE_PREFIX) {
+        if !test
+            .rsplit("::")
+            .next()
+            .is_some_and(|name| name.starts_with(SHOWCASE_PREFIX))
+        {
             plan.outside += 1;
             continue;
         }
