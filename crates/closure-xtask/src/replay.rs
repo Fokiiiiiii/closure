@@ -24,6 +24,8 @@ use twilight_model::id::Id;
 
 /// The variable the bot reads its token from.
 const TOKEN_VARIABLE: &str = "DISCORD_TOKEN";
+/// How much of a message's opening tells its kind apart from another message of the same kind.
+const TEMPLATE_CHARS: usize = 25;
 const USAGE: &str = "usage: closure-xtask replay --dir <dir> --channel <channel id>";
 
 /// What a replay would send, and what it leaves out.
@@ -33,13 +35,13 @@ pub struct Plan {
     pub posts: Vec<Action>,
     /// The actions that are not sent, counted by kind (`add_role`, `respond/defer`, ...).
     pub skipped: BTreeMap<String, usize>,
-    /// Messages that differ from an earlier one only in digits (ids, counts). Left out.
+    /// Messages of a kind that an earlier message already showed (see `template_key`). Left out.
     pub similar: usize,
 }
 
-/// What one action becomes: a message to send, or the kind it is counted under.
+/// What one action becomes: a message to send with its key, or the kind it is counted under.
 enum Step {
-    Send(Action),
+    Send { post: Box<Action>, key: String },
     Skip(String),
 }
 
@@ -159,9 +161,9 @@ pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) ->
         let action: Action = serde_json::from_value(value)
             .with_context(|| format!("line {number}: not a recorded action"))?;
         match step(action, &kind, channel) {
-            Step::Send(post) => {
-                if seen.insert(similarity_key(&post)?) {
-                    plan.posts.push(post);
+            Step::Send { post, key } => {
+                if seen.insert(key) {
+                    plan.posts.push(*post);
                 } else {
                     plan.similar += 1;
                 }
@@ -172,23 +174,43 @@ pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) ->
     Ok(plan)
 }
 
-/// The text of a message with every run of digits replaced by `#`. Messages with the same key say
-/// the same thing with other numbers (ids, counts), so only the first of them is sent.
-fn similarity_key(post: &Action) -> Result<String> {
-    let mut key = String::new();
+/// The key of a message's kind: the opening of its text with every number masked, so that a
+/// warning or a ban is sent once however many numbers it names. A message without text is keyed by
+/// its whole content, so that different embeds are never merged.
+fn template_key(content: Option<&str>, embeds: &[Embed]) -> String {
+    let text = content
+        .map(str::to_owned)
+        .or_else(|| embeds.iter().find_map(embed_text));
+    match text {
+        Some(text) => mask_numbers(&text).chars().take(TEMPLATE_CHARS).collect(),
+        None => format!("{embeds:?}"),
+    }
+}
+
+/// The text an embed shows: its description, or else the value of its last field.
+fn embed_text(embed: &Embed) -> Option<String> {
+    embed
+        .description
+        .clone()
+        .or_else(|| embed.fields.last().map(|field| field.value.clone()))
+}
+
+/// The text with every run of digits replaced by one `#`.
+fn mask_numbers(text: &str) -> String {
+    let mut masked = String::with_capacity(text.len());
     let mut in_digits = false;
-    for character in serde_json::to_string(post)?.chars() {
+    for character in text.chars() {
         if character.is_ascii_digit() {
             if !in_digits {
-                key.push('#');
+                masked.push('#');
             }
             in_digits = true;
         } else {
             in_digits = false;
-            key.push(character);
+            masked.push(character);
         }
     }
-    Ok(key)
+    masked
 }
 
 fn step(action: Action, kind: &str, channel: ChannelId) -> Step {
@@ -235,13 +257,17 @@ fn message(channel: ChannelId, content: Option<String>, embeds: Vec<Embed>, kind
     if content.is_none() && embeds.is_empty() {
         return Step::Skip(format!("{kind}/empty"));
     }
-    Step::Send(Action::SendMessage {
-        channel_id: channel,
-        content,
-        embeds,
-        reply_to: None,
-        mentions: MentionPolicy::None,
-    })
+    let key = template_key(content.as_deref(), &embeds);
+    Step::Send {
+        post: Box::new(Action::SendMessage {
+            channel_id: channel,
+            content,
+            embeds,
+            reply_to: None,
+            mentions: MentionPolicy::None,
+        }),
+        key,
+    }
 }
 
 fn response_kind(response: &InteractionResponse) -> &'static str {
@@ -263,6 +289,8 @@ mod tests {
     use closure_core::event::{
         ChannelId, GuildId, InteractionId, InteractionToken, RoleId, UserId,
     };
+    use serde_json::json;
+    use twilight_model::channel::message::Embed;
 
     use super::{Plan, plan, replay};
 
@@ -365,6 +393,35 @@ mod tests {
 
         assert_eq!(plan.posts, vec![sent("hello 1"), sent("bye 1")]);
         assert_eq!(plan.similar, 0);
+    }
+
+    #[test]
+    fn messages_that_open_the_same_way_are_posted_once() {
+        let plan = plan_of(&[
+            sent("You were warned in a server. Reason: spam"),
+            sent("You were warned in a server. Reason: raid"),
+        ]);
+
+        assert_eq!(plan.posts.len(), 1);
+        assert_eq!(plan.similar, 1);
+    }
+
+    #[test]
+    fn messages_without_text_are_told_apart_by_their_embeds() {
+        let embed = |title: &str| {
+            serde_json::from_value::<Embed>(json!({ "type": "rich", "title": title })).unwrap()
+        };
+        let card = |title: &str| Action::SendMessage {
+            channel_id: channel(),
+            content: None,
+            embeds: vec![embed(title)],
+            reply_to: None,
+            mentions: closure_core::action::MentionPolicy::None,
+        };
+
+        let plan = plan_of(&[card("a"), card("b")]);
+
+        assert_eq!(plan.posts.len(), 2);
     }
 
     #[test]
