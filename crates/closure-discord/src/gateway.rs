@@ -120,7 +120,11 @@ pub fn new_cache() -> Arc<InMemoryCache> {
                     | ResourceType::MEMBER
                     | ResourceType::ROLE
                     | ResourceType::CHANNEL
-                    | ResourceType::USER_CURRENT,
+                    | ResourceType::USER_CURRENT
+                    | ResourceType::VOICE_STATE
+                    | ResourceType::EMOJI
+                    | ResourceType::STICKER
+                    | ResourceType::STAGE_INSTANCE,
             )
             .build(),
     )
@@ -508,16 +512,21 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
     }
 }
 
-/// What the cache holds about what `event` changes. Read before the cache applies the event,
-/// because afterwards it only holds the new state.
 fn before(cache: &InMemoryCache, event: &Event) -> convert::Before {
     match event {
-        Event::MemberUpdate(updated) => convert::Before {
-            roles: cache
-                .member(updated.guild_id, updated.user.id)
-                .map(|member| member.roles().to_vec()),
-            ..convert::Before::default()
-        },
+        Event::MemberUpdate(updated) => {
+            let member = cache.member(updated.guild_id, updated.user.id);
+            convert::Before {
+                roles: member.as_ref().map(|member| member.roles().to_vec()),
+                member: member.map(|member| {
+                    (
+                        member.nick().map(str::to_owned),
+                        member.communication_disabled_until().map(convert::seconds),
+                    )
+                }),
+                ..convert::Before::default()
+            }
+        }
         Event::ThreadUpdate(updated) => convert::Before {
             archived: cache.channel(updated.0.id).and_then(|channel| {
                 channel
@@ -525,6 +534,54 @@ fn before(cache: &InMemoryCache, event: &Event) -> convert::Before {
                     .as_ref()
                     .map(|metadata| metadata.archived)
             }),
+            ..convert::Before::default()
+        },
+        Event::ChannelUpdate(updated) => convert::Before {
+            channel: cache
+                .channel(updated.0.id)
+                .and_then(|cached| convert::channel(&cached)),
+            ..convert::Before::default()
+        },
+        Event::RoleUpdate(updated) => convert::Before {
+            role: cache
+                .role(updated.role.id)
+                .map(|cached| convert::role(updated.guild_id, cached.value().resource())),
+            ..convert::Before::default()
+        },
+        Event::VoiceStateUpdate(update) => convert::Before {
+            voice_channel: update
+                .0
+                .guild_id
+                .and_then(|guild| cache.voice_state(update.0.user_id, guild))
+                .map(|cached| cached.channel_id()),
+            ..convert::Before::default()
+        },
+        Event::GuildEmojisUpdate(update) => convert::Before {
+            emojis: cache.guild_emojis(update.guild_id).map(|ids| {
+                ids.iter()
+                    .filter_map(|id| cache.emoji(*id))
+                    .map(|cached| {
+                        convert::cached_emoji_info(update.guild_id, cached.value().resource())
+                    })
+                    .collect()
+            }),
+            ..convert::Before::default()
+        },
+        Event::GuildStickersUpdate(update) => convert::Before {
+            stickers: cache.guild_stickers(update.guild_id).map(|ids| {
+                ids.iter()
+                    .filter_map(|id| cache.sticker(*id))
+                    .map(|cached| {
+                        convert::cached_sticker_info(update.guild_id, cached.value().resource())
+                    })
+                    .collect()
+            }),
+            ..convert::Before::default()
+        },
+        Event::StageInstanceUpdate(updated) => convert::Before {
+            stage: cache
+                .stage_instance(updated.0.id)
+                .map(|cached| convert::stage_info(cached.value().resource())),
             ..convert::Before::default()
         },
         _ => convert::Before::default(),

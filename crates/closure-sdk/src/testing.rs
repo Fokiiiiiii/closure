@@ -1076,6 +1076,8 @@ impl Harness {
             guild_id: Id::new(GUILD),
             name: Some(format!("channel-{channel}")),
             parent_id: None,
+            topic: None,
+            nsfw: false,
         }))
         .await
     }

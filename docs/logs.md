@@ -18,6 +18,16 @@ modules:
       member_joins: true
       member_leaves: true
       bans: true
+      channels: true                # channel created, changed and deleted
+      threads: true                 # thread created, archived, unarchived and deleted
+      roles: true                   # role created, changed and deleted
+      member_roles: true            # roles given to or taken from a member
+      member_nicknames: true        # nickname changed
+      member_timeouts: true         # member timed out, and the timeout lifted
+      voice: false                  # joins, leaves and moves of voice channels
+      emojis: true                  # emoji created, deleted and changed
+      stickers: true                # sticker created, deleted and changed
+      stage_instances: true         # stage started, changed and ended
       keep_attachments: false       # see Files below
 ```
 
@@ -30,6 +40,21 @@ modules:
   (its message history is off for the guild) the text before says that it was not kept.
 - **Deletion.** The text, the files and the id of the message, and when it was posted. The entry is
   stamped with the time of the deletion.
+- **Channels and threads.** A change shows what changed: the name, the category, the topic and NSFW.
+  Creations, archives and deletions are shown as they happen.
+- **Roles.** A change shows what changed: the name, the colour (as a hex code), the position and the
+  flags. A role the bot did not see before is not compared.
+- **Members.** Roles given and taken, the nickname before and after, and a Discord timeout that is set
+  or lifted. These compare with what the bot knew about the member before, so a member the bot did
+  not see is not compared.
+- **Voice.** A join, a leave or a move of a voice channel, against the channel the bot knew the member
+  to be in. Off by default: it is busy on a large server.
+- **Emojis, stickers and stages.** Created, deleted and changed. A change compares with the list the
+  bot knew before the update.
+- **Text in code blocks.** Message text, topics, nicknames and sticker descriptions are shown in code
+  blocks, so they read as written and cannot format the entry around them.
+- **Not yet.** Who made a change, and kicks: Discord reports a kick as a leave, so a kick shows as a
+  departure. Both need the audit log, which the logs module does not read yet.
 
 ## Files
 

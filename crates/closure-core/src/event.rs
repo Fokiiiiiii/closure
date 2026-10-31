@@ -6,8 +6,8 @@ use twilight_model::gateway::Intents;
 use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 use twilight_model::id::marker::{
-    ApplicationMarker, ChannelMarker, GuildMarker, InteractionMarker, MessageMarker, RoleMarker,
-    UserMarker,
+    ApplicationMarker, ChannelMarker, EmojiMarker, GuildMarker, InteractionMarker, MessageMarker,
+    RoleMarker, StageMarker, StickerMarker, UserMarker,
 };
 
 use crate::action::Emoji;
@@ -22,6 +22,9 @@ pub type RoleId = Id<RoleMarker>;
 pub type MessageId = Id<MessageMarker>;
 pub type InteractionId = Id<InteractionMarker>;
 pub type ApplicationId = Id<ApplicationMarker>;
+pub type EmojiId = Id<EmojiMarker>;
+pub type StickerId = Id<StickerMarker>;
+pub type StageId = Id<StageMarker>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserInfo {
@@ -119,6 +122,11 @@ pub struct ChannelInfo {
     pub guild_id: GuildId,
     pub name: Option<String>,
     pub parent_id: Option<ChannelId>,
+    /// The topic of a text channel or a forum, when it has one.
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub nsfw: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +136,43 @@ pub struct RoleInfo {
     pub name: String,
     pub position: i64,
     pub permissions: Permissions,
+    /// The colour as Discord has it: `0` for none.
+    #[serde(default)]
+    pub color: u32,
+    #[serde(default)]
+    pub hoist: bool,
+    #[serde(default)]
+    pub mentionable: bool,
+}
+
+/// An emoji of a guild.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmojiInfo {
+    pub id: EmojiId,
+    pub guild_id: GuildId,
+    pub name: String,
+    pub animated: bool,
+    pub available: bool,
+}
+
+/// A sticker of a guild.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StickerInfo {
+    pub id: StickerId,
+    pub guild_id: GuildId,
+    pub name: String,
+    /// The description the sticker was given; empty when it has none.
+    pub description: String,
+    pub available: bool,
+}
+
+/// A stage instance: a stage channel that is live, with its topic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageInfo {
+    pub id: StageId,
+    pub guild_id: GuildId,
+    pub channel_id: ChannelId,
+    pub topic: String,
 }
 
 /// A member gained or lost roles. Only sent when the bot knew the roles the member had before.
@@ -479,6 +524,57 @@ pub enum Event {
         role_id: RoleId,
     },
     RolesChanged(RolesChange),
+    /// A channel was changed. Sent with `ChannelUpdated`, and only when the bot knew the channel
+    /// before the change.
+    ChannelChanged {
+        before: ChannelInfo,
+        after: ChannelInfo,
+    },
+    /// A role was changed. Sent with `RoleUpdated`, and only when the bot knew the role before.
+    RoleChanged {
+        before: RoleInfo,
+        after: RoleInfo,
+    },
+    /// A member's nickname was changed, against the nickname the bot knew before.
+    NicknameChanged {
+        guild_id: GuildId,
+        user: UserInfo,
+        before: Option<String>,
+        after: Option<String>,
+    },
+    /// A member was timed out, or the timeout was lifted, against the timeout the bot knew before.
+    TimeoutChanged {
+        guild_id: GuildId,
+        user: UserInfo,
+        before: Option<i64>,
+        after: Option<i64>,
+    },
+    /// A member joined a voice channel, left one, or moved to another. `before` and `after` are
+    /// the channels, `None` when the member was in none.
+    VoiceStateChanged {
+        guild_id: GuildId,
+        user: UserInfo,
+        before: Option<ChannelId>,
+        after: Option<ChannelId>,
+    },
+    EmojiCreated(EmojiInfo),
+    EmojiDeleted(EmojiInfo),
+    EmojiUpdated {
+        before: EmojiInfo,
+        after: EmojiInfo,
+    },
+    StickerCreated(StickerInfo),
+    StickerDeleted(StickerInfo),
+    StickerUpdated {
+        before: StickerInfo,
+        after: StickerInfo,
+    },
+    StageCreated(StageInfo),
+    StageDeleted(StageInfo),
+    StageUpdated {
+        before: StageInfo,
+        after: StageInfo,
+    },
     ThreadCreated(ThreadInfo),
     ThreadArchived(ThreadInfo),
     ThreadUnarchived(ThreadInfo),
@@ -534,6 +630,20 @@ pub enum EventKind {
     RoleUpdated,
     RoleDeleted,
     RolesChanged,
+    ChannelChanged,
+    RoleChanged,
+    NicknameChanged,
+    TimeoutChanged,
+    VoiceStateChanged,
+    EmojiCreated,
+    EmojiDeleted,
+    EmojiUpdated,
+    StickerCreated,
+    StickerDeleted,
+    StickerUpdated,
+    StageCreated,
+    StageDeleted,
+    StageUpdated,
     ThreadCreated,
     ThreadArchived,
     ThreadUnarchived,
@@ -555,7 +665,12 @@ impl EventKind {
     #[must_use]
     pub fn required_intents(self) -> Intents {
         match self {
-            Self::MemberJoined | Self::MemberUpdated | Self::MemberLeft | Self::RolesChanged => {
+            Self::MemberJoined
+            | Self::MemberUpdated
+            | Self::MemberLeft
+            | Self::RolesChanged
+            | Self::NicknameChanged
+            | Self::TimeoutChanged => {
                 Intents::GUILD_MEMBERS
             }
             Self::MessageCreated
@@ -564,6 +679,13 @@ impl EventKind {
             | Self::MessagesBulkDeleted => Intents::GUILD_MESSAGES,
             Self::ReactionAdded | Self::ReactionRemoved => Intents::GUILD_MESSAGE_REACTIONS,
             Self::BanAdded | Self::BanRemoved => Intents::GUILD_MODERATION,
+            Self::VoiceStateChanged => Intents::GUILD_VOICE_STATES,
+            Self::EmojiCreated
+            | Self::EmojiDeleted
+            | Self::EmojiUpdated
+            | Self::StickerCreated
+            | Self::StickerDeleted
+            | Self::StickerUpdated => Intents::GUILD_EMOJIS_AND_STICKERS,
             Self::GuildAvailable
             | Self::GuildRemoved
             | Self::ChannelCreated
@@ -572,6 +694,11 @@ impl EventKind {
             | Self::RoleCreated
             | Self::RoleUpdated
             | Self::RoleDeleted
+            | Self::ChannelChanged
+            | Self::RoleChanged
+            | Self::StageCreated
+            | Self::StageDeleted
+            | Self::StageUpdated
             // Threads and cases need no intent beyond `GUILDS`, which the bot always asks for.
             | Self::ThreadCreated
             | Self::ThreadArchived
@@ -611,6 +738,20 @@ impl EventKind {
             Self::RoleUpdated => "role_updated",
             Self::RoleDeleted => "role_deleted",
             Self::RolesChanged => "roles_changed",
+            Self::ChannelChanged => "channel_changed",
+            Self::RoleChanged => "role_changed",
+            Self::NicknameChanged => "nickname_changed",
+            Self::TimeoutChanged => "timeout_changed",
+            Self::VoiceStateChanged => "voice_state_changed",
+            Self::EmojiCreated => "emoji_created",
+            Self::EmojiDeleted => "emoji_deleted",
+            Self::EmojiUpdated => "emoji_updated",
+            Self::StickerCreated => "sticker_created",
+            Self::StickerDeleted => "sticker_deleted",
+            Self::StickerUpdated => "sticker_updated",
+            Self::StageCreated => "stage_created",
+            Self::StageDeleted => "stage_deleted",
+            Self::StageUpdated => "stage_updated",
             Self::ThreadCreated => "thread_created",
             Self::ThreadArchived => "thread_archived",
             Self::ThreadUnarchived => "thread_unarchived",
@@ -649,6 +790,20 @@ impl Event {
             Self::ChannelDeleted(_) => EventKind::ChannelDeleted,
             Self::RoleCreated(_) => EventKind::RoleCreated,
             Self::RoleUpdated(_) => EventKind::RoleUpdated,
+            Self::ChannelChanged { .. } => EventKind::ChannelChanged,
+            Self::RoleChanged { .. } => EventKind::RoleChanged,
+            Self::NicknameChanged { .. } => EventKind::NicknameChanged,
+            Self::TimeoutChanged { .. } => EventKind::TimeoutChanged,
+            Self::VoiceStateChanged { .. } => EventKind::VoiceStateChanged,
+            Self::EmojiCreated(_) => EventKind::EmojiCreated,
+            Self::EmojiDeleted(_) => EventKind::EmojiDeleted,
+            Self::EmojiUpdated { .. } => EventKind::EmojiUpdated,
+            Self::StickerCreated(_) => EventKind::StickerCreated,
+            Self::StickerDeleted(_) => EventKind::StickerDeleted,
+            Self::StickerUpdated { .. } => EventKind::StickerUpdated,
+            Self::StageCreated(_) => EventKind::StageCreated,
+            Self::StageDeleted(_) => EventKind::StageDeleted,
+            Self::StageUpdated { .. } => EventKind::StageUpdated,
             Self::RoleDeleted { .. } => EventKind::RoleDeleted,
             Self::RolesChanged(_) => EventKind::RolesChanged,
             Self::ThreadCreated(_) => EventKind::ThreadCreated,
@@ -745,7 +900,10 @@ impl Event {
             | Self::BanRemoved { guild_id, .. }
             | Self::RoleDeleted { guild_id, .. }
             | Self::ThreadDeleted { guild_id, .. }
-            | Self::RolesChanged(RolesChange { guild_id, .. }) => *guild_id,
+            | Self::RolesChanged(RolesChange { guild_id, .. })
+            | Self::NicknameChanged { guild_id, .. }
+            | Self::TimeoutChanged { guild_id, .. }
+            | Self::VoiceStateChanged { guild_id, .. } => *guild_id,
             Self::ThreadCreated(thread)
             | Self::ThreadArchived(thread)
             | Self::ThreadUnarchived(thread) => thread.guild_id,
@@ -757,6 +915,14 @@ impl Event {
             | Self::ChannelUpdated(info)
             | Self::ChannelDeleted(info) => info.guild_id,
             Self::RoleCreated(info) | Self::RoleUpdated(info) => info.guild_id,
+            Self::ChannelChanged { after, .. } => after.guild_id,
+            Self::RoleChanged { after, .. } => after.guild_id,
+            Self::EmojiCreated(info) | Self::EmojiDeleted(info) => info.guild_id,
+            Self::EmojiUpdated { after, .. } => after.guild_id,
+            Self::StickerCreated(info) | Self::StickerDeleted(info) => info.guild_id,
+            Self::StickerUpdated { after, .. } => after.guild_id,
+            Self::StageCreated(info) | Self::StageDeleted(info) => info.guild_id,
+            Self::StageUpdated { after, .. } => after.guild_id,
             Self::Command(invocation) => invocation.guild_id,
             Self::Component(click) => click.guild_id,
             Self::Modal(submission) => submission.guild_id,

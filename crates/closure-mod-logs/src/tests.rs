@@ -1,12 +1,15 @@
 use closure_core::action::Action;
 use closure_core::capability::Capability;
 use closure_core::error::DiscordError;
-use closure_core::event::{AttachmentInfo, Event, MemberInfo, MessageInfo, UserInfo};
+use closure_core::event::{
+    AttachmentInfo, ChannelInfo, EmojiInfo, Event, MemberInfo, MessageInfo, RoleInfo, UserInfo,
+};
 use closure_core::history::SavedMessage;
 use closure_core::module::Module;
 use closure_sdk::Locale;
 use closure_sdk::testing::Harness;
 use serde_json::json;
+use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 
 use super::*;
@@ -30,6 +33,16 @@ fn config(channel: Option<&str>, deletes: bool) -> serde_json::Value {
         "member_joins": true,
         "member_leaves": true,
         "bans": true,
+        "channels": true,
+        "threads": true,
+        "roles": true,
+        "member_roles": true,
+        "member_nicknames": true,
+        "member_timeouts": true,
+        "voice": false,
+        "emojis": true,
+        "stickers": true,
+        "stage_instances": true,
         "keep_attachments": false
     })
 }
@@ -784,6 +797,180 @@ fn the_module_asks_for_message_content_so_that_it_can_post_the_text() {
     let module = module().unwrap();
 
     assert!(module.manifest().intents.contains(Intents::MESSAGE_CONTENT));
+}
+
+/// A channel as the gateway describes it, with the topic it has.
+fn channel_info(name: &str, topic: Option<&str>) -> ChannelInfo {
+    ChannelInfo {
+        id: Id::new(CHANNEL),
+        guild_id: Id::new(GUILD),
+        name: Some(name.into()),
+        parent_id: None,
+        topic: topic.map(Into::into),
+        nsfw: false,
+    }
+}
+
+fn member(id: u64) -> UserInfo {
+    UserInfo {
+        id: Id::new(id),
+        name: "member".into(),
+        bot: false,
+    }
+}
+
+#[tokio::test]
+async fn a_channel_change_shows_the_old_and_new_topic_in_code_blocks() {
+    let harness = harness();
+
+    harness
+        .emit(Event::ChannelChanged {
+            before: channel_info("general", Some("old topic")),
+            after: channel_info("general", Some("new topic")),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("Channel changed"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("```old topic```"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("```new topic```"),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn a_change_that_shows_nothing_is_not_posted() {
+    let harness = harness();
+
+    harness
+        .emit(Event::ChannelChanged {
+            before: channel_info("general", None),
+            after: channel_info("general", None),
+        })
+        .await
+        .unwrap();
+
+    assert!(sent(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn a_voice_join_is_logged_only_when_the_voice_setting_is_on() {
+    let harness = harness();
+    let joined = Event::VoiceStateChanged {
+        guild_id: Id::new(GUILD),
+        user: member(40),
+        before: None,
+        after: Some(Id::new(CHANNEL)),
+    };
+
+    harness.emit(joined.clone()).await.unwrap();
+    assert!(sent(&harness).is_empty(), "voice is off by default");
+
+    let mut value = config(None, true);
+    value["voice"] = json!(true);
+    harness.set_config(value);
+    harness.emit(joined).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("Joined a voice channel"),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn a_nickname_change_shows_both_nicknames_in_code_blocks() {
+    let harness = harness();
+
+    harness
+        .emit(Event::NicknameChanged {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+            before: Some("Old name".into()),
+            after: None,
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("```Old name```"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(posted[0].embeds.contains("(none)"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_role_change_shows_its_colour_as_a_hex_code() {
+    let harness = harness();
+    let role = |colour: u32| RoleInfo {
+        id: Id::new(60),
+        guild_id: Id::new(GUILD),
+        name: "mods".into(),
+        position: 3,
+        permissions: Permissions::empty(),
+        color: colour,
+        hoist: false,
+        mentionable: false,
+    };
+
+    harness
+        .emit(Event::RoleChanged {
+            before: role(0),
+            after: role(0x00FF_0000),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(posted[0].embeds.contains("#FF0000"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn an_emoji_creation_names_the_emoji() {
+    let harness = harness();
+
+    harness
+        .emit(Event::EmojiCreated(EmojiInfo {
+            id: Id::new(70),
+            guild_id: Id::new(GUILD),
+            name: "wave".into(),
+            animated: false,
+            available: true,
+        }))
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(posted[0].embeds.contains(":wave:"), "{}", posted[0].embeds);
+    assert!(
+        posted[0].embeds.contains("Emoji created"),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[test]
+fn a_text_with_backticks_cannot_end_its_code_block() {
+    assert_eq!(code_block("a```b"), "```a`\u{200B}``b```");
 }
 
 #[test]

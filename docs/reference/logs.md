@@ -28,13 +28,23 @@ Set under `modules.logs.config` in a server's configuration; see [configuration]
 |---|---|---|---|---|
 | `bans` | boolean | `true` | - | Post the bans and unbans of members. |
 | `channel` | any | `null` | - | The channel the entries are posted to. Left out, the guild's log channel. |
+| `channels` | boolean | `true` | - |  |
+| `emojis` | boolean | `true` | - |  |
 | `keep_attachments` | boolean | `false` | - | Keep the files of attachments as their messages arrive, not only when a message is deleted or edited. Uses storage: a server's files are capped and kept for the message history's retention. |
 | `member_joins` | boolean | `true` | - | Post the joins of members. |
 | `member_leaves` | boolean | `true` | - | Post the departures of members. |
+| `member_nicknames` | boolean | `true` | - |  |
+| `member_roles` | boolean | `true` | - |  |
+| `member_timeouts` | boolean | `true` | - |  |
 | `message_deletes` | boolean | `true` | - | Post the deletions of messages, with their text and files as the history kept them. |
 | `message_edits` | boolean | `true` | - | Post the edits of messages. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
+| `roles` | boolean | `true` | - |  |
+| `stage_instances` | boolean | `true` | - |  |
+| `stickers` | boolean | `true` | - |  |
 | `texts` | any | - | - | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
+| `threads` | boolean | `true` | - |  |
+| `voice` | boolean | `false` | - |  |
 
 Default configuration:
 
@@ -42,10 +52,20 @@ Default configuration:
 {
   "bans": true,
   "channel": null,
+  "channels": true,
+  "emojis": true,
   "keep_attachments": false,
   "member_joins": true,
   "member_leaves": true,
+  "member_nicknames": true,
+  "member_roles": true,
+  "member_timeouts": true,
   "message_deletes": true,
-  "message_edits": true
+  "message_edits": true,
+  "roles": true,
+  "stage_instances": true,
+  "stickers": true,
+  "threads": true,
+  "voice": false
 }
 ```

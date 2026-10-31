@@ -5,12 +5,14 @@
 
 use closure_core::action::Emoji;
 use closure_core::event::{
-    AttachmentInfo, AutocompleteInvocation, ChannelInfo, CommandInvocation, CommandOption,
-    CommandOptionValue, ComponentInvocation, ContextInvocation, ContextTarget, Event, GuildId,
-    InteractionToken, MemberInfo, Mentionable, MessageInfo, ModalSubmission, ReactionInfo, RoleId,
-    RoleInfo, RolesChange, ThreadInfo, UserInfo,
+    AttachmentInfo, AutocompleteInvocation, ChannelId, ChannelInfo, CommandInvocation,
+    CommandOption, CommandOptionValue, ComponentInvocation, ContextInvocation, ContextTarget,
+    EmojiInfo, Event, GuildId, InteractionToken, MemberInfo, Mentionable, MessageInfo,
+    ModalSubmission, ReactionInfo, RoleId, RoleInfo, RolesChange, StageInfo, StickerInfo,
+    ThreadInfo, UserInfo,
 };
 use closure_core::locale::Locale;
+use twilight_cache_inmemory::model::{CachedEmoji, CachedSticker};
 use twilight_gateway::Event as Gateway;
 use twilight_model::application::command::CommandType;
 use twilight_model::application::interaction::InteractionDataResolved;
@@ -19,16 +21,18 @@ use twilight_model::application::interaction::application_command::{
 };
 use twilight_model::application::interaction::modal::ModalInteractionComponent;
 use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
+use twilight_model::channel::message::sticker::Sticker;
 use twilight_model::channel::message::{EmojiReactionType, Message, MessageType};
-use twilight_model::channel::{Attachment, Channel};
+use twilight_model::channel::{Attachment, Channel, StageInstance};
 use twilight_model::gateway::payload::incoming::{
-    GuildCreate, MemberUpdate, ThreadCreate, ThreadDelete,
+    GuildCreate, GuildEmojisUpdate, GuildStickersUpdate, MemberUpdate, ThreadCreate, ThreadDelete,
 };
 use twilight_model::guild::{Member, Role};
 use twilight_model::id::Id;
 use twilight_model::id::marker::GenericMarker;
 use twilight_model::user::User;
 use twilight_model::util::Timestamp;
+use twilight_model::voice::VoiceState;
 
 fn user(user: &User) -> UserInfo {
     UserInfo {
@@ -38,7 +42,7 @@ fn user(user: &User) -> UserInfo {
     }
 }
 
-fn seconds(timestamp: Timestamp) -> i64 {
+pub(crate) fn seconds(timestamp: Timestamp) -> i64 {
     timestamp.as_secs()
 }
 
@@ -94,22 +98,27 @@ fn message(message: &Message) -> Option<MessageInfo> {
     })
 }
 
-fn channel(channel: &Channel) -> Option<ChannelInfo> {
+pub(crate) fn channel(channel: &Channel) -> Option<ChannelInfo> {
     Some(ChannelInfo {
         id: channel.id,
         guild_id: channel.guild_id?,
         name: channel.name.clone(),
         parent_id: channel.parent_id,
+        topic: channel.topic.clone(),
+        nsfw: channel.nsfw.unwrap_or(false),
     })
 }
 
-fn role(guild_id: GuildId, role: &Role) -> RoleInfo {
+pub(crate) fn role(guild_id: GuildId, role: &Role) -> RoleInfo {
     RoleInfo {
         id: role.id,
         guild_id,
         name: role.name.clone(),
         position: role.position,
         permissions: role.permissions,
+        color: role.colors.primary_color,
+        hoist: role.hoist,
+        mentionable: role.mentionable,
     }
 }
 
@@ -473,6 +482,8 @@ pub(crate) fn event(gateway: &Gateway) -> Option<Event> {
         Gateway::ChannelDelete(deleted) => Event::ChannelDeleted(channel(&deleted.0)?),
         Gateway::RoleCreate(created) => Event::RoleCreated(role(created.guild_id, &created.role)),
         Gateway::RoleUpdate(updated) => Event::RoleUpdated(role(updated.guild_id, &updated.role)),
+        Gateway::StageInstanceCreate(created) => Event::StageCreated(stage_info(&created.0)),
+        Gateway::StageInstanceDelete(deleted) => Event::StageDeleted(stage_info(&deleted.0)),
         Gateway::RoleDelete(deleted) => Event::RoleDeleted {
             guild_id: deleted.guild_id,
             role_id: deleted.role_id,
@@ -490,6 +501,20 @@ pub(crate) struct Before {
     pub(crate) roles: Option<Vec<RoleId>>,
     /// Whether the thread was archived, when the thread was cached.
     pub(crate) archived: Option<bool>,
+    /// The nickname and the timeout of the member, when the member was cached.
+    pub(crate) member: Option<(Option<String>, Option<i64>)>,
+    /// The channel, when it was cached.
+    pub(crate) channel: Option<ChannelInfo>,
+    /// The role, when it was cached.
+    pub(crate) role: Option<RoleInfo>,
+    /// The channel the member was in, `None` when the member was in none.
+    pub(crate) voice_channel: Option<ChannelId>,
+    /// The emojis of the guild, when the guild was cached.
+    pub(crate) emojis: Option<Vec<EmojiInfo>>,
+    /// The stickers of the guild, when the guild was cached.
+    pub(crate) stickers: Option<Vec<StickerInfo>>,
+    /// The stage instance, when it was cached.
+    pub(crate) stage: Option<StageInfo>,
 }
 
 /// Every event a payload gives: the one it converts to, then the one that compares it with
@@ -501,13 +526,227 @@ pub(crate) fn events(gateway: &Gateway, before: &Before) -> Vec<Event> {
         .collect()
 }
 
-fn state_change(gateway: &Gateway, before: &Before) -> Option<Event> {
+fn state_change(gateway: &Gateway, before: &Before) -> Vec<Event> {
     match gateway {
-        Gateway::MemberUpdate(updated) => roles_changed(updated, before.roles.as_deref()),
-        Gateway::ThreadCreate(created) => thread_created(created),
-        Gateway::ThreadUpdate(updated) => archive_change(&updated.0, before.archived),
-        Gateway::ThreadDelete(deleted) => Some(thread_deleted(deleted)),
-        _ => None,
+        Gateway::MemberUpdate(updated) => member_changes(updated, before),
+        Gateway::ChannelUpdate(updated) => before
+            .channel
+            .clone()
+            .and_then(|previous| {
+                channel(&updated.0).map(|after| Event::ChannelChanged {
+                    before: previous,
+                    after,
+                })
+            })
+            .into_iter()
+            .collect(),
+        Gateway::RoleUpdate(updated) => before
+            .role
+            .clone()
+            .map(|previous| Event::RoleChanged {
+                before: previous,
+                after: role(updated.guild_id, &updated.role),
+            })
+            .into_iter()
+            .collect(),
+        Gateway::StageInstanceUpdate(updated) => before
+            .stage
+            .clone()
+            .map(|previous| Event::StageUpdated {
+                before: previous,
+                after: stage_info(&updated.0),
+            })
+            .into_iter()
+            .collect(),
+        Gateway::VoiceStateUpdate(update) => voice_change(&update.0, before).into_iter().collect(),
+        Gateway::GuildEmojisUpdate(update) => emoji_changes(update, before.emojis.as_deref()),
+        Gateway::GuildStickersUpdate(update) => sticker_changes(update, before.stickers.as_deref()),
+        Gateway::ThreadCreate(created) => thread_created(created).into_iter().collect(),
+        Gateway::ThreadUpdate(updated) => archive_change(&updated.0, before.archived)
+            .into_iter()
+            .collect(),
+        Gateway::ThreadDelete(deleted) => vec![thread_deleted(deleted)],
+        _ => Vec::new(),
+    }
+}
+
+/// A member's roles, nickname and timeout, against what the bot knew about the member before.
+fn member_changes(updated: &MemberUpdate, before: &Before) -> Vec<Event> {
+    let mut changes: Vec<Event> = roles_changed(updated, before.roles.as_deref())
+        .into_iter()
+        .collect();
+    if let Some((nick, timed_out_until)) = &before.member {
+        let who = user(&updated.user);
+        if *nick != updated.nick {
+            changes.push(Event::NicknameChanged {
+                guild_id: updated.guild_id,
+                user: who.clone(),
+                before: nick.clone(),
+                after: updated.nick.clone(),
+            });
+        }
+        let timed_out_after = updated.communication_disabled_until.map(seconds);
+        if *timed_out_until != timed_out_after {
+            changes.push(Event::TimeoutChanged {
+                guild_id: updated.guild_id,
+                user: who,
+                before: *timed_out_until,
+                after: timed_out_after,
+            });
+        }
+    }
+    changes
+}
+
+/// A member joined a voice channel, left one or moved to another, against the channel the bot knew
+/// the member to be in before.
+fn voice_change(state: &VoiceState, before: &Before) -> Option<Event> {
+    let guild_id = state.guild_id?;
+    if before.voice_channel == state.channel_id {
+        return None;
+    }
+    let who = match &state.member {
+        Some(member) => user(&member.user),
+        None => UserInfo {
+            id: state.user_id,
+            name: state.user_id.to_string(),
+            bot: false,
+        },
+    };
+    Some(Event::VoiceStateChanged {
+        guild_id,
+        user: who,
+        before: before.voice_channel,
+        after: state.channel_id,
+    })
+}
+
+/// The emojis that a guild update adds, removes and changes, against the emojis the bot knew.
+fn emoji_changes(update: &GuildEmojisUpdate, before: Option<&[EmojiInfo]>) -> Vec<Event> {
+    let Some(before) = before else {
+        return Vec::new();
+    };
+    let after: Vec<EmojiInfo> = update
+        .emojis
+        .iter()
+        .map(|emoji| emoji_info(update.guild_id, emoji))
+        .collect();
+    let diff = diff_by_id(before, &after, |emoji| emoji.id.get());
+    diff.deleted
+        .into_iter()
+        .map(Event::EmojiDeleted)
+        .chain(diff.created.into_iter().map(Event::EmojiCreated))
+        .chain(
+            diff.updated
+                .into_iter()
+                .map(|(before, after)| Event::EmojiUpdated { before, after }),
+        )
+        .collect()
+}
+
+/// The stickers that a guild update adds, removes and changes, against the stickers the bot knew.
+fn sticker_changes(update: &GuildStickersUpdate, before: Option<&[StickerInfo]>) -> Vec<Event> {
+    let Some(before) = before else {
+        return Vec::new();
+    };
+    let after: Vec<StickerInfo> = update
+        .stickers
+        .iter()
+        .map(|sticker| sticker_info(update.guild_id, sticker))
+        .collect();
+    let diff = diff_by_id(before, &after, |sticker| sticker.id.get());
+    diff.deleted
+        .into_iter()
+        .map(Event::StickerDeleted)
+        .chain(diff.created.into_iter().map(Event::StickerCreated))
+        .chain(
+            diff.updated
+                .into_iter()
+                .map(|(before, after)| Event::StickerUpdated { before, after }),
+        )
+        .collect()
+}
+
+/// What changed between two lists of the same things, by their ids.
+struct Diff<T> {
+    created: Vec<T>,
+    deleted: Vec<T>,
+    updated: Vec<(T, T)>,
+}
+
+fn diff_by_id<T: Clone + PartialEq>(before: &[T], after: &[T], id: impl Fn(&T) -> u64) -> Diff<T> {
+    let created = after
+        .iter()
+        .filter(|new| !before.iter().any(|old| id(old) == id(new)))
+        .cloned()
+        .collect();
+    let mut deleted = Vec::new();
+    let mut updated = Vec::new();
+    for old in before {
+        match after.iter().find(|new| id(new) == id(old)) {
+            None => deleted.push(old.clone()),
+            Some(new) if new != old => updated.push((old.clone(), new.clone())),
+            Some(_) => {}
+        }
+    }
+    Diff {
+        created,
+        deleted,
+        updated,
+    }
+}
+
+/// An emoji of a guild, as the module sees it.
+pub(crate) fn emoji_info(guild_id: GuildId, emoji: &twilight_model::guild::Emoji) -> EmojiInfo {
+    EmojiInfo {
+        id: emoji.id,
+        guild_id,
+        name: emoji.name.clone(),
+        animated: emoji.animated,
+        available: emoji.available,
+    }
+}
+
+/// An emoji of a guild as the cache held it.
+pub(crate) fn cached_emoji_info(guild_id: GuildId, emoji: &CachedEmoji) -> EmojiInfo {
+    EmojiInfo {
+        id: emoji.id(),
+        guild_id,
+        name: emoji.name().to_owned(),
+        animated: emoji.animated(),
+        available: emoji.available(),
+    }
+}
+
+/// A sticker of a guild, as the module sees it.
+pub(crate) fn sticker_info(guild_id: GuildId, sticker: &Sticker) -> StickerInfo {
+    StickerInfo {
+        id: sticker.id,
+        guild_id,
+        name: sticker.name.clone(),
+        description: sticker.description.clone().unwrap_or_default(),
+        available: sticker.available,
+    }
+}
+
+/// A sticker of a guild as the cache held it.
+pub(crate) fn cached_sticker_info(guild_id: GuildId, sticker: &CachedSticker) -> StickerInfo {
+    StickerInfo {
+        id: sticker.id(),
+        guild_id,
+        name: sticker.name().to_owned(),
+        description: sticker.description().to_owned(),
+        available: sticker.available(),
+    }
+}
+
+/// A stage instance, as the module sees it.
+pub(crate) fn stage_info(stage: &StageInstance) -> StageInfo {
+    StageInfo {
+        id: stage.id,
+        guild_id: stage.guild_id,
+        channel_id: stage.channel_id,
+        topic: stage.topic.clone(),
     }
 }
 
@@ -594,6 +833,57 @@ fn reaction(reaction: &twilight_model::gateway::GatewayReaction) -> Option<React
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_emoji_list_change_is_announced_by_what_it_added_removed_and_changed() {
+        let emoji = |id: u64, name: &str| EmojiInfo {
+            id: Id::new(id),
+            guild_id: Id::new(1),
+            name: name.into(),
+            animated: false,
+            available: true,
+        };
+        let before = vec![emoji(1, "a"), emoji(2, "b")];
+        let after = vec![emoji(2, "renamed"), emoji(3, "c")];
+
+        let diff = diff_by_id(&before, &after, |emoji| emoji.id.get());
+
+        assert_eq!(diff.deleted, vec![emoji(1, "a")]);
+        assert_eq!(diff.created, vec![emoji(3, "c")]);
+        assert_eq!(diff.updated, vec![(emoji(2, "b"), emoji(2, "renamed"))]);
+    }
+
+    #[test]
+    fn a_voice_join_is_announced_against_the_channel_known_before() {
+        let state: VoiceState = serde_json::from_value(serde_json::json!({
+            "channel_id": "3",
+            "guild_id": "1",
+            "user_id": "40",
+            "session_id": "session",
+            "deaf": false,
+            "mute": false,
+            "self_deaf": false,
+            "self_mute": false,
+            "self_video": false,
+            "suppress": false,
+            "request_to_speak_timestamp": null
+        }))
+        .unwrap();
+
+        let event = voice_change(&state, &Before::default());
+
+        assert!(
+            matches!(
+                event,
+                Some(Event::VoiceStateChanged {
+                    before: None,
+                    after: Some(_),
+                    ..
+                })
+            ),
+            "{event:?}"
+        );
+    }
+
     use serde_json::{Value, json};
     use twilight_model::gateway::payload::incoming::{
         BanAdd, GuildDelete, InteractionCreate, MemberUpdate, MessageCreate, MessageDelete,

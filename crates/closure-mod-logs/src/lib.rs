@@ -5,7 +5,8 @@
 use closure_core::capability::Capability;
 use closure_core::error::{CoreError, ModuleError};
 use closure_core::event::{
-    AttachmentInfo, ChannelId, Event, EventKind, MemberInfo, MessageId, MessageInfo, UserInfo,
+    AttachmentInfo, ChannelId, ChannelInfo, Event, EventKind, MemberInfo, MessageId, MessageInfo,
+    RoleId, RoleInfo, RolesChange, StageInfo, StickerInfo, ThreadInfo, UserInfo,
 };
 use closure_core::history::SavedMessage;
 use closure_core::locale::Locale;
@@ -39,6 +40,16 @@ struct Config {
     member_joins: bool,
     member_leaves: bool,
     bans: bool,
+    channels: bool,
+    threads: bool,
+    roles: bool,
+    member_roles: bool,
+    member_nicknames: bool,
+    member_timeouts: bool,
+    voice: bool,
+    emojis: bool,
+    stickers: bool,
+    stage_instances: bool,
 }
 
 fn settings() -> (serde_json::Value, serde_json::Value) {
@@ -59,6 +70,16 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "member_joins": { "type": "boolean", "description": "Post the joins of members." },
             "member_leaves": { "type": "boolean", "description": "Post the departures of members." },
             "bans": { "type": "boolean", "description": "Post the bans and unbans of members." },
+            "channels": { "type": "boolean" },
+            "threads": { "type": "boolean" },
+            "roles": { "type": "boolean" },
+            "member_roles": { "type": "boolean" },
+            "member_nicknames": { "type": "boolean" },
+            "member_timeouts": { "type": "boolean" },
+            "voice": { "type": "boolean" },
+            "emojis": { "type": "boolean" },
+            "stickers": { "type": "boolean" },
+            "stage_instances": { "type": "boolean" },
             "keep_attachments": {
                 "type": "boolean",
                 "description": "Keep the files of attachments as their messages arrive, not only when a message is deleted or edited. Uses storage: a server's files are capped and kept for the message history's retention.",
@@ -74,6 +95,16 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
         "member_joins": true,
         "member_leaves": true,
         "bans": true,
+        "channels": true,
+        "threads": true,
+        "roles": true,
+        "member_roles": true,
+        "member_nicknames": true,
+        "member_timeouts": true,
+        "voice": false,
+        "emojis": true,
+        "stickers": true,
+        "stage_instances": true,
         "keep_attachments": false
     });
     (schema, defaults)
@@ -91,7 +122,9 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 Intents::GUILD_MESSAGES
                     | Intents::GUILD_MEMBERS
                     | Intents::GUILD_MODERATION
-                    | Intents::MESSAGE_CONTENT,
+                    | Intents::MESSAGE_CONTENT
+                    | Intents::GUILD_VOICE_STATES
+                    | Intents::GUILD_EMOJIS_AND_STICKERS,
             )
             .on(Subscription::new(EventKind::MessageUpdated), on_event)
             .on(Subscription::new(EventKind::MessageDeleted), on_event)
@@ -100,6 +133,29 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .on(Subscription::new(EventKind::MemberLeft), on_event)
             .on(Subscription::new(EventKind::BanAdded), on_event)
             .on(Subscription::new(EventKind::BanRemoved), on_event)
+            .on(Subscription::new(EventKind::ChannelCreated), on_event)
+            .on(Subscription::new(EventKind::ChannelChanged), on_event)
+            .on(Subscription::new(EventKind::ChannelDeleted), on_event)
+            .on(Subscription::new(EventKind::ThreadCreated), on_event)
+            .on(Subscription::new(EventKind::ThreadArchived), on_event)
+            .on(Subscription::new(EventKind::ThreadUnarchived), on_event)
+            .on(Subscription::new(EventKind::ThreadDeleted), on_event)
+            .on(Subscription::new(EventKind::RoleCreated), on_event)
+            .on(Subscription::new(EventKind::RoleChanged), on_event)
+            .on(Subscription::new(EventKind::RoleDeleted), on_event)
+            .on(Subscription::new(EventKind::RolesChanged), on_event)
+            .on(Subscription::new(EventKind::NicknameChanged), on_event)
+            .on(Subscription::new(EventKind::TimeoutChanged), on_event)
+            .on(Subscription::new(EventKind::VoiceStateChanged), on_event)
+            .on(Subscription::new(EventKind::EmojiCreated), on_event)
+            .on(Subscription::new(EventKind::EmojiDeleted), on_event)
+            .on(Subscription::new(EventKind::EmojiUpdated), on_event)
+            .on(Subscription::new(EventKind::StickerCreated), on_event)
+            .on(Subscription::new(EventKind::StickerDeleted), on_event)
+            .on(Subscription::new(EventKind::StickerUpdated), on_event)
+            .on(Subscription::new(EventKind::StageCreated), on_event)
+            .on(Subscription::new(EventKind::StageDeleted), on_event)
+            .on(Subscription::new(EventKind::StageUpdated), on_event)
             .config(schema, defaults)
             .catalog(Locale::En, EN)
             .catalog(Locale::Ja, JA),
@@ -141,10 +197,184 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
         Event::BanRemoved { user, .. } if config.bans => {
             vec![member_entry(&ctx, "logs-unbanned", Color::Success, user)?]
         }
-        _ => return Ok(Flow::Continue),
+        _ => match change_entries(&ctx, &config, &event)? {
+            Some(entries) => entries,
+            None => return Ok(Flow::Continue),
+        },
     };
     files::post(&ctx, channel, entries).await?;
     Ok(Flow::Continue)
+}
+
+/// The entries of the events that describe a change of a channel, a thread or a role. `None` for any
+/// other event.
+fn structure_entries(
+    ctx: &EventContext,
+    config: &Config,
+    event: &Event,
+) -> Result<Option<Vec<LogEntry>>, ModuleError> {
+    let entries = match event {
+        Event::ChannelCreated(channel) if config.channels => {
+            vec![channel_entry(
+                ctx,
+                "logs-channel-created",
+                Color::Success,
+                channel,
+            )?]
+        }
+        Event::ChannelChanged { before, after } if config.channels => {
+            changed(channel_changed_entry(ctx, before, after)?)
+        }
+        Event::ChannelDeleted(channel) if config.channels => {
+            vec![channel_entry(
+                ctx,
+                "logs-channel-deleted",
+                Color::Error,
+                channel,
+            )?]
+        }
+        Event::ThreadCreated(thread) if config.threads => {
+            vec![thread_entry(
+                ctx,
+                "logs-thread-created",
+                Color::Success,
+                thread,
+            )?]
+        }
+        Event::ThreadArchived(thread) if config.threads => {
+            vec![thread_entry(
+                ctx,
+                "logs-thread-archived",
+                Color::Info,
+                thread,
+            )?]
+        }
+        Event::ThreadUnarchived(thread) if config.threads => {
+            vec![thread_entry(
+                ctx,
+                "logs-thread-unarchived",
+                Color::Info,
+                thread,
+            )?]
+        }
+        Event::ThreadDeleted {
+            thread_id,
+            parent_id,
+            ..
+        } if config.threads => vec![thread_deleted_entry(ctx, *thread_id, *parent_id)?],
+        Event::RoleCreated(role) if config.roles => {
+            vec![role_entry(ctx, "logs-role-created", Color::Success, role)?]
+        }
+        Event::RoleChanged { before, after } if config.roles => {
+            changed(role_changed_entry(ctx, before, after)?)
+        }
+        Event::RoleDeleted { role_id, .. } if config.roles => {
+            vec![role_deleted_entry(ctx, *role_id)?]
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(entries))
+}
+
+/// The entries of the events that describe a change of a member, a voice channel, an emoji, a sticker
+/// or a stage. `None` for any other event.
+fn state_entries(
+    ctx: &EventContext,
+    config: &Config,
+    event: &Event,
+) -> Result<Option<Vec<LogEntry>>, ModuleError> {
+    let entries = match event {
+        Event::RolesChanged(change) if config.member_roles => {
+            vec![roles_changed_entry(ctx, change)?]
+        }
+        Event::NicknameChanged {
+            user,
+            before,
+            after,
+            ..
+        } if config.member_nicknames => vec![nickname_entry(
+            ctx,
+            user,
+            before.as_deref(),
+            after.as_deref(),
+        )?],
+        Event::TimeoutChanged { user, after, .. } if config.member_timeouts => {
+            vec![timeout_entry(ctx, user, *after)?]
+        }
+        Event::VoiceStateChanged {
+            user,
+            before,
+            after,
+            ..
+        } if config.voice => vec![voice_entry(ctx, user, *before, *after)?],
+        Event::EmojiCreated(emoji) if config.emojis => {
+            vec![emoji_entry(
+                ctx,
+                "logs-emoji-created",
+                Color::Success,
+                &emoji.name,
+            )?]
+        }
+        Event::EmojiDeleted(emoji) if config.emojis => {
+            vec![emoji_entry(
+                ctx,
+                "logs-emoji-deleted",
+                Color::Error,
+                &emoji.name,
+            )?]
+        }
+        Event::EmojiUpdated { before, after } if config.emojis => {
+            changed(emoji_changed_entry(ctx, &before.name, &after.name)?)
+        }
+        Event::StickerCreated(sticker) if config.stickers => {
+            vec![sticker_entry(
+                ctx,
+                "logs-sticker-created",
+                Color::Success,
+                sticker,
+            )?]
+        }
+        Event::StickerDeleted(sticker) if config.stickers => {
+            vec![sticker_entry(
+                ctx,
+                "logs-sticker-deleted",
+                Color::Error,
+                sticker,
+            )?]
+        }
+        Event::StickerUpdated { before, after } if config.stickers => {
+            changed(sticker_changed_entry(ctx, before, after)?)
+        }
+        Event::StageCreated(stage) if config.stage_instances => {
+            vec![stage_entry(
+                ctx,
+                "logs-stage-started",
+                Color::Success,
+                stage,
+            )?]
+        }
+        Event::StageDeleted(stage) if config.stage_instances => {
+            vec![stage_entry(ctx, "logs-stage-ended", Color::Error, stage)?]
+        }
+        Event::StageUpdated { before, after } if config.stage_instances => {
+            changed(stage_changed_entry(ctx, before, after)?)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(entries))
+}
+
+/// The entries that a gateway event gives beyond the ones of messages and members, if it describes a
+/// change that a log shows.
+fn change_entries(
+    ctx: &EventContext,
+    config: &Config,
+    event: &Event,
+) -> Result<Option<Vec<LogEntry>>, ModuleError> {
+    match structure_entries(ctx, config, event)? {
+        Some(entries) => Ok(Some(entries)),
+        None => state_entries(ctx, config, event),
+    }
 }
 
 /// The channel the entries go to: the one the module is configured with, else the guild's log channel.
@@ -318,7 +548,7 @@ fn text_field(ctx: &EventContext, card: EmbedBuilder, key: &str, text: &str) -> 
     let value = if text.is_empty() {
         label(ctx, "logs-no-text")
     } else {
-        clip(text, FIELD_LIMIT)
+        code_block(text)
     };
     card.field(label(ctx, key), value, false)
 }
@@ -437,6 +667,457 @@ fn build(card: EmbedBuilder) -> Result<Embed, ModuleError> {
     card.build()
         .map_err(|error| ModuleError::other(error.to_string()))
 }
+
+/// The entries that a change gives: none when the change shows nothing.
+fn changed(entry: Option<LogEntry>) -> Vec<LogEntry> {
+    entry.into_iter().collect()
+}
+
+/// An entry without files.
+fn plain(card: EmbedBuilder) -> Result<LogEntry, ModuleError> {
+    Ok(LogEntry {
+        embed: build(card)?,
+        files: Vec::new(),
+    })
+}
+
+/// A name in a code span; backticks in the name are kept apart from the span.
+fn name_text(ctx: &EventContext, name: Option<&str>) -> String {
+    match name {
+        Some(name) if !name.is_empty() => format!("`{}`", name.replace('`', "'")),
+        _ => label(ctx, "logs-none"),
+    }
+}
+
+/// A text as a code block, or the word for none.
+fn text_or_none(ctx: &EventContext, text: Option<&str>) -> String {
+    match text {
+        Some(text) if !text.is_empty() => code_block(text),
+        _ => label(ctx, "logs-none"),
+    }
+}
+
+fn channel_mention(ctx: &EventContext, id: Option<ChannelId>) -> String {
+    id.map_or_else(|| label(ctx, "logs-none"), |id| format!("<#{}>", id.get()))
+}
+
+fn yes_or_no(ctx: &EventContext, value: bool) -> String {
+    label(ctx, if value { "logs-yes" } else { "logs-no" })
+}
+
+fn arrow(before: &str, after: &str) -> String {
+    format!("{before} → {after}")
+}
+
+fn role_mentions(roles: &[RoleId]) -> String {
+    roles
+        .iter()
+        .map(|role| format!("<@&{}>", role.get()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn colour_text(colour: u32) -> String {
+    format!("#{colour:06X}")
+}
+
+/// A text that changed: the text before it, then the text after it, each as a code block.
+fn text_change(
+    ctx: &EventContext,
+    card: EmbedBuilder,
+    key: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> EmbedBuilder {
+    card.field(label(ctx, key), text_or_none(ctx, before), false)
+        .field(label(ctx, "logs-after"), text_or_none(ctx, after), false)
+}
+
+fn channel_entry(
+    ctx: &EventContext,
+    title: &str,
+    color: Color,
+    channel: &ChannelInfo,
+) -> Result<LogEntry, ModuleError> {
+    let card = card(label(ctx, title), color)
+        .field(
+            label(ctx, "logs-channel"),
+            format!("<#{}>", channel.id.get()),
+            true,
+        )
+        .field(
+            label(ctx, "logs-name"),
+            name_text(ctx, channel.name.as_deref()),
+            true,
+        );
+    let card = match channel.parent_id {
+        Some(parent) => card.field(
+            label(ctx, "logs-parent"),
+            format!("<#{}>", parent.get()),
+            true,
+        ),
+        None => card,
+    };
+    plain(card)
+}
+
+fn channel_changed_entry(
+    ctx: &EventContext,
+    before: &ChannelInfo,
+    after: &ChannelInfo,
+) -> Result<Option<LogEntry>, ModuleError> {
+    let mut card = card(label(ctx, "logs-channel-changed"), Color::Warning).field(
+        label(ctx, "logs-channel"),
+        format!("<#{}>", after.id.get()),
+        true,
+    );
+    let mut any = false;
+    if before.name != after.name {
+        let shown = arrow(
+            &name_text(ctx, before.name.as_deref()),
+            &name_text(ctx, after.name.as_deref()),
+        );
+        card = card.field(label(ctx, "logs-name"), shown, false);
+        any = true;
+    }
+    if before.parent_id != after.parent_id {
+        let shown = arrow(
+            &channel_mention(ctx, before.parent_id),
+            &channel_mention(ctx, after.parent_id),
+        );
+        card = card.field(label(ctx, "logs-parent"), shown, false);
+        any = true;
+    }
+    if before.topic != after.topic {
+        card = text_change(
+            ctx,
+            card,
+            "logs-topic",
+            before.topic.as_deref(),
+            after.topic.as_deref(),
+        );
+        any = true;
+    }
+    if before.nsfw != after.nsfw {
+        let shown = arrow(&yes_or_no(ctx, before.nsfw), &yes_or_no(ctx, after.nsfw));
+        card = card.field(label(ctx, "logs-nsfw"), shown, false);
+        any = true;
+    }
+    if any { plain(card).map(Some) } else { Ok(None) }
+}
+
+fn thread_entry(
+    ctx: &EventContext,
+    title: &str,
+    color: Color,
+    thread: &ThreadInfo,
+) -> Result<LogEntry, ModuleError> {
+    plain(
+        card(label(ctx, title), color)
+            .field(
+                label(ctx, "logs-thread"),
+                format!("<#{}>", thread.id.get()),
+                true,
+            )
+            .field(
+                label(ctx, "logs-name"),
+                name_text(ctx, Some(&thread.name)),
+                true,
+            )
+            .field(
+                label(ctx, "logs-parent"),
+                channel_mention(ctx, thread.parent_id),
+                true,
+            ),
+    )
+}
+
+fn thread_deleted_entry(
+    ctx: &EventContext,
+    thread: ChannelId,
+    parent: ChannelId,
+) -> Result<LogEntry, ModuleError> {
+    plain(
+        card(label(ctx, "logs-thread-deleted"), Color::Error)
+            .field(
+                label(ctx, "logs-thread"),
+                format!("<#{}>", thread.get()),
+                true,
+            )
+            .field(
+                label(ctx, "logs-parent"),
+                format!("<#{}>", parent.get()),
+                true,
+            ),
+    )
+}
+
+fn role_card(ctx: &EventContext, title: &str, color: Color, role: &RoleInfo) -> EmbedBuilder {
+    card(label(ctx, title), color)
+        .field(
+            label(ctx, "logs-role"),
+            format!("<@&{}>", role.id.get()),
+            true,
+        )
+        .field(
+            label(ctx, "logs-name"),
+            name_text(ctx, Some(&role.name)),
+            true,
+        )
+}
+
+fn role_entry(
+    ctx: &EventContext,
+    title: &str,
+    color: Color,
+    role: &RoleInfo,
+) -> Result<LogEntry, ModuleError> {
+    plain(role_card(ctx, title, color, role))
+}
+
+fn role_deleted_entry(ctx: &EventContext, role: RoleId) -> Result<LogEntry, ModuleError> {
+    plain(card(label(ctx, "logs-role-deleted"), Color::Error).field(
+        label(ctx, "logs-role"),
+        format!("<@&{}>", role.get()),
+        true,
+    ))
+}
+
+fn role_changed_entry(
+    ctx: &EventContext,
+    before: &RoleInfo,
+    after: &RoleInfo,
+) -> Result<Option<LogEntry>, ModuleError> {
+    let mut card = role_card(ctx, "logs-role-changed", Color::Warning, after);
+    let mut any = false;
+    if before.name != after.name {
+        let shown = arrow(
+            &name_text(ctx, Some(&before.name)),
+            &name_text(ctx, Some(&after.name)),
+        );
+        card = card.field(label(ctx, "logs-name"), shown, false);
+        any = true;
+    }
+    if before.color != after.color {
+        let shown = arrow(&colour_text(before.color), &colour_text(after.color));
+        card = card.field(label(ctx, "logs-colour"), shown, false);
+        any = true;
+    }
+    if before.position != after.position {
+        let shown = arrow(&before.position.to_string(), &after.position.to_string());
+        card = card.field(label(ctx, "logs-position"), shown, false);
+        any = true;
+    }
+    if before.hoist != after.hoist {
+        let shown = arrow(&yes_or_no(ctx, before.hoist), &yes_or_no(ctx, after.hoist));
+        card = card.field(label(ctx, "logs-hoist"), shown, false);
+        any = true;
+    }
+    if before.mentionable != after.mentionable {
+        let shown = arrow(
+            &yes_or_no(ctx, before.mentionable),
+            &yes_or_no(ctx, after.mentionable),
+        );
+        card = card.field(label(ctx, "logs-mentionable"), shown, false);
+        any = true;
+    }
+    if any { plain(card).map(Some) } else { Ok(None) }
+}
+
+fn roles_changed_entry(ctx: &EventContext, change: &RolesChange) -> Result<LogEntry, ModuleError> {
+    let mut card = member_card(ctx, "logs-member-roles-changed", Color::Info, &change.user);
+    if !change.added.is_empty() {
+        let shown = role_mentions(&change.added);
+        card = card.field(label(ctx, "logs-roles-added"), shown, false);
+    }
+    if !change.removed.is_empty() {
+        let shown = role_mentions(&change.removed);
+        card = card.field(label(ctx, "logs-roles-removed"), shown, false);
+    }
+    plain(card)
+}
+
+fn nickname_entry(
+    ctx: &EventContext,
+    user: &UserInfo,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Result<LogEntry, ModuleError> {
+    let card = member_card(ctx, "logs-nickname-changed", Color::Info, user)
+        .field(label(ctx, "logs-before"), text_or_none(ctx, before), false)
+        .field(label(ctx, "logs-after"), text_or_none(ctx, after), false);
+    plain(card)
+}
+
+fn timeout_entry(
+    ctx: &EventContext,
+    user: &UserInfo,
+    until: Option<i64>,
+) -> Result<LogEntry, ModuleError> {
+    let mut card = match until {
+        Some(_) => member_card(ctx, "logs-timeout-set", Color::Warning, user),
+        None => member_card(ctx, "logs-timeout-lifted", Color::Success, user),
+    };
+    if let Some(until) = until {
+        let shown = duration::timestamp(until, TimeStyle::ShortDateTime);
+        card = card.field(label(ctx, "logs-until"), shown, true);
+    }
+    plain(card)
+}
+
+fn voice_entry(
+    ctx: &EventContext,
+    user: &UserInfo,
+    before: Option<ChannelId>,
+    after: Option<ChannelId>,
+) -> Result<LogEntry, ModuleError> {
+    let title = match (before, after) {
+        (None, Some(_)) => "logs-voice-joined",
+        (Some(_), None) => "logs-voice-left",
+        _ => "logs-voice-moved",
+    };
+    let mut card = member_card(ctx, title, Color::Info, user);
+    if let Some(from) = before {
+        card = card.field(label(ctx, "logs-from"), format!("<#{}>", from.get()), true);
+    }
+    if let Some(to) = after {
+        card = card.field(label(ctx, "logs-to"), format!("<#{}>", to.get()), true);
+    }
+    plain(card)
+}
+
+fn emoji_entry(
+    ctx: &EventContext,
+    title: &str,
+    color: Color,
+    name: &str,
+) -> Result<LogEntry, ModuleError> {
+    plain(card(label(ctx, title), color).field(label(ctx, "logs-emoji"), format!(":{name}:"), true))
+}
+
+fn emoji_changed_entry(
+    ctx: &EventContext,
+    before: &str,
+    after: &str,
+) -> Result<Option<LogEntry>, ModuleError> {
+    if before == after {
+        return Ok(None);
+    }
+    let shown = arrow(&format!(":{before}:"), &format!(":{after}:"));
+    plain(
+        card(label(ctx, "logs-emoji-changed"), Color::Warning).field(
+            label(ctx, "logs-emoji"),
+            shown,
+            false,
+        ),
+    )
+    .map(Some)
+}
+
+fn sticker_entry(
+    ctx: &EventContext,
+    title: &str,
+    color: Color,
+    sticker: &StickerInfo,
+) -> Result<LogEntry, ModuleError> {
+    let card = card(label(ctx, title), color).field(
+        label(ctx, "logs-name"),
+        name_text(ctx, Some(&sticker.name)),
+        true,
+    );
+    let card = if sticker.description.is_empty() {
+        card
+    } else {
+        card.field(
+            label(ctx, "logs-description"),
+            code_block(&sticker.description),
+            false,
+        )
+    };
+    plain(card)
+}
+
+fn sticker_changed_entry(
+    ctx: &EventContext,
+    before: &StickerInfo,
+    after: &StickerInfo,
+) -> Result<Option<LogEntry>, ModuleError> {
+    let mut card = card(label(ctx, "logs-sticker-changed"), Color::Warning);
+    let mut any = false;
+    if before.name != after.name {
+        let shown = arrow(
+            &name_text(ctx, Some(&before.name)),
+            &name_text(ctx, Some(&after.name)),
+        );
+        card = card.field(label(ctx, "logs-name"), shown, false);
+        any = true;
+    }
+    if before.description != after.description {
+        card = text_change(
+            ctx,
+            card,
+            "logs-description",
+            Some(&before.description),
+            Some(&after.description),
+        );
+        any = true;
+    }
+    if any { plain(card).map(Some) } else { Ok(None) }
+}
+
+fn stage_entry(
+    ctx: &EventContext,
+    title: &str,
+    color: Color,
+    stage: &StageInfo,
+) -> Result<LogEntry, ModuleError> {
+    plain(
+        card(label(ctx, title), color)
+            .field(
+                label(ctx, "logs-channel"),
+                format!("<#{}>", stage.channel_id.get()),
+                true,
+            )
+            .field(
+                label(ctx, "logs-topic"),
+                text_or_none(ctx, Some(&stage.topic)),
+                false,
+            ),
+    )
+}
+
+fn stage_changed_entry(
+    ctx: &EventContext,
+    before: &StageInfo,
+    after: &StageInfo,
+) -> Result<Option<LogEntry>, ModuleError> {
+    if before.topic == after.topic {
+        return Ok(None);
+    }
+    let card = card(label(ctx, "logs-stage-changed"), Color::Warning).field(
+        label(ctx, "logs-channel"),
+        format!("<#{}>", after.channel_id.get()),
+        true,
+    );
+    let card = text_change(
+        ctx,
+        card,
+        "logs-topic",
+        Some(&before.topic),
+        Some(&after.topic),
+    );
+    plain(card).map(Some)
+}
+
+/// Text as a code block, so that it reads as written and nothing in it formats the entry. A run of
+/// backticks is broken with a zero-width space, so that the text cannot end the block early.
+fn code_block(text: &str) -> String {
+    let escaped = text.replace("```", "`\u{200B}``");
+    format!("```{}```", clip(&escaped, FIELD_LIMIT - CODE_FENCE_CHARS))
+}
+
+/// The characters that the code block around a text adds to it.
+const CODE_FENCE_CHARS: usize = 6;
 
 #[cfg(test)]
 mod tests;

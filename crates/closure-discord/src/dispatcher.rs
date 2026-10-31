@@ -361,7 +361,10 @@ fn ordering_key(event: &Event) -> u64 {
         Event::MemberJoined(member) | Event::MemberUpdated(member) => member.user.id.get(),
         Event::MemberLeft { user, .. }
         | Event::BanAdded { user, .. }
-        | Event::BanRemoved { user, .. } => user.id.get(),
+        | Event::BanRemoved { user, .. }
+        | Event::NicknameChanged { user, .. }
+        | Event::TimeoutChanged { user, .. }
+        | Event::VoiceStateChanged { user, .. } => user.id.get(),
         Event::MessageCreated(message) | Event::MessageUpdated(message) => message.channel_id.get(),
         Event::MessageDeleted { channel_id, .. }
         | Event::MessagesBulkDeleted { channel_id, .. } => channel_id.get(),
@@ -374,6 +377,14 @@ fn ordering_key(event: &Event) -> u64 {
         Event::RoleCreated(role) | Event::RoleUpdated(role) => role.id.get(),
         Event::RoleDeleted { role_id, .. } => role_id.get(),
         Event::RolesChanged(change) => change.user.id.get(),
+        Event::ChannelChanged { after, .. } => after.id.get(),
+        Event::RoleChanged { after, .. } => after.id.get(),
+        Event::EmojiCreated(emoji) | Event::EmojiDeleted(emoji) => emoji.id.get(),
+        Event::EmojiUpdated { after, .. } => after.id.get(),
+        Event::StickerCreated(sticker) | Event::StickerDeleted(sticker) => sticker.id.get(),
+        Event::StickerUpdated { after, .. } => after.id.get(),
+        Event::StageCreated(stage) | Event::StageDeleted(stage) => stage.id.get(),
+        Event::StageUpdated { after, .. } => after.id.get(),
         Event::ThreadCreated(thread)
         | Event::ThreadArchived(thread)
         | Event::ThreadUnarchived(thread) => thread.id.get(),
