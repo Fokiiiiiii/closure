@@ -273,7 +273,7 @@ fn step(action: Action, kind: &str, channel: ChannelId) -> Step {
             content,
             embeds,
             ..
-        } => message(channel, Some(direct_text(user_id, content)), embeds, kind),
+        } => direct_message(channel, user_id, content.as_deref(), embeds, kind),
         Action::Respond {
             response: InteractionResponse::Message { reply } | InteractionResponse::Update { reply },
             ..
@@ -287,11 +287,32 @@ fn step(action: Action, kind: &str, channel: ChannelId) -> Step {
     }
 }
 
-/// The text of a direct message, under a first line that names the member it was meant for.
-fn direct_text(user_id: UserId, content: Option<String>) -> String {
-    match content {
-        Some(text) => format!("DM to {user_id}\n{text}"),
-        None => format!("DM to {user_id}"),
+/// A direct message, posted under a first line that names the member it was meant for. The line is
+/// not what tells the kinds apart: the same message goes to many members, so the key is the text
+/// the member reads. A message with text is checked with its line, as it always was; one without
+/// text is checked by its embeds alone.
+fn direct_message(
+    channel: ChannelId,
+    user_id: UserId,
+    body: Option<&str>,
+    embeds: Vec<Embed>,
+    kind: &str,
+) -> Step {
+    let header = format!("DM to {user_id}");
+    let shown = match body {
+        Some(text) => format!("{header}\n{text}"),
+        None => header,
+    };
+    let key = template_key(body, &embeds);
+    let checked = body.map(|_| shown.clone());
+    match message(channel, checked, embeds, kind) {
+        Step::Send { mut post, .. } => {
+            if let Action::SendMessage { content, .. } = &mut *post {
+                *content = Some(shown);
+            }
+            Step::Send { post, key }
+        }
+        other => other,
     }
 }
 
@@ -393,6 +414,32 @@ mod tests {
         let plan = plan_of(&[dm]);
 
         assert_eq!(plan.posts, vec![sent("DM to 42\nhi there")]);
+    }
+
+    #[test]
+    fn direct_messages_with_other_texts_are_all_posted_whoever_they_are_for() {
+        let described = |text: &str| {
+            serde_json::from_value::<Embed>(json!({ "type": "rich", "description": text })).unwrap()
+        };
+        let dm = |user: u64, text: &str| Action::SendDirectMessage {
+            guild_id: GuildId::new(1),
+            user_id: UserId::new(user),
+            content: None,
+            embeds: vec![described(text)],
+        };
+
+        let plan = plan_of(&[
+            dm(42, "You were warned in a server. Reason: spam"),
+            dm(43, "You were banned from a server. Reason: raid"),
+        ]);
+
+        assert_eq!(plan.similar, 0);
+        assert_eq!(plan.posts.len(), 2);
+        assert!(
+            matches!(&plan.posts[0], Action::SendMessage { content: Some(text), .. } if text == "DM to 42"),
+            "{:?}",
+            plan.posts[0]
+        );
     }
 
     #[test]
