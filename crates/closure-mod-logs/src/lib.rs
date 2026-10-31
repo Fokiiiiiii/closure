@@ -22,6 +22,9 @@ use serde_json::json;
 use twilight_model::channel::message::Embed;
 use twilight_model::id::Id;
 
+mod audit;
+use audit::{add_audit, audit_of};
+
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 
@@ -117,6 +120,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .capability(Capability::SendMessages)
             .capability(Capability::ReadMessageHistory)
             .capability(Capability::KeepAttachments)
+            .capability(Capability::ReadAuditLog)
             .intents(
                 Intents::GUILD_MESSAGES
                     | Intents::GUILD_MEMBERS
@@ -188,16 +192,46 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             vec![joined_entry(&ctx, member)?]
         }
         Event::MemberLeft { user, .. } if config.member_leaves => {
-            vec![member_entry(&ctx, "logs-left", Color::Info, user)?]
+            let kick = audit_of(&ctx, &config, &event).await;
+            let (title, color) = if kick.is_some() {
+                ("logs-kicked", Color::Error)
+            } else {
+                ("logs-left", Color::Info)
+            };
+            vec![add_audit(
+                &ctx,
+                member_entry(&ctx, title, color, user)?,
+                kick.as_ref(),
+            )]
         }
         Event::BanAdded { user, .. } if config.bans => {
-            vec![member_entry(&ctx, "logs-banned", Color::Error, user)?]
+            let ban = audit_of(&ctx, &config, &event).await;
+            vec![add_audit(
+                &ctx,
+                member_entry(&ctx, "logs-banned", Color::Error, user)?,
+                ban.as_ref(),
+            )]
         }
         Event::BanRemoved { user, .. } if config.bans => {
-            vec![member_entry(&ctx, "logs-unbanned", Color::Success, user)?]
+            let unban = audit_of(&ctx, &config, &event).await;
+            vec![add_audit(
+                &ctx,
+                member_entry(&ctx, "logs-unbanned", Color::Success, user)?,
+                unban.as_ref(),
+            )]
         }
         _ => match change_entries(&ctx, &config, &event)? {
-            Some(entries) => entries,
+            Some(entries) => {
+                let audit = if entries.is_empty() {
+                    None
+                } else {
+                    audit_of(&ctx, &config, &event).await
+                };
+                entries
+                    .into_iter()
+                    .map(|entry| add_audit(&ctx, entry, audit.as_ref()))
+                    .collect()
+            }
             None => return Ok(Flow::Continue),
         },
     };

@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use closure_core::action::Action;
 use closure_core::capability::Capability;
 use closure_core::error::DiscordError;
@@ -10,6 +12,7 @@ use closure_sdk::Locale;
 use closure_sdk::testing::Harness;
 use serde_json::json;
 use twilight_model::guild::Permissions;
+use twilight_model::guild::audit_log::{AuditLogEntry, AuditLogEventType};
 use twilight_model::id::Id;
 
 use super::*;
@@ -986,4 +989,163 @@ fn both_languages_define_the_same_messages() {
 
     assert!(!keys(EN).is_empty());
     assert_eq!(keys(EN), keys(JA));
+}
+
+/// The snowflakes count from Discord's epoch, in milliseconds.
+const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+
+/// An audit log entry of `kind` on `target`, made by `by` with `reason`, `seconds_ago` seconds ago.
+fn audit(
+    kind: AuditLogEventType,
+    target: u64,
+    by: u64,
+    reason: Option<&str>,
+    seconds_ago: u64,
+) -> AuditLogEntry {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after the Unix epoch")
+        .as_millis();
+    let made_ms = u64::try_from(now_ms).expect("the time fits in a u64") - seconds_ago * 1000;
+    AuditLogEntry {
+        action_type: kind,
+        changes: Vec::new(),
+        guild_id: None,
+        id: Id::new((made_ms - DISCORD_EPOCH_MS) << 22),
+        options: None,
+        reason: reason.map(str::to_owned),
+        target_id: Some(Id::new(target)),
+        user_id: Some(Id::new(by)),
+    }
+}
+
+#[tokio::test]
+async fn a_departure_the_audit_log_records_as_a_kick_is_shown_as_one_with_who_made_it() {
+    let harness = harness();
+    harness
+        .api()
+        .add_audit_entry(audit(AuditLogEventType::MemberKick, 40, 9, Some("spam"), 5));
+
+    harness
+        .emit(Event::MemberLeft {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(
+        posted[0].embeds.contains("Member kicked"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+    assert!(posted[0].embeds.contains("spam"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_departure_with_only_an_old_kick_in_the_audit_log_is_a_leave() {
+    let harness = harness();
+    harness
+        .api()
+        .add_audit_entry(audit(AuditLogEventType::MemberKick, 40, 9, None, 3600));
+
+    harness
+        .emit(Event::MemberLeft {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(
+        posted[0].embeds.contains("Member left"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(!posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_ban_names_who_made_it_and_the_reason_they_gave() {
+    let harness = harness();
+    harness.api().add_audit_entry(audit(
+        AuditLogEventType::MemberBanAdd,
+        40,
+        9,
+        Some("raid"),
+        5,
+    ));
+
+    harness
+        .emit(Event::BanAdded {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(
+        posted[0].embeds.contains("Member banned"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+    assert!(posted[0].embeds.contains("raid"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_nickname_change_names_who_made_it() {
+    let harness = harness();
+    harness
+        .api()
+        .add_audit_entry(audit(AuditLogEventType::MemberUpdate, 40, 9, None, 5));
+
+    harness
+        .emit(Event::NicknameChanged {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+            before: Some("Old name".into()),
+            after: None,
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_departure_is_still_logged_when_the_audit_log_cannot_be_read() {
+    let harness = harness();
+    harness
+        .api()
+        .add_audit_entry(audit(AuditLogEventType::MemberKick, 40, 9, None, 5));
+    harness
+        .api()
+        .fail_nth(1, DiscordError::Forbidden("missing access".into()));
+
+    harness
+        .emit(Event::MemberLeft {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(
+        posted[0].embeds.contains("Member left"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(!posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
 }

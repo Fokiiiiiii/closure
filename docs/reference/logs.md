@@ -8,6 +8,7 @@ Post the edits and deletions of messages, the changes of channels, threads, role
 ## Capabilities
 
 - `send_messages`
+- `read_audit_log`
 - `respond_to_interactions`
 - `message_history`
 - `keep_attachments`

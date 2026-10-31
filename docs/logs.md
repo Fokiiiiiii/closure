@@ -53,8 +53,12 @@ modules:
   bot knew before the update.
 - **Text in code blocks.** Message text, topics, nicknames and sticker descriptions are shown in code
   blocks, so they read as written and cannot format the entry around them.
-- **Not yet.** Who made a change, and kicks: Discord reports a kick as a leave, so a kick shows as a
-  departure. Both need the audit log, which the logs module does not read yet.
+- **Who made a change.** Channels, roles, a member's roles, nickname and timeout, emojis, stickers, stages,
+  threads, bans and unbans show who made the change and the reason they gave, from the audit log. A kick
+  shows as a kick, not as a departure. The audit log is read for the newest entry of the same kind that names
+  the same target and is less than a minute old; that minute is an assumption, not measured. A change the
+  member made to themselves, or one Discord made, shows no name. Reading the audit log needs the bot to view
+  it: without that, entries are still posted, without who made the change, and the failure is logged.
 
 ## Files
 

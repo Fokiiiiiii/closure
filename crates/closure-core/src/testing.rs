@@ -5,9 +5,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use twilight_model::channel::{Channel, Message};
+use twilight_model::guild::audit_log::{AuditLog, AuditLogEntry};
 use twilight_model::guild::{Guild, Member, Role};
 
-use crate::action::{Action, InteractionResponse, Outcome, OverwriteTarget};
+use crate::action::{Action, AuditLogQuery, InteractionResponse, Outcome, OverwriteTarget};
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
 use crate::event::{ChannelId, Event, GuildId, RoleId, UserId};
@@ -116,6 +117,8 @@ pub struct MockApi {
     /// The guilds whose invites are switched off by an edit, as the pretend Discord reports them.
     invites_disabled: Mutex<HashSet<GuildId>>,
     lookups: Mutex<usize>,
+    /// The entries of the pretend Discord's audit log, oldest first.
+    audit_log: Mutex<Vec<AuditLogEntry>>,
 }
 
 impl MockApi {
@@ -210,6 +213,9 @@ impl MockApi {
             } => Ok(token
                 .text_command_message()
                 .map_or(Outcome::None, |(channel, _)| self.sent(channel))),
+            Action::GetAuditLog { query, .. } => {
+                Ok(Outcome::AuditLog(Box::new(self.audit_log_for(query))))
+            }
             // Writes that return a new object are recorded but answered with `Outcome::None`.
             _ => Ok(Outcome::None),
         }
@@ -221,6 +227,35 @@ impl MockApi {
         let id = u64::try_from(lock(&self.actions).len()).unwrap_or(u64::MAX) + 1;
         sent_message(channel, id)
             .map_or(Outcome::None, |message| Outcome::Message(Box::new(message)))
+    }
+
+    /// Adds an entry to the guild's audit log, as Discord would have it.
+    pub fn add_audit_entry(&self, entry: AuditLogEntry) {
+        lock(&self.audit_log).push(entry);
+    }
+
+    /// The audit log entries of one kind (all of them when the query names no kind), newest first.
+    fn audit_log_for(&self, query: &AuditLogQuery) -> AuditLog {
+        let entries: Vec<AuditLogEntry> = lock(&self.audit_log)
+            .iter()
+            .rev()
+            .filter(|entry| {
+                query
+                    .action_type
+                    .is_none_or(|kind| u16::from(entry.action_type) == kind)
+            })
+            .cloned()
+            .collect();
+        AuditLog {
+            application_commands: Vec::new(),
+            auto_moderation_rules: Vec::new(),
+            entries,
+            guild_scheduled_events: Vec::new(),
+            integrations: Vec::new(),
+            threads: Vec::new(),
+            users: Vec::new(),
+            webhooks: Vec::new(),
+        }
     }
 
     /// Every action received so far, in order.

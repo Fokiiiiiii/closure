@@ -76,3 +76,6 @@ logs-sticker-changed = スタンプ変更
 logs-stage-started = ステージ開始
 logs-stage-ended = ステージ終了
 logs-stage-changed = ステージ変更
+logs-kicked = キック
+logs-by = 実行者
+logs-reason = 理由

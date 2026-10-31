@@ -76,3 +76,6 @@ logs-sticker-changed = Sticker changed
 logs-stage-started = Stage started
 logs-stage-ended = Stage ended
 logs-stage-changed = Stage changed
+logs-kicked = Member kicked
+logs-by = By
+logs-reason = Reason
