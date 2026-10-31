@@ -23,7 +23,8 @@ use twilight_model::channel::message::Embed;
 use twilight_model::id::Id;
 
 mod audit;
-use audit::{add_audit, audit_of, bulk_audit_of, deletion_audit_of};
+mod permissions;
+use audit::{add_audit, audit_of, bulk_audit_of, change_audit_of, deletion_audit_of};
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
@@ -239,7 +240,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
                 let audit = if entries.is_empty() {
                     None
                 } else {
-                    audit_of(&ctx, &config, &event).await
+                    change_audit_of(&ctx, &config, &event).await
                 };
                 entries
                     .into_iter()
@@ -857,6 +858,14 @@ fn channel_changed_entry(
         card = card.field(label(ctx, "logs-nsfw"), shown, false);
         any = true;
     }
+    for change in permissions::overwrite_changes(&before.overwrites, &after.overwrites) {
+        card = card.field(
+            label(ctx, "logs-overwrite"),
+            permissions::overwrite_value(ctx, &change),
+            false,
+        );
+        any = true;
+    }
     if any { plain(card).map(Some) } else { Ok(None) }
 }
 
@@ -973,6 +982,14 @@ fn role_changed_entry(
             &yes_or_no(ctx, after.mentionable),
         );
         card = card.field(label(ctx, "logs-mentionable"), shown, false);
+        any = true;
+    }
+    if before.permissions != after.permissions {
+        let shown = code_block(&permissions::permission_diff(
+            before.permissions,
+            after.permissions,
+        ));
+        card = card.field(label(ctx, "logs-permissions"), shown, false);
         any = true;
     }
     if any { plain(card).map(Some) } else { Ok(None) }

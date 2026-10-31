@@ -8,8 +8,8 @@ use closure_core::event::{
     AttachmentInfo, AutocompleteInvocation, ChannelId, ChannelInfo, CommandInvocation,
     CommandOption, CommandOptionValue, ComponentInvocation, ContextInvocation, ContextTarget,
     EmojiInfo, Event, GuildId, InteractionToken, MemberInfo, Mentionable, MessageInfo,
-    ModalSubmission, ReactionInfo, RoleId, RoleInfo, RolesChange, StageInfo, StickerInfo,
-    ThreadInfo, UserInfo,
+    ModalSubmission, OverwriteInfo, OverwriteTarget, ReactionInfo, RoleId, RoleInfo, RolesChange,
+    StageInfo, StickerInfo, ThreadInfo, UserInfo,
 };
 use closure_core::locale::Locale;
 use twilight_cache_inmemory::model::{CachedEmoji, CachedSticker};
@@ -23,6 +23,7 @@ use twilight_model::application::interaction::modal::ModalInteractionComponent;
 use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
 use twilight_model::channel::message::sticker::Sticker;
 use twilight_model::channel::message::{EmojiReactionType, Message, MessageType};
+use twilight_model::channel::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType};
 use twilight_model::channel::{Attachment, Channel, StageInstance};
 use twilight_model::gateway::payload::incoming::{
     GuildCreate, GuildEmojisUpdate, GuildStickersUpdate, MemberUpdate, ThreadCreate, ThreadDelete,
@@ -106,6 +107,25 @@ pub(crate) fn channel(channel: &Channel) -> Option<ChannelInfo> {
         parent_id: channel.parent_id,
         topic: channel.topic.clone(),
         nsfw: channel.nsfw.unwrap_or(false),
+        overwrites: channel
+            .permission_overwrites
+            .iter()
+            .flatten()
+            .filter_map(overwrite_info)
+            .collect(),
+    })
+}
+
+fn overwrite_info(permission: &PermissionOverwrite) -> Option<OverwriteInfo> {
+    let target = match permission.kind {
+        PermissionOverwriteType::Role => OverwriteTarget::Role(permission.id.cast()),
+        PermissionOverwriteType::Member => OverwriteTarget::Member(permission.id.cast()),
+        _ => return None,
+    };
+    Some(OverwriteInfo {
+        target,
+        allow: permission.allow,
+        deny: permission.deny,
     })
 }
 

@@ -40,13 +40,15 @@ modules:
   (its message history is off for the guild) the text before says that it was not kept.
 - **Deletion.** The text, the files and the id of the message, and when it was posted. The entry is
   stamped with the time of the deletion.
-- **Channels and threads.** A change shows what changed: the name, the category, the topic and NSFW.
+- **Channels and threads.** A change shows what changed: the name, the category, the topic, NSFW, and the
+  permission overwrites: for each role or member, what it allows and denies, with the changed permissions marked
+  `+` when added and `-` when removed.
   Creations, archives and deletions are shown as they happen.
-- **Roles.** A change shows what changed: the name, the colour (as a hex code), the position and the
-  flags. A role the bot did not see before is not compared.
+- **Roles.** A change shows what changed: the name, the colour (as a hex code), the position, the flags, and
+  the permissions, marked `+` when added and `-` when removed. A role the bot did not see before is not compared.
 - **Members.** Roles given and taken, the nickname before and after, and a Discord timeout that is set
-  or lifted. These compare with what the bot knew about the member before, so a member the bot did
-  not see is not compared.
+  or lifted. These compare with what the bot knew about the member before. The bot asks Discord for the
+  members of each guild when the guild comes up, so offline members are known too.
 - **Voice.** A join, a leave or a move of a voice channel, against the channel the bot knew the member
   to be in. Off by default: it is busy on a large server.
 - **Emojis, stickers and stages.** Created, deleted and changed. A change compares with the list the

@@ -11,6 +11,7 @@ use closure_sdk::files::LogEntry;
 use twilight_model::channel::message::embed::EmbedField;
 use twilight_model::guild::audit_log::{AuditLogEntry, AuditLogEventType};
 
+use crate::permissions;
 use crate::{Config, code_block, label};
 
 /// How old an audit log entry may be and still be the change an event reports. Assumed, not measured: a
@@ -176,6 +177,63 @@ pub(crate) async fn audit_of(
         by: entry.user_id,
         reason: entry.reason.clone(),
     })
+}
+
+/// The audit log entry of a change: the change of the event's own target, or, for a channel whose
+/// permission overwrites changed, the change of one of them.
+pub(crate) async fn change_audit_of(
+    ctx: &EventContext,
+    config: &Config,
+    event: &Event,
+) -> Option<AuditEntry> {
+    if let Some(audit) = audit_of(ctx, config, event).await {
+        return Some(audit);
+    }
+    let Event::ChannelChanged { before, after } = event else {
+        return None;
+    };
+    let targets: Vec<u64> = permissions::overwrite_changes(&before.overwrites, &after.overwrites)
+        .iter()
+        .map(|change| permissions::target_id(change.target))
+        .collect();
+    if targets.is_empty() {
+        return None;
+    }
+    overwrite_audit_of(ctx, after.id, &targets).await
+}
+
+/// The audit log entry that changed a permission overwrite of `channel` for one of `targets`, when there
+/// is one. Discord names the channel in the options of the entry, and the role or member in its target.
+async fn overwrite_audit_of(
+    ctx: &EventContext,
+    channel: ChannelId,
+    targets: &[u64],
+) -> Option<AuditEntry> {
+    let now = ctx.now();
+    for kind in [
+        AuditLogEventType::ChannelOverwriteCreate,
+        AuditLogEventType::ChannelOverwriteUpdate,
+        AuditLogEventType::ChannelOverwriteDelete,
+    ] {
+        let entries = recent_entries(ctx, kind).await?;
+        let found = entries.iter().find(|entry| {
+            entry
+                .target_id
+                .is_some_and(|id| targets.contains(&id.get()))
+                && entry
+                    .options
+                    .as_ref()
+                    .is_some_and(|options| options.channel_id == Some(channel))
+                && within_window(now, entry)
+        });
+        if let Some(entry) = found {
+            return Some(AuditEntry {
+                by: entry.user_id,
+                reason: entry.reason.clone(),
+            });
+        }
+    }
+    None
 }
 
 /// The audit log entry of a message that someone other than its author deleted. The entry names the author

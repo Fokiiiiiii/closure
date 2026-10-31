@@ -127,6 +127,24 @@ pub struct ChannelInfo {
     pub topic: Option<String>,
     #[serde(default)]
     pub nsfw: bool,
+    /// The permission overwrites of the channel, one per role or member they name.
+    #[serde(default)]
+    pub overwrites: Vec<OverwriteInfo>,
+}
+
+/// What a permission overwrite of a channel allows and denies for one role or member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverwriteInfo {
+    pub target: OverwriteTarget,
+    pub allow: Permissions,
+    pub deny: Permissions,
+}
+
+/// The role or member a permission overwrite applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum OverwriteTarget {
+    Role(RoleId),
+    Member(UserId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

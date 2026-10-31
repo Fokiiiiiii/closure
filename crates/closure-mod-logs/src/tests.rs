@@ -4,7 +4,8 @@ use closure_core::action::Action;
 use closure_core::capability::Capability;
 use closure_core::error::DiscordError;
 use closure_core::event::{
-    AttachmentInfo, ChannelInfo, EmojiInfo, Event, MemberInfo, MessageInfo, RoleInfo, UserInfo,
+    AttachmentInfo, ChannelInfo, EmojiInfo, Event, MemberInfo, MessageInfo, OverwriteInfo,
+    OverwriteTarget, RoleInfo, UserInfo,
 };
 use closure_core::history::SavedMessage;
 use closure_core::module::Module;
@@ -811,6 +812,7 @@ fn channel_info(name: &str, topic: Option<&str>) -> ChannelInfo {
         parent_id: None,
         topic: topic.map(Into::into),
         nsfw: false,
+        overwrites: Vec::new(),
     }
 }
 
@@ -820,6 +822,153 @@ fn member(id: u64) -> UserInfo {
         name: "member".into(),
         bot: false,
     }
+}
+
+fn overwrite_audit(kind: AuditLogEventType, channel: u64, target: u64, by: u64) -> AuditLogEntry {
+    let mut entry = audit(kind, target, by, None, 5);
+    entry.options =
+        Some(serde_json::from_value(json!({ "channel_id": channel.to_string() })).unwrap());
+    entry
+}
+
+fn role_overwrite(role: u64, allow: Permissions, deny: Permissions) -> OverwriteInfo {
+    OverwriteInfo {
+        target: OverwriteTarget::Role(Id::new(role)),
+        allow,
+        deny,
+    }
+}
+
+#[tokio::test]
+async fn a_change_of_a_permission_overwrite_shows_what_the_role_allows_and_denies() {
+    let harness = harness();
+    let mut after = channel_info("general", None);
+    after.overwrites = vec![role_overwrite(
+        9,
+        Permissions::VIEW_CHANNEL,
+        Permissions::SEND_MESSAGES,
+    )];
+
+    harness
+        .emit(Event::ChannelChanged {
+            before: channel_info("general", None),
+            after,
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(
+        posted[0].embeds.contains("Permission overwrite"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(posted[0].embeds.contains("<@&9>"), "{}", posted[0].embeds);
+    assert!(
+        posted[0].embeds.contains("+VIEW_CHANNEL"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("+SEND_MESSAGES"),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn a_role_whose_permissions_changed_shows_the_permissions_added_and_removed() {
+    let harness = harness();
+    let role = |permissions: Permissions| RoleInfo {
+        id: Id::new(60),
+        guild_id: Id::new(GUILD),
+        name: "mods".into(),
+        position: 3,
+        permissions,
+        color: 0,
+        hoist: false,
+        mentionable: false,
+    };
+
+    harness
+        .emit(Event::RoleChanged {
+            before: role(Permissions::VIEW_CHANNEL),
+            after: role(Permissions::ADD_REACTIONS),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(
+        posted[0].embeds.contains("+ADD_REACTIONS"),
+        "{}",
+        posted[0].embeds
+    );
+    assert!(
+        posted[0].embeds.contains("-VIEW_CHANNEL"),
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn an_overwrite_change_names_the_moderator_whose_entry_has_the_same_channel_and_target() {
+    let harness = harness();
+    harness.api().add_audit_entry(overwrite_audit(
+        AuditLogEventType::ChannelOverwriteCreate,
+        CHANNEL,
+        9,
+        5,
+    ));
+    let mut after = channel_info("general", None);
+    after.overwrites = vec![role_overwrite(
+        9,
+        Permissions::VIEW_CHANNEL,
+        Permissions::empty(),
+    )];
+
+    harness
+        .emit(Event::ChannelChanged {
+            before: channel_info("general", None),
+            after,
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(posted[0].embeds.contains("<@5>"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn an_overwrite_change_of_another_channel_is_not_named() {
+    let harness = harness();
+    harness.api().add_audit_entry(overwrite_audit(
+        AuditLogEventType::ChannelOverwriteCreate,
+        CHANNEL + 1,
+        9,
+        5,
+    ));
+    let mut after = channel_info("general", None);
+    after.overwrites = vec![role_overwrite(
+        9,
+        Permissions::VIEW_CHANNEL,
+        Permissions::empty(),
+    )];
+
+    harness
+        .emit(Event::ChannelChanged {
+            before: channel_info("general", None),
+            after,
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(!posted[0].embeds.contains("<@5>"), "{}", posted[0].embeds);
 }
 
 #[tokio::test]

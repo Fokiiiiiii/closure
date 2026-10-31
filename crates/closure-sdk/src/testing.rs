@@ -1078,6 +1078,7 @@ impl Harness {
             parent_id: None,
             topic: None,
             nsfw: false,
+            overwrites: Vec::new(),
         }))
         .await
     }
