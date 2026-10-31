@@ -552,6 +552,8 @@ async fn escalation_line(
 /// Warns a member. The warning is a case that expires after `warn_expire_days`. Once it brings the
 /// member to a number of active warnings that a rule names, that rule's action follows.
 async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
+    // Acknowledged first: the work below may outlast Discord's three seconds.
+    cx.defer(true).await?;
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let reason = punishment_reason(&config, args.reason)?;
@@ -718,6 +720,7 @@ async fn case_revoke(cx: CommandCx, args: Revoke) -> Result<(), UserError> {
 /// template is asked for. The member stays in the server, so the direct message comes after the
 /// timeout.
 async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
+    cx.defer(true).await?;
     // Resolved first: a moment that has passed is refused before anything else is asked.
     let duration = args
         .duration
@@ -739,6 +742,7 @@ async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
 
 /// Lifts a timeout. The newest timeout that still stands is revoked with it.
 async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
+    cx.defer(true).await?;
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let case = punisher_for(&cx, &config)
@@ -758,6 +762,7 @@ async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 /// Kicks a member. The direct message comes first: a kicked member shares no server with the bot.
 /// Without a reason, a template is asked for.
 async fn kick(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
+    cx.defer(true).await?;
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let punishment = templates::Punishment::new(
@@ -774,6 +779,7 @@ async fn kick(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 /// up. The direct message comes first, as with a kick. Without a reason, or a duration on a ban
 /// that a template may give, a template is asked for.
 async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
+    cx.defer(true).await?;
     if let Some(span) = &args.duration {
         span.resolve(&cx)?;
     }
@@ -796,6 +802,7 @@ async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
 
 /// Lifts a ban. The timer of a timed ban goes, and the newest ban that still stands is revoked.
 async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
+    cx.defer(true).await?;
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let case = punisher_for(&cx, &config)

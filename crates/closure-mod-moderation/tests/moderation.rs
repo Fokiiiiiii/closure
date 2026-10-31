@@ -155,7 +155,12 @@ fn case_revoke(number: i64, reason: Option<&str>) -> Invocation {
 }
 
 fn text(replies: &[Reply]) -> &str {
-    replies.first().map_or("", |reply| reply.content.as_str())
+    replies.last().map_or("", |reply| reply.content.as_str())
+}
+
+/// The answer of a command or a press: the acknowledgement comes first, the answer is the last reply.
+fn answer(replies: &[Reply]) -> &Reply {
+    replies.last().expect("an answer")
 }
 
 /// The lines of the answer that start with a case number, in the order given.
@@ -182,7 +187,10 @@ async fn a_moderator_warns_and_the_warning_is_a_case_that_expires_in_thirty_days
     let replies = harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
     assert!(text(&replies).contains("case #1"), "{replies:?}");
     assert!(text(&replies).contains("1 active."), "{replies:?}");
-    assert!(replies[0].ephemeral, "answered to the moderator alone");
+    assert!(
+        answer(&replies).ephemeral,
+        "answered to the moderator alone"
+    );
 
     let case = harness.cases().get(1).await.unwrap().unwrap();
     assert_eq!(case.kind.as_str(), "warn");
@@ -191,6 +199,28 @@ async fn a_moderator_warns_and_the_warning_is_a_case_that_expires_in_thirty_days
     assert_eq!(case.reason.as_deref(), Some("spam"));
     assert_eq!(case.expires_at, Some(case.created_at + 30 * 86_400));
     assert!(case.revoked.is_none());
+}
+
+#[tokio::test]
+async fn a_punishment_is_acknowledged_before_discord_is_asked_and_answered_by_an_edit() {
+    let harness = harness();
+    let replies = harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
+    // The first thing sent is the acknowledgement, so a slow punishment cannot pass Discord's limit.
+    assert!(
+        matches!(
+            harness.api().actions().first(),
+            Some(Action::Respond { .. })
+        ),
+        "{:?}",
+        harness.api().actions()
+    );
+    let kinds: Vec<ReplyKind> = replies.iter().map(|reply| reply.kind).collect();
+    assert_eq!(kinds.first(), Some(&ReplyKind::Deferred), "{replies:?}");
+    assert_eq!(kinds.last(), Some(&ReplyKind::Edit), "{replies:?}");
+    assert!(
+        replies.last().unwrap().content.contains("case #1"),
+        "{replies:?}"
+    );
 }
 
 #[tokio::test]
@@ -313,10 +343,10 @@ async fn the_direct_message_can_be_turned_off() {
 #[tokio::test]
 async fn a_closed_direct_message_does_not_fail_the_warning() {
     let harness = harness();
-    // The warning's own request is the first call; the direct message is the second.
+    // The acknowledgement is the first call, the warning's own request the second; the direct message is the third.
     harness
         .api()
-        .fail_nth(2, DiscordError::DirectMessagesClosed);
+        .fail_nth(3, DiscordError::DirectMessagesClosed);
     let replies = harness.invoke(warn(MEMBER, Some("closed"))).await.unwrap();
     assert!(text(&replies).contains("case #1"), "{replies:?}");
     assert!(
@@ -350,12 +380,12 @@ async fn a_confirmed_punishment_is_a_success_with_the_guild_emoji_and_a_list_sta
     let harness = harness();
     let warned = harness.invoke(warn(MEMBER, Some("tone"))).await.unwrap();
     assert_eq!(
-        warned[0].embeds[0].color,
+        answer(&warned).embeds[0].color,
         Some(SUCCESS_COLOUR),
         "{warned:?}"
     );
     assert!(
-        warned[0].embeds[0]
+        answer(&warned).embeds[0]
             .description
             .as_deref()
             .is_some_and(|text| text.starts_with("✅ ")),
@@ -365,9 +395,17 @@ async fn a_confirmed_punishment_is_a_success_with_the_guild_emoji_and_a_list_sta
         .invoke(timeout_of(MEMBER, Some("1h"), Some("tone")))
         .await
         .unwrap();
-    assert_eq!(timed[0].embeds[0].color, Some(SUCCESS_COLOUR), "{timed:?}");
+    assert_eq!(
+        answer(&timed).embeds[0].color,
+        Some(SUCCESS_COLOUR),
+        "{timed:?}"
+    );
     let listed = harness.invoke(warnings(MEMBER)).await.unwrap();
-    assert_eq!(listed[0].embeds[0].color, Some(INFO_COLOUR), "{listed:?}");
+    assert_eq!(
+        answer(&listed).embeds[0].color,
+        Some(INFO_COLOUR),
+        "{listed:?}"
+    );
 }
 
 // ---- /warnings ----
@@ -450,7 +488,7 @@ async fn at_most_ten_of_the_newest_warnings_are_listed() {
 async fn a_note_is_a_case_without_expiry_and_no_warning() {
     let harness = harness();
     let replies = harness.invoke(note(MEMBER, "memo")).await.unwrap();
-    assert!(replies[0].ephemeral, "{replies:?}");
+    assert!(answer(&replies).ephemeral, "{replies:?}");
 
     let case = harness.cases().get(1).await.unwrap().unwrap();
     assert_eq!(case.kind.as_str(), "note");
@@ -479,10 +517,10 @@ async fn a_case_is_shown_as_the_log_shows_it() {
     harness.invoke(warn(MEMBER, Some("shown"))).await.unwrap();
 
     let replies = harness.invoke(case_view(1)).await.unwrap();
-    assert!(replies[0].ephemeral, "{replies:?}");
-    assert_eq!(replies[0].embeds.len(), 1, "{replies:?}");
+    assert!(answer(&replies).ephemeral, "{replies:?}");
+    assert_eq!(answer(&replies).embeds.len(), 1, "{replies:?}");
     assert_eq!(
-        replies[0].embeds[0].title.as_deref(),
+        answer(&replies).embeds[0].title.as_deref(),
         Some("Case #1 · Warning")
     );
 
@@ -919,10 +957,10 @@ async fn a_kick_without_direct_messages_is_only_the_kick() {
 async fn a_kick_the_discord_refuses_leaves_no_case_and_no_log() {
     let harness = harness();
     harness.set_log_channel(50);
-    // The lookup of the member is the first call, the direct message the second, the kick the third.
+    // The acknowledgement is the first call, the lookup the second, the direct message the third, the kick the fourth.
     harness
         .api()
-        .fail_nth(3, DiscordError::Forbidden("missing permission".to_owned()));
+        .fail_nth(4, DiscordError::Forbidden("missing permission".to_owned()));
     assert!(harness.invoke(kick(MEMBER, Some("rude"))).await.is_err());
     assert!(cases_of(&harness, MEMBER).await.is_empty());
     assert!(harness.sent_embeds().is_empty());
@@ -1070,10 +1108,10 @@ async fn a_lift_that_fails_otherwise_is_left_to_run_again() {
 #[tokio::test]
 async fn a_ban_the_discord_refuses_leaves_no_case_and_no_timer() {
     let harness = harness();
-    // The lookup of the member, the direct message, then the ban.
+    // The acknowledgement, the lookup of the member, the direct message, then the ban.
     harness
         .api()
-        .fail_nth(3, DiscordError::Forbidden("missing permission".to_owned()));
+        .fail_nth(4, DiscordError::Forbidden("missing permission".to_owned()));
     assert!(
         harness
             .invoke(ban(MEMBER, Some("raid"), Some("1d"), None))
@@ -1224,10 +1262,10 @@ async fn the_direct_message_and_the_log_speak_the_server_language() {
 #[tokio::test]
 async fn a_closed_direct_message_does_not_fail_a_ban() {
     let harness = harness();
-    // The lookup of the member is the first call, the direct message the second.
+    // The acknowledgement is the first call, the lookup of the member the second, the direct message the third.
     harness
         .api()
-        .fail_nth(2, DiscordError::DirectMessagesClosed);
+        .fail_nth(3, DiscordError::DirectMessagesClosed);
     let replies = harness
         .invoke(ban(MEMBER, Some("raid"), None, None))
         .await
@@ -1445,7 +1483,7 @@ async fn a_failed_escalation_leaves_the_warning_and_no_escalation_case() {
     // message, then the timeout.
     harness
         .api()
-        .fail_nth(4, DiscordError::Forbidden("missing permission".to_owned()));
+        .fail_nth(5, DiscordError::Forbidden("missing permission".to_owned()));
     let replies = warn_times(&harness, MEMBER, 1).await;
     assert!(text(&replies).contains("case #3"), "{replies:?}");
     assert!(
@@ -2431,7 +2469,7 @@ fn edit_of(replies: &[Reply]) -> Option<&Reply> {
 
 /// The custom id of the picker that the command answered with.
 fn picker_id(replies: &[Reply]) -> String {
-    replies[0].custom_ids()[0].clone()
+    answer(replies).custom_ids()[0].clone()
 }
 
 /// Picks `template` in the picker `custom_id` as `user`, who has `roles`.
@@ -2483,19 +2521,23 @@ async fn a_punishment_without_a_reason_asks_for_a_template_and_does_nothing_yet(
     ));
     let replies = harness.invoke(kick(MEMBER, None)).await.unwrap();
 
-    assert_eq!(replies.len(), 1, "{replies:?}");
-    assert_eq!(replies[0].kind, ReplyKind::Response);
-    assert!(replies[0].ephemeral, "the picker is private by default");
-    assert_eq!(replies[0].embeds.len(), 1, "{replies:?}");
-    assert!(replies[0].content.contains("<@7>"), "{replies:?}");
-    let menu = menu_of(&replies[0]).expect("a select menu");
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(replies[0].kind, ReplyKind::Deferred);
+    assert_eq!(answer(&replies).kind, ReplyKind::Edit);
+    assert!(
+        answer(&replies).ephemeral,
+        "the picker is private by default"
+    );
+    assert_eq!(answer(&replies).embeds.len(), 1, "{replies:?}");
+    assert!(answer(&replies).content.contains("<@7>"), "{replies:?}");
+    let menu = menu_of(answer(&replies)).expect("a select menu");
     assert_eq!(menu.placeholder.as_deref(), Some("Template"));
-    let ids = replies[0].custom_ids();
+    let ids = answer(&replies).custom_ids();
     assert_eq!(ids.len(), 1, "{ids:?}");
     let owned_by_moderator = format!("moderation:tpl:{MODERATOR}:");
     assert!(ids[0].starts_with(&owned_by_moderator), "{ids:?}");
     assert_eq!(
-        options_of(&replies[0]),
+        options_of(answer(&replies)),
         [(
             "Spam".to_owned(),
             "spam".to_owned(),
@@ -2546,7 +2588,7 @@ async fn a_timeout_without_a_duration_takes_the_template_duration_and_keeps_the_
         .invoke(timeout_of(MEMBER, None, Some("spam")))
         .await
         .unwrap();
-    assert!(menu_of(&replies[0]).is_some(), "{replies:?}");
+    assert!(menu_of(answer(&replies)).is_some(), "{replies:?}");
 
     let picked = pick(&harness, &picker_id(&replies), "short").await;
     assert!(
@@ -2664,7 +2706,7 @@ async fn a_timeout_with_a_reason_and_a_duration_asks_nothing() {
         .invoke(timeout(MEMBER, "1h", Some("spam")))
         .await
         .unwrap();
-    assert!(menu_of(&replies[0]).is_none(), "{replies:?}");
+    assert!(menu_of(answer(&replies)).is_none(), "{replies:?}");
     assert_eq!(sequence(&harness), ["timeout", "dm"]);
     let cases = cases_of(&harness, MEMBER).await;
     assert_eq!(cases[0].reason.as_deref(), Some("spam"));
@@ -2694,7 +2736,7 @@ async fn without_a_usable_template_a_punishment_runs_without_a_reason() {
         ] {
             harness.advance(Duration::from_secs(3));
             let replies = harness.invoke(invocation).await.unwrap();
-            assert!(menu_of(&replies[0]).is_none(), "{replies:?}");
+            assert!(menu_of(answer(&replies)).is_none(), "{replies:?}");
         }
     }
     let cases = cases_of(&harness, MEMBER).await;
@@ -2710,7 +2752,7 @@ async fn a_timeout_without_a_duration_or_a_usable_template_needs_one() {
         .await
         .unwrap();
     assert!(text(&replies).contains("Give a duration"), "{replies:?}");
-    assert!(menu_of(&replies[0]).is_none(), "{replies:?}");
+    assert!(menu_of(answer(&replies)).is_none(), "{replies:?}");
     assert!(sequence(&harness).is_empty(), "{:?}", sequence(&harness));
     assert!(cases_of(&harness, MEMBER).await.is_empty());
     assert_eq!(harness.jobs(), 0);
@@ -2747,7 +2789,7 @@ async fn a_template_that_cannot_be_used_is_not_offered() {
         .await
         .unwrap();
     assert_eq!(
-        options_of(&replies[0]),
+        options_of(answer(&replies)),
         [(
             "Ok".to_owned(),
             "ok".to_owned(),
@@ -2766,7 +2808,7 @@ async fn a_template_that_cannot_be_used_is_not_offered() {
         .invoke(timeout_of(MEMBER, None, Some("spam")))
         .await
         .unwrap();
-    assert_eq!(options_of(&replies[0]).len(), 1, "{replies:?}");
+    assert_eq!(options_of(answer(&replies)).len(), 1, "{replies:?}");
 }
 
 #[tokio::test]
@@ -2778,7 +2820,10 @@ async fn an_option_description_keeps_the_duration_within_discord_s_limit() {
         json!([{ "id": "long", "label": "Long", "reason": long_reason, "duration": "1h" }]),
     ));
     let replies = harness.invoke(ban(MEMBER, None, None, None)).await.unwrap();
-    let description = options_of(&replies[0])[0].2.clone().expect("a description");
+    let description = options_of(answer(&replies))[0]
+        .2
+        .clone()
+        .expect("a description");
     assert!(description.chars().count() <= 100, "{description}");
     assert!(description.ends_with(" (1 hour)"), "{description}");
 }
@@ -2928,9 +2973,9 @@ fn undo_of(reply: &Reply) -> Option<(String, String)> {
         .find(|(_, custom_id)| custom_id.starts_with("moderation:undo:"))
 }
 
-/// The custom id of the undo button of the first reply.
+/// The custom id of the undo button of the answer.
 fn undo_id(replies: &[Reply]) -> String {
-    undo_of(&replies[0]).expect("an undo button").1
+    undo_of(answer(replies)).expect("an undo button").1
 }
 
 fn undo_id_of_case(kind: &str, target: u64, number: i64) -> String {
@@ -2972,7 +3017,7 @@ async fn a_timeout_ban_vcmute_and_warn_reply_carry_an_undo_button_and_a_kick_or_
         .await
         .unwrap();
     assert_eq!(
-        undo_of(&timed[0]),
+        undo_of(answer(&timed)),
         Some(("Undo".to_owned(), undo_id_of_case("timeout", MEMBER, 1))),
         "{timed:?}"
     );
@@ -2983,7 +3028,7 @@ async fn a_timeout_ban_vcmute_and_warn_reply_carry_an_undo_button_and_a_kick_or_
         .await
         .unwrap();
     assert_eq!(
-        undo_of(&banned[0]),
+        undo_of(answer(&banned)),
         Some(("Undo".to_owned(), undo_id_of_case("ban", FREE, 2))),
         "{banned:?}"
     );
@@ -2994,7 +3039,7 @@ async fn a_timeout_ban_vcmute_and_warn_reply_carry_an_undo_button_and_a_kick_or_
         .await
         .unwrap();
     assert_eq!(
-        undo_of(&muted[0]),
+        undo_of(answer(&muted)),
         Some(("Undo".to_owned(), undo_id_of_case("vcmute", MEMBER, 3))),
         "{muted:?}"
     );
@@ -3002,16 +3047,16 @@ async fn a_timeout_ban_vcmute_and_warn_reply_carry_an_undo_button_and_a_kick_or_
     harness.advance(Duration::from_secs(3));
     let warned = harness.invoke(warn(MEMBER, Some("rude"))).await.unwrap();
     assert_eq!(
-        undo_of(&warned[0]),
+        undo_of(answer(&warned)),
         Some(("Revoke".to_owned(), undo_id_of_case("warn", MEMBER, 4))),
         "{warned:?}"
     );
 
     harness.advance(Duration::from_secs(3));
     let kicked = harness.invoke(kick(MEMBER, Some("rude"))).await.unwrap();
-    assert!(buttons_of(&kicked[0]).is_empty(), "{kicked:?}");
+    assert!(buttons_of(answer(&kicked)).is_empty(), "{kicked:?}");
     let noted = harness.invoke(note(MEMBER, "watch")).await.unwrap();
-    assert!(buttons_of(&noted[0]).is_empty(), "{noted:?}");
+    assert!(buttons_of(answer(&noted)).is_empty(), "{noted:?}");
 }
 
 #[tokio::test]
@@ -3402,7 +3447,7 @@ async fn each_placeholder_is_expanded_in_the_stored_reason_and_the_direct_messag
         .invoke(timeout_of(MEMBER, None, None))
         .await
         .unwrap();
-    let described = options_of(&replies[0]);
+    let described = options_of(answer(&replies));
     assert!(
         described[0]
             .2
@@ -4130,7 +4175,10 @@ async fn a_date_that_has_passed_is_refused_before_anything_is_asked_of_discord()
         .invoke(timeout_of(MEMBER, Some(&utc_text(past)), Some("spam")))
         .await
         .unwrap();
-    let shown = replies[0].embeds[0].description.clone().unwrap_or_default();
+    let shown = answer(&replies).embeds[0]
+        .description
+        .clone()
+        .unwrap_or_default();
     assert!(shown.contains("passed"), "{shown:?}");
     // Only the answer itself is recorded: no lookup or change happens on Discord.
     assert!(
@@ -4138,7 +4186,7 @@ async fn a_date_that_has_passed_is_refused_before_anything_is_asked_of_discord()
             .api()
             .actions()
             .iter()
-            .all(|action| matches!(action, Action::Respond { .. })),
+            .all(|action| matches!(action, Action::Respond { .. } | Action::EditResponse { .. })),
         "{:?}",
         harness.api().actions()
     );
