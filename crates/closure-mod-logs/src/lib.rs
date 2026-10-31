@@ -109,7 +109,7 @@ pub fn module() -> Result<SdkModule, CoreError> {
 
 async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     let config: Config = parse_module_config(&ctx)?;
-    let Some(channel) = destination(&ctx, &config) else {
+    let Some(channel) = destination(&ctx, &config)? else {
         return Ok(Flow::Continue);
     };
     let entries = match &event {
@@ -150,13 +150,16 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
 }
 
 /// The channel the entries go to: the one the module is configured with, else the guild's log channel.
-fn destination(ctx: &EventContext, config: &Config) -> Option<ChannelId> {
-    config
-        .channel
-        .as_deref()
-        .and_then(|text| text.parse::<u64>().ok())
+/// A configured value that is not a channel is an error, so the entries never go to another channel.
+fn destination(ctx: &EventContext, config: &Config) -> Result<Option<ChannelId>, ModuleError> {
+    let Some(text) = config.channel.as_deref() else {
+        return Ok(ctx.policy().log_channel);
+    };
+    text.parse::<u64>()
+        .ok()
         .and_then(Id::new_checked)
-        .or(ctx.policy().log_channel)
+        .map(Some)
+        .ok_or_else(|| ModuleError::Config(format!("`{text}` is not a channel id")))
 }
 
 async fn deleted(

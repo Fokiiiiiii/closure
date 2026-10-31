@@ -342,6 +342,22 @@ async fn the_entries_go_to_the_configured_channel_and_not_the_log_channel() {
     assert_eq!(posted.len(), 1, "{:?}", posted.len());
     assert_eq!(posted[0].channel, OTHER_LOG);
 }
+#[tokio::test]
+async fn a_configured_channel_that_is_not_a_channel_is_an_error_and_nothing_is_posted() {
+    for channel in ["0", "abc", ""] {
+        let harness = harness();
+        harness.set_config(config(Some(channel), true));
+
+        let result = harness.emit(deleted(15)).await;
+
+        assert!(
+            matches!(result, Err(ModuleError::Config(_))),
+            "{channel:?}: {result:?}"
+        );
+        assert!(sent(&harness).is_empty(), "{channel:?}");
+    }
+}
+
 
 #[tokio::test]
 async fn joins_leaves_and_bans_are_logged() {
