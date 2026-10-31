@@ -23,7 +23,7 @@ use twilight_model::channel::message::Embed;
 use twilight_model::id::Id;
 
 mod audit;
-use audit::{add_audit, audit_of};
+use audit::{add_audit, audit_of, bulk_audit_of};
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
@@ -187,7 +187,14 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             channel_id,
             message_ids,
             ..
-        } if config.message_deletes => bulk_deleted(&ctx, *channel_id, message_ids).await?,
+        } if config.message_deletes => {
+            let audit = bulk_audit_of(&ctx, *channel_id, message_ids.len()).await;
+            bulk_deleted(&ctx, *channel_id, message_ids)
+                .await?
+                .into_iter()
+                .map(|entry| add_audit(&ctx, entry, audit.as_ref()))
+                .collect()
+        }
         Event::MemberJoined(member) if config.member_joins => {
             vec![joined_entry(&ctx, member)?]
         }

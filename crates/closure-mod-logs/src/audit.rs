@@ -4,12 +4,12 @@
 //! role is never named for this one.
 
 use closure_core::action::{Action, AuditLogQuery, Outcome};
-use closure_core::event::{Event, UserId};
+use closure_core::event::{ChannelId, Event, UserId};
 use closure_core::module::EventContext;
 use closure_sdk::duration::snowflake_time;
 use closure_sdk::files::LogEntry;
 use twilight_model::channel::message::embed::EmbedField;
-use twilight_model::guild::audit_log::AuditLogEventType;
+use twilight_model::guild::audit_log::{AuditLogEntry, AuditLogEventType};
 
 use crate::{Config, code_block, label};
 
@@ -121,19 +121,16 @@ fn audited_change(config: &Config, event: &Event) -> Option<(AuditLogEventType, 
 /// The audit log entry of the change `event` reports, when there is one. `None` for an event without a
 /// change to look up, when no entry of it is recent, or when the audit log cannot be read: the entry is
 /// then posted without who made the change, and a failure to read is logged.
-pub(crate) async fn audit_of(
-    ctx: &EventContext,
-    config: &Config,
-    event: &Event,
-) -> Option<AuditEntry> {
-    let (kind, target) = audited_change(config, event)?;
+/// The newest entries of one kind, as Discord gives them. `None` when they cannot be read: the failure is
+/// logged, and the entry is posted without who made the change.
+async fn recent_entries(ctx: &EventContext, kind: AuditLogEventType) -> Option<Vec<AuditLogEntry>> {
     let query = AuditLogQuery {
         user_id: None,
         action_type: Some(u16::from(kind)),
         before: None,
         limit: Some(AUDIT_LOOKUP_LIMIT),
     };
-    let log = match ctx
+    match ctx
         .api
         .execute(Action::GetAuditLog {
             guild_id: ctx.guild_id,
@@ -141,10 +138,10 @@ pub(crate) async fn audit_of(
         })
         .await
     {
-        Ok(Outcome::AuditLog(log)) => log,
+        Ok(Outcome::AuditLog(log)) => Some(log.entries),
         Ok(outcome) => {
             tracing::warn!(?outcome, "the audit log did not answer with its entries");
-            return None;
+            None
         }
         Err(error) => {
             tracing::warn!(
@@ -152,13 +149,53 @@ pub(crate) async fn audit_of(
                 %error,
                 "could not read the audit log; the entry is posted without who made the change"
             );
-            return None;
+            None
         }
-    };
+    }
+}
+
+/// Whether an entry is recent enough to be the change an event reports.
+fn within_window(now: i64, entry: &AuditLogEntry) -> bool {
+    now - snowflake_time(entry.id.get()) <= AUDIT_WINDOW_SECONDS
+}
+
+/// The audit log entry of the change `event` reports, when there is one. `None` for an event without a
+/// change to look up, when no entry of it is recent, or when the audit log cannot be read.
+pub(crate) async fn audit_of(
+    ctx: &EventContext,
+    config: &Config,
+    event: &Event,
+) -> Option<AuditEntry> {
+    let (kind, target) = audited_change(config, event)?;
+    let entries = recent_entries(ctx, kind).await?;
     let now = ctx.now();
-    let entry = log.entries.iter().find(|entry| {
-        entry.target_id.is_some_and(|id| id.get() == target)
-            && now - snowflake_time(entry.id.get()) <= AUDIT_WINDOW_SECONDS
+    let entry = entries.iter().find(|entry| {
+        entry.target_id.is_some_and(|id| id.get() == target) && within_window(now, entry)
+    })?;
+    Some(AuditEntry {
+        by: entry.user_id,
+        reason: entry.reason.clone(),
+    })
+}
+
+/// The audit log entry of a bulk delete of `count` messages in `channel`, when there is one. Discord names
+/// the channel and the number of messages in the entry, not the messages themselves.
+pub(crate) async fn bulk_audit_of(
+    ctx: &EventContext,
+    channel: ChannelId,
+    count: usize,
+) -> Option<AuditEntry> {
+    let entries = recent_entries(ctx, AuditLogEventType::MessageBulkDelete).await?;
+    let now = ctx.now();
+    let entry = entries.iter().find(|entry| {
+        entry.options.as_ref().is_some_and(|options| {
+            options.channel_id == Some(channel)
+                && options
+                    .count
+                    .as_deref()
+                    .and_then(|count| count.parse::<usize>().ok())
+                    == Some(count)
+        }) && within_window(now, entry)
     })?;
     Some(AuditEntry {
         by: entry.user_id,

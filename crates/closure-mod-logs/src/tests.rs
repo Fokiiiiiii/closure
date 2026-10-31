@@ -1199,3 +1199,53 @@ async fn a_voice_move_names_the_moderator_who_made_it() {
     assert_eq!(posted.len(), 1, "{}", posted.len());
     assert!(posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
 }
+
+/// An audit log entry of a bulk delete of `count` messages in `channel`, made by `by`.
+fn bulk_audit(channel: u64, count: usize, by: u64) -> AuditLogEntry {
+    let mut entry = audit(AuditLogEventType::MessageBulkDelete, channel, by, None, 5);
+    entry.options = Some(
+        serde_json::from_value(
+            json!({ "channel_id": channel.to_string(), "count": count.to_string() }),
+        )
+        .unwrap(),
+    );
+    entry
+}
+
+#[tokio::test]
+async fn a_bulk_delete_names_the_moderator_whose_entry_has_the_same_channel_and_count() {
+    let harness = harness();
+    harness.api().add_audit_entry(bulk_audit(CHANNEL, 2, 9));
+
+    harness
+        .emit(Event::MessagesBulkDeleted {
+            guild_id: Id::new(GUILD),
+            channel_id: Id::new(CHANNEL),
+            message_ids: vec![Id::new(22), Id::new(23)],
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_bulk_delete_of_another_count_is_not_named() {
+    let harness = harness();
+    harness.api().add_audit_entry(bulk_audit(CHANNEL, 3, 9));
+
+    harness
+        .emit(Event::MessagesBulkDeleted {
+            guild_id: Id::new(GUILD),
+            channel_id: Id::new(CHANNEL),
+            message_ids: vec![Id::new(22), Id::new(23)],
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(!posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+}
