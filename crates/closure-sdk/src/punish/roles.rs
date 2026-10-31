@@ -7,9 +7,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use closure_core::action::{
-    Action, MentionPolicy, NewRole, Outcome, OverwriteSpec, OverwriteTarget, Reason,
-};
+use closure_core::action::{Action, NewRole, Outcome, OverwriteSpec, OverwriteTarget, Reason};
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{ChannelId, RoleId, UserId};
 use closure_core::locale::Args;
@@ -23,6 +21,7 @@ use twilight_model::channel::permission_overwrite::{PermissionOverwrite, Permiss
 use twilight_model::guild::{Permissions, Role};
 
 use super::{RoleSelection, STRIP_LIMIT, active_cases};
+use crate::embed::{Color, DESCRIPTION_LIMIT, EmbedBuilder, truncate};
 use crate::{JobCx, UserError};
 
 /// The job that sets a dedicated role up in the channels, a batch of them per run.
@@ -1022,14 +1021,13 @@ async fn note(ctx: &EventContext, text: String) -> Result<(), ModuleError> {
     let Some(channel) = ctx.policy().log_channel else {
         return Ok(());
     };
+    let embed = EmbedBuilder::new()
+        .description(truncate(&text, DESCRIPTION_LIMIT))
+        .color(Color::Info)
+        .build()
+        .map_err(|error| ModuleError::other(error.to_string()))?;
     ctx.api
-        .execute(Action::SendMessage {
-            channel_id: channel,
-            content: Some(text),
-            embeds: Vec::new(),
-            reply_to: None,
-            mentions: MentionPolicy::None,
-        })
+        .send_embeds(channel, vec![embed])
         .await
         .map(drop)
         .map_err(ModuleError::Discord)

@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use closure_core::action::{Action, ChannelPatch, GuildPatch, MentionPolicy, Outcome, Reason};
+use closure_core::action::{Action, ChannelPatch, GuildPatch, Outcome, Reason};
 use closure_core::error::DiscordError;
+use closure_sdk::embed::{Color, DESCRIPTION_LIMIT, EmbedBuilder, truncate};
 use closure_sdk::punish::{RestrictionRole, ensure_role};
 use closure_sdk::{
     Args, ChannelId, Event, EventContext, Expect, GuildId, JobCx, ModuleError, RoleId,
@@ -1089,16 +1090,15 @@ pub fn gap_key(gap: Gap) -> &'static str {
 
 /// Posts `body` to `channel`. A notice that does not arrive does not undo the change it tells of.
 async fn send(ctx: &EventContext, channel: ChannelId, body: String) {
-    let _ = ctx
-        .api
-        .execute(Action::SendMessage {
-            channel_id: channel,
-            content: Some(body),
-            embeds: Vec::new(),
-            reply_to: None,
-            mentions: MentionPolicy::None,
-        })
-        .await;
+    // The description is cut to fit, so the embed always builds.
+    let Ok(embed) = EmbedBuilder::new()
+        .description(truncate(&body, DESCRIPTION_LIMIT))
+        .color(Color::Warning)
+        .build()
+    else {
+        return;
+    };
+    let _ = ctx.api.send_embeds(channel, vec![embed]).await;
 }
 
 /// Tells the log channel, and the notify channel of the level when it has one, what changed.

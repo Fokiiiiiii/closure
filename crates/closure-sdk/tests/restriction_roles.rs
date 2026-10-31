@@ -295,10 +295,7 @@ async fn the_sync_denies_speech_where_a_channel_has_no_overwrite_and_skips_the_r
     assert!(
         harness.api().actions().iter().any(|action| matches!(
             action,
-            Action::SendMessage {
-                content: Some(_),
-                ..
-            }
+            Action::SendMessage { embeds, .. } if !embeds.is_empty()
         )),
         "the log says how the sync went"
     );
@@ -420,10 +417,9 @@ fn sent_texts(harness: &Harness) -> Vec<String> {
         .actions()
         .into_iter()
         .filter_map(|action| match action {
-            Action::SendMessage {
-                content: Some(text),
-                ..
-            } => Some(text),
+            Action::SendMessage { embeds, .. } => {
+                embeds.into_iter().find_map(|embed| embed.description)
+            }
             _ => None,
         })
         .collect()

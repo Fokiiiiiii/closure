@@ -142,14 +142,14 @@ async fn the_actions_run_in_the_order_given() {
         .iter()
         .filter_map(|action| match action {
             Action::SendMessage {
-                content: Some(text),
-                ..
-            } if text == "first" => Some("alert"),
+                content, embeds, ..
+            } => {
+                let text = content
+                    .clone()
+                    .or_else(|| embeds.iter().find_map(|embed| embed.description.clone()));
+                matches!(text.as_deref(), Some("first" | "last")).then_some("alert")
+            }
             Action::DeleteMessage { .. } => Some("delete"),
-            Action::SendMessage {
-                content: Some(text),
-                ..
-            } if text == "last" => Some("alert"),
             _ => None,
         })
         .collect();
@@ -497,10 +497,15 @@ async fn reply_posts_the_text_and_mentions_nobody() {
         .into_iter()
         .filter_map(|action| match action {
             Action::SendMessage {
-                content: Some(content),
+                content,
+                embeds,
                 mentions,
                 ..
-            } => Some((Some(content), mentions)),
+            } => {
+                let text =
+                    content.or_else(|| embeds.into_iter().find_map(|embed| embed.description))?;
+                Some((Some(text), mentions))
+            }
             _ => None,
         })
         .collect();

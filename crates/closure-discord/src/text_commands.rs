@@ -25,6 +25,8 @@ use twilight_model::id::Id;
 use twilight_model::id::marker::RoleMarker;
 use twilight_util::permission_calculator::PermissionCalculator;
 
+use crate::notice;
+
 /// What a message means as a text command.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Reading {
@@ -570,7 +572,7 @@ impl DiscordApi for TextCommandApi {
                     &Args::new(),
                 );
                 let reply = InteractionReply {
-                    content: Some(content),
+                    embeds: vec![notice::embed(&content, notice::INFO)],
                     ephemeral: true,
                     ..InteractionReply::default()
                 };

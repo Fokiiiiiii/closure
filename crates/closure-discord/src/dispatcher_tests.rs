@@ -1232,7 +1232,17 @@ fn reply_text(action: &Action) -> (String, bool) {
     else {
         panic!("expected a message response, got {action:?}");
     };
-    (reply.content.clone().unwrap(), reply.ephemeral)
+    let text = reply
+        .content
+        .clone()
+        .or_else(|| {
+            reply
+                .embeds
+                .first()
+                .and_then(|embed| embed.description.clone())
+        })
+        .unwrap();
+    (text, reply.ephemeral)
 }
 
 #[tokio::test]

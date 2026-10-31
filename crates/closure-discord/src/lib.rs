@@ -17,6 +17,7 @@ mod fetch;
 mod gateway;
 pub mod hierarchy;
 mod jobs;
+mod notice;
 mod text_commands;
 
 pub use api::{RetryPolicy, TwilightApi, joined_guilds};

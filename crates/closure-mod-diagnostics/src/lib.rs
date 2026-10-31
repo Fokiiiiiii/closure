@@ -106,8 +106,13 @@ async fn ping(cx: CommandCx, (): ()) -> Result<(), UserError> {
                 .with("done", call.to_string())
                 .with("total", PINGS.to_string());
             let progress = InteractionReply {
-                content: Some(cx.t("ping-progress", &args)),
-                embeds: Vec::new(),
+                content: None,
+                embeds: vec![
+                    EmbedBuilder::new()
+                        .description(cx.t("ping-progress", &args))
+                        .color(Color::Info)
+                        .build()?,
+                ],
                 components: Vec::new(),
                 ephemeral: config.ephemeral,
             };

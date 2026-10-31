@@ -630,8 +630,8 @@ async fn reply(
     auto_delete: Option<Duration>,
     values: &Values,
 ) -> Result<(), ModuleError> {
-    let content = truncate(&render(template, values), CONTENT_CHARS);
-    let sent = ctx.api.send_message(message.channel_id, content).await?;
+    let embed = embed_of(&render(template, values), Color::Info)?;
+    let sent = ctx.api.send_embeds(message.channel_id, vec![embed]).await?;
     if let Some(after) = auto_delete {
         let payload = Cleanup {
             channel: message.channel_id.get(),
@@ -660,10 +660,19 @@ async fn alert(
     template: Option<&str>,
 ) -> Result<(), ModuleError> {
     let body = alert_text(ctx, rule, hit, context, template);
-    ctx.api
-        .send_message(channel, truncate(&body, CONTENT_CHARS))
-        .await?;
+    let embed = embed_of(&body, Color::Warning)?;
+    ctx.api.send_embeds(channel, vec![embed]).await?;
     Ok(())
+}
+
+/// The text as an embed of `color`. Automod posts its replies and alerts as embeds, like the other
+/// replies of the bot.
+fn embed_of(text: &str, color: Color) -> Result<Embed, ModuleError> {
+    EmbedBuilder::new()
+        .description(truncate(text, CONTENT_CHARS))
+        .color(color)
+        .build()
+        .map_err(|error| ModuleError::other(error.to_string()))
 }
 
 /// The text of an alert: the template given, or the default that says who, which rule and what was

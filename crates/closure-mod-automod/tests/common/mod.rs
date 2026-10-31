@@ -200,9 +200,12 @@ pub fn sent_texts(harness: &Harness) -> Vec<(u64, String)> {
         .filter_map(|action| match action {
             Action::SendMessage {
                 channel_id,
-                content: Some(content),
+                content,
+                embeds,
                 ..
-            } => Some((channel_id.get(), content)),
+            } => content
+                .or_else(|| embeds.into_iter().find_map(|embed| embed.description))
+                .map(|text| (channel_id.get(), text)),
             _ => None,
         })
         .collect()

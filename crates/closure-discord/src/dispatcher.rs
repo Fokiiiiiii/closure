@@ -48,6 +48,7 @@ use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 
 use crate::breaker::{Breaker, BreakerConfig, Ticket};
+use crate::notice;
 use crate::text_commands::{Reader, Reading, TextCommandApi};
 
 /// How long `shutdown` waits for lanes to stop once they were told to abort.
@@ -603,7 +604,7 @@ impl Dispatcher {
         }
         let shared = Arc::clone(&self.shared);
         self.shared.tracker.spawn(async move {
-            reply(&shared, &invocation, text).await;
+            reply_in(&shared, &invocation, text, notice::INFO).await;
         });
     }
 
@@ -1376,7 +1377,13 @@ async fn answer_busy(shared: &Shared, guild: GuildId, event: &Event) {
     let locale = invocation
         .locale()
         .unwrap_or_else(|| shared.settings.locale(guild));
-    reply(shared, invocation, text(shared, locale, "error-busy")).await;
+    reply_in(
+        shared,
+        invocation,
+        text(shared, locale, "error-busy"),
+        notice::WAIT,
+    )
+    .await;
 }
 
 fn text(shared: &Shared, locale: Locale, key: &str) -> String {
@@ -1388,11 +1395,16 @@ fn text(shared: &Shared, locale: Locale, key: &str) -> String {
 /// Tells the invoker something went wrong. If the module already acknowledged the command, a
 /// follow-up is used instead; failures here are only logged because there is nobody left to tell.
 async fn reply(shared: &Shared, invocation: &dyn InteractionRef, message: String) {
+    reply_in(shared, invocation, message, notice::ERROR).await;
+}
+
+/// [`reply`] as an embed of `color`.
+async fn reply_in(shared: &Shared, invocation: &dyn InteractionRef, message: String, color: u32) {
     let granted: CapabilitySet = [Capability::RespondToInteractions].into_iter().collect();
     let client = ApiClient::new(Arc::clone(&shared.api), granted, ModuleId::system());
     let reply = InteractionReply {
-        content: Some(message),
-        embeds: Vec::new(),
+        content: None,
+        embeds: vec![notice::embed(&message, color)],
         components: Vec::new(),
         ephemeral: true,
     };

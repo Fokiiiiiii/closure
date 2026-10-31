@@ -220,6 +220,26 @@ impl ApiClient {
         }
     }
 
+    /// Posts `embeds` to the channel, without text and without mentions. Needs the capability
+    /// `SendMessages`, as [`Self::send_message`] does.
+    pub async fn send_embeds(
+        &self,
+        channel_id: ChannelId,
+        embeds: Vec<Embed>,
+    ) -> Result<Message, DiscordError> {
+        let action = Action::SendMessage {
+            channel_id,
+            content: None,
+            embeds,
+            reply_to: None,
+            mentions: MentionPolicy::None,
+        };
+        match self.execute(action).await? {
+            Outcome::Message(message) => Ok(*message),
+            _ => Err(unexpected("send_embeds")),
+        }
+    }
+
     /// Privately to a member of the guild the client is bound to; the host checks that the user
     /// is one.
     pub async fn send_direct_message(
@@ -1823,6 +1843,40 @@ mod tests {
         let client = client(&api, &[Capability::KickMembers]);
         let result = client.kick(Id::new(1), Id::new(2), reason()).await;
         assert_eq!(result, Err(DiscordError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn an_embed_is_posted_without_text_or_mentions() {
+        let api = Arc::new(MockApi::default());
+        let channel = serde_json::from_value::<Channel>(serde_json::json!({
+            "id": "5",
+            "type": 0,
+            "name": "general"
+        }))
+        .unwrap();
+        api.set_channels(Id::new(1), vec![channel]);
+        let client = client(&api, &[Capability::SendMessages]).scoped_to(Id::new(1));
+        let embed = serde_json::from_value::<Embed>(serde_json::json!({
+            "type": "rich",
+            "description": "hi"
+        }))
+        .unwrap();
+
+        client
+            .send_embeds(Id::new(5), vec![embed.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            api.actions(),
+            [Action::SendMessage {
+                channel_id: Id::new(5),
+                content: None,
+                embeds: vec![embed],
+                reply_to: None,
+                mentions: MentionPolicy::None,
+            }]
+        );
     }
 
     #[tokio::test]
