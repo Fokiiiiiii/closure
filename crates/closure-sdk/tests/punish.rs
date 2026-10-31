@@ -1977,7 +1977,7 @@ async fn a_role_timeout_lift_moves_to_the_end_of_a_newer_timeout_that_stands() {
         "the lift is set for the newer timeout's end"
     );
 
-    harness.advance(Duration::from_secs(3_000));
+    harness.advance(Duration::from_mins(50));
     harness.run_due_jobs().await;
     assert!(role_changed(&harness, 30, false));
     assert_eq!(harness.jobs(), 0);
@@ -2021,9 +2021,9 @@ async fn a_role_timeout_lift_follows_the_latest_end_as_more_timeouts_follow() {
     assert_eq!(harness.jobs(), 1, "set for 3600");
 
     // A later one is made before the lift is due, and ends after the first.
-    harness.advance(Duration::from_secs(1_200));
+    harness.advance(Duration::from_mins(20));
     other_module_case(&harness, "timeout", MEMBER, Some(first.created_at + 5_400)).await;
-    harness.advance(Duration::from_secs(1_800));
+    harness.advance(Duration::from_mins(30));
     harness.run_due_jobs().await;
     assert!(
         !role_changed(&harness, 30, false),
@@ -2031,7 +2031,7 @@ async fn a_role_timeout_lift_follows_the_latest_end_as_more_timeouts_follow() {
     );
     assert_eq!(harness.jobs(), 1, "set again for 5400");
 
-    harness.advance(Duration::from_secs(1_800));
+    harness.advance(Duration::from_mins(30));
     harness.run_due_jobs().await;
     assert!(role_changed(&harness, 30, false));
     assert_eq!(harness.jobs(), 0);
@@ -2060,7 +2060,7 @@ async fn a_voice_role_lift_moves_to_the_end_of_a_newer_discord_mute_that_stands(
         "the lift is set for the newer mute's end"
     );
 
-    harness.advance(Duration::from_secs(3_000));
+    harness.advance(Duration::from_mins(50));
     harness.run_due_jobs().await;
     assert!(role_changed(&harness, 31, false));
     assert_eq!(harness.jobs(), 0);
@@ -2089,7 +2089,7 @@ async fn a_voice_lift_by_discord_moves_to_the_end_of_a_newer_role_mute_that_stan
         "the lift is set for the newer mute's end"
     );
 
-    harness.advance(Duration::from_secs(3_000));
+    harness.advance(Duration::from_mins(50));
     harness.run_due_jobs().await;
     assert_eq!(sequence(&harness).last(), Some(&"vcunmute"));
     assert_eq!(harness.jobs(), 0);
@@ -2212,6 +2212,62 @@ async fn a_ban_that_cannot_be_recorded_says_the_ban_went_through() {
     assert_eq!(sequence(&harness).last(), Some(&"ban"), "Discord banned");
     assert!(cases_of(&harness, MEMBER).await.is_empty());
     assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn a_role_timeout_whose_case_cannot_be_recorded_still_gets_its_lift() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout": "role", "timeout_role": "30" }));
+    // A reason longer than a case keeps: the recording fails after the role was given.
+    let reason = "a".repeat(513);
+    let result = harness
+        .invoke(with_reason(
+            with_duration(target("timeout", MEMBER), "1h"),
+            Some(reason.as_str()),
+        ))
+        .await;
+    assert!(result.is_err(), "the failure is reported, not answered");
+    assert!(role_changed(&harness, 30, true), "the role was given");
+    assert_eq!(harness.jobs(), 1, "the lift of the role is still scheduled");
+}
+
+/// A role of the guild with a name, as Discord lists it.
+fn named_role(id: u64, name: &str, position: i64) -> Role {
+    serde_json::from_value(json!({
+        "id": id.to_string(),
+        "name": name,
+        "color": 0,
+        "colors": { "primary_color": 0, "secondary_color": null, "tertiary_color": null },
+        "hoist": false,
+        "managed": false,
+        "mentionable": false,
+        "permissions": "0",
+        "position": position,
+        "flags": 0,
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_role_of_the_same_name_that_closure_did_not_make_is_not_adopted() {
+    let harness = harness();
+    harness
+        .api()
+        .set_roles(Id::new(1), vec![named_role(700, "Mute", 1)]);
+    harness
+        .api()
+        .set_member(Id::new(1), member_with_roles(MEMBER, &[]));
+    harness.set_config(json!({ "timeout": "role" }));
+
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+
+    assert!(
+        !role_changed(&harness, 700, true),
+        "a same-named role that someone else made may grant access the name does not show"
+    );
 }
 
 #[tokio::test]

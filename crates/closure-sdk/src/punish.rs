@@ -25,7 +25,9 @@ use crate::{
     ModuleBuilder, ModuleError, NewCase, Reason, RoleId, ScheduleError, UserError, UserId,
     UserInfo,
 };
-pub use roles::{RestrictionRole, RoleError, channel_created, ensure_role};
+pub use roles::{
+    MemberTurn, RestrictionRole, RoleError, channel_created, ensure_role, member_turn,
+};
 use roles::{restore_when_free, strip};
 
 /// Discord's longest timeout, 28 days in seconds.
@@ -298,22 +300,32 @@ impl<'a> Punisher<'a> {
         duration: Duration,
         reason: Option<String>,
     ) -> Result<Done, UserError> {
+        let _turn = member_turn(self.ctx, target).await;
         let now = self.ctx.now();
         let reason_text = dm_reason(self.ctx, reason.as_deref());
         let role = self
             .give_timeout(target, duration, reason.as_deref())
             .await?;
-        let case = self
+        let recorded = self
             .record("timeout", target, reason, Some(now + secs(duration)))
-            .await?;
+            .await;
+        // The timer is set even when the case is not recorded: the timeout holds all the same.
         let timer = match role {
             Some(role) => self
-                .schedule_timeout_lift(target, case.number, role, duration)
+                .schedule_timeout_lift(
+                    target,
+                    recorded
+                        .as_ref()
+                        .map_or(UNRECORDED_CASE, |case| case.number),
+                    role,
+                    duration,
+                )
                 .await
                 .is_err()
                 .then_some(Note::NoTimeoutTimer),
             None => None,
         };
+        let case = recorded?;
         let stripped = self
             .strip_for(target, role, RestrictionRole::Timeout)
             .await?;
@@ -410,6 +422,7 @@ impl<'a> Punisher<'a> {
         delete_message_seconds: u32,
         reason: Option<String>,
     ) -> Result<Done, UserError> {
+        let _turn = member_turn(self.ctx, target).await;
         if delete_message_seconds > MAX_BAN_DELETE_SECONDS {
             return Err(UserError::sdk("punish-ban-delete-days-range"));
         }
@@ -508,22 +521,32 @@ impl<'a> Punisher<'a> {
         duration: Option<Duration>,
         reason: Option<String>,
     ) -> Result<Done, UserError> {
+        let _turn = member_turn(self.ctx, target).await;
         let now = self.ctx.now();
         let reason_text = dm_reason(self.ctx, reason.as_deref());
         let role = self.mute_in_voice(target, reason.as_deref()).await?;
         let stripped = self.strip_for(target, role, RestrictionRole::Voice).await?;
         let expires_at = duration.map(|duration| now + secs(duration));
-        let case = self.record("vcmute", target, reason, expires_at).await?;
+        let recorded = self.record("vcmute", target, reason, expires_at).await;
         // A new mute replaces the timer of an earlier one, which would lift this mute too early.
         let _ = self.ctx.scheduler().cancel(&voice_key(target)).await;
+        // The timer is set even when the case is not recorded: the mute holds all the same.
         let timer = match duration {
             Some(duration) => self
-                .schedule_voice_lift(target, case.number, role, duration)
+                .schedule_voice_lift(
+                    target,
+                    recorded
+                        .as_ref()
+                        .map_or(UNRECORDED_CASE, |case| case.number),
+                    role,
+                    duration,
+                )
                 .await
                 .is_err()
                 .then_some(Note::NoVoiceTimer),
             None => None,
         };
+        let case = recorded?;
         let note = match duration {
             Some(duration) => {
                 self.notify(
@@ -747,6 +770,31 @@ impl<'a> Punisher<'a> {
                 Ok(Some(role))
             }
         }
+    }
+
+    /// Schedules the lift of a role that is given again on rejoin, for the time the case has left. The
+    /// timer that lifted the role before is replaced: it may have lifted another role.
+    pub async fn rearm_timeout_lift(
+        &self,
+        target: UserId,
+        case: i64,
+        role: RoleId,
+        after: Duration,
+    ) -> Result<(), ScheduleError> {
+        self.schedule_timeout_lift(target, case, role, after).await
+    }
+
+    /// Schedules the lift of a voice mute role that is given again on rejoin, for the time left.
+    pub async fn rearm_voice_lift(
+        &self,
+        target: UserId,
+        case: i64,
+        role: RoleId,
+        after: Duration,
+    ) -> Result<(), ScheduleError> {
+        let _ = self.ctx.scheduler().cancel(&voice_key(target)).await;
+        self.schedule_voice_lift(target, case, Some(role), after)
+            .await
     }
 
     async fn schedule_timeout_lift(
@@ -1130,6 +1178,7 @@ async fn lift_ban(cx: JobCx) -> Result<(), ModuleError> {
     let Some(user) = UserId::new_checked(payload.user) else {
         return Err(ModuleError::other("a ban job names no member"));
     };
+    let _turn = member_turn(cx.ctx(), user).await;
     if another_stands(cx.ctx(), user, "ban", payload.case).await? {
         return Ok(());
     }
@@ -1158,6 +1207,7 @@ async fn end_timeout(cx: JobCx) -> Result<(), ModuleError> {
     ) else {
         return Err(ModuleError::other("a timeout job names no member or role"));
     };
+    let _turn = member_turn(cx.ctx(), user).await;
     match held_by_others(cx.ctx(), user, "timeout", payload.case).await? {
         Hold::Free => {}
         Hold::Forever => return Ok(()),
@@ -1198,6 +1248,7 @@ async fn end_voice_mute(cx: JobCx) -> Result<(), ModuleError> {
     let Some(user) = UserId::new_checked(payload.user) else {
         return Err(ModuleError::other("a voice mute job names no member"));
     };
+    let _turn = member_turn(cx.ctx(), user).await;
     // Nothing else lifts a Discord mute later, so the lift waits for the others as a role does.
     match held_by_others(cx.ctx(), user, "vcmute", payload.case).await? {
         Hold::Free => {}

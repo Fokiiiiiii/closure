@@ -16,7 +16,7 @@ use closure_core::locale::Args;
 use closure_core::module::EventContext;
 use closure_core::schedule::ScheduleError;
 use closure_core::storage::StorageError;
-use futures_util::lock::Mutex;
+use futures_util::lock::{Mutex, OwnedMutexGuard};
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::Channel;
 use twilight_model::channel::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType};
@@ -38,7 +38,7 @@ const SYNC_RETRIES: u32 = 3;
 /// How long after a sync that left channels undone the next run starts.
 const SYNC_RETRY_DELAY: Duration = Duration::from_secs(3_600);
 /// How long roles that could not be given back stay remembered for a later lift.
-const RESTORE_KEEP: Duration = Duration::from_secs(30 * 24 * 3_600);
+const RESTORE_KEEP: Duration = Duration::from_hours(30 * 24);
 /// Every kind of restriction role, for the lookups that cover all of them.
 const RESTRICTIONS: [RestrictionRole; 3] = [
     RestrictionRole::Timeout,
@@ -162,6 +162,93 @@ fn member_gates() -> &'static StdMutex<HashMap<(u64, u64), Gate>> {
     MEMBER_GATES.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
+/// The turns of the punishments of each member, by guild and user. Like the role turns, a gate is
+/// kept only while a turn is taken or waited for.
+fn punish_gates() -> &'static StdMutex<HashMap<(u64, u64), Gate>> {
+    static PUNISH_GATES: OnceLock<StdMutex<HashMap<(u64, u64), Gate>>> = OnceLock::new();
+    PUNISH_GATES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// The turn of one punishment of a member, or of its lift. The case, the Discord call and the timer
+/// of a punishment do not interleave with another of the same member, so that a lift cannot undo a
+/// punishment that came after its check. The turn is kept until this is dropped. Role changes take
+/// their own turns inside, so a turn is never taken while another of the same member is held.
+#[derive(Debug)]
+pub struct MemberTurn {
+    key: (u64, u64),
+    gates: &'static StdMutex<HashMap<(u64, u64), Gate>>,
+    gate: Gate,
+    turn: Option<OwnedMutexGuard<()>>,
+}
+
+/// Takes the turn of a member, waiting for the turns taken before it.
+pub async fn member_turn(ctx: &EventContext, user: UserId) -> MemberTurn {
+    turn_of((ctx.guild_id.get(), user.get()), punish_gates()).await
+}
+
+/// Takes the turn of `key` among `gates`, waiting for the turns taken before it.
+async fn turn_of(
+    key: (u64, u64),
+    gates: &'static StdMutex<HashMap<(u64, u64), Gate>>,
+) -> MemberTurn {
+    let gate = {
+        let mut map = gates.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+    };
+    let turn = Arc::clone(&gate).lock_owned().await;
+    MemberTurn {
+        key,
+        gates,
+        gate,
+        turn: Some(turn),
+    }
+}
+
+impl Drop for MemberTurn {
+    fn drop(&mut self) {
+        // The turn is given up first: a waiter holds a copy of the gate until it has its turn.
+        self.turn.take();
+        let mut map = self.gates.lock().unwrap_or_else(PoisonError::into_inner);
+        if Arc::strong_count(&self.gate) <= 2 {
+            map.remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::*;
+
+    fn gates() -> &'static StdMutex<HashMap<(u64, u64), Gate>> {
+        static TEST_GATES: OnceLock<StdMutex<HashMap<(u64, u64), Gate>>> = OnceLock::new();
+        TEST_GATES.get_or_init(|| StdMutex::new(HashMap::new()))
+    }
+
+    #[tokio::test]
+    async fn a_second_turn_of_a_member_waits_for_the_first_and_is_forgotten_after() {
+        let first = turn_of((1, 7), gates()).await;
+        let second = tokio::spawn(turn_of((1, 7), gates()));
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!second.is_finished(), "the second turn waits for the first");
+        drop(first);
+        let second = second.await.unwrap();
+        drop(second);
+        assert!(!gates().lock().unwrap().contains_key(&(1, 7)));
+    }
+
+    #[tokio::test]
+    async fn turns_of_different_members_do_not_wait_for_each_other() {
+        let first = turn_of((2, 7), gates()).await;
+        let other = turn_of((2, 8), gates()).await;
+        drop(other);
+        drop(first);
+        assert!(!gates().lock().unwrap().contains_key(&(2, 7)));
+        assert!(!gates().lock().unwrap().contains_key(&(2, 8)));
+    }
+}
+
 /// Runs `work` while no other strip or restore of `target` runs. Each of them reads the plan of the
 /// member, makes Discord calls and writes the plan back, so they must not interleave.
 async fn one_at_a_time<T>(ctx: &EventContext, target: UserId, work: impl Future<Output = T>) -> T {
@@ -187,9 +274,9 @@ async fn one_at_a_time<T>(ctx: &EventContext, target: UserId, work: impl Future<
 }
 
 /// The role a restriction gives. A configured role that exists is used as it is. Otherwise the
-/// role Closure remembered, or one named like it, or else a new role with no permissions at all,
-/// which is then set up in every channel by a sync job. A role is only adopted when it is safe to
-/// hand to a punished member: see [`is_safe`].
+/// role Closure remembered, or else a new role with no permissions at all, which is then set up in
+/// every channel by a sync job. A role another party made is never adopted by its name: a role of
+/// the same name may grant access in channels that the name does not show.
 pub async fn ensure_role(
     ctx: &EventContext,
     which: RestrictionRole,
@@ -267,12 +354,6 @@ async fn ensure_role_now(
     let role = if let Some(role) = kept {
         refresh(ctx, &roles, role, &name).await;
         role
-    } else if let Some(found) = roles
-        .iter()
-        .find(|role| role.name.eq_ignore_ascii_case(&name) && safe(role))
-    {
-        remember(ctx, which, found.id).await?;
-        found.id
     } else {
         let created = create(ctx, which).await?;
         remember(ctx, which, created).await?;

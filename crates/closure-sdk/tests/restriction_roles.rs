@@ -128,6 +128,18 @@ fn module_with(configured: Configured) -> ModuleBuilder {
         )
 }
 
+/// The id of the role the module made with `name`.
+fn made_role(harness: &Harness, name: &str) -> u64 {
+    harness
+        .api()
+        .roles(Id::new(GUILD))
+        .iter()
+        .find(|role| role.name == name)
+        .unwrap_or_else(|| panic!("no role named {name} was made"))
+        .id
+        .get()
+}
+
 fn created_names(harness: &Harness) -> Vec<String> {
     harness
         .api()
@@ -212,7 +224,7 @@ async fn a_configured_role_that_exists_is_used_and_its_channels_are_left_alone()
 }
 
 #[tokio::test]
-async fn a_role_found_by_name_is_used_and_not_created_again() {
+async fn a_role_of_the_same_name_that_closure_did_not_make_is_not_used() {
     let harness = Harness::new(module(None)).unwrap();
     harness.api().set_roles(
         Id::new(GUILD),
@@ -220,9 +232,10 @@ async fn a_role_found_by_name_is_used_and_not_created_again() {
     );
     harness.config_changed().await.unwrap();
     harness.config_changed().await.unwrap();
-    assert!(
-        created_names(&harness).is_empty(),
-        "both roles already exist by name"
+    assert_eq!(
+        created_names(&harness),
+        ["Mute", "VC mute"],
+        "closure makes its own roles, and only once"
     );
 }
 
@@ -248,20 +261,17 @@ async fn a_refusal_to_create_the_role_is_a_clear_error() {
 async fn the_sync_denies_speech_where_a_channel_has_no_overwrite_and_skips_the_rest() {
     let harness = Harness::new(module(None)).unwrap();
     harness.set_log_channel(LOG);
-    // An explicit role: the created ids depend on how many calls came before them.
-    harness
-        .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
+    harness.config_changed().await.unwrap();
+    let mute = made_role(&harness, "Mute");
     harness.api().set_channels(
         Id::new(GUILD),
         vec![
             channel(1, &[]),
             // The timeout role already denies everything in this channel: nothing to set.
-            channel_with(2, &[(700, 0, Permissions::empty(), timeout_denies())]),
+            channel_with(2, &[(mute, 0, Permissions::empty(), timeout_denies())]),
             channel(3, &[]),
         ],
     );
-    harness.config_changed().await.unwrap();
     run_all_jobs(&harness).await;
 
     let set = overwrites(&harness);
@@ -450,23 +460,22 @@ async fn an_unsafe_role_with_a_restriction_name_is_ignored_and_a_safe_one_is_cre
 #[tokio::test]
 async fn a_remembered_role_that_gains_permissions_is_replaced() {
     let harness = Harness::new(module(None)).unwrap();
-    harness
-        .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
     harness.config_changed().await.unwrap();
-    assert_eq!(created_names(&harness), ["VC mute"], "700 is adopted");
+    let remembered = made_role(&harness, "Mute");
     harness.api().set_roles(
         Id::new(GUILD),
         vec![
-            role_with(700, "Mute", Permissions::ADMINISTRATOR, false),
+            role_with(remembered, "Mute", Permissions::ADMINISTRATOR, false),
             role(800, "VC mute"),
         ],
     );
+    let made_before = created_names(&harness).len();
     harness.config_changed().await.unwrap();
-    assert_eq!(
-        created_names(&harness),
-        ["VC mute", "Mute"],
-        "the remembered 700 is no longer safe, so a new role is made"
+    assert!(
+        created_names(&harness)[made_before..]
+            .iter()
+            .any(|name| name == "Mute"),
+        "the remembered role is no longer safe, so a new role is made"
     );
 }
 
@@ -482,19 +491,17 @@ async fn two_setups_at_the_same_time_create_one_role_each() {
 #[tokio::test]
 async fn a_channel_created_later_keeps_the_denies_the_role_already_has_there() {
     let harness = Harness::new(module(None)).unwrap();
-    harness
-        .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
     harness.config_changed().await.unwrap();
+    let mute = made_role(&harness, "Mute");
     harness.api().set_channels(
         Id::new(GUILD),
         vec![channel_with(
             50,
-            &[(700, 0, Permissions::empty(), Permissions::VIEW_CHANNEL)],
+            &[(mute, 0, Permissions::empty(), Permissions::VIEW_CHANNEL)],
         )],
     );
     harness.channel_created(50).await.unwrap();
-    let specs = specs_of(&harness, 50, 700);
+    let specs = specs_of(&harness, 50, mute);
     assert_eq!(specs.len(), 1, "{specs:?}");
     let deny = specs[0].1;
     assert!(
@@ -507,17 +514,17 @@ async fn a_channel_created_later_keeps_the_denies_the_role_already_has_there() {
 async fn a_channel_created_later_leaves_alone_an_auto_role_an_explicit_role_has_replaced() {
     let configured: Configured = Arc::new(Mutex::new(None));
     let harness = Harness::new(module_with(Arc::clone(&configured))).unwrap();
-    harness.api().set_roles(
-        Id::new(GUILD),
-        vec![role(700, "Mute"), role(42, "Mods' mute")],
-    );
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(42, "Mods' mute")]);
     harness.config_changed().await.unwrap();
+    let auto = made_role(&harness, "Mute");
     *configured.lock().unwrap_or_else(PoisonError::into_inner) = Some(Id::new(42));
     harness.config_changed().await.unwrap();
     harness.api().add_channel(Id::new(50), Some(Id::new(GUILD)));
     harness.channel_created(50).await.unwrap();
     assert!(
-        specs_of(&harness, 50, 700).is_empty(),
+        specs_of(&harness, 50, auto).is_empty(),
         "the auto role is no longer in use"
     );
     assert!(
@@ -529,18 +536,16 @@ async fn a_channel_created_later_leaves_alone_an_auto_role_an_explicit_role_has_
 #[tokio::test]
 async fn a_channel_the_sync_could_not_set_up_is_set_up_by_the_retry() {
     let harness = Harness::new(module(None)).unwrap();
-    harness
-        .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
+    harness.config_changed().await.unwrap();
+    let mute = made_role(&harness, "Mute");
     harness.api().set_channels(
         Id::new(GUILD),
         vec![channel(1, &[]), channel(2, &[]), channel(3, &[])],
     );
     harness.api().fail_role(
-        Id::new(700),
+        Id::new(mute),
         DiscordError::Forbidden("Missing Permissions".into()),
     );
-    harness.config_changed().await.unwrap();
     run_all_jobs(&harness).await;
     assert_eq!(
         harness.jobs(),
@@ -548,16 +553,16 @@ async fn a_channel_the_sync_could_not_set_up_is_set_up_by_the_retry() {
         "the sync is not marked done: a retry waits an hour"
     );
     harness.api().recover_roles();
-    let before = attempts_on(&harness, 700);
+    let before = attempts_on(&harness, mute);
     harness.advance(Duration::from_secs(3_600));
     run_all_jobs(&harness).await;
     assert_eq!(
-        attempts_on(&harness, 700) - before,
+        attempts_on(&harness, mute) - before,
         3,
         "every channel is tried again"
     );
     for channel in [1, 2, 3] {
-        let last = specs_of(&harness, channel, 700).last().map(|spec| spec.1);
+        let last = specs_of(&harness, channel, mute).last().map(|spec| spec.1);
         assert!(
             last.is_some_and(|deny| deny.contains(Permissions::SEND_MESSAGES)),
             "channel {channel} is set up by the retry"
@@ -571,21 +576,19 @@ async fn a_sync_that_keeps_failing_is_retried_three_times_and_then_noted() {
     harness.set_log_channel(LOG);
     harness
         .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
-    harness
-        .api()
         .set_channels(Id::new(GUILD), vec![channel(1, &[]), channel(2, &[])]);
+    harness.config_changed().await.unwrap();
+    let mute = made_role(&harness, "Mute");
     harness.api().fail_role(
-        Id::new(700),
+        Id::new(mute),
         DiscordError::Forbidden("Missing Permissions".into()),
     );
-    harness.config_changed().await.unwrap();
     for _ in 0..4 {
         run_all_jobs(&harness).await;
         harness.advance(Duration::from_secs(3_600));
     }
     assert_eq!(
-        attempts_on(&harness, 700),
+        attempts_on(&harness, mute),
         8,
         "one run and three retries of two channels"
     );
@@ -640,24 +643,22 @@ async fn a_member_allow_is_a_way_around_the_restriction() {
 #[tokio::test]
 async fn the_sync_keeps_the_denies_and_drops_the_allows_of_the_role_it_sets() {
     let harness = Harness::new(module(None)).unwrap();
-    harness
-        .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
+    harness.config_changed().await.unwrap();
+    let mute = made_role(&harness, "Mute");
     harness.api().set_channels(
         Id::new(GUILD),
         vec![channel_with(
             1,
             &[(
-                700,
+                mute,
                 0,
                 Permissions::SEND_MESSAGES,
                 Permissions::VIEW_CHANNEL,
             )],
         )],
     );
-    harness.config_changed().await.unwrap();
     run_all_jobs(&harness).await;
-    let specs = specs_of(&harness, 1, 700);
+    let specs = specs_of(&harness, 1, mute);
     let (allow, deny) = *specs.last().unwrap();
     assert!(
         deny.contains(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES),
