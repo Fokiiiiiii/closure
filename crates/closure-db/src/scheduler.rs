@@ -535,13 +535,25 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let runners = (0..4).map(|_| {
-            let db = db.clone();
-            tokio::spawn(async move { db.claim_due(40, LEASE).await.unwrap() })
-        });
+        // Every runner is started before any is awaited, and they all claim after the barrier, so
+        // the claims really overlap. A runner that never starts makes the timeout fail the test.
+        let start = Arc::new(tokio::sync::Barrier::new(4));
+        let runners: Vec<_> = (0..4)
+            .map(|_| {
+                let (db, start) = (db.clone(), Arc::clone(&start));
+                tokio::spawn(async move {
+                    start.wait().await;
+                    db.claim_due(40, LEASE).await.unwrap()
+                })
+            })
+            .collect();
         let mut ids = Vec::new();
         for runner in runners {
-            ids.extend(runner.await.unwrap().into_iter().map(|job| job.id));
+            let jobs = tokio::time::timeout(Duration::from_secs(10), runner)
+                .await
+                .expect("all runners start")
+                .unwrap();
+            ids.extend(jobs.into_iter().map(|job| job.id));
         }
         let taken = ids.len();
         ids.sort_unstable();
@@ -562,18 +574,27 @@ mod tests {
         .execute(&db.pool)
         .await
         .unwrap();
-        let attempts = (0..20).map(|_| {
-            let warn = scheduler(&db, "warn", 1);
-            tokio::spawn(async move {
-                warn.job("x", &1)
-                    .unwrap()
-                    .after(Duration::from_secs(5))
-                    .await
+        let start = Arc::new(tokio::sync::Barrier::new(20));
+        let attempts: Vec<_> = (0..20)
+            .map(|_| {
+                let warn = scheduler(&db, "warn", 1);
+                let start = Arc::clone(&start);
+                tokio::spawn(async move {
+                    start.wait().await;
+                    warn.job("x", &1)
+                        .unwrap()
+                        .after(Duration::from_secs(5))
+                        .await
+                })
             })
-        });
+            .collect();
         let mut added = 0;
         for attempt in attempts {
-            match attempt.await.unwrap() {
+            let outcome = tokio::time::timeout(Duration::from_secs(10), attempt)
+                .await
+                .expect("all attempts start")
+                .unwrap();
+            match outcome {
                 Ok(()) => added += 1,
                 Err(error) => assert_eq!(error, ScheduleError::QuotaExceeded { limit: MAX_JOBS }),
             }
