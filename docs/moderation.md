@@ -99,7 +99,7 @@ well, to show the replies of this module to the invoking user only or to everyon
 
   **Known limit.** Discord adds up the permissions of all the roles of a member in a channel, and an
   allow that another role gives in that channel wins over the deny of this role. In a channel where
-  another role, @everyone included, allows Send Messages (or Speak for a voice mute), the member can
+  another role (not @everyone) allows Send Messages (or Speak for a voice mute), the member can
   still speak. The sync's note counts these channels. Remove that allow overwrite, or use `discord` for
   the method, which Discord enforces itself.
   If the timer cannot be set, the timeout still holds and the reply says so.

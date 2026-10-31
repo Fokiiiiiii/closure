@@ -298,6 +298,16 @@ async fn a_configuration_change_creates_the_timeout_role_before_a_punishment() {
 }
 
 #[tokio::test]
+async fn a_dry_run_configuration_change_creates_no_timeout_role() {
+    let harness = configured(json!({ "timeout_method": "role", "dry_run": true }));
+    harness.config_changed().await.unwrap();
+    assert_eq!(
+        count_actions(&harness, |a| matches!(a, Action::CreateRole { .. })),
+        0
+    );
+}
+
+#[tokio::test]
 async fn a_channel_created_later_gets_the_timeout_role_overwrite() {
     let harness = configured(json!({ "timeout_method": "role" }));
     harness.config_changed().await.unwrap();
