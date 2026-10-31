@@ -123,6 +123,34 @@ fn roles_to_db(roles: &[RoleId]) -> Result<Vec<i64>, HistoryError> {
     roles.iter().map(|id| to_db(*id).map_err(backend)).collect()
 }
 
+/// How many rows one purge statement removes at most.
+const PURGE_BATCH: u64 = 1_000;
+
+/// Runs the purge `statement` (which takes the cutoff and a batch size) until a batch removes fewer rows
+/// than the batch size, and returns how many rows it removed in all. One statement that removes all of
+/// it at once could run into the statement timeout.
+async fn purge_in_batches(
+    pool: &sqlx::PgPool,
+    statement: &'static str,
+    cutoff: i64,
+    batch: u64,
+) -> Result<u64, HistoryError> {
+    let mut removed = 0;
+    loop {
+        let rows = sqlx::query(statement)
+            .bind(cutoff)
+            .bind(i64::try_from(batch).unwrap_or(i64::MAX))
+            .execute(pool)
+            .await
+            .map_err(backend)?
+            .rows_affected();
+        removed += rows;
+        if rows < batch {
+            return Ok(removed);
+        }
+    }
+}
+
 #[async_trait]
 impl HistoryBackend for Db {
     /// An empty `content` clears the stored text (see the trait), and the time it was sent and
@@ -138,7 +166,8 @@ impl HistoryBackend for Db {
                  channel_id = EXCLUDED.channel_id,
                  author_id = EXCLUDED.author_id,
                  author_bot = EXCLUDED.author_bot,
-                 content = EXCLUDED.content,
+                 content = CASE WHEN EXCLUDED.content = '' THEN saved_messages.content
+                     ELSE EXCLUDED.content END,
                  attachments = EXCLUDED.attachments,
                  embed_count = EXCLUDED.embed_count,
                  sticker_count = EXCLUDED.sticker_count,
@@ -263,18 +292,24 @@ impl HistoryBackend for Db {
     }
 
     async fn purge_before(&self, cutoff: i64) -> Result<u64, HistoryError> {
-        let removed =
-            sqlx::query("DELETE FROM saved_messages WHERE created_at < to_timestamp($1::bigint)")
-                .bind(cutoff)
-                .execute(&self.pool)
-                .await
-                .map_err(backend)?
-                .rows_affected();
-        sqlx::query("DELETE FROM message_files WHERE kept_at < to_timestamp($1::bigint)")
-            .bind(cutoff)
-            .execute(&self.pool)
-            .await
-            .map_err(backend)?;
+        let removed = purge_in_batches(
+            &self.pool,
+            "DELETE FROM saved_messages WHERE (guild_id, message_id) IN (
+                    SELECT guild_id, message_id FROM saved_messages
+                    WHERE created_at < to_timestamp($1::bigint) LIMIT $2)",
+            cutoff,
+            PURGE_BATCH,
+        )
+        .await?;
+        purge_in_batches(
+            &self.pool,
+            "DELETE FROM message_files WHERE (guild_id, message_id, attachment_id) IN (
+                SELECT guild_id, message_id, attachment_id FROM message_files
+                WHERE kept_at < to_timestamp($1::bigint) LIMIT $2)",
+            cutoff,
+            PURGE_BATCH,
+        )
+        .await?;
         Ok(removed)
     }
 
@@ -492,7 +527,7 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn an_edit_replaces_the_text_and_an_emptied_text_clears_it(pool: PgPool) {
+    async fn an_edit_replaces_the_text_and_an_empty_one_keeps_it(pool: PgPool) {
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
         let history = history(&db, 1);
@@ -515,12 +550,15 @@ mod tests {
         without_text.edited_at = Some(1_700_000_200);
         history.save(&without_text).await.unwrap();
         let stored = history.get(Id::new(5), Id::new(10)).await.unwrap().unwrap();
-        assert_eq!(stored.content, "");
+        assert_eq!(
+            stored.content, "second",
+            "an empty text keeps the stored one"
+        );
         assert_eq!(stored.edited_at, Some(1_700_000_200));
     }
 
     #[sqlx::test]
-    async fn an_edit_to_an_empty_text_clears_the_stored_text(pool: PgPool) {
+    async fn an_edit_without_text_keeps_the_stored_text(pool: PgPool) {
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
         let history = history(&db, 1);
@@ -533,8 +571,8 @@ mod tests {
         history.save(&emptied).await.unwrap();
         let stored = history.get(Id::new(5), Id::new(10)).await.unwrap().unwrap();
         assert_eq!(
-            stored.content, "",
-            "an edit that empties the text clears it"
+            stored.content, "abc",
+            "an edit without text keeps the stored text"
         );
         assert_eq!(stored.edited_at, Some(1_700_000_100));
     }
