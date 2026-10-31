@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use closure_core::action::{InteractionReply, InteractionResponse, Outcome};
-use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
-use closure_core::event::{ChannelId, GuildId, InteractionId, InteractionToken};
+use closure_core::event::{ChannelId, InteractionId, InteractionToken};
 use closure_core::module::{ChoiceValue, OptionChoice};
 use twilight_model::application::command::{CommandOptionChoice, CommandOptionChoiceValue};
 use twilight_model::channel::Message;
@@ -121,7 +120,7 @@ impl TwilightApi {
     ) -> Result<Outcome, DiscordError> {
         if let Some((channel, message)) = token.text_command_message() {
             let sent = self
-                .send_text_reply_checked(channel, message, reply, reply.ephemeral)
+                .send_text_reply_as(channel, message, reply, reply.ephemeral)
                 .await?;
             return Ok(Outcome::Message(Box::new(sent)));
         }
@@ -172,70 +171,17 @@ impl TwilightApi {
     }
 }
 
-/// How long an ephemeral reply to a text command stays before it is deleted.
-const EPHEMERAL_LIFETIME: Duration = Duration::from_secs(30);
-
 /// How long the bot's reply to a text command can still be edited, as long as the interaction
 /// token of a slash command is good.
-const EDITABLE_FOR: Duration = Duration::from_secs(15 * 60);
+const EDITABLE_FOR: Duration = Duration::from_mins(15);
 
 /// Most replies to text commands remembered for editing; the oldest are forgotten first.
 const REMEMBERED_REPLIES: usize = 1_024;
 
-/// Most ephemeral replies waiting to be deleted, in all guilds together. Past it a reply is
-/// refused rather than sent, since a private reply must never stay in the channel.
-const PENDING_DELETIONS: usize = 1_024;
-
-/// Most ephemeral replies waiting to be deleted in one guild, so that one guild cannot use up
-/// the places of the others.
-pub(super) const PENDING_DELETIONS_PER_GUILD: usize = 64;
-
 /// What the bot answered each text command with, by the command's token.
+#[derive(Default)]
 pub(super) struct TextReplies {
     replies: Mutex<HashMap<String, Remembered>>,
-    deletions: Arc<Mutex<Deletions>>,
-    /// How long an ephemeral reply stays; shorter in tests.
-    pub(super) ephemeral_lifetime: Duration,
-}
-
-impl Default for TextReplies {
-    fn default() -> Self {
-        Self {
-            replies: Mutex::new(HashMap::new()),
-            deletions: Arc::new(Mutex::new(Deletions::default())),
-            ephemeral_lifetime: EPHEMERAL_LIFETIME,
-        }
-    }
-}
-
-/// How many ephemeral replies wait to be deleted, in all and per guild. `None` is a channel the
-/// bot cannot place in a guild.
-#[derive(Default)]
-struct Deletions {
-    total: usize,
-    per_guild: HashMap<Option<GuildId>, usize>,
-}
-
-/// A place in [`Deletions`], given back when it is dropped: once its reply is deleted, or at
-/// once when the reply could not be sent.
-pub(super) struct Place {
-    deletions: Arc<Mutex<Deletions>>,
-    guild: Option<GuildId>,
-}
-
-impl Drop for Place {
-    fn drop(&mut self) {
-        let mut deletions = self
-            .deletions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        deletions.total = deletions.total.saturating_sub(1);
-        let count = deletions.per_guild.entry(self.guild).or_default();
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            deletions.per_guild.remove(&self.guild);
-        }
-    }
 }
 
 struct Remembered {
@@ -283,36 +229,6 @@ impl TextReplies {
     }
 }
 
-impl TextReplies {
-    /// Takes a place for an ephemeral reply in `guild`, or refuses: the reply is not sent without
-    /// one, so that it can always be deleted.
-    pub(super) fn reserve(&self, guild: Option<GuildId>) -> Result<Place, DiscordError> {
-        let mut deletions = self
-            .deletions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let in_guild = deletions.per_guild.get(&guild).copied().unwrap_or(0);
-        if deletions.total >= PENDING_DELETIONS || in_guild >= PENDING_DELETIONS_PER_GUILD {
-            tracing::warn!("too many private replies are waiting to be deleted; one is refused");
-            return Err(DiscordError::Transient("busy, try again".into()));
-        }
-        deletions.total += 1;
-        *deletions.per_guild.entry(guild).or_default() += 1;
-        Ok(Place {
-            deletions: Arc::clone(&self.deletions),
-            guild,
-        })
-    }
-
-    #[cfg(test)]
-    pub(super) fn pending_deletions(&self) -> usize {
-        self.deletions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .total
-    }
-}
-
 impl TwilightApi {
     /// A text command has no interaction to answer, so the bot replies to its message in the same
     /// channel. A deferral is only remembered: the first edit sends the reply.
@@ -330,7 +246,7 @@ impl TwilightApi {
             }
             InteractionResponse::Message { reply } => {
                 let sent = self
-                    .send_text_reply_checked(channel, invoker, reply, reply.ephemeral)
+                    .send_text_reply_as(channel, invoker, reply, reply.ephemeral)
                     .await?;
                 self.text.remember(token, Some(sent.id), reply.ephemeral);
                 Ok(Outcome::Message(Box::new(sent)))
@@ -353,7 +269,7 @@ impl TwilightApi {
         reply: &InteractionReply,
     ) -> Result<Outcome, DiscordError> {
         match self.text.fresh(token) {
-            Some((Some(message), _)) => {
+            Some((Some(message), false)) => {
                 let allowed = AllowedMentions::default();
                 let mut request = self
                     .http
@@ -367,11 +283,11 @@ impl TwilightApi {
                     .components(Some(&reply.components));
                 run(request).await
             }
-            // Nothing sent yet, or only a deferral: this is the first reply.
+            // Nothing sent yet, a deferral, or a private reply, which is sent again rather than edited.
             other => {
                 let ephemeral = other.is_some_and(|(_, ephemeral)| ephemeral) || reply.ephemeral;
                 let sent = self
-                    .send_text_reply_checked(channel, invoker, reply, ephemeral)
+                    .send_text_reply_as(channel, invoker, reply, ephemeral)
                     .await?;
                 self.text.remember(token, Some(sent.id), ephemeral);
                 Ok(Outcome::Message(Box::new(sent)))
@@ -407,40 +323,46 @@ impl TwilightApi {
         read(request).await
     }
 
-    /// Sends `reply` to a text command. An ephemeral one takes its place for deletion before it is
-    /// sent: without a place it is not sent at all, and a failed send gives the place back.
-    async fn send_text_reply_checked(
+    /// Sends `reply` as a reply to a text command. An ephemeral one goes to the invoker's direct
+    /// messages instead: a reply in the channel would stay visible to everyone there.
+    async fn send_text_reply_as(
         &self,
         channel: ChannelId,
         invoker: Id<MessageMarker>,
         reply: &InteractionReply,
         ephemeral: bool,
     ) -> Result<Message, DiscordError> {
-        let place = if ephemeral {
-            let guild = self.channel_guild(channel).await?;
-            Some(self.text.reserve(guild)?)
-        } else {
-            None
-        };
-        let sent = self.send_text_reply(channel, invoker, reply).await?;
-        if let Some(place) = place {
-            self.delete_later(channel, sent.id, place);
+        if ephemeral {
+            return self.send_private_reply(channel, invoker, reply).await;
         }
-        Ok(sent)
+        self.send_text_reply(channel, invoker, reply).await
     }
 
-    /// Deletes a reply to a text command after its lifetime, then gives its place back. Best
-    /// effort: the message may be gone already, and the bot may not be allowed to delete it.
-    fn delete_later(&self, channel: ChannelId, message: Id<MessageMarker>, place: Place) {
-        let http = Arc::clone(&self.http);
-        let lifetime = self.text.ephemeral_lifetime;
-        tokio::spawn(async move {
-            tokio::time::sleep(lifetime).await;
-            if let Err(error) = http.delete_message(channel, message).await {
-                tracing::debug!(%error, "could not delete a reply to a text command");
-            }
-            drop(place);
-        });
+    /// Sends `reply` to the direct messages of whoever invoked the text command. The author is read
+    /// from the invoking message, so a message that is gone leaves nothing sent.
+    async fn send_private_reply(
+        &self,
+        channel: ChannelId,
+        invoker: Id<MessageMarker>,
+        reply: &InteractionReply,
+    ) -> Result<Message, DiscordError> {
+        let author = read(self.http.message(channel, invoker)).await?.author.id;
+        let direct = read(self.http.create_private_channel(author)).await?;
+        let allowed = AllowedMentions::default();
+        let mut request = self
+            .http
+            .create_message(direct.id)
+            .allowed_mentions(Some(&allowed));
+        if let Some(content) = &reply.content {
+            request = request.content(content);
+        }
+        if !reply.embeds.is_empty() {
+            request = request.embeds(&reply.embeds);
+        }
+        if !reply.components.is_empty() {
+            request = request.components(&reply.components);
+        }
+        read(request).await
     }
 }
 
@@ -553,54 +475,5 @@ mod tests {
             private.data.and_then(|d| d.flags),
             Some(MessageFlags::EPHEMERAL)
         );
-    }
-
-    #[test]
-    fn a_guild_holds_only_its_own_share_of_deletions() {
-        let text = TextReplies::default();
-        let guild: Option<GuildId> = Some(Id::new(10));
-        let places: Vec<Place> = (0..PENDING_DELETIONS_PER_GUILD)
-            .map(|_| text.reserve(guild).unwrap())
-            .collect();
-        assert!(
-            text.reserve(guild).is_err(),
-            "one reply past the share is refused"
-        );
-        assert!(
-            text.reserve(Some(Id::new(11))).is_ok(),
-            "another guild still has its share"
-        );
-        drop(places);
-        assert!(
-            text.reserve(guild).is_ok(),
-            "the places are back once the replies are gone"
-        );
-    }
-
-    #[test]
-    fn the_whole_bot_holds_at_most_its_total_of_deletions() {
-        let text = TextReplies::default();
-        let mut places = Vec::new();
-        for guild in 1..=16_u64 {
-            for _ in 0..PENDING_DELETIONS_PER_GUILD {
-                places.push(text.reserve(Some(Id::new(guild))).unwrap());
-            }
-        }
-        assert_eq!(places.len(), PENDING_DELETIONS);
-        assert!(
-            text.reserve(Some(Id::new(17))).is_err(),
-            "a 17th guild finds the bot full"
-        );
-        places.pop();
-        assert!(text.reserve(Some(Id::new(17))).is_ok());
-    }
-
-    #[test]
-    fn a_place_is_given_back_when_it_is_dropped() {
-        let text = TextReplies::default();
-        let place = text.reserve(Some(Id::new(10))).unwrap();
-        assert_eq!(text.pending_deletions(), 1);
-        drop(place);
-        assert_eq!(text.pending_deletions(), 0);
     }
 }

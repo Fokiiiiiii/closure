@@ -39,7 +39,7 @@ use closure_i18n::{CORE_NAMESPACE, user_message};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use futures_util::FutureExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -52,6 +52,10 @@ use crate::notice;
 use crate::text_commands::{Reader, Reading, TextCommandApi};
 
 /// How long `shutdown` waits for lanes to stop once they were told to abort.
+/// Most usage lines answered at once. A usage line costs a Discord call, so an answer past this is
+/// dropped rather than queued: a flood of incomplete commands must not spawn a task for each.
+const MAX_USAGE_REPLIES: usize = 16;
+
 const HARD_STOP_WAIT: Duration = Duration::from_secs(2);
 
 /// How long an aborted module task gets to actually stop. Shorter than [`HARD_STOP_WAIT`], so a
@@ -250,6 +254,8 @@ struct Shared {
     /// they block a thread and cannot be aborted. A module with any is not given new calls.
     wedged: DashMap<ModuleId, Arc<AtomicUsize>>,
     pending_total: AtomicUsize,
+    /// The answers to incomplete text commands still allowed to run at once.
+    usage_replies: Arc<Semaphore>,
     closing: AtomicBool,
     cancel: CancellationToken,
     /// Cancelled when the grace period of `shutdown` ran out: lanes stop taking work and running
@@ -504,6 +510,7 @@ impl Dispatcher {
             interactions,
             wedged: DashMap::new(),
             pending_total: AtomicUsize::new(0),
+            usage_replies: Arc::new(Semaphore::new(MAX_USAGE_REPLIES)),
             closing: AtomicBool::new(false),
             cancel: CancellationToken::new(),
             abort: CancellationToken::new(),
@@ -613,8 +620,13 @@ impl Dispatcher {
         if self.shared.closing.load(Ordering::Acquire) {
             return;
         }
+        let Ok(place) = Arc::clone(&self.shared.usage_replies).try_acquire_owned() else {
+            tracing::debug!("too many usage lines are being answered; one is dropped");
+            return;
+        };
         let shared = Arc::clone(&self.shared);
         self.shared.tracker.spawn(async move {
+            let _place = place;
             reply_in(&shared, &invocation, text, notice::INFO).await;
         });
     }

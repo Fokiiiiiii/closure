@@ -18,6 +18,7 @@ use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{ChoiceValue, CommandSpec, OptionKind, OptionSpec, SubcommandSpec};
 use closure_core::settings::SettingsProvider;
 use closure_i18n::CORE_NAMESPACE;
+use tokio::sync::Semaphore;
 use twilight_cache_inmemory::InMemoryCache;
 use twilight_model::channel::permission_overwrite::PermissionOverwrite;
 use twilight_model::guild::Permissions;
@@ -461,6 +462,10 @@ pub(crate) fn invoker_permissions(cache: &InMemoryCache, message: &MessageInfo) 
 /// The audit log reason of the messages a guild's text-command delays delete.
 const CLEANUP_REASON: &str = "Text command cleanup";
 
+/// Most messages of text commands waiting to be deleted by the guilds' delays, in all guilds together.
+/// Past it a message stays, rather than a task waiting for it.
+pub(crate) const MAX_PENDING_DELETIONS: usize = 1_024;
+
 /// The messages a text command's answer deletes later, with the guild's delays.
 struct Deletions {
     channel: ChannelId,
@@ -476,6 +481,8 @@ pub(crate) struct TextCommandApi {
     interactions: Arc<InteractionGuilds>,
     settings: Arc<dyn SettingsProvider>,
     translator: Arc<dyn Translator>,
+    /// The places for the deletions still waiting.
+    pending: Arc<Semaphore>,
 }
 
 impl TextCommandApi {
@@ -490,6 +497,7 @@ impl TextCommandApi {
             interactions,
             settings,
             translator,
+            pending: Arc::new(Semaphore::new(MAX_PENDING_DELETIONS)),
         }
     }
 
@@ -537,8 +545,13 @@ impl TextCommandApi {
         after: Duration,
         reason: Reason,
     ) {
+        let Ok(place) = Arc::clone(&self.pending).try_acquire_owned() else {
+            tracing::warn!("too many messages wait to be deleted; one stays");
+            return;
+        };
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
+            let _place = place;
             tokio::time::sleep(after).await;
             let action = Action::DeleteMessage {
                 channel_id: channel,

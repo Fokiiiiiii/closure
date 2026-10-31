@@ -985,6 +985,15 @@ fn text_reply(content: &str) -> closure_core::action::InteractionReply {
     }
 }
 
+fn ephemeral_reply(content: &str) -> InteractionResponse {
+    InteractionResponse::Message {
+        reply: closure_core::action::InteractionReply {
+            ephemeral: true,
+            ..text_reply(content)
+        },
+    }
+}
+
 #[tokio::test]
 async fn a_text_command_reply_replies_to_the_invoker_and_pings_nobody() {
     let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON)]).await;
@@ -1083,155 +1092,35 @@ async fn a_deferred_text_command_is_sent_by_its_first_edit_and_edited_after_that
 }
 
 #[tokio::test]
-async fn an_ephemeral_text_command_reply_is_deleted_after_its_lifetime() {
-    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (204, "")]).await;
-    let mut api = discord.api().with_cache(Arc::new(TextChannelInGuildTen));
-    api.text.ephemeral_lifetime = Duration::from_millis(20);
-    api.execute(Action::Respond {
-        interaction_id: Id::new(44),
-        token: text_token(),
-        response: InteractionResponse::Message {
-            reply: closure_core::action::InteractionReply {
-                ephemeral: true,
-                ..text_reply("only you")
-            },
-        },
-    })
-    .await
-    .unwrap();
+async fn an_ephemeral_text_command_reply_goes_to_the_invoker_and_not_to_the_channel() {
+    let discord = FakeDiscord::start(vec![
+        (200, MESSAGE_JSON),
+        (200, DM_CHANNEL_JSON),
+        (200, MESSAGE_JSON),
+    ])
+    .await;
 
-    // The deletion runs on its own task; wait for it, with a bound.
-    for _ in 0..500 {
-        if discord
-            .requests()
-            .iter()
-            .any(|request| request.method == "DELETE")
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    discord
+        .api()
+        .execute(Action::Respond {
+            interaction_id: Id::new(44),
+            token: text_token(),
+            response: ephemeral_reply("only you"),
+        })
+        .await
+        .unwrap();
+
     let requests = discord.requests();
-    let deletion = requests
+    let paths: Vec<_> = requests
         .iter()
-        .find(|request| request.method == "DELETE")
-        .expect("the ephemeral reply is deleted");
-    assert!(
-        deletion.path.ends_with("/channels/1/messages/5"),
-        "{}",
-        deletion.path
-    );
-}
-
-/// A cache that knows channel 1 is in guild 10, so a text command's guild needs no request.
-struct TextChannelInGuildTen;
-
-impl CacheView for TextChannelInGuildTen {
-    fn bot_user(&self) -> Option<closure_core::event::UserId> {
-        None
-    }
-    fn guild_owner(&self, _: closure_core::event::GuildId) -> Option<closure_core::event::UserId> {
-        None
-    }
-    fn member_roles(
-        &self,
-        _: closure_core::event::GuildId,
-        _: closure_core::event::UserId,
-    ) -> Option<Vec<closure_core::event::RoleId>> {
-        None
-    }
-    fn role_position(&self, _: closure_core::event::RoleId) -> Option<i64> {
-        None
-    }
-    fn channel_guild(
-        &self,
-        channel: closure_core::event::ChannelId,
-    ) -> Option<closure_core::event::GuildId> {
-        (channel.get() == 1).then(|| Id::new(10))
-    }
-}
-
-fn ephemeral_reply(content: &str) -> InteractionResponse {
-    InteractionResponse::Message {
-        reply: closure_core::action::InteractionReply {
-            ephemeral: true,
-            ..text_reply(content)
-        },
-    }
-}
-
-#[tokio::test]
-async fn an_ephemeral_text_command_reply_is_refused_when_its_guild_has_no_place_left() {
-    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON)]).await;
-    let api = discord.api().with_cache(Arc::new(TextChannelInGuildTen));
-    let _places: Vec<_> = (0..super::interactions::PENDING_DELETIONS_PER_GUILD)
-        .map(|_| api.text.reserve(Some(Id::new(10))).unwrap())
+        .map(|request| (request.method.as_str(), request.path.as_str()))
         .collect();
-
-    let result = api
-        .execute(Action::Respond {
-            interaction_id: Id::new(44),
-            token: text_token(),
-            response: ephemeral_reply("only you"),
-        })
-        .await;
-    assert!(
-        matches!(result, Err(DiscordError::Transient(_))),
-        "a busy refusal, which the caller reports"
-    );
-    assert!(
-        discord.requests().is_empty(),
-        "nothing is sent without a place to delete it from"
-    );
-}
-
-#[tokio::test]
-async fn a_place_is_given_back_when_the_ephemeral_reply_cannot_be_sent() {
-    let discord = FakeDiscord::start(vec![(500, "")]).await;
-    let api = discord.api().with_cache(Arc::new(TextChannelInGuildTen));
-    let result = api
-        .execute(Action::Respond {
-            interaction_id: Id::new(44),
-            token: text_token(),
-            response: ephemeral_reply("only you"),
-        })
-        .await;
-    assert!(result.is_err(), "Discord refused the reply");
-    assert_eq!(api.text.pending_deletions(), 0);
-}
-
-#[tokio::test]
-async fn a_deleted_ephemeral_reply_gives_its_place_back() {
-    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (204, "")]).await;
-    let mut api = discord.api().with_cache(Arc::new(TextChannelInGuildTen));
-    api.text.ephemeral_lifetime = Duration::from_millis(200);
-    api.execute(Action::Respond {
-        interaction_id: Id::new(44),
-        token: text_token(),
-        response: ephemeral_reply("only you"),
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        api.text.pending_deletions(),
-        1,
-        "the place is taken while the reply waits"
-    );
-
-    // The deletion runs on its own task; wait for it, with a bound.
-    for _ in 0..500 {
-        if api.text.pending_deletions() == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(api.text.pending_deletions(), 0);
-    assert!(
-        discord
-            .requests()
-            .iter()
-            .any(|request| request.method == "DELETE")
-    );
+    assert_eq!(paths.len(), 3, "{paths:?}");
+    assert!(paths[0].1.ends_with("/channels/1/messages/44"), "{paths:?}");
+    assert!(paths[1].1.ends_with("/users/@me/channels"), "{paths:?}");
+    assert!(paths[2].1.ends_with("/channels/300/messages"), "{paths:?}");
+    let message: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+    assert_eq!(message["content"], "only you");
 }
 
 #[tokio::test]

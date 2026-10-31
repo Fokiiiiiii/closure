@@ -14,6 +14,7 @@ use closure_core::locale::Locale;
 use closure_core::registry::ModuleRegistry;
 use futures_util::FutureExt;
 use tokio::sync::Notify;
+use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use twilight_cache_inmemory::{InMemoryCache, ResourceType};
@@ -31,6 +32,10 @@ use twilight_model::id::marker::GuildMarker;
 use crate::convert;
 use crate::dispatcher::Dispatcher;
 use crate::text_commands;
+
+/// How long a shard waits between two requests for the members of a guild. A shard may send 120
+/// commands a minute, and a request for all the members of a large guild takes a while to answer.
+const MEMBER_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long a hook may take before the gateway moves on without it.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -476,11 +481,20 @@ pub async fn start_gateway(
 async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
     let id = shard.id();
     let mut closing = false;
+    let mut members = MemberRequests::default();
+    let mut pacing = interval(MEMBER_REQUEST_INTERVAL);
+    pacing.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         let item = tokio::select! {
             () = context.shutdown.cancelled(), if !closing => {
                 closing = true;
                 shard.close(CloseFrame::NORMAL);
+                continue;
+            }
+            _ = pacing.tick(), if !members.is_empty() => {
+                if let Some(guild) = members.take_next() {
+                    shard.command(&RequestGuildMembers::builder(guild).query("", None));
+                }
                 continue;
             }
             item = shard.next_event(EventTypeFlags::all()) => item,
@@ -499,8 +513,7 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
                     && let Some(guild) = guild_to_request(&event)
                 {
                     // Discord leaves offline members out of a guild's first payload; asking caches them.
-                    // shortcut: no pacing, Discord allows 120 requests a minute per shard, pace them once a shard holds more guilds than that.
-                    shard.command(&RequestGuildMembers::builder(guild).query("", None));
+                    members.push(guild);
                 }
                 if finished {
                     break;
@@ -599,6 +612,29 @@ fn before(cache: &InMemoryCache, event: &Event) -> convert::Before {
             ..convert::Before::default()
         },
         _ => convert::Before::default(),
+    }
+}
+
+/// The guilds whose members are still to be asked for, one at a time.
+#[derive(Default)]
+struct MemberRequests {
+    pending: VecDeque<Id<GuildMarker>>,
+}
+
+impl MemberRequests {
+    /// Queues `guild` unless it already waits.
+    fn push(&mut self, guild: Id<GuildMarker>) {
+        if !self.pending.contains(&guild) {
+            self.pending.push_back(guild);
+        }
+    }
+
+    fn take_next(&mut self) -> Option<Id<GuildMarker>> {
+        self.pending.pop_front()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty()
     }
 }
 
@@ -770,6 +806,18 @@ mod tests {
             guild_to_request(&Event::GuildCreate(Box::new(unavailable))),
             None
         );
+    }
+
+    #[test]
+    fn a_guild_waits_once_for_its_members_and_the_guilds_go_in_order() {
+        let mut members = MemberRequests::default();
+        members.push(Id::new(10));
+        members.push(Id::new(11));
+        members.push(Id::new(10));
+        assert_eq!(members.take_next(), Some(Id::new(10)));
+        assert_eq!(members.take_next(), Some(Id::new(11)));
+        assert_eq!(members.take_next(), None);
+        assert!(members.is_empty());
     }
 
     #[test]

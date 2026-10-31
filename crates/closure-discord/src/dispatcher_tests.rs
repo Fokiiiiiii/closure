@@ -2353,6 +2353,33 @@ async fn a_text_command_runs_with_the_options_its_slash_form_gets() {
 }
 
 #[tokio::test]
+async fn a_burst_of_incomplete_text_commands_is_answered_up_to_a_limit() {
+    let module = warn_module(Behavior::LogCommand);
+    let h = text_harness(&[(&module, true)], Some("!"), Locale::Ja).await;
+
+    for message in 0..(MAX_USAGE_REPLIES as u64 * 4) {
+        h.dispatcher
+            .dispatch_message(text_message(100 + message, "!warn"), |_| {
+                Permissions::empty()
+            });
+    }
+    h.dispatcher.flush().await;
+    for _ in 0..500 {
+        if h.api.actions().len() >= MAX_USAGE_REPLIES {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    assert_eq!(
+        h.api.actions().len(),
+        MAX_USAGE_REPLIES,
+        "the answers past the limit are dropped"
+    );
+}
+
+#[tokio::test]
 async fn a_text_command_with_missing_words_is_answered_with_its_usage_and_runs_nothing() {
     let module = warn_module(Behavior::LogCommand);
     let h = text_harness(&[(&module, true)], Some("!"), Locale::Ja).await;
@@ -2626,6 +2653,42 @@ async fn wait_until_logged(probe: &Probe, line: &str) -> bool {
     })
     .await
     .is_ok()
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_deletions_waiting_for_a_guilds_delay_are_capped() {
+    let module = warn_module(Behavior::AnswerCommand);
+    let policy = GuildPolicy {
+        prefix: Some("!".to_owned()),
+        prefix_delete_command_after: Some(Duration::from_secs(3_600)),
+        ..GuildPolicy::default()
+    };
+    let h = text_harness_with(&[(&module, true)], policy, Locale::En).await;
+
+    // The lanes take a few messages at a time, so the burst is flushed in parts.
+    for message in 0..(crate::text_commands::MAX_PENDING_DELETIONS as u64 + 10) {
+        h.dispatcher
+            .dispatch_message(text_message(10_000 + message, "!warn <@5>"), |_| {
+                Permissions::empty()
+            });
+        if message % 32 == 31 {
+            h.dispatcher.flush().await;
+        }
+    }
+    h.dispatcher.flush().await;
+    tokio::time::sleep(Duration::from_secs(3_601)).await;
+
+    let deleted = h
+        .api
+        .actions()
+        .iter()
+        .filter(|action| matches!(action, Action::DeleteMessage { .. }))
+        .count();
+    assert_eq!(
+        deleted,
+        crate::text_commands::MAX_PENDING_DELETIONS,
+        "the messages past the cap stay"
+    );
 }
 
 #[tokio::test(start_paused = true)]
