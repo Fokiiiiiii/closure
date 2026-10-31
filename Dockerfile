@@ -1,6 +1,6 @@
 # The image only wraps a binary that the release workflow has already built (one per
 # architecture, in context/amd64 and context/arm64), so nothing is compiled here.
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
