@@ -47,6 +47,9 @@ for about a day, so a link alone cannot show a picture later.
   the files of a guild are capped at 256 MiB, and the oldest go first. Files are kept for the same
   period as the message history (seven days by default).
 
+A picture (png, jpg, jpeg, gif or webp) is shown inside its entry's embed; any other file is posted
+with the entry as an attachment.
+
 Only files up to 8 MiB are fetched or kept. Links are fetched only from Discord's CDN
 (`cdn.discordapp.com` and `media.discordapp.net`), over HTTPS and without following redirects.
 Each fetch has a short timeout, and a deletion waits for its fetches, so a very large bulk deletion

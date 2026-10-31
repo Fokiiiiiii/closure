@@ -15,7 +15,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use closure_core::action::{Action, InteractionReply, InteractionResponse, MentionPolicy};
+use closure_core::action::{
+    Action, FileUpload, InteractionReply, InteractionResponse, MentionPolicy,
+};
 use closure_core::client::DiscordApi;
 use closure_core::event::{ChannelId, UserId};
 use closure_discord::TwilightApi;
@@ -268,10 +270,19 @@ fn step(action: Action, kind: &str, channel: ChannelId) -> Step {
     match action {
         Action::SendMessage {
             content, embeds, ..
-        }
-        | Action::SendFile {
-            content, embeds, ..
         } => message(channel, content, embeds, kind),
+        Action::SendFile {
+            content,
+            embeds,
+            file,
+            ..
+        } => match message(channel, content, embeds, kind) {
+            Step::Send { post, key } => Step::Send {
+                post: Box::new(with_file(*post, file)),
+                key,
+            },
+            other => other,
+        },
         Action::SendDirectMessage {
             user_id,
             content,
@@ -354,6 +365,24 @@ fn message(channel: ChannelId, content: Option<String>, embeds: Vec<Embed>, kind
     }
 }
 
+/// The message with the file it carries, so that the replay posts the file as the bot does.
+fn with_file(post: Action, file: FileUpload) -> Action {
+    match post {
+        Action::SendMessage {
+            channel_id,
+            content,
+            embeds,
+            ..
+        } => Action::SendFile {
+            channel_id,
+            content,
+            embeds,
+            file,
+        },
+        other => other,
+    }
+}
+
 fn response_kind(response: &InteractionResponse) -> &'static str {
     match response {
         InteractionResponse::Defer { .. } => "defer",
@@ -370,7 +399,7 @@ mod tests {
     use std::fs;
 
     use closure_core::action::{
-        Action, InteractionReply, InteractionResponse, MentionPolicy, Reason,
+        Action, FileUpload, InteractionReply, InteractionResponse, MentionPolicy, Reason,
     };
     use closure_core::event::{
         ChannelId, GuildId, InteractionId, InteractionToken, RoleId, UserId,
@@ -588,6 +617,27 @@ mod tests {
 
         assert_eq!(plan.posts, vec![sent("Muted for 10 minutes in voice")]);
         assert_eq!(plan.outside, 1);
+    }
+
+    #[test]
+    fn a_file_is_posted_as_a_file_with_its_embed() {
+        let embed = serde_json::from_value::<Embed>(
+            json!({ "type": "rich", "description": "A picture of a message that was deleted." }),
+        )
+        .unwrap();
+        let picture = Action::SendFile {
+            channel_id: channel(),
+            content: None,
+            embeds: vec![embed],
+            file: FileUpload {
+                filename: "photo.png".to_owned(),
+                data: vec![1, 2, 3],
+            },
+        };
+
+        let plan = plan_of(std::slice::from_ref(&picture));
+
+        assert_eq!(plan.posts, vec![picture]);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use closure_core::error::ModuleError;
 use closure_core::event::{AttachmentInfo, ChannelId, MessageId};
 use closure_core::module::EventContext;
 use twilight_model::channel::message::Embed;
+use twilight_model::channel::message::embed::EmbedImage;
 
 /// The most characters Discord takes in the embeds of one message, all of them together.
 const MAX_EMBED_CHARS: usize = 6000;
@@ -119,7 +120,7 @@ pub struct LogEntry {
 
 /// Posts the entries to `channel`, in order. Entries without files share messages, as many embeds to a
 /// message as Discord takes and as many characters as `MAX_EMBED_CHARS` allows; a file goes in a
-/// message of its own, with the embed of its entry.
+/// message of its own, with the embed of its entry, which shows a picture inside it.
 pub async fn post(
     ctx: &EventContext,
     channel: ChannelId,
@@ -140,12 +141,13 @@ pub async fn post(
         }
         flush(ctx, channel, &mut pending).await?;
         for file in entry.files {
+            let embeds = vec![embed_with_file(&entry.embed, &file)];
             send(
                 ctx,
                 Action::SendFile {
                     channel_id: channel,
                     content: None,
-                    embeds: vec![entry.embed.clone()],
+                    embeds,
                     file,
                 },
             )
@@ -153,6 +155,32 @@ pub async fn post(
         }
     }
     flush(ctx, channel, &mut pending).await
+}
+
+/// The extensions of the files that an embed shows as a picture.
+const PICTURE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+
+/// The embed of an entry, with the file's picture inside it when the file is a picture: the embed
+/// names the file that the message carries.
+fn embed_with_file(embed: &Embed, file: &FileUpload) -> Embed {
+    let mut embed = embed.clone();
+    if is_picture(&file.filename) {
+        embed.image = Some(EmbedImage {
+            height: None,
+            proxy_url: None,
+            url: format!("attachment://{}", file.filename),
+            width: None,
+        });
+    }
+    embed
+}
+
+fn is_picture(filename: &str) -> bool {
+    filename.rsplit_once('.').is_some_and(|(_, extension)| {
+        PICTURE_EXTENSIONS
+            .iter()
+            .any(|known| extension.eq_ignore_ascii_case(known))
+    })
 }
 
 async fn flush(

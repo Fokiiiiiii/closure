@@ -34,6 +34,15 @@ fn config(channel: Option<&str>, deletes: bool) -> serde_json::Value {
     })
 }
 
+/// A 1 by 1 PNG, the picture that the showcase shows inside its embed.
+const PICTURE_BYTES: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x64, 0x60, 0xF8, 0x5F,
+    0x0F, 0x00, 0x02, 0x87, 0x01, 0x80, 0xEB, 0x47, 0xBA, 0x92, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+
 fn picture(id: u64) -> AttachmentInfo {
     AttachmentInfo {
         id,
@@ -182,6 +191,11 @@ async fn a_deleted_picture_is_posted_as_the_file_the_host_kept() {
     assert_eq!(
         posted[0].files,
         [("photo.png".to_owned(), b"the picture".to_vec())]
+    );
+    assert!(
+        posted[0].embeds.contains("attachment://photo.png"),
+        "{}",
+        posted[0].embeds
     );
 }
 
@@ -488,7 +502,7 @@ async fn showcase_an_edit_that_removes_a_picture_shows_the_picture() {
     let harness = harness();
     harness.set_guild_locale(Locale::Ja);
     harness
-        .seed_file(CHANNEL, 31, picture(4), Some(b"removed bytes".to_vec()))
+        .seed_file(CHANNEL, 31, picture(4), Some(PICTURE_BYTES.to_vec()))
         .await
         .unwrap();
 
@@ -508,9 +522,41 @@ async fn showcase_an_edit_that_removes_a_picture_shows_the_picture() {
     let posted = sent(&harness);
     assert_eq!(posted.len(), 1, "{:?}", posted.len());
     assert!(
-        posted[0].embeds.contains("photo.png"),
+        posted[0].embeds.contains("attachment://photo.png"),
         "{}",
         posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn showcase_a_deleted_picture_is_shown_inside_its_embed() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+    harness
+        .seed_message(saved(
+            30,
+            "写真付きのメッセージを消しました。",
+            vec![picture(7)],
+        ))
+        .await
+        .unwrap();
+    harness
+        .seed_file(CHANNEL, 30, picture(7), Some(PICTURE_BYTES.to_vec()))
+        .await
+        .unwrap();
+
+    harness.emit(deleted(30)).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("attachment://photo.png"),
+        "{}",
+        posted[0].embeds
+    );
+    assert_eq!(
+        posted[0].files,
+        [("photo.png".to_owned(), PICTURE_BYTES.to_vec())]
     );
 }
 
