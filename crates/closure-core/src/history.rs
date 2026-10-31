@@ -400,6 +400,11 @@ struct GuildMessages {
     files: Vec<MemoryFile>,
 }
 
+/// The order files are kept in, as the database lists them: when kept, then message, then attachment.
+fn kept_order(kept: &KeptFile) -> (i64, u64, u64) {
+    (kept.kept_at, kept.message_id.get(), kept.attachment.id)
+}
+
 /// A file kept by the memory history, with its bytes when they were fetched.
 #[derive(Debug)]
 struct MemoryFile {
@@ -570,12 +575,14 @@ impl HistoryBackend for MemoryHistory {
     ) -> Result<Vec<KeptFile>, HistoryError> {
         let guilds = self.lock();
         Ok(guilds.get(&guild).map_or_else(Vec::new, |messages| {
-            messages
+            let mut files: Vec<KeptFile> = messages
                 .files
                 .iter()
                 .filter(|file| file.kept.message_id == message)
                 .map(|file| file.kept.clone())
-                .collect()
+                .collect();
+            files.sort_by_key(kept_order);
+            files
         }))
     }
 
@@ -601,6 +608,7 @@ impl HistoryBackend for MemoryHistory {
         let Some(messages) = guilds.get_mut(&guild) else {
             return Ok(0);
         };
+        messages.files.sort_by_key(|file| kept_order(&file.kept));
         let size = |file: &MemoryFile| {
             file.data
                 .as_ref()
@@ -907,5 +915,42 @@ mod tests {
             Err(HistoryError::InvalidContent(_))
         ));
         assert_eq!(history.get(Id::new(5), Id::new(10)).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn files_are_listed_and_dropped_oldest_first_whatever_the_order_they_were_saved_in() {
+        let backend = Arc::new(MemoryHistory::default());
+        let (guild, channel, message) = (Id::new(1), Id::new(5), Id::new(10));
+        let picture = |id: u64| AttachmentInfo {
+            id,
+            filename: format!("{id}.png"),
+            size: 5,
+            content_type: None,
+            url: format!("https://cdn.example/{id}.png"),
+        };
+        // Attachment 2 is saved first but kept later: the time it was kept decides the order.
+        backend
+            .save_file(guild, channel, message, &picture(2), Some(b"later"), 200)
+            .await
+            .unwrap();
+        backend
+            .save_file(guild, channel, message, &picture(1), Some(b"first"), 100)
+            .await
+            .unwrap();
+        let listed: Vec<u64> = backend
+            .files_of(guild, message)
+            .await
+            .unwrap()
+            .iter()
+            .map(|file| file.attachment.id)
+            .collect();
+        assert_eq!(listed, [1, 2]);
+        // Ten bytes are kept and five may stay: the oldest file goes, which is attachment 1.
+        assert_eq!(backend.trim_files(guild, 5).await.unwrap(), 1);
+        assert_eq!(backend.file_data(guild, message, 1).await.unwrap(), None);
+        assert_eq!(
+            backend.file_data(guild, message, 2).await.unwrap(),
+            Some(b"later".to_vec())
+        );
     }
 }
