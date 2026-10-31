@@ -22,7 +22,7 @@ closure (binary)
 | `closure-discord` | Twilight: REST (`TwilightApi`), gateway shards, event conversion, the event `Dispatcher`, slash command publishing. |
 | `closure-api` | The HTTP API (Axum). |
 | `closure-sdk`, `closure-sdk-macros` | What a module author uses: declare commands (`#[derive(CommandArgs)]`), permissions, buttons and forms, jobs; the SDK checks, parses, answers and tests (`testing::Harness`). |
-| `closure-mod-diagnostics` | `/ping` and `/about`; the smallest module. |
+| `closure-mod-diagnostics` | `/ping`; the smallest module. |
 | `closure-mod-moderation` | `/warn`, `/note`, `/warnings` and `/case`; the reference module written with the SDK only: permissions, a cooldown, cases, the log, direct messages, two languages. |
 | `closure-mod-automod` | [`automod`](automod.md): rules that check every message and act on the first one that hits; off until a server turns it on. Its frame only: the detailed rules come later. |
 | `closure` | The composition root: reads settings, wires everything, shuts it down in order. |

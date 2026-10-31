@@ -82,9 +82,3 @@ test application and server you provide (see the header of
   OAuth2) belongs to the future dashboard.
 - Configuration problems are reported with stable codes and English messages; translating them
   is not done yet.
-
-## License
-
-[GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`). If you run a modified
-version for others over a network you must offer them its source; `/about` points to this
-repository.

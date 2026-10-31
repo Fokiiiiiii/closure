@@ -215,6 +215,7 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | `require_reason` | boolean | `false` | - | Whether a warning needs a reason. |
 | `restore_roles_on_mute` | any | `true` | - | Which of the roles taken off come back when the punishment ends: the same forms as remove_roles_on_mute. true by default. |
 | `templates` | object | `{}` | - | Templates a moderator picks from when a command leaves out the reason or the duration. |
+| `texts` | any | - | - | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
 | `timeout_role` | string or null | `null` | role | The id of the role a timeout gives, when timeout_method is role. |
 | `voice_mute_method` | string | `"discord"` | - | How a voice mute is given: Discord's voice mute, or a role that is taken off when its time is up. |

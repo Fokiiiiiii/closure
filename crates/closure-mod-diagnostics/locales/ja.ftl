@@ -1,9 +1,6 @@
 command-ping = ping
     .description = Bot が動作しているか確認します
-command-about = about
-    .description = バージョンとソースコードの場所を表示します
 ping-title = Pong!
 ping-progress = 計測中… { $done }/{ $total }
 ping-calls = { $total } 回中 { $succeeded } 回成功
 ping-clock-behind = 0 ms（時計が遅れています）
-about-reply = closure { $version }（AGPL-3.0）· ソースコード: { $url }

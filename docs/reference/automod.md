@@ -176,6 +176,7 @@ Set under `modules.automod.config` in a server's configuration; see [configurati
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `restore_roles_on_mute` | any | `true` | - | Which of the roles taken off come back when the timeout ends: the same forms as remove_roles_on_mute. true by default. |
 | `rules` | object | `{}` | - | The rules, keyed by id. Each one is checked on every message; the rules are checked in the order of their ids, and the first one that trips acts unless it says to continue. |
+| `texts` | any | - | - | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
 | `timeout_role` | string or null | `null` | - | The id of the role a timeout gives, when timeout_method is role. |
 | `warn_expire_days` | integer | `30` | - | After how many days a warning of a rule expires. |

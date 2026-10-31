@@ -1,22 +1,18 @@
-//! The `diagnostics` module: `/ping` and `/about`.
+//! The `diagnostics` module: `/ping`.
 //!
 //! Written with the SDK only, and the smallest complete example of a module: a manifest, message
 //! catalogs in every supported language, typed configuration, and commands that answer with
-//! embeds. `/about` also satisfies the AGPL-3.0 requirement to offer the source code to people who
-//! use the bot over a network.
+//! embeds.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use closure_core::latency::LatencySummary;
 use closure_sdk::{
     Args, Color, Command, CommandCx, CoreError, EmbedBuilder, InteractionReply, Locale,
-    ModuleBuilder, SdkModule, Tone, UserError,
+    ModuleBuilder, SdkModule, UserError,
 };
 use serde::Deserialize;
 use serde_json::json;
-
-/// Where the source code of this program can be obtained.
-const SOURCE_URL: &str = "https://github.com/Fokiiiiiii/closure";
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
@@ -162,18 +158,6 @@ async fn ping(cx: CommandCx, (): ()) -> Result<(), UserError> {
     .await
 }
 
-async fn about(cx: CommandCx, (): ()) -> Result<(), UserError> {
-    let config: Config = cx.config()?;
-    let args = Args::new()
-        .with("version", env!("CARGO_PKG_VERSION"))
-        .with("url", SOURCE_URL);
-    if config.ephemeral {
-        cx.say_private_t(Tone::Info, "about-reply", &args).await
-    } else {
-        cx.say_t(Tone::Info, "about-reply", &args).await
-    }
-}
-
 /// The module's declaration; the bot builds it with the other modules.
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
     Ok(
@@ -194,13 +178,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 json!({ "ephemeral": true }),
             )
             .command(Command::<()>::new("ping", "Check that the bot is alive").handler(ping))
-            .command(
-                Command::<()>::new(
-                    "about",
-                    "Show the version and where to find the source code",
-                )
-                .handler(about),
-            )
             .catalog(Locale::En, EN)
             .catalog(Locale::Ja, JA)
             .enabled_by_default(),
@@ -378,37 +355,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn about_is_an_embed_with_the_version_and_the_source() {
-        let h = harness();
-        let replies = h.invoke(Invocation::new("about")).await.unwrap();
-        assert_eq!(replies.len(), 1);
-        assert_eq!(replies[0].kind, ReplyKind::Response);
-        let text = &replies[0].content;
-        assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
-        assert!(text.contains(SOURCE_URL), "{text}");
-        assert!(text.contains("AGPL-3.0"), "{text}");
-        assert!(replies[0].ephemeral);
-    }
-
-    #[tokio::test]
-    async fn about_follows_the_ephemeral_setting_and_speaks_japanese() {
-        let h = harness();
-        h.set_config(json!({ "ephemeral": false }));
-        let replies = h
-            .invoke(Invocation::new("about").locale(Locale::Ja))
-            .await
-            .unwrap();
-        assert!(!replies[0].ephemeral);
-        assert!(replies[0].content.contains("ソースコード"));
-    }
-
     #[test]
     fn the_manifest_keeps_its_commands_and_capability() {
         let module = module().unwrap();
         let manifest = module.manifest();
         let names: Vec<&str> = manifest.commands.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["ping", "about"]);
+        assert_eq!(names, ["ping"]);
         assert!(
             manifest
                 .capabilities

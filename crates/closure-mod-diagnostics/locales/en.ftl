@@ -1,9 +1,6 @@
 command-ping = ping
     .description = Check that the bot is alive
-command-about = about
-    .description = Show the version and where to find the source code
 ping-title = Pong!
 ping-progress = Pinging… { $done }/{ $total }
 ping-calls = { $succeeded } of { $total } succeeded
 ping-clock-behind = 0 ms (clock behind)
-about-reply = closure { $version } (AGPL-3.0) · Source: { $url }

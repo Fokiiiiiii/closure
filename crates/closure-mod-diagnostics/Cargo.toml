@@ -1,6 +1,6 @@
 [package]
 name = "closure-mod-diagnostics"
-description = "The diagnostics module for closure: /ping and /about, and the smallest complete module example"
+description = "The diagnostics module for closure: /ping, and the smallest complete module example"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

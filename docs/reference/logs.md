@@ -34,6 +34,7 @@ Set under `modules.logs.config` in a server's configuration; see [configuration]
 | `message_deletes` | boolean | `true` | - | Post the deletions of messages, with their text and files as the history kept them. |
 | `message_edits` | boolean | `true` | - | Post the edits of messages. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
+| `texts` | any | - | - | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 
 Default configuration:
 
