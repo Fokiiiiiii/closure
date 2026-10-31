@@ -502,6 +502,7 @@ async fn set_antiraid_level(
         crate::antiraid::Setter::Bot,
         duration,
         None,
+        deps.config.dry_run,
     )
     .await?;
     Ok(match change {

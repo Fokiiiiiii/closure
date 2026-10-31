@@ -14,6 +14,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use closure_config::{ConfigCompiler, parse_overrides};
 use closure_core::action::Action;
@@ -25,6 +26,7 @@ use closure_sdk::Event;
 use closure_sdk::testing::{Autocomplete, Harness, Invocation, Reply};
 use common::*;
 use serde_json::{Value, json};
+use tokio::time::timeout;
 use twilight_model::channel::Channel;
 use twilight_model::guild::Role;
 use twilight_model::id::Id;
@@ -607,6 +609,67 @@ async fn a_dry_run_reports_the_level_change_and_changes_nothing() {
     assert!(view(&harness).await.contains("calm"));
     assert!(channel_edits(&harness).is_empty());
     assert!(guild_edits(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn a_dry_run_does_not_give_a_quarantine_role_to_a_joining_member() {
+    let antiraid = json!({ "levels": LEVELS, "effects": { "high": { "quarantine": {} } } });
+    let harness = raid(antiraid.clone());
+    set(&harness, "high").await;
+    harness.set_config(json!({ "dry_run": true, "antiraid": antiraid }));
+    let before = harness.api().actions().len();
+    join(&harness, 201).await;
+    let actions = harness.api().actions();
+    assert!(
+        !actions[before..]
+            .iter()
+            .any(|action| matches!(action, Action::CreateRole { .. } | Action::AddRole { .. })),
+        "a dry run gives no quarantine role to a member who joins"
+    );
+}
+
+#[tokio::test]
+async fn a_dry_run_level_change_creates_no_quarantine_role() {
+    let antiraid = json!({ "levels": LEVELS, "effects": { "high": { "quarantine": {} } } });
+    let harness = raid(antiraid.clone());
+    harness.set_config(json!({ "dry_run": true, "antiraid": antiraid }));
+    set(&harness, "high").await;
+    let actions = harness.api().actions();
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::CreateRole { .. })),
+        "a dry run sets up no role for the level"
+    );
+}
+
+#[tokio::test]
+async fn a_level_change_books_its_resume_before_it_makes_the_discord_changes() {
+    let harness = Arc::new(raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "slowmode": { "seconds": 30 } } }
+    })));
+    let store = harness.store();
+    let runner = Arc::clone(&harness);
+    let change = tokio::spawn(async move { set(&runner, "high").await });
+    timeout(Duration::from_secs(5), async {
+        while store
+            .get::<Value>("antiraid:level")
+            .await
+            .unwrap()
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the level is written");
+    change.abort();
+    assert_eq!(
+        harness.jobs(),
+        1,
+        "the resume of a level is booked as soon as the level is written"
+    );
 }
 
 // ---- the configuration as the host reads it ----

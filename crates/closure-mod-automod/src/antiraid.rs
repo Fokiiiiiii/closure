@@ -394,6 +394,7 @@ pub async fn set_level(
     set_by: Setter,
     duration: Option<Duration>,
     expect_generation: Option<u64>,
+    dry_run: bool,
 ) -> Result<Option<Change>, ModuleError> {
     if !cfg.levels.iter().any(|level| level == name) {
         return Err(ModuleError::other(format!(
@@ -402,7 +403,7 @@ pub async fn set_level(
     }
     let lock = guild_lock(ctx.guild_id);
     let _guard = lock.lock().await;
-    change(ctx, cfg, name, set_by, duration, expect_generation).await
+    change(ctx, cfg, name, set_by, duration, expect_generation, dry_run).await
 }
 
 /// The change of [`set_level`], made under the lock of the guild.
@@ -413,6 +414,7 @@ async fn change(
     set_by: Setter,
     duration: Option<Duration>,
     expect_generation: Option<u64>,
+    dry_run: bool,
 ) -> Result<Option<Change>, ModuleError> {
     let store = ctx.store();
     let (old, revision) = level(store, cfg.calm()).await?;
@@ -447,13 +449,15 @@ async fn change(
         }
     };
     // The record goes first: a stop during the Discord changes leaves the level incomplete, which
-    // the resume job or setting the same level again finishes.
+    // the resume job or setting the same level again finishes. The job is booked before the changes,
+    // so that a stop cannot leave the level without one; it does nothing once the level is applied.
     let revision = write_level(store, &level, revision).await?;
+    let booked = schedule_resume(ctx, level.generation).await;
     let effect = cfg.effects.get(name).cloned().unwrap_or_default();
     let mut tally = Tally::default();
-    let effects = apply_effects(ctx, &effect, &level, &mut tally).await;
+    let effects = apply_effects(ctx, &effect, &level, &mut tally, dry_run).await;
     let gap = settle(store, &level, revision, gap_of(&effects, &tally)).await;
-    if gap.is_some() && schedule_resume(ctx, level.generation).await.is_err() {
+    if gap.is_some() && booked.is_err() {
         tally.failed += 1;
     }
     let change = Change {
@@ -575,13 +579,14 @@ async fn apply_effects(
     effect: &Effect,
     level: &Level,
     tally: &mut Tally,
+    dry_run: bool,
 ) -> Effects {
     slowmodes(ctx, effect.slowmode.as_ref(), tally).await;
     let invites_paused = invites(ctx, effect.pause_invites, level.generation, tally).await;
-    let quarantine_ready = if let Some(quarantine) = effect.quarantine {
-        Some(quarantine_role_ready(ctx, quarantine, tally).await)
-    } else {
-        None
+    // A dry run sets up no role, so the notice has no readiness to report.
+    let quarantine_ready = match effect.quarantine {
+        Some(quarantine) if !dry_run => Some(quarantine_role_ready(ctx, quarantine, tally).await),
+        _ => None,
     };
     let expiry_failed = !schedule(ctx, level, tally).await;
     Effects {
@@ -671,6 +676,7 @@ pub async fn expire(state: &State, cx: JobCx) -> Result<(), ModuleError> {
         Setter::Bot,
         None,
         Some(payload.generation),
+        loaded.config.dry_run,
     )
     .await?;
     if let Some(change) = change {
@@ -782,7 +788,7 @@ pub async fn resume(state: &State, cx: JobCx) -> Result<(), ModuleError> {
     }
     let effect = cfg.effects.get(&current.name).cloned().unwrap_or_default();
     let mut tally = Tally::default();
-    let effects = apply_effects(ctx, &effect, &current, &mut tally).await;
+    let effects = apply_effects(ctx, &effect, &current, &mut tally, loaded.config.dry_run).await;
     let next = Level {
         tries: current.tries + 1,
         ..current
@@ -1377,12 +1383,13 @@ pub async fn member_event(
     memory: &Memory,
     cfg: Option<&Antiraid>,
     event: &Event,
+    dry_run: bool,
 ) -> Result<(), ModuleError> {
     let Some(cfg) = cfg else {
         return Ok(());
     };
     match event {
-        Event::MemberJoined(info) if !info.user.bot => {
+        Event::MemberJoined(info) if !info.user.bot && !dry_run => {
             quarantine_join(ctx, memory, cfg, info.user.id).await
         }
         Event::MemberLeft { user, .. } => forget(ctx.store(), user.id.get()).await,

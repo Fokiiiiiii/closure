@@ -396,9 +396,17 @@ async fn set_and_reply(
     let Some(antiraid) = loaded.setup.antiraid.as_ref() else {
         return antiraid_off(cx).await;
     };
-    let change = antiraid::set_level(cx.ctx(), antiraid, level, by, duration, None)
-        .await
-        .map_err(UserError::Module)?;
+    let change = antiraid::set_level(
+        cx.ctx(),
+        antiraid,
+        level,
+        by,
+        duration,
+        None,
+        loaded.config.dry_run,
+    )
+    .await
+    .map_err(UserError::Module)?;
     let Some(change) = change else {
         let text = cx.t("antiraid-already", &Args::new().with("level", level));
         return cx.reply_private(text).await;

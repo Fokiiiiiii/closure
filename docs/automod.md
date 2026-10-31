@@ -488,6 +488,10 @@ is not taken. For each hit, one embed titled `[dry run] automod` goes to the ser
 with the rule, the member, what was found, and the actions that would have run. Without a log channel
 a dry run does nothing at all.
 
+Antiraid in a dry run: a joining member is not quarantined, and a level that quarantines sets up no
+quarantine role. A level set with `/automod antiraid set` still changes the level and its other effects
+(slowmode, invites), as a moderator's own command does.
+
 ## Status
 
 `/automod status` (privately) shows whether dry run is on, how many rules are enabled, disabled and

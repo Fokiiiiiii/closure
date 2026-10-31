@@ -120,9 +120,14 @@ pub async fn on_event(state: &State, ctx: EventContext, event: Event) -> Result<
     let loaded = state.load(&ctx)?;
     // The quarantine of a joining member is applied whatever the rules say, and a leaving member is
     // forgotten by it.
-    let quarantine =
-        crate::antiraid::member_event(&ctx, &state.memory, loaded.setup.antiraid.as_ref(), &event)
-            .await;
+    let quarantine = crate::antiraid::member_event(
+        &ctx,
+        &state.memory,
+        loaded.setup.antiraid.as_ref(),
+        &event,
+        loaded.config.dry_run,
+    )
+    .await;
     drain(
         state,
         &ctx,
