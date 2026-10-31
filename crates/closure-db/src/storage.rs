@@ -551,6 +551,54 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn legacy_restriction_lists_are_moved_into_the_shared_one(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        // The lists as the modules kept them before the shared one: member 7 in two of them, member 8
+        // with an older key and one already in the shared list, and member 9 with a list that ran out.
+        sqlx::query(
+            "INSERT INTO module_kv (module, guild_id, key, value, revision, expires_at)
+             VALUES ('moderation', 1, 'stripped:7', '[800, 801]', 1, NULL),
+                    ('moderation', 1, 'stripped:7:vcmute', '[801, 802]', 2, NULL),
+                    ('automod', 1, 'stripped:8:timeout', '[803]', 3, now() + interval '1 day'),
+                    ('restrictions', 1, 'stripped:8', '[805]', 4, now() + interval '2 days'),
+                    ('automod', 1, 'stripped:9', '[804]', 5, now() - interval '1 day')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // `migrate` applies the migration once; running its statements here checks what they do.
+        sqlx::raw_sql(include_str!("../migrations/0009_restrictions_shared.sql"))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        let shared: Vec<(String, serde_json::Value, bool)> = sqlx::query_as(
+            "SELECT key, value, expires_at IS NULL FROM module_kv
+             WHERE module = 'restrictions' ORDER BY key",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            shared,
+            [
+                ("stripped:7".to_owned(), json!([800, 801, 802]), true),
+                ("stripped:8".to_owned(), json!([803, 805]), false),
+            ]
+        );
+        let left: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM module_kv
+             WHERE module <> 'restrictions' AND key LIKE 'stripped:%'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(left, 0, "the old lists are removed");
+    }
+
+    #[sqlx::test]
     async fn the_quota_of_entries_is_exact_under_concurrency(pool: PgPool) {
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
