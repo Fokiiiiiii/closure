@@ -175,7 +175,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
         return Ok(Flow::Continue);
     };
     let entries = match &event {
-        Event::MessageUpdated(message) if config.message_edits => {
+        Event::MessageUpdated(message) if config.message_edits && edit_is_logged(message) => {
             vec![edited(&ctx, message).await?]
         }
         Event::MessageDeleted {
@@ -500,6 +500,13 @@ async fn bulk_deleted(
         },
     );
     Ok(entries)
+}
+
+/// Whether an edit is worth an entry. Not the bot's own messages: an entry is one of them, and Discord edits
+/// a message again when it unfurls the links in it, which would post an entry for every entry. Not an edit
+/// that left the text as it was either.
+fn edit_is_logged(message: &MessageInfo) -> bool {
+    !message.author.bot && message.previous_content.as_deref() != Some(message.content.as_str())
 }
 
 /// An edit: the message, its files, the files the edit took away (`removed_attachments`), and the

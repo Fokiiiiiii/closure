@@ -1288,3 +1288,31 @@ async fn a_message_its_author_deleted_names_no_one_else() {
     assert_eq!(posted.len(), 1, "{}", posted.len());
     assert!(!posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
 }
+
+#[tokio::test]
+async fn an_edit_of_a_bot_message_is_not_logged() {
+    let harness = harness();
+    let mut event = edited(16, "embed only", Vec::new(), Vec::new());
+    if let Event::MessageUpdated(info) = &mut event {
+        info.author.bot = true;
+    }
+
+    harness.emit(event).await.unwrap();
+
+    assert!(sent(&harness).is_empty(), "{:?}", sent(&harness).len());
+}
+
+#[tokio::test]
+async fn an_edit_that_leaves_the_text_as_it_was_is_not_logged() {
+    let harness = harness();
+
+    harness
+        .emit(replacing(
+            edited(16, "same text", Vec::new(), Vec::new()),
+            "same text",
+        ))
+        .await
+        .unwrap();
+
+    assert!(sent(&harness).is_empty(), "{:?}", sent(&harness).len());
+}
