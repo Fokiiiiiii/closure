@@ -2133,7 +2133,7 @@ async fn a_ban_that_cannot_be_recorded_says_the_ban_went_through() {
 }
 
 #[tokio::test]
-async fn a_role_timeout_whose_roles_cannot_be_read_fails_the_command() {
+async fn a_role_timeout_whose_roles_cannot_be_read_still_takes_the_timeout() {
     let harness = harness();
     harness
         .api()
@@ -2154,10 +2154,9 @@ async fn a_role_timeout_whose_roles_cannot_be_read_fails_the_command() {
         role_changed(&harness, 30, true),
         "the timeout role was given"
     );
-    assert!(
-        result.is_err(),
-        "the roles left on are reported: {result:?}"
-    );
+    // Not refused: the same as a log that cannot take a case. The roles are simply left on.
+    assert!(result.is_ok(), "{result:?}");
+    assert!(!role_changed(&harness, 700, false), "no role was taken off");
 }
 
 // ---- a timed ban lift looks past the newest cases for an older ban that stands ----

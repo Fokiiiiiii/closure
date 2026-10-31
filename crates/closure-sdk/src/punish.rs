@@ -480,6 +480,7 @@ impl<'a> Punisher<'a> {
         let now = self.ctx.now();
         let reason_text = dm_reason(self.ctx, reason.as_deref());
         let role = self.mute_in_voice(target, reason.as_deref()).await?;
+        let stripped = self.strip_for(target, role, RestrictionRole::Voice).await?;
         let expires_at = duration.map(|duration| now + secs(duration));
         let case = self.record("vcmute", target, reason, expires_at).await?;
         // A new mute replaces the timer of an earlier one, which would lift this mute too early.
@@ -492,7 +493,6 @@ impl<'a> Punisher<'a> {
                 .then_some(Note::NoVoiceTimer),
             None => None,
         };
-        let stripped = self.strip_for(target, role, RestrictionRole::Voice).await?;
         let note = match duration {
             Some(duration) => {
                 self.notify(
@@ -609,10 +609,10 @@ impl<'a> Punisher<'a> {
         .await
         {
             Ok(skipped) => Ok((skipped > 0).then_some(Note::RolesNotStripped(skipped))),
-            // The roles that stayed on are not taken off silently: the caller is told.
+            // Nothing was taken off when the strip could not be remembered: logged, not refused.
             Err(error) => {
-                tracing::error!(user = %target, %error, "could not take the roles off a punished member");
-                Err(error.into())
+                tracing::warn!(user = %target, %error, "could not take the roles off a punished member");
+                Ok(None)
             }
         }
     }

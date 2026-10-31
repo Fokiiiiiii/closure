@@ -613,22 +613,16 @@ async fn strip_now(
 
     let mut failed = Vec::new();
     for role in chosen {
-        match ctx
+        // A role that cannot be taken off, for any reason, is counted and noted, and the others
+        // still go. Whatever is saved and not removed is harmless: giving it back is idempotent.
+        if ctx
             .api
             .remove_role(ctx.guild_id, target, role, audit(ctx, which, "stripped"))
             .await
+            .is_err()
         {
-            Ok(()) => {}
-            Err(
-                DiscordError::Forbidden(_)
-                | DiscordError::HierarchyViolation(_)
-                | DiscordError::NotFound,
-            ) => {
-                skipped += 1;
-                failed.push(role.get());
-            }
-            // Whatever is saved and not removed is harmless: giving it back is idempotent.
-            Err(error) => return Err(ModuleError::Discord(error)),
+            skipped += 1;
+            failed.push(role.get());
         }
     }
     if !failed.is_empty() {
