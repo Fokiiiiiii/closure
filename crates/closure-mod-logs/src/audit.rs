@@ -4,7 +4,7 @@
 //! role is never named for this one.
 
 use closure_core::action::{Action, AuditLogQuery, Outcome};
-use closure_core::event::{ChannelId, Event, UserId};
+use closure_core::event::{ChannelId, Event, MessageId, UserId};
 use closure_core::module::EventContext;
 use closure_sdk::duration::snowflake_time;
 use closure_sdk::files::LogEntry;
@@ -174,6 +174,45 @@ pub(crate) async fn audit_of(
     })?;
     Some(AuditEntry {
         by: entry.user_id,
+        reason: entry.reason.clone(),
+    })
+}
+
+/// The audit log entry of a message that someone other than its author deleted. The entry names the author
+/// and the channel of a deletion, not the message, so the author is read from the history: a message the
+/// history does not hold names no one. A deletion by the author has no entry and names no one either.
+pub(crate) async fn deletion_audit_of(
+    ctx: &EventContext,
+    channel: ChannelId,
+    message: MessageId,
+) -> Option<AuditEntry> {
+    let author = match ctx.history().get(channel, message).await {
+        Ok(saved) => saved?.author,
+        Err(error) => {
+            tracing::warn!(
+                guild = ctx.guild_id.get(),
+                %error,
+                "could not read the message, so the deletion is posted without who made it"
+            );
+            return None;
+        }
+    };
+    let entries = recent_entries(ctx, AuditLogEventType::MessageDelete).await?;
+    let now = ctx.now();
+    let entry = entries.iter().find(|entry| {
+        entry.target_id.is_some_and(|id| id.get() == author.get())
+            && entry
+                .options
+                .as_ref()
+                .is_some_and(|options| options.channel_id == Some(channel))
+            && within_window(now, entry)
+    })?;
+    let by = entry.user_id?;
+    if by == author {
+        return None;
+    }
+    Some(AuditEntry {
+        by: Some(by),
         reason: entry.reason.clone(),
     })
 }

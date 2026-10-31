@@ -58,10 +58,12 @@ modules:
   from the audit log. A kick shows as a kick, not as a departure. The audit log is read for the newest
   entry of the same kind that names the same target and is less than a minute old; that minute is an
   assumption, not measured. A change the member made to themselves, or one Discord made, shows no name.
-  A single message a moderator deleted shows no name: the audit log names the author and the channel of a
-  deletion, not the message, so it cannot tell a moderator's deletion from the author's own. A bulk delete
-  shows who made it when the audit log has an entry for the same channel and the same number of messages.
-  Reading the
+  A deleted message shows who deleted it when the audit log has a deletion of a message by the same author
+  in the same channel, within the minute; a message its author deleted shows no name. The audit log does
+  not say which message was deleted, so a moderator's deletion of another message by the same author in
+  the same channel within the minute can be named for the author's own deletion; and the message history
+  must hold the message to know its author. A bulk delete shows who made it when the audit log has an
+  entry for the same channel and the same number of messages. Reading the
   audit log needs the bot to view it: without that, entries are still posted, without who made the change,
   and the failure is logged.
 

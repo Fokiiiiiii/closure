@@ -1249,3 +1249,42 @@ async fn a_bulk_delete_of_another_count_is_not_named() {
     assert_eq!(posted.len(), 1, "{}", posted.len());
     assert!(!posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
 }
+
+/// An audit log entry of a deletion of a message by `author` in `channel`, made by `by`.
+fn deletion_audit(author: u64, channel: u64, by: u64) -> AuditLogEntry {
+    let mut entry = audit(AuditLogEventType::MessageDelete, author, by, None, 5);
+    entry.options =
+        Some(serde_json::from_value(json!({ "channel_id": channel.to_string() })).unwrap());
+    entry
+}
+
+#[tokio::test]
+async fn a_message_a_moderator_deleted_names_the_moderator() {
+    let harness = harness();
+    harness
+        .seed_message(saved(16, "消される文章", Vec::new()))
+        .await
+        .unwrap();
+    harness.api().add_audit_entry(deletion_audit(5, CHANNEL, 9));
+
+    harness.emit(deleted(16)).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_message_its_author_deleted_names_no_one_else() {
+    let harness = harness();
+    harness
+        .seed_message(saved(16, "消される文章", Vec::new()))
+        .await
+        .unwrap();
+
+    harness.emit(deleted(16)).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(!posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+}
