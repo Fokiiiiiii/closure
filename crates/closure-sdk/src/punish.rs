@@ -370,7 +370,11 @@ impl<'a> Punisher<'a> {
             target,
             "timeout",
             case.number,
-            format!("removed by case #{}", case.number),
+            self.ctx.t_core(
+                self.ctx.locale,
+                "reason-removed-by-case",
+                &Args::new().with("case", case.number),
+            ),
         )
         .await?;
         Ok(case)
@@ -487,7 +491,11 @@ impl<'a> Punisher<'a> {
             target,
             "ban",
             case.number,
-            format!("unbanned by case #{}", case.number),
+            self.ctx.t_core(
+                self.ctx.locale,
+                "reason-unbanned-by-case",
+                &Args::new().with("case", case.number),
+            ),
         )
         .await?;
         Ok(case)
@@ -582,7 +590,11 @@ impl<'a> Punisher<'a> {
             target,
             "vcmute",
             case.number,
-            format!("removed by case #{}", case.number),
+            self.ctx.t_core(
+                self.ctx.locale,
+                "reason-removed-by-case",
+                &Args::new().with("case", case.number),
+            ),
         )
         .await?;
         Ok(case)
@@ -820,8 +832,15 @@ impl<'a> Punisher<'a> {
     ) -> Result<(), UserError> {
         match self.undoing {
             Some(number) => {
-                self.revoke_case(number, format!("removed by case #{lift}"))
-                    .await
+                self.revoke_case(
+                    number,
+                    self.ctx.t_core(
+                        self.ctx.locale,
+                        "reason-removed-by-case",
+                        &Args::new().with("case", lift),
+                    ),
+                )
+                .await
             }
             None => self.revoke_latest(target, kind, reason).await,
         }
@@ -1115,8 +1134,14 @@ async fn lift_ban(cx: JobCx) -> Result<(), ModuleError> {
         return Ok(());
     }
     let reason = Reason::truncated(&match payload.case {
-        UNRECORDED_CASE => "the ban ran out".to_owned(),
-        case => format!("the ban of case #{case} ran out"),
+        UNRECORDED_CASE => cx
+            .ctx()
+            .t_core(cx.ctx().locale, "reason-ban-ran-out", &Args::new()),
+        case => cx.ctx().t_core(
+            cx.ctx().locale,
+            "reason-ban-of-case-ran-out",
+            &Args::new().with("case", case),
+        ),
     });
     match cx.api().unban(cx.guild_id(), user, reason).await {
         Ok(()) | Err(DiscordError::NotFound) => Ok(()),
@@ -1140,7 +1165,11 @@ async fn end_timeout(cx: JobCx) -> Result<(), ModuleError> {
             return reschedule(cx.ctx(), "untimeout", &untimeout_key(user), &payload, at).await;
         }
     }
-    let reason = Reason::truncated(&format!("the timeout of case #{} ran out", payload.case));
+    let reason = Reason::truncated(&cx.ctx().t_core(
+        cx.ctx().locale,
+        "reason-timeout-of-case-ran-out",
+        &Args::new().with("case", payload.case),
+    ));
     match cx
         .api()
         .remove_role(cx.guild_id(), user, role, reason)
