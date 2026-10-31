@@ -50,6 +50,9 @@ enum Command {
         /// The test channel to post to.
         #[arg(long)]
         channel: u64,
+        /// Only counts what would be posted: sends nothing and needs no token.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -70,7 +73,11 @@ fn run(command: &Command) -> Result<bool> {
     match command {
         Command::Docs { check } => docs(*check),
         Command::NewModule { id, dry_run } => new_module(id, *dry_run),
-        Command::Replay { dir, channel } => replay::run(dir, *channel),
+        Command::Replay {
+            dir,
+            channel,
+            dry_run,
+        } => replay::run(dir, *channel, *dry_run),
     }
 }
 

@@ -33,8 +33,8 @@ pub struct Plan {
     pub posts: Vec<Action>,
     /// The actions that are not sent, counted by kind (`add_role`, `respond/defer`, ...).
     pub skipped: BTreeMap<String, usize>,
-    /// Lines that repeat an earlier line exactly; each distinct action is sent once.
-    pub duplicates: usize,
+    /// Messages that differ from an earlier one only in digits (ids, counts). Left out.
+    pub similar: usize,
 }
 
 /// What one action becomes: a message to send, or the kind it is counted under.
@@ -50,36 +50,43 @@ enum Step {
 ///
 /// Fails before sending anything when the token is missing, the directory cannot be read, or a
 /// line is not a recorded action.
-pub fn run(dir: &Path, channel_id: u64) -> Result<bool> {
+pub fn run(dir: &Path, channel_id: u64, dry_run: bool) -> Result<bool> {
     // A missing `.env` is normal; variables already set in the environment win.
     let _ = dotenvy::dotenv();
     let token = std::env::var(TOKEN_VARIABLE)
         .ok()
         .filter(|value| !value.trim().is_empty());
-    replay(dir, channel_id, token)
+    replay(dir, channel_id, token, dry_run)
 }
 
-/// [`run`] with the token given instead of read from the environment.
-fn replay(dir: &Path, channel_id: u64, token: Option<String>) -> Result<bool> {
-    let Some(token) = token else {
-        bail!("{TOKEN_VARIABLE} is not set (in the environment or in .env)\n{USAGE}");
-    };
+/// [`run`] with the token given instead of read from the environment. A dry run only counts what
+/// would be sent, so it needs no token.
+fn replay(dir: &Path, channel_id: u64, token: Option<String>, dry_run: bool) -> Result<bool> {
     let channel: ChannelId =
         Id::new_checked(channel_id).context("--channel must be a non-zero id")?;
     let lines = dump_lines(dir)?;
     let Plan {
         posts,
         skipped,
-        duplicates,
+        similar,
     } = plan(lines.iter().map(String::as_str), channel)?;
 
     let total = posts.len();
+    if dry_run {
+        println!("would send {total} message(s); {similar} similar message(s) left out");
+        print_skipped(&skipped);
+        return Ok(true);
+    }
+    let Some(token) = token else {
+        bail!("{TOKEN_VARIABLE} is not set (in the environment or in .env)\n{USAGE}");
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    // Only messages are sent, and they do not use the application id (interaction routes do).
-    let api = TwilightApi::new(Arc::new(Client::new(token)), Id::new(1));
-    let failures = runtime.block_on(async {
+    let failures = runtime.block_on(async move {
+        // The client starts its rate limiter on the runtime it runs in, so it is made here.
+        // Only messages are sent, and they do not use the application id (interaction routes do).
+        let api = TwilightApi::new(Arc::new(Client::new(token)), Id::new(1));
         let mut failures = 0_usize;
         for (number, action) in posts.into_iter().enumerate() {
             if let Err(error) = api.execute(action).await {
@@ -91,13 +98,17 @@ fn replay(dir: &Path, channel_id: u64, token: Option<String>) -> Result<bool> {
     });
 
     println!(
-        "sent {} of {total} message(s); {duplicates} duplicate line(s) left out",
+        "sent {} of {total} message(s); {similar} similar message(s) left out",
         total - failures
     );
-    for (kind, count) in &skipped {
+    print_skipped(&skipped);
+    Ok(failures == 0)
+}
+
+fn print_skipped(skipped: &BTreeMap<String, usize>) {
+    for (kind, count) in skipped {
         println!("not sent, {kind}: {count}");
     }
-    Ok(failures == 0)
 }
 
 /// The lines of every `.jsonl` dump in `dir`, file by file in name order. The order between
@@ -147,16 +158,37 @@ pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) ->
             .to_owned();
         let action: Action = serde_json::from_value(value)
             .with_context(|| format!("line {number}: not a recorded action"))?;
-        if !seen.insert(serde_json::to_string(&action)?) {
-            plan.duplicates += 1;
-            continue;
-        }
         match step(action, &kind, channel) {
-            Step::Send(post) => plan.posts.push(post),
+            Step::Send(post) => {
+                if seen.insert(similarity_key(&post)?) {
+                    plan.posts.push(post);
+                } else {
+                    plan.similar += 1;
+                }
+            }
             Step::Skip(label) => *plan.skipped.entry(label).or_default() += 1,
         }
     }
     Ok(plan)
+}
+
+/// The text of a message with every run of digits replaced by `#`. Messages with the same key say
+/// the same thing with other numbers (ids, counts), so only the first of them is sent.
+fn similarity_key(post: &Action) -> Result<String> {
+    let mut key = String::new();
+    let mut in_digits = false;
+    for character in serde_json::to_string(post)?.chars() {
+        if character.is_ascii_digit() {
+            if !in_digits {
+                key.push('#');
+            }
+            in_digits = true;
+        } else {
+            in_digits = false;
+            key.push(character);
+        }
+    }
+    Ok(key)
 }
 
 fn step(action: Action, kind: &str, channel: ChannelId) -> Step {
@@ -225,6 +257,8 @@ fn response_kind(response: &InteractionResponse) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use closure_core::action::{Action, InteractionReply, InteractionResponse, Reason};
     use closure_core::event::{
         ChannelId, GuildId, InteractionId, InteractionToken, RoleId, UserId,
@@ -318,11 +352,19 @@ mod tests {
     }
 
     #[test]
-    fn the_same_line_twice_is_posted_once() {
-        let plan = plan_of(&[sent("hello"), sent("hello")]);
+    fn messages_that_differ_only_in_numbers_are_posted_once() {
+        let plan = plan_of(&[sent("hello 1"), sent("hello 2"), sent("hello 1")]);
 
-        assert_eq!(plan.posts, vec![sent("hello")]);
-        assert_eq!(plan.duplicates, 1);
+        assert_eq!(plan.posts, vec![sent("hello 1")]);
+        assert_eq!(plan.similar, 2);
+    }
+
+    #[test]
+    fn messages_with_other_words_are_all_posted() {
+        let plan = plan_of(&[sent("hello 1"), sent("bye 1")]);
+
+        assert_eq!(plan.posts, vec![sent("hello 1"), sent("bye 1")]);
+        assert_eq!(plan.similar, 0);
     }
 
     #[test]
@@ -346,12 +388,40 @@ mod tests {
         assert!(plan(["{not json"], channel()).is_err());
     }
 
-    #[test]
-    fn without_a_token_nothing_is_read_or_sent() {
-        let missing = std::path::Path::new("/nonexistent-closure-dump-directory");
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("closure-replay-{}-{name}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
-        let error = replay(missing, 100, None).unwrap_err();
+    #[test]
+    fn without_a_token_nothing_is_sent() {
+        let dir = test_dir("without-token");
+
+        let error = replay(&dir, 100, None, false).unwrap_err();
+        let _ = fs::remove_dir_all(&dir);
 
         assert!(error.to_string().contains("DISCORD_TOKEN"));
+    }
+
+    #[test]
+    fn an_empty_dump_is_replayed_through_a_client_made_on_the_runtime() {
+        let dir = test_dir("empty");
+
+        let outcome = replay(&dir, 100, Some("token".to_owned()), false);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(outcome.unwrap());
+    }
+
+    #[test]
+    fn a_dry_run_needs_no_token_and_sends_nothing() {
+        let dir = test_dir("dry-run");
+
+        let outcome = replay(&dir, 100, None, true);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(outcome.unwrap());
     }
 }
