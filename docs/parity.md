@@ -63,7 +63,7 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | antiraid levels: `antiraid_levels` (none, low, medium, high, lockdown) with their slowmode, invite pause and quarantine | the module's `antiraid` section: named levels (the first is calm), per-level `slowmode` (restored when the level goes down), `pause_invites` (only when antiraid paused them), `quarantine` (new members of that level; the role is created as `Quarantine` when none is given, and it is never released automatically: `/automod antiraid release` or `release-all`), `notify_channel`; `/automod antiraid view\|set\|clear\|release\|release-all`. A timed level goes back to calm |
 | counters | the module's `counters`: per member, per channel or overall, lazy decay, triggers and reverses, changed by actions and by `/automod counters`. The reference bot's counter commands are `/automod counters view\|set\|add\|reset` here |
 | message history for spam, `clean`, logs | available as the `message_history` capability: messages kept for `--message-history-days` (7 by default), with edits and deletions (see [writing modules](writing-modules.md#message-history)) |
-| `Logs` event log | the `logs` module: edits, deletions (with the text and attachments the history kept), joins, leaves and bans, to a channel. The text an edit replaced is kept; the text before that edit is not. Files are fetched when a deletion or an edit needs them, and kept as they arrive with `keep_attachments` (see [logs](logs.md)) |
+| `Logs` event log | the `logs` module: edits, deletions (with the text and attachments the history kept), joins, leaves, bans and kicks, to a channel, with who made a change where the audit log names them. The text an edit replaced is kept; the text before that edit is not. Files are fetched when a deletion or an edit needs them, and kept as they arrive with `keep_attachments` (see [logs](logs.md)) |
 | Mutes / ModActions / Warnings message templates | fixed texts; `{user}` `{moderator}` `{server}` in templates. `closure_sdk::template` has `{name}` and `{a.b}` only, with no functions (the reference bot's `if`, `plural`, `round`... are not ported) |
 | config overrides | closure-config has overrides |
 | text commands with a prefix (`!warn @user spam`) | `prefix` per guild; the words fill the options of the slash command of the same name, which runs with the same handler and checks (see [text commands](writing-modules.md#text-commands)) |
@@ -78,7 +78,7 @@ guild and emoji updates) block the features that need them; those wait for M12 i
 
 **P1: the platform has everything; do these first**
 
-1. Logs (done, the `logs` module): an event log of edits, deletions, joins, leaves and bans, posted to a channel. The events
+1. Logs (done, the `logs` module): an event log of edits, deletions, joins, leaves, bans and kicks, posted to a channel, with who made a change where the audit log names them. The events
    exist (message updated and deleted, member joined and left, bans). The largest gap for moderation.
 2. WelcomeMessage: a message on join, with templates.
 3. A Slowmode command for moderators (the action exists).

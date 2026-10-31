@@ -40,6 +40,18 @@ fn audited_change(config: &Config, event: &Event) -> Option<(AuditLogEventType, 
         Event::BanRemoved { user, .. } if config.bans => {
             (AuditLogEventType::MemberBanRemove, user.id.get())
         }
+        Event::VoiceStateChanged {
+            user,
+            before: Some(_),
+            after: None,
+            ..
+        } if config.voice => (AuditLogEventType::MemberDisconnect, user.id.get()),
+        Event::VoiceStateChanged {
+            user,
+            before: Some(_),
+            after: Some(_),
+            ..
+        } if config.voice => (AuditLogEventType::MemberMove, user.id.get()),
         Event::ChannelCreated(channel) if config.channels => {
             (AuditLogEventType::ChannelCreate, channel.id.get())
         }

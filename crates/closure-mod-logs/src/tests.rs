@@ -1149,3 +1149,53 @@ async fn a_departure_is_still_logged_when_the_audit_log_cannot_be_read() {
     );
     assert!(!posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
 }
+
+#[tokio::test]
+async fn a_voice_disconnect_names_the_moderator_who_made_it() {
+    let harness = harness();
+    let mut value = config(None, true);
+    value["voice"] = json!(true);
+    harness.set_config(value);
+    harness
+        .api()
+        .add_audit_entry(audit(AuditLogEventType::MemberDisconnect, 40, 9, None, 5));
+
+    harness
+        .emit(Event::VoiceStateChanged {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+            before: Some(Id::new(CHANNEL)),
+            after: None,
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_voice_move_names_the_moderator_who_made_it() {
+    let harness = harness();
+    let mut value = config(None, true);
+    value["voice"] = json!(true);
+    harness.set_config(value);
+    harness
+        .api()
+        .add_audit_entry(audit(AuditLogEventType::MemberMove, 40, 9, None, 5));
+
+    harness
+        .emit(Event::VoiceStateChanged {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+            before: Some(Id::new(CHANNEL)),
+            after: Some(Id::new(OTHER_LOG)),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+}
