@@ -650,11 +650,20 @@ impl StorageBackend for MemoryStorage {
             }
         }
         let row = inner.counters.entry(key).or_default();
-        row.total = row
+        // Both sums are checked before either is written, so a failed add changes nothing.
+        let total = row
             .total
             .checked_add(delta)
             .ok_or_else(|| StorageError::Backend("the counter overflows".into()))?;
-        *row.minutes.entry(minute).or_default() += delta;
+        let in_minute = row
+            .minutes
+            .get(&minute)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(delta)
+            .ok_or_else(|| StorageError::Backend("the counter overflows".into()))?;
+        row.total = total;
+        row.minutes.insert(minute, in_minute);
         let oldest = minute - window_minutes(MAX_WINDOW);
         row.minutes.retain(|at, _| *at > oldest);
         Ok(row.total)
@@ -680,7 +689,10 @@ impl StorageBackend for MemoryStorage {
             None => row.total,
             Some(window) => {
                 let from = minute - window_minutes(window) + 1;
-                row.minutes.range(from..).map(|(_, value)| value).sum()
+                row.minutes
+                    .range(from..)
+                    .try_fold(0_i64, |sum, (_, value)| sum.checked_add(*value))
+                    .ok_or_else(|| StorageError::Backend("the counter overflows".into()))?
             }
         })
     }
@@ -1011,5 +1023,50 @@ mod tests {
             store.counter_add("bad name", 1_u64, 1).await,
             Err(StorageError::InvalidCounter(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_minute_that_would_overflow_is_an_error_and_changes_nothing() {
+        let f = fixture();
+        let store = f.store("warn", 1);
+        store.counter_add("edge", 1_u64, -1).await.unwrap();
+        f.advance(60);
+        store.counter_add("edge", 1_u64, i64::MAX).await.unwrap();
+        // The total still fits (it is i64::MAX), but this minute would go past the limit.
+        assert!(matches!(
+            store.counter_add("edge", 1_u64, 1).await,
+            Err(StorageError::Backend(_))
+        ));
+        assert_eq!(
+            store.counter_total("edge", 1_u64).await.unwrap(),
+            i64::MAX - 1
+        );
+        assert_eq!(
+            store
+                .counter_recent("edge", 1_u64, Duration::from_secs(60))
+                .await
+                .unwrap(),
+            i64::MAX
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_whose_sum_would_overflow_is_an_error() {
+        let f = fixture();
+        let store = f.store("warn", 1);
+        // The total stays small because the first minute is negative, but the last two minutes
+        // add up past the limit.
+        store.counter_add("span", 1_u64, -i64::MAX).await.unwrap();
+        f.advance(60);
+        store.counter_add("span", 1_u64, i64::MAX).await.unwrap();
+        f.advance(60);
+        store.counter_add("span", 1_u64, 1).await.unwrap();
+        assert!(matches!(
+            store
+                .counter_recent("span", 1_u64, Duration::from_secs(120))
+                .await,
+            Err(StorageError::Backend(_))
+        ));
+        assert_eq!(store.counter_total("span", 1_u64).await.unwrap(), 1);
     }
 }
