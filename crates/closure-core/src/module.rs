@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,7 +17,7 @@ use crate::error::{CoreError, ModuleError};
 use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId, UserId};
 use crate::history::MessageHistory;
 use crate::latency::{GatewayLatency, LatencySummary};
-use crate::locale::{Args, Catalog, Locale, Translator};
+use crate::locale::{ArgValue, Args, Catalog, Locale, Translator};
 use crate::permission::{GuildPermissions, PermissionSpec};
 use crate::schedule::Scheduler;
 use crate::settings::GuildPolicy;
@@ -600,6 +601,66 @@ impl ModuleManifest {
     }
 }
 
+/// The key of a module's configuration in which the administrator replaces the module's texts:
+/// message id to text. A value that is not a non-empty string is ignored; see [`EventContext::t_in`].
+pub const TEXTS_KEY: &str = "texts";
+
+/// The longest text an administrator may put in place of a module's: Discord's limit for a
+/// message's content, which a direct message takes.
+const TEXT_LIMIT: usize = 2_000;
+
+/// Takes the administrator's texts out of a module's configuration, so that no module reads them
+/// as settings. Only a non-empty string is a text; anything else under the key is ignored.
+fn split_texts(
+    config: Arc<serde_json::Value>,
+) -> (Arc<serde_json::Value>, HashMap<String, String>) {
+    if config.get(TEXTS_KEY).is_none() {
+        return (config, HashMap::new());
+    }
+    let texts = config
+        .get(TEXTS_KEY)
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, text)| {
+            let text = text.as_str().filter(|text| !text.is_empty())?;
+            Some((id.clone(), text.to_owned()))
+        })
+        .collect();
+    let mut settings = (*config).clone();
+    if let Some(object) = settings.as_object_mut() {
+        object.remove(TEXTS_KEY);
+    }
+    (Arc::new(settings), texts)
+}
+
+/// Puts the arguments into an administrator's text: `{name}` becomes the argument `name`, and any
+/// other `{..}` stays as it is. The result is cut to [`TEXT_LIMIT`] characters, ending with `…`.
+fn fill_text(template: &str, args: &Args) -> String {
+    let mut filled = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        filled.push_str(&rest[..open]);
+        rest = &rest[open..];
+        let Some(close) = rest.find('}') else {
+            break;
+        };
+        match args.iter().find(|(name, _)| *name == &rest[1..close]) {
+            Some((_, ArgValue::Text(text))) => filled.push_str(text),
+            Some((_, ArgValue::Number(number))) => filled.push_str(&number.to_string()),
+            None => filled.push_str(&rest[..=close]),
+        }
+        rest = &rest[close + 1..];
+    }
+    filled.push_str(rest);
+    if filled.chars().count() <= TEXT_LIMIT {
+        return filled;
+    }
+    let mut cut: String = filled.chars().take(TEXT_LIMIT - 1).collect();
+    cut.push('…');
+    cut
+}
+
 /// What a module sees while handling one event.
 #[derive(Clone)]
 pub struct EventContext {
@@ -616,6 +677,7 @@ pub struct EventContext {
     history: MessageHistory,
     config: Arc<serde_json::Value>,
     translator: Arc<dyn Translator>,
+    texts: Arc<HashMap<String, String>>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     bot: Option<UserId>,
     gateway: Arc<GatewayLatency>,
@@ -642,6 +704,7 @@ impl EventContext {
         config: Arc<serde_json::Value>,
         translator: Arc<dyn Translator>,
     ) -> Self {
+        let (config, texts) = split_texts(config);
         Self {
             store: Store::unavailable(module.clone(), guild_id),
             scheduler: Scheduler::unavailable(module.clone(), guild_id),
@@ -655,6 +718,7 @@ impl EventContext {
             permissions: Arc::default(),
             config,
             translator,
+            texts: Arc::new(texts),
             clock: Arc::new(system_unix_now),
             bot: None,
             gateway: Arc::default(),
@@ -792,7 +856,7 @@ impl EventContext {
     /// A message of the catalog every module shares (`core`), such as the SDK's own.
     #[must_use]
     pub fn t_core(&self, locale: Locale, key: &str, args: &Args) -> String {
-        self.translator.translate(locale, "core", key, args)
+        self.translate_in(locale, "core", key, args)
     }
 
     /// Translates `key` into the guild language.
@@ -808,8 +872,15 @@ impl EventContext {
 
     #[must_use]
     pub fn t_in(&self, locale: Locale, key: &str, args: &Args) -> String {
-        self.translator
-            .translate(locale, self.module.as_str(), key, args)
+        self.translate_in(locale, self.module.as_str(), key, args)
+    }
+
+    /// The administrator's text for `key` ([`TEXTS_KEY`]) when there is one, else the catalog's.
+    fn translate_in(&self, locale: Locale, namespace: &str, key: &str, args: &Args) -> String {
+        match self.texts.get(key) {
+            Some(template) => fill_text(template, args),
+            None => self.translator.translate(locale, namespace, key, args),
+        }
     }
 
     /// The language to answer a slash command in: the invoker's own, else the guild's.

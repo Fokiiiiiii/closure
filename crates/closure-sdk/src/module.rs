@@ -17,7 +17,7 @@ use closure_core::event::{
 use closure_core::locale::{Args, Locale};
 use closure_core::module::{
     ChoiceValue, CommandSpec, ContextCommandSpec, ContextKind, EventContext, Module, ModuleId,
-    ModuleManifest, OptionChoice, OptionKind, OptionSpec, SubcommandSpec,
+    ModuleManifest, OptionChoice, OptionKind, OptionSpec, SubcommandSpec, TEXTS_KEY,
 };
 use closure_core::permission::{PermissionKey, PermissionSpec};
 use closure_core::schedule::ScheduledJob;
@@ -868,18 +868,21 @@ impl ModuleBuilder {
                 ));
             }
         }
-        // Every module gets the setting that decides who sees its replies (see `Cx::reply_with`).
-        if self
-            .manifest
-            .config_schema
-            .get("properties")
-            .and_then(|properties| properties.get(REPLIES))
-            .is_some()
-        {
-            self.problem.get_or_insert(self.invalid(
-                "",
-                format!("declares the config key `{REPLIES}`, which the SDK reserves"),
-            ));
+        // Every module gets the settings the SDK reserves: who sees its replies (see
+        // `Cx::reply_with`) and the administrator's texts (see `TEXTS_KEY`).
+        for key in [REPLIES, TEXTS_KEY] {
+            let declared = self
+                .manifest
+                .config_schema
+                .get("properties")
+                .and_then(|properties| properties.get(key))
+                .is_some();
+            if declared {
+                self.problem.get_or_insert(self.invalid(
+                    "",
+                    format!("declares the config key `{key}`, which the SDK reserves"),
+                ));
+            }
         }
         let added = self
             .manifest
@@ -898,6 +901,12 @@ impl ModuleBuilder {
                         "type": "string",
                         "enum": ["private", "public"],
                         "description": "Who sees the replies of the module's commands: \"private\" only the user who used the command, \"public\" everyone in the channel. Unset: as the module chose."
+                    }),
+                );
+                properties.insert(
+                    TEXTS_KEY.to_owned(),
+                    json!({
+                        "description": "Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default."
                     }),
                 );
             })

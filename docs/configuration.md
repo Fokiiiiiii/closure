@@ -111,6 +111,27 @@ space, so `✅ Warned user 7` reads as the success it is. The default is `✅` a
 emoji (`❤️`, `👍🏽`) or a custom one as `<:name:id>` or `<a:name:id>`, at most 100 characters. An empty
 string (`""`) puts no emoji there. Info replies and warnings never get one.
 
+### Module texts
+
+`texts` in a module's `config` replaces the messages that module shows: replies, direct messages,
+warnings, log headings. Each key is a message id of the module's locale file, such as `warned` in
+the moderation module, and the text replaces the message in every language. Inside the text,
+`{name}` is replaced by the message's argument `name` (`{user}`, `{number}`, ...); a `{..}` that names
+no argument stays as written.
+
+```yaml
+modules:
+  moderation:
+    config:
+      texts:
+        warned: "Warned {user}: case #{number}, {active} active. The next one is a timeout."
+```
+
+An empty string, or no entry for the id, keeps the module's own text. A value that is not a string,
+and an id that no message has, are ignored, so they never stop the configuration from loading. A
+text longer than 2000 characters is cut to 2000, ending with `…`. An id that the module and the
+shared `core` messages both use is replaced in both.
+
 ### Bot-wide defaults
 
 `--bot-config <file>` (or `BOT_CONFIG`) names a document of this same form that every server
