@@ -2,9 +2,11 @@
 //! takes a role off, and a timeout is lost the same way, so a rejoin would end a punishment early.
 //! Only what still stands is given again: a case that was revoked or ran out is not.
 
-use closure_sdk::punish::{Method, RestrictionRole, RoleError, ensure_role};
+use std::time::Duration;
+
+use closure_sdk::punish::{Method, Moderator, Punisher, RestrictionRole, RoleError, ensure_role};
 use closure_sdk::{
-    Args, Case, DiscordError, Event, EventContext, Flow, ModuleError, Reason, UserId,
+    Args, Case, DiscordError, Event, EventContext, Flow, ModuleError, Reason, RoleId, UserId,
 };
 
 use crate::restrict;
@@ -68,7 +70,10 @@ async fn give_timeout_again(
                 // The role is set up again by the next punishment: nothing is given now.
                 Err(_) => return Ok(()),
             };
-            ctx.api.add_role(ctx.guild_id, user, role, reason).await
+            match ctx.api.add_role(ctx.guild_id, user, role, reason).await {
+                Ok(()) => rearm(ctx, config, user, case, role, false).await,
+                Err(error) => Err(error),
+            }
         }
         Method::Discord => {
             // A timeout is always recorded with its expiry, so one without it is not given.
@@ -87,6 +92,40 @@ async fn give_timeout_again(
         }
     };
     tolerate_gone(result)
+}
+
+/// Schedules the lift of a role given again on rejoin, for the time the case has left. The timer that
+/// lifted the role before may have lifted another one, so it is replaced.
+async fn rearm(
+    ctx: &EventContext,
+    config: &Config,
+    user: UserId,
+    case: &Case,
+    role: RoleId,
+    voice: bool,
+) -> Result<(), DiscordError> {
+    let Some(expires_at) = case.expires_at else {
+        return Ok(());
+    };
+    let Ok(left) = u64::try_from(expires_at - ctx.now()) else {
+        return Ok(());
+    };
+    let punisher = Punisher::new(
+        ctx,
+        Moderator::bot(ctx, "rejoin").map_err(|error| DiscordError::Fatal(error.to_string()))?,
+        crate::settings_from(config, (!voice).then_some(role), voice.then_some(role)),
+    );
+    let after = Duration::from_secs(left);
+    let scheduled = if voice {
+        punisher
+            .rearm_voice_lift(user, case.number, role, after)
+            .await
+    } else {
+        punisher
+            .rearm_timeout_lift(user, case.number, role, after)
+            .await
+    };
+    scheduled.map_err(|error| DiscordError::Fatal(format!("could not schedule the lift: {error}")))
 }
 
 /// Gives a voice mute again by its role. Discord's server mute is not given: Discord refuses it
@@ -112,7 +151,12 @@ async fn give_voice_mute_again(
                 Err(_) => return Ok(()),
             };
             let reason = rejoin_reason(ctx, "rejoin-voice", case.number);
-            tolerate_gone(ctx.api.add_role(ctx.guild_id, user, role, reason).await)
+            tolerate_gone(
+                match ctx.api.add_role(ctx.guild_id, user, role, reason).await {
+                    Ok(()) => rearm(ctx, config, user, case, role, true).await,
+                    Err(error) => Err(error),
+                },
+            )
         }
     }
 }

@@ -49,6 +49,8 @@ pub struct AntiraidRelease {
 
 /// `/automod counter`: looks at, sets, adds to, or resets a counter, as the action says.
 pub async fn counter(state: Arc<State>, cx: CommandCx, args: CounterArgs) -> Result<(), UserError> {
+    // Acknowledged first: the change may outlast Discord's three seconds.
+    cx.defer(true).await?;
     let CounterArgs {
         counter,
         action,
@@ -150,6 +152,9 @@ async fn change(
     let (user, channel) = scope_of(&def, user, channel);
     if let Some(text) = missing(cx, &def, user, channel) {
         return cx.reply_private(text).await;
+    }
+    if let Some(target) = user {
+        cx.check_target(target).await?;
     }
     let outcome = counter::change(
         cx.ctx(),
@@ -327,6 +332,8 @@ pub async fn antiraid_set(
     cx: CommandCx,
     args: AntiraidSet,
 ) -> Result<(), UserError> {
+    // Acknowledged first: the change may outlast Discord's three seconds.
+    cx.defer(true).await?;
     let duration = match &args.duration {
         Some(span) => Some(span.resolve(&cx)?),
         None => None,
@@ -338,6 +345,8 @@ pub async fn antiraid_set(
 }
 
 pub async fn antiraid_clear(state: Arc<State>, cx: CommandCx, (): ()) -> Result<(), UserError> {
+    // Acknowledged first: the change may outlast Discord's three seconds.
+    cx.defer(true).await?;
     let loaded = load(&state, &cx)?;
     let Some(antiraid) = loaded.setup.antiraid.as_ref() else {
         return antiraid_off(&cx).await;
@@ -354,6 +363,8 @@ pub async fn antiraid_release(
     cx: CommandCx,
     args: AntiraidRelease,
 ) -> Result<(), UserError> {
+    // Acknowledged first: the change may outlast Discord's three seconds.
+    cx.defer(true).await?;
     let tally = antiraid::release(cx.ctx(), &state.memory, args.user)
         .await
         .map_err(UserError::Module)?;
@@ -365,6 +376,8 @@ pub async fn antiraid_release_all(
     cx: CommandCx,
     (): (),
 ) -> Result<(), UserError> {
+    // Acknowledged first: the change may outlast Discord's three seconds.
+    cx.defer(true).await?;
     let tally = antiraid::release_all(cx.ctx(), &state.memory)
         .await
         .map_err(UserError::Module)?;

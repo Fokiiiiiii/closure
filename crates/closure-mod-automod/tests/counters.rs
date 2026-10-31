@@ -25,7 +25,15 @@ use twilight_model::id::Id;
 
 /// A harness with these counters and rules.
 fn with(counters: Value, rules_: Value) -> Harness {
-    configured(json!({ "counters": counters, "rules": rules_ }))
+    let harness = configured(json!({ "counters": counters, "rules": rules_ }));
+    // Not members, so a change for them needs no role check; a test that needs one declares them.
+    harness
+        .api()
+        .set_not_a_member(Id::new(GUILD), Id::new(MEMBER));
+    harness
+        .api()
+        .set_not_a_member(Id::new(GUILD), Id::new(OTHER_MEMBER));
+    harness
 }
 
 fn words(word: &str) -> Value {
@@ -102,6 +110,49 @@ async fn add_to_counter_keeps_a_count_for_each_member() {
         value(&harness, "strikes", Some(OTHER_MEMBER), None).await,
         1
     );
+}
+
+/// A role of the guild at a position, as Discord lists it.
+fn role_at(id: u64, position: i64) -> twilight_model::guild::Role {
+    serde_json::from_value(json!({
+        "id": id.to_string(),
+        "name": "role",
+        "color": 0,
+        "colors": { "primary_color": 0, "secondary_color": null, "tertiary_color": null },
+        "hoist": false,
+        "managed": false,
+        "mentionable": false,
+        "permissions": "0",
+        "position": position,
+        "flags": 0,
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_moderator_cannot_change_the_counter_of_a_member_above_them() {
+    let harness = with(json!({ "strikes": { "per_user": true } }), rules(&[]));
+    harness.api().set_roles(
+        Id::new(GUILD),
+        vec![role_at(MODERATOR_ROLE, 5), role_at(ROLE, 9)],
+    );
+    declare(&harness, MEMBER, &[ROLE]);
+
+    let replies = harness
+        .invoke(scoped_to(
+            command("set", "strikes").option("value", CommandOptionValue::Integer(4)),
+            Some(MEMBER),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        text_of(&replies).contains("not below yours"),
+        "a member above the moderator is refused: {}",
+        text_of(&replies)
+    );
+    assert_eq!(value(&harness, "strikes", Some(MEMBER), None).await, 0);
 }
 
 #[tokio::test]
@@ -282,7 +333,7 @@ async fn decay_lowers_the_value_as_time_passes() {
         ))
         .await
         .unwrap();
-    harness.advance(Duration::from_secs(3 * 60));
+    harness.advance(Duration::from_mins(3));
     assert_eq!(value(&harness, "strikes", Some(MEMBER), None).await, 2);
 }
 

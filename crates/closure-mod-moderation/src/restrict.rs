@@ -42,6 +42,8 @@ pub(crate) fn check_timeout(config: &Config, duration: Option<Duration>) -> Resu
 /// `/vcmute`: mutes a member in voice, for `duration` or until `/vcunmute`. Without a reason, a
 /// template is asked for.
 pub(crate) async fn voice_mute(cx: CommandCx, args: VoiceMute) -> Result<(), UserError> {
+    // Acknowledged first: Discord's three seconds may pass before the mute is given.
+    cx.defer(true).await?;
     if let Some(span) = &args.duration {
         span.resolve(&cx)?;
     }
@@ -59,6 +61,8 @@ pub(crate) async fn voice_mute(cx: CommandCx, args: VoiceMute) -> Result<(), Use
 
 /// `/vcunmute`: lifts the voice mute of a member and revokes the newest mute that stands.
 pub(crate) async fn voice_unmute(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
+    // Acknowledged first: Discord's three seconds may pass before the mute is given.
+    cx.defer(true).await?;
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
     let case = punisher_for(&cx, &config)

@@ -13,7 +13,7 @@ use std::time::Duration;
 use closure_core::action::{Action, ChannelPatch, GuildPatch, Outcome, Reason};
 use closure_core::error::DiscordError;
 use closure_sdk::embed::{Color, DESCRIPTION_LIMIT, EmbedBuilder, truncate};
-use closure_sdk::punish::{RestrictionRole, ensure_role};
+use closure_sdk::punish::{RestrictionRole, ensure_role, member_turn};
 use closure_sdk::{
     Args, ChannelId, Event, EventContext, Expect, GuildId, JobCx, ModuleError, RoleId,
     StorageError, Store, UserId,
@@ -1274,6 +1274,9 @@ async fn quarantine_join(
     cfg: &Antiraid,
     user: UserId,
 ) -> Result<(), ModuleError> {
+    // A member's hold, give and release do not interleave: a release between the hold and the give
+    // would leave a role that no record names.
+    let _turn = member_turn(ctx, user).await;
     let store = ctx.store();
     let (current, _) = level(store, cfg.calm()).await?;
     let Some(quarantine) = cfg
@@ -1331,6 +1334,7 @@ pub async fn release(
     memory: &Memory,
     user: UserId,
 ) -> Result<Tally, ModuleError> {
+    let _turn = member_turn(ctx, user).await;
     let store = ctx.store();
     let mut tally = Tally::default();
     let held = held_for(store, user.get()).await?;
@@ -1362,6 +1366,8 @@ pub async fn release(
 }
 
 /// Releases every quarantined member.
+// shortcut: each member reads every chunk again, so N members cost N × CHUNKS store reads. An index from
+// member to chunk would avoid it but changes the stored format; upgrade it when a quarantine holds thousands.
 pub async fn release_all(ctx: &EventContext, memory: &Memory) -> Result<Tally, ModuleError> {
     let users: BTreeSet<u64> = held_all(ctx.store())
         .await?

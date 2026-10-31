@@ -16,8 +16,8 @@ use closure_sdk::punish::{
 use closure_sdk::{
     Args, Capability, Case, CaseError, CaseKind, Cases, Command, CommandArgs, CommandCx, Cooldown,
     CoreError, Cx, Event, EventContext, EventKind, Flow, InteractionRef, InteractionReply, Level,
-    Locale, ModuleBuilder, ModuleError, NewCase, PermissionSpec, SdkModule, Span, Subscription,
-    Tone, UserError, UserId,
+    Locale, ModuleBuilder, ModuleError, NewCase, PermissionSpec, RoleId, SdkModule, Span,
+    Subscription, Tone, UserError, UserId,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -368,7 +368,17 @@ async fn punish_settings(ctx: &EventContext, config: &Config) -> Result<Settings
         ),
         Method::Discord => None,
     };
-    Ok(Settings {
+    Ok(settings_from(config, timeout_role, voice_role))
+}
+
+/// The SDK's settings of the configuration, with the roles the methods give. A punishment's timer
+/// reads only what the restore setting says, so a rejoin may take these from the configuration too.
+pub(crate) fn settings_from(
+    config: &Config,
+    timeout_role: Option<RoleId>,
+    voice_role: Option<RoleId>,
+) -> Settings {
+    Settings {
         dm: config.dm_on_action,
         timeout: config.timeout_method,
         timeout_role,
@@ -378,7 +388,7 @@ async fn punish_settings(ctx: &EventContext, config: &Config) -> Result<Settings
             remove: config.remove_roles_on_mute.selection(),
             restore: config.restore_roles_on_mute.selection(),
         },
-    })
+    }
 }
 
 /// Sets the dedicated roles up when the configuration changes, so that they exist and are set up

@@ -2062,20 +2062,20 @@ async fn the_roles_come_back_only_when_the_last_timeout_is_lifted() {
         .invoke(timeout(MEMBER, "1h", Some("first")))
         .await
         .unwrap();
-    harness.advance(Duration::from_secs(1_800));
+    harness.advance(Duration::from_mins(30));
     harness
         .invoke(timeout(MEMBER, "2h", Some("second")))
         .await
         .unwrap();
     // The first timer is due at one hour; the second still stands, so nothing comes back yet.
-    harness.advance(Duration::from_secs(1_860));
+    harness.advance(Duration::from_mins(31));
     harness.run_due_jobs().await;
     assert!(
         given_back(&harness).is_empty(),
         "the second timeout still stands"
     );
     // The second timer is due at two and a half hours.
-    harness.advance(Duration::from_secs(5_400));
+    harness.advance(Duration::from_mins(90));
     harness.run_due_jobs().await;
     assert_eq!(given_back(&harness).last(), Some(&60));
 }
@@ -3214,7 +3214,7 @@ async fn a_press_after_the_timeout_ran_out_is_not_needed() {
         .await
         .unwrap();
     let id = undo_id(&timed);
-    harness.advance(Duration::from_secs(2 * 3_600));
+    harness.advance(Duration::from_hours(2));
     let before = sequence(&harness);
 
     let late = press(&harness, &id).await;
@@ -3744,6 +3744,28 @@ fn voice_mutes_sent(harness: &Harness) -> usize {
 }
 
 #[tokio::test]
+async fn a_role_given_again_on_rejoin_is_lifted_by_a_timer_of_its_own() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    // The configured role changes while the member is away: the rejoin gives the new one.
+    harness.set_config(json!({ "timeout_method": "role", "timeout_role": "31" }));
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(roles_added(&harness).last(), Some(&31));
+    harness.advance(Duration::from_secs(3601));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.iter().all(Result::is_ok), "{ended:?}");
+    assert!(
+        removed(&harness).contains(&31),
+        "the timer lifts the role that was given again: {:?}",
+        harness.api().actions()
+    );
+}
+
+#[tokio::test]
 async fn a_member_who_rejoins_gets_the_timeout_role_back_while_the_timeout_stands() {
     let harness = harness();
     harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
@@ -3817,7 +3839,7 @@ async fn a_timeout_by_discord_is_given_again_for_the_time_left() {
         .invoke(timeout(MEMBER, "1h", Some("spam")))
         .await
         .unwrap();
-    harness.advance(Duration::from_secs(1_200));
+    harness.advance(Duration::from_mins(20));
     rejoin(&harness, MEMBER).await.unwrap();
     assert_eq!(timeouts_sent(&harness), [Some(3_600), Some(2_400)]);
 }

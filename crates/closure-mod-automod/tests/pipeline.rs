@@ -554,7 +554,7 @@ async fn a_cooldown_lets_a_rule_fire_once_per_member_for_its_length() {
         "the cooldown is per member"
     );
 
-    harness.advance(Duration::from_secs(2 * 3600));
+    harness.advance(Duration::from_hours(2));
     say(&harness, MEMBER, "spoiler").await;
     assert_eq!(
         cases_of(&harness, MEMBER).await.len(),

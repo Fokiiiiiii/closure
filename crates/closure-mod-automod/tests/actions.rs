@@ -271,17 +271,18 @@ async fn a_timeout_by_role_creates_the_role_when_none_is_configured() {
 }
 
 #[tokio::test]
-async fn a_timeout_role_named_like_moderations_is_shared() {
+async fn a_timeout_role_named_like_moderations_is_not_adopted() {
     let harness = configured(timeout_by_role(json!({})));
     harness
         .api()
         .set_roles(Id::new(GUILD), vec![guild_role(700, "Mute", 1, false)]);
     say(&harness, MEMBER, "spoiler").await;
+    // A role of the same name that Closure did not make may grant access the name does not show.
     assert_eq!(
         count_actions(&harness, |a| matches!(a, Action::CreateRole { .. })),
-        0
+        1
     );
-    assert!(harness.api().actions().iter().any(|a| matches!(
+    assert!(!harness.api().actions().iter().any(|a| matches!(
         a,
         Action::AddRole { role_id, .. } if *role_id == Id::new(700)
     )));

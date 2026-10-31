@@ -262,10 +262,11 @@ async fn a_failing_effect_is_counted_and_the_other_channels_still_change() {
         "levels": LEVELS,
         "effects": { "high": { "slowmode": { "seconds": 30 } } }
     }));
-    // The list of the channels is the first call; the first slowmode edit is the second.
+    // The acknowledgement is the first call, the list of the channels the second; the first
+    // slowmode edit is the third.
     harness
         .api()
-        .fail_nth(2, DiscordError::Forbidden("no".into()));
+        .fail_nth(3, DiscordError::Forbidden("no".into()));
     let replies = harness.invoke(set_invocation("high")).await;
     assert!(replies.is_ok(), "the command itself succeeds");
     let edited: Vec<u64> = channel_edits(&harness).iter().map(|(id, _)| *id).collect();

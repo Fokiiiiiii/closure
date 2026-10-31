@@ -32,8 +32,9 @@ pub(crate) async fn clear(cx: CommandCx, args: Clear) -> Result<(), UserError> {
             .await;
     };
     let channel = cx.invocation().channel_id;
-    let now = cx.now();
     let newest = cx.api().get_messages(channel, None, limit).await?;
+    // Read after the listing: a message may pass the fourteen days while the listing is on its way.
+    let now = cx.now();
     let (fresh, old): (Vec<_>, Vec<_>) = newest
         .iter()
         .map(|message| message.id)
