@@ -55,7 +55,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::SendMessages,
         Self::AddReactions,
         Self::ManageMessages,
@@ -77,6 +77,7 @@ impl Capability {
         Self::SendDirectMessages,
         Self::ReadMessages,
         Self::ReadMessageHistory,
+        Self::KeepAttachments,
         Self::DeafenMembers,
         Self::MoveMembers,
         Self::ManageThreads,
@@ -190,6 +191,50 @@ impl FromIterator<Capability> for CapabilitySet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_variant_is_listed_in_all_exactly_once() {
+        const VARIANTS: [Capability; 30] = [
+            Capability::SendMessages,
+            Capability::AddReactions,
+            Capability::ManageMessages,
+            Capability::ReadGuild,
+            Capability::ReadBans,
+            Capability::KickMembers,
+            Capability::BanMembers,
+            Capability::TimeoutMembers,
+            Capability::MuteMembers,
+            Capability::ManageNicknames,
+            Capability::ManageRoles,
+            Capability::ManageChannels,
+            Capability::ManageAutoMod,
+            Capability::ReadAuditLog,
+            Capability::RespondToInteractions,
+            Capability::Storage,
+            Capability::Schedule,
+            Capability::Cases,
+            Capability::SendDirectMessages,
+            Capability::ReadMessages,
+            Capability::ReadMessageHistory,
+            Capability::KeepAttachments,
+            Capability::DeafenMembers,
+            Capability::MoveMembers,
+            Capability::ManageThreads,
+            Capability::ManageInvites,
+            Capability::ManageWebhooks,
+            Capability::ManageGuild,
+            Capability::ManageEvents,
+            Capability::ManageEmojis,
+        ];
+        for capability in VARIANTS {
+            let listed = Capability::ALL
+                .iter()
+                .filter(|&&listed| listed == capability)
+                .count();
+            assert_eq!(listed, 1, "{capability} is listed {listed} times in ALL");
+        }
+        assert_eq!(Capability::ALL.len(), VARIANTS.len());
+    }
 
     #[test]
     fn all_lists_every_variant_once() {
