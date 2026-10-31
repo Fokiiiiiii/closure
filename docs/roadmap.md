@@ -79,7 +79,7 @@ Done: a generator of the command, permission and configuration reference from th
 in the configuration schema for the dashboard's forms (`x-ui`). Still to do: tests that a wrong use
 of the macro does not compile; the explanation of why a permission was granted or refused.
 
-- Dedicated roles for the role method: `Timed out` and `Voice muted` created on first use with no permissions, set up in every channel by a sync job, with `remove_roles_on_mute` and `restore_roles_on_mute` taking roles off and giving them back. Known limit: another role's allow overwrite in a channel wins over the deny (counted in the sync note).
+- Dedicated roles for the role method: `Mute` and `VC mute` (named in the server's language, red) created on first use with no permissions, set up in every channel by a sync job, with `remove_roles_on_mute` and `restore_roles_on_mute` taking roles off and giving them back. Known limit: another role's allow overwrite in a channel wins over the deny (counted in the sync note).
 
 ## What a piece must have before it counts as done
 Tests that fail first and pass after, the same tests failing when the code is broken on purpose,

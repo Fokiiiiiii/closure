@@ -1943,7 +1943,7 @@ async fn a_role_method_creates_its_roles_when_the_configuration_changes() {
     let harness = harness();
     harness.set_config(json!({ "timeout_method": "role", "voice_mute_method": "role" }));
     harness.config_changed().await.unwrap();
-    assert_eq!(created_role_names(&harness), ["Timed out", "Voice muted"]);
+    assert_eq!(created_role_names(&harness), ["Mute", "VC mute"]);
     harness.config_changed().await.unwrap();
     assert_eq!(
         created_role_names(&harness).len(),

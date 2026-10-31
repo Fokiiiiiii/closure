@@ -171,7 +171,7 @@ async fn run_all_jobs(harness: &Harness) {
 async fn a_missing_role_is_created_with_no_permissions_and_its_sync_is_scheduled() {
     let harness = Harness::new(module(None)).unwrap();
     harness.config_changed().await.unwrap();
-    assert_eq!(created_names(&harness), ["Timed out", "Voice muted"]);
+    assert_eq!(created_names(&harness), ["Mute", "VC mute"]);
     let actions = harness.api().actions();
     let created = actions
         .iter()
@@ -201,7 +201,7 @@ async fn a_configured_role_that_exists_is_used_and_its_channels_are_left_alone()
     run_all_jobs(&harness).await;
     assert_eq!(
         created_names(&harness),
-        ["Voice muted"],
+        ["VC mute"],
         "the configured role is not created"
     );
     assert!(
@@ -215,7 +215,7 @@ async fn a_role_found_by_name_is_used_and_not_created_again() {
     let harness = Harness::new(module(None)).unwrap();
     harness.api().set_roles(
         Id::new(GUILD),
-        vec![role(700, "timed out"), role(701, "Voice muted")],
+        vec![role(700, "mute"), role(701, "vc mute")],
     );
     harness.config_changed().await.unwrap();
     harness.config_changed().await.unwrap();
@@ -230,7 +230,7 @@ async fn a_second_setup_does_not_create_a_second_role() {
     let harness = Harness::new(module(None)).unwrap();
     harness.config_changed().await.unwrap();
     harness.config_changed().await.unwrap();
-    assert_eq!(created_names(&harness), ["Timed out", "Voice muted"]);
+    assert_eq!(created_names(&harness), ["Mute", "VC mute"]);
 }
 
 #[tokio::test]
@@ -250,7 +250,7 @@ async fn the_sync_denies_speech_where_a_channel_has_no_overwrite_and_skips_the_r
     // An explicit role: the created ids depend on how many calls came before them.
     harness
         .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Timed out")]);
+        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
     harness.api().set_channels(
         Id::new(GUILD),
         vec![
@@ -431,13 +431,13 @@ async fn an_unsafe_role_with_a_restriction_name_is_ignored_and_a_safe_one_is_cre
     harness.api().set_roles(
         Id::new(GUILD),
         vec![
-            role_with(700, "Timed out", Permissions::ADMINISTRATOR, false),
+            role_with(700, "Mute", Permissions::ADMINISTRATOR, false),
             role_with(701, "voice muted", Permissions::empty(), true),
         ],
     );
     harness.config_changed().await.unwrap();
     run_all_jobs(&harness).await;
-    assert_eq!(created_names(&harness), ["Timed out", "Voice muted"]);
+    assert_eq!(created_names(&harness), ["Mute", "VC mute"]);
     assert!(
         overwrites(&harness)
             .iter()
@@ -451,20 +451,20 @@ async fn a_remembered_role_that_gains_permissions_is_replaced() {
     let harness = Harness::new(module(None)).unwrap();
     harness
         .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Timed out")]);
+        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
     harness.config_changed().await.unwrap();
-    assert_eq!(created_names(&harness), ["Voice muted"], "700 is adopted");
+    assert_eq!(created_names(&harness), ["VC mute"], "700 is adopted");
     harness.api().set_roles(
         Id::new(GUILD),
         vec![
-            role_with(700, "Timed out", Permissions::ADMINISTRATOR, false),
-            role(800, "Voice muted"),
+            role_with(700, "Mute", Permissions::ADMINISTRATOR, false),
+            role(800, "VC mute"),
         ],
     );
     harness.config_changed().await.unwrap();
     assert_eq!(
         created_names(&harness),
-        ["Voice muted", "Timed out"],
+        ["VC mute", "Mute"],
         "the remembered 700 is no longer safe, so a new role is made"
     );
 }
@@ -475,7 +475,7 @@ async fn two_setups_at_the_same_time_create_one_role_each() {
     let (first, second) = tokio::join!(harness.config_changed(), harness.config_changed());
     first.unwrap();
     second.unwrap();
-    assert_eq!(created_names(&harness), ["Timed out", "Voice muted"]);
+    assert_eq!(created_names(&harness), ["Mute", "VC mute"]);
 }
 
 #[tokio::test]
@@ -483,7 +483,7 @@ async fn a_channel_created_later_keeps_the_denies_the_role_already_has_there() {
     let harness = Harness::new(module(None)).unwrap();
     harness
         .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Timed out")]);
+        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
     harness.config_changed().await.unwrap();
     harness.api().set_channels(
         Id::new(GUILD),
@@ -508,7 +508,7 @@ async fn a_channel_created_later_leaves_alone_an_auto_role_an_explicit_role_has_
     let harness = Harness::new(module_with(Arc::clone(&configured))).unwrap();
     harness.api().set_roles(
         Id::new(GUILD),
-        vec![role(700, "Timed out"), role(42, "Mods' mute")],
+        vec![role(700, "Mute"), role(42, "Mods' mute")],
     );
     harness.config_changed().await.unwrap();
     *configured.lock().unwrap_or_else(PoisonError::into_inner) = Some(Id::new(42));
@@ -530,7 +530,7 @@ async fn a_channel_the_sync_could_not_set_up_is_set_up_by_the_retry() {
     let harness = Harness::new(module(None)).unwrap();
     harness
         .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Timed out")]);
+        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
     harness.api().set_channels(
         Id::new(GUILD),
         vec![channel(1, &[]), channel(2, &[]), channel(3, &[])],
@@ -570,7 +570,7 @@ async fn a_sync_that_keeps_failing_is_retried_three_times_and_then_noted() {
     harness.set_log_channel(LOG);
     harness
         .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Timed out")]);
+        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
     harness
         .api()
         .set_channels(Id::new(GUILD), vec![channel(1, &[]), channel(2, &[])]);
@@ -641,7 +641,7 @@ async fn the_sync_keeps_the_denies_and_drops_the_allows_of_the_role_it_sets() {
     let harness = Harness::new(module(None)).unwrap();
     harness
         .api()
-        .set_roles(Id::new(GUILD), vec![role(700, "Timed out")]);
+        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
     harness.api().set_channels(
         Id::new(GUILD),
         vec![channel_with(
@@ -663,4 +663,28 @@ async fn the_sync_keeps_the_denies_and_drops_the_allows_of_the_role_it_sets() {
         "{deny:?}"
     );
     assert!(!allow.contains(Permissions::SEND_MESSAGES), "{allow:?}");
+}
+
+#[tokio::test]
+async fn a_guild_in_japanese_gets_its_restriction_roles_named_in_japanese() {
+    let harness = Harness::new(module(None)).unwrap();
+    harness.set_guild_locale(closure_sdk::Locale::Ja);
+    harness.config_changed().await.unwrap();
+    assert_eq!(created_names(&harness), ["ミュート", "VCミュート"]);
+}
+
+#[tokio::test]
+async fn restriction_roles_are_created_red() {
+    let harness = Harness::new(module(None)).unwrap();
+    harness.config_changed().await.unwrap();
+    let colors: Vec<u32> = harness
+        .api()
+        .actions()
+        .into_iter()
+        .filter_map(|action| match action {
+            Action::CreateRole { spec, .. } => Some(spec.color),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(colors, [0x00F0_4747, 0x00F0_4747]);
 }

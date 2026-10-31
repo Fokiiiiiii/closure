@@ -67,15 +67,20 @@ impl RestrictionRole {
         }
     }
 
-    /// The name a created role has. Found by name without regard to case, so that two modules in
-    /// one guild share one role.
-    #[must_use]
-    pub const fn role_name(self) -> &'static str {
+    /// The catalog key of the name a created role has.
+    const fn name_key(self) -> &'static str {
         match self {
-            Self::Timeout => "Timed out",
-            Self::Voice => "Voice muted",
-            Self::Quarantine => "Quarantine",
+            Self::Timeout => "role-name-timeout",
+            Self::Voice => "role-name-voice",
+            Self::Quarantine => "role-name-quarantine",
         }
+    }
+
+    /// The name a created role has, in the guild's language. Found by name without regard to case, so
+    /// that two modules in one guild share one role.
+    #[must_use]
+    pub fn role_name(self, ctx: &EventContext) -> String {
+        ctx.t_core(ctx.locale, self.name_key(), &Args::new())
     }
 
     /// What the role denies in every channel. Discord adds up the allows of all roles, so another
@@ -225,11 +230,12 @@ async fn ensure_role_now(
     let kept = remembered(ctx, which)
         .await?
         .filter(|id| roles.iter().any(|role| role.id == *id && safe(role)));
+    let name = which.role_name(ctx);
     let role = if let Some(role) = kept {
         role
     } else if let Some(found) = roles
         .iter()
-        .find(|role| role.name.eq_ignore_ascii_case(which.role_name()) && safe(role))
+        .find(|role| role.name.eq_ignore_ascii_case(&name) && safe(role))
     {
         remember(ctx, which, found.id).await?;
         found.id
@@ -910,18 +916,20 @@ async fn remember(
 }
 
 async fn create(ctx: &EventContext, which: RestrictionRole) -> Result<RoleId, DiscordError> {
+    let name = which.role_name(ctx);
     let reason = Reason::truncated(&ctx.t_core(
         ctx.locale,
         "role-created-reason",
-        &Args::new().with("role", which.role_name()),
+        &Args::new().with("role", name.as_str()),
     ));
     match ctx
         .api
         .execute(Action::CreateRole {
             guild_id: ctx.guild_id,
             spec: NewRole {
-                name: which.role_name().to_owned(),
-                color: 0,
+                name,
+                // Red, as the errors are: a restriction shows at a glance.
+                color: Color::Error.value(),
                 permissions: Permissions::empty(),
                 hoist: false,
                 mentionable: false,
@@ -954,7 +962,7 @@ async fn set_overwrite(
     let reason = Reason::truncated(&ctx.t_core(
         ctx.locale,
         "restriction-sync-reason",
-        &Args::new().with("role", which.role_name()),
+        &Args::new().with("role", which.role_name(ctx)),
     ));
     ctx.api
         .execute(Action::SetPermissionOverwrite {
@@ -1011,7 +1019,7 @@ fn audit(ctx: &EventContext, which: RestrictionRole, what: &str) -> Reason {
             ctx.locale,
             "restriction-audit",
             &Args::new()
-                .with("role", which.role_name())
+                .with("role", which.role_name(ctx))
                 .with("what", what),
         ),
     )

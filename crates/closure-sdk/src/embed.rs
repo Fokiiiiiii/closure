@@ -31,7 +31,7 @@ pub enum Color {
 }
 
 impl Color {
-    fn value(self) -> u32 {
+    pub(crate) fn value(self) -> u32 {
         match self {
             Self::Success => 0x0043_B581,
             Self::Warning => 0x00FA_A61A,

@@ -124,7 +124,7 @@ async fn a_timeout_by_one_module_is_lifted_by_another_and_gives_the_roles_back()
         Id::new(GUILD),
         vec![
             role(BOT_ROLE, "Bot", 50),
-            role(TIMEOUT_ROLE, "Timed out", 1),
+            role(TIMEOUT_ROLE, "Mute", 1),
             role(STAFF, "Staff", 1),
             role(HELPER, "Helper", 1),
         ],

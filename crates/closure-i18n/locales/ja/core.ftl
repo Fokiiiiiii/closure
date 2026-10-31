@@ -95,3 +95,6 @@ config-modules = モジュールごとの設定。モジュールの ID で区�
 config-replies = モジュールのコマンドの返信を誰が見るか。"private" はコマンドを使った本人だけ、"public" はチャンネルの全員に見えます。未設定ならモジュールの選択に従います。
 config-texts = モジュールの文言を、メッセージ ID で差し替えます。{"{"}name{"}"} は引数の名前に置き換えられます。空の値や文字列でない値は既定のままです。
 replay-direct-message = DM の宛先: { $user }
+role-name-timeout = ミュート
+role-name-voice = VCミュート
+role-name-quarantine = 隔離

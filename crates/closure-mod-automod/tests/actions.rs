@@ -275,7 +275,7 @@ async fn a_timeout_role_named_like_moderations_is_shared() {
     let harness = configured(timeout_by_role(json!({})));
     harness
         .api()
-        .set_roles(Id::new(GUILD), vec![guild_role(700, "Timed out", 1, false)]);
+        .set_roles(Id::new(GUILD), vec![guild_role(700, "Mute", 1, false)]);
     say(&harness, MEMBER, "spoiler").await;
     assert_eq!(
         count_actions(&harness, |a| matches!(a, Action::CreateRole { .. })),
