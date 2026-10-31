@@ -94,3 +94,4 @@ config-language = ボットのメッセージの言語。`auto` はサーバー�
 config-modules = モジュールごとの設定。モジュールの ID で区別します。
 config-replies = モジュールのコマンドの返信を誰が見るか。"private" はコマンドを使った本人だけ、"public" はチャンネルの全員に見えます。未設定ならモジュールの選択に従います。
 config-texts = モジュールの文言を、メッセージ ID で差し替えます。{"{"}name{"}"} は引数の名前に置き換えられます。空の値や文字列でない値は既定のままです。
+replay-direct-message = DM の宛先: { $user }

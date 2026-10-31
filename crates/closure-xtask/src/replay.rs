@@ -2,9 +2,10 @@
 //!
 //! The dumps are written by closure-core while `CLOSURE_DUMP_DIR` is set. Only the tests whose names
 //! start with `showcase::` make the showcase, and the messages they produce are posted as they are,
-//! without mentions. Direct messages are posted under a `DM to` line. Messages that repeat a kind
-//! already posted, that are too short to read, or that carry the test fixtures' ids are left out, as
-//! are the actions that say nothing on their own (role changes, bans, timeouts, deletions).
+//! without mentions. Direct messages are posted under a header line that names the member. Messages
+//! that repeat a kind already posted, that are too short to read, or that carry the test fixtures' ids
+//! are left out, as are the actions that say nothing on their own (role changes, bans, timeouts,
+//! deletions).
 //!
 //! The token is `DISCORD_TOKEN`, read the way the bot reads it: from the environment, or from
 //! `.env` when that file exists. The token is never printed.
@@ -20,7 +21,9 @@ use closure_core::action::{
 };
 use closure_core::client::DiscordApi;
 use closure_core::event::{ChannelId, UserId};
+use closure_core::locale::{Args, Locale, Translator};
 use closure_discord::TwilightApi;
+use closure_i18n::{CORE_NAMESPACE, TranslatorBuilder};
 use serde_json::Value;
 use twilight_http::Client;
 use twilight_model::channel::message::Embed;
@@ -166,6 +169,7 @@ fn dump_lines(dir: &Path) -> Result<Vec<String>> {
 ///
 /// Fails on the first line that is not JSON or not a recorded action.
 pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) -> Result<Plan> {
+    let translator = TranslatorBuilder::new()?.build();
     let mut plan = Plan::default();
     let mut seen = HashSet::new();
     for (index, line) in lines.into_iter().enumerate() {
@@ -192,7 +196,7 @@ pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) ->
             plan.outside += 1;
             continue;
         }
-        match step(action, &kind, channel) {
+        match step(action, &kind, channel, &translator) {
             Step::Send { post, key } => {
                 if seen.insert(key) {
                     plan.posts.push(*post);
@@ -266,7 +270,7 @@ fn mask_numbers(text: &str) -> String {
     masked
 }
 
-fn step(action: Action, kind: &str, channel: ChannelId) -> Step {
+fn step(action: Action, kind: &str, channel: ChannelId, translator: &dyn Translator) -> Step {
     match action {
         Action::SendMessage {
             content, embeds, ..
@@ -288,7 +292,14 @@ fn step(action: Action, kind: &str, channel: ChannelId) -> Step {
             content,
             embeds,
             ..
-        } => direct_message(channel, user_id, content.as_deref(), embeds, kind),
+        } => direct_message(
+            channel,
+            user_id,
+            content.as_deref(),
+            embeds,
+            kind,
+            translator,
+        ),
         Action::Respond {
             response: InteractionResponse::Message { reply } | InteractionResponse::Update { reply },
             ..
@@ -312,8 +323,15 @@ fn direct_message(
     body: Option<&str>,
     embeds: Vec<Embed>,
     kind: &str,
+    translator: &dyn Translator,
 ) -> Step {
-    let header = format!("DM to {user_id}");
+    // The showcase this replays is in Japanese, so its header is too.
+    let header = translator.translate(
+        Locale::Ja,
+        CORE_NAMESPACE,
+        "replay-direct-message",
+        &Args::new().with("user", user_id.to_string()),
+    );
     let shown = match body {
         Some(text) => format!("{header}\n{text}"),
         None => header,
@@ -446,7 +464,7 @@ mod tests {
 
         let plan = plan_of(&[dm]);
 
-        assert_eq!(plan.posts, vec![sent("DM to 42\nhi there")]);
+        assert_eq!(plan.posts, vec![sent("DM の宛先: 42\nhi there")]);
     }
 
     #[test]
@@ -469,7 +487,7 @@ mod tests {
         assert_eq!(plan.similar, 0);
         assert_eq!(plan.posts.len(), 2);
         assert!(
-            matches!(&plan.posts[0], Action::SendMessage { content: Some(text), .. } if text == "DM to 42"),
+            matches!(&plan.posts[0], Action::SendMessage { content: Some(text), .. } if text == "DM の宛先: 42"),
             "{:?}",
             plan.posts[0]
         );

@@ -106,3 +106,4 @@ config-language = Language of the bot's messages; `auto` follows the server's co
 config-modules = Per-module settings, keyed by module id.
 config-replies = Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose.
 config-texts = Replaces the module's texts by message id; {"{"}name{"}"} is filled in with the argument name. An empty or non-text value keeps the default.
+replay-direct-message = DM to { $user }
