@@ -173,7 +173,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                     "properties": {
                         "ephemeral": {
                             "type": "boolean",
-                            "description": "Only show replies to the person who ran the command.",
+                            "description": "config-diagnostics-ephemeral",
                             "x-ui": { "level": "basic" }
                         }
                     },

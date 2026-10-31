@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 closure-core.workspace = true
+closure-i18n.workspace = true
 dashmap.workspace = true
 jsonschema.workspace = true
 schemars.workspace = true

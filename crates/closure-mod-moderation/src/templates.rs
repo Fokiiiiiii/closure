@@ -488,12 +488,12 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
 pub(crate) fn schema() -> serde_json::Value {
     json!({
         "type": "object",
-        "description": "Templates a moderator picks from when a command leaves out the reason or the duration.",
+        "description": "config-moderation-templates",
         "properties": {
-            "timeout": list("Templates for /timeout. Each needs a duration."),
-            "kick": list("Templates for /kick. A duration is not used."),
-            "ban": list("Templates for /ban."),
-            "vcmute": list("Templates for /vcmute.")
+            "timeout": list("config-moderation-templates-timeout"),
+            "kick": list("config-moderation-templates-kick"),
+            "ban": list("config-moderation-templates-ban"),
+            "vcmute": list("config-moderation-templates-vcmute")
         },
         "additionalProperties": false
     })
@@ -511,24 +511,24 @@ fn list(description: &str) -> serde_json::Value {
                 "id": {
                     "type": "string",
                     "pattern": "^[a-z0-9_-]{1,32}$",
-                    "description": "The name of the template; unique within its list."
+                    "description": "config-moderation-template-id"
                 },
                 "label": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 100,
-                    "description": "The name the moderator sees."
+                    "description": "config-moderation-template-label"
                 },
                 "reason": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 512,
-                    "description": "The reason the punishment gets. {user} stands for the member, {moderator} for the moderator and {server} for the server."
+                    "description": "config-moderation-template-reason"
                 },
                 "duration": {
                     "type": "string",
                     "pattern": "^([0-9]{1,10}[smhdw] ?)+$",
-                    "description": "How long, such as 1h or 7d."
+                    "description": "config-moderation-template-duration"
                 }
             },
             "required": ["id", "label", "reason"],

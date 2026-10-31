@@ -828,8 +828,8 @@ async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 }
 
 /// The module, still open for a test to build on.
-const REMOVE_ROLES_DOC: &str = "Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids.";
-const RESTORE_ROLES_DOC: &str = "Which of the roles taken off come back when the punishment ends: the same forms as remove_roles_on_mute. true by default.";
+const REMOVE_ROLES_DOC: &str = "config-moderation-remove_roles_on_mute";
+const RESTORE_ROLES_DOC: &str = "config-moderation-restore_roles_on_mute";
 
 /// The schema of a setting that takes roles: `false`, `true`, or a list of role ids.
 fn role_list_setting(description: &str) -> serde_json::Value {
@@ -853,30 +853,30 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 365,
-                    "description": "After how many days a warning expires.",
+                    "description": "config-moderation-warn_expire_days",
                     "x-ui": { "level": "basic" }
                 },
                 "dm_on_action": {
                     "type": "boolean",
-                    "description": "Whether the warned member gets a direct message.",
+                    "description": "config-moderation-dm_on_action",
                     "x-ui": { "level": "basic" }
                 },
                 "require_reason": {
                     "type": "boolean",
-                    "description": "Whether a warning needs a reason.",
+                    "description": "config-moderation-require_reason",
                     "x-ui": { "level": "basic" }
                 },
                 "ban_delete_days": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 7,
-                    "description": "How many days of the messages of a banned member are deleted.",
+                    "description": "config-moderation-ban_delete_days",
                     "x-ui": { "level": "basic" }
                 },
                 "escalation": {
                     "type": "array",
                     "maxItems": 10,
-                    "description": "What a warning brings about when a member reaches a number of active warnings.",
+                    "description": "config-moderation-escalation",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -884,7 +884,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                                 "type": "integer",
                                 "minimum": 1,
                                 "maximum": 100,
-                                "description": "The number of active warnings that triggers the action."
+                                "description": "config-moderation-warns"
                             },
                             "action": {
                                 "type": "string",
@@ -893,7 +893,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                             "duration": {
                                 "type": "string",
                                 "pattern": "^([0-9]{1,10}[smhdw] ?)+$",
-                                "description": "How long, such as 1h or 7d. A timeout needs it; a ban may have it."
+                                "description": "config-moderation-duration"
                             }
                         },
                         "required": ["warns", "action"],
@@ -903,25 +903,25 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                 "timeout_method": {
                     "type": "string",
                     "enum": ["discord", "role"],
-                    "description": "How a timeout is given: Discord's timeout, or a role that is taken off when its time is up.",
+                    "description": "config-moderation-timeout_method",
                     "x-ui": { "level": "basic" }
                 },
                 "timeout_role": {
                     "type": ["string", "null"],
                     "pattern": "^[0-9]{1,20}$",
-                    "description": "The id of the role a timeout gives, when timeout_method is role.",
+                    "description": "config-moderation-timeout_role",
                     "x-ui": { "level": "basic", "widget": "role" }
                 },
                 "voice_mute_method": {
                     "type": "string",
                     "enum": ["discord", "role"],
-                    "description": "How a voice mute is given: Discord's voice mute, or a role that is taken off when its time is up.",
+                    "description": "config-moderation-voice_mute_method",
                     "x-ui": { "level": "basic" }
                 },
                 "voice_mute_role": {
                     "type": ["string", "null"],
                     "pattern": "^[0-9]{1,20}$",
-                    "description": "The id of the role a voice mute gives, when voice_mute_method is role.",
+                    "description": "config-moderation-voice_mute_role",
                     "x-ui": { "level": "basic", "widget": "role" }
                 },
                 "remove_roles_on_mute": role_list_setting(REMOVE_ROLES_DOC),

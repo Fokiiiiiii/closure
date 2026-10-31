@@ -39,7 +39,7 @@ fn optional_timezone_schema(_: &mut schemars::SchemaGenerator) -> schemars::Sche
     schemars::json_schema!({
         "anyOf": [{
             "type": "string",
-            "description": "The zone of a date typed without one: UTC, Z, an offset such as UTC+9, UTC+09:00, UTC-5, +09:00 or -0500, or a fixed zone such as Asia/Tokyo. Zones with daylight saving time are refused; use a fixed offset instead."
+            "description": "config-timezone"
         }, { "type": "null" }]
     })
 }
@@ -51,7 +51,7 @@ fn optional_prefix_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema
             "minLength": 1,
             "maxLength": 10,
             "pattern": "^\\S+$",
-            "description": "The prefix of text commands, 1 to 10 characters without spaces. Unset, text commands are off."
+            "description": "config-prefix"
         }, { "type": "null" }]
     })
 }
@@ -65,7 +65,7 @@ fn optional_delete_after_schema(_: &mut schemars::SchemaGenerator) -> schemars::
             "type": "integer",
             "minimum": 1,
             "maximum": MAX_DELETE_AFTER_SECONDS,
-            "description": "Seconds after which the message is deleted, 1 to 86400. Unset, it is kept."
+            "description": "config-delete-after"
         }, { "type": "null" }]
     })
 }
@@ -75,7 +75,7 @@ fn optional_emoji_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
         "anyOf": [{
             "type": "string",
             "maxLength": 100,
-            "description": "A Unicode emoji, or a custom one as <:name:id> or <a:name:id>. An empty string means no emoji."
+            "description": "config-emoji"
         }, { "type": "null" }]
     })
 }

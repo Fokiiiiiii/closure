@@ -1,4 +1,11 @@
 module-description = Post the edits and deletions of messages, the changes of channels, threads, roles, members and voice, and of emojis, stickers and stages, to a channel.
+config-logs-channel = The channel the entries are posted to. Left out, the guild's log channel.
+config-logs-message_edits = Post the edits of messages.
+config-logs-message_deletes = Post the deletions of messages, with their text and files as the history kept them.
+config-logs-member_joins = Post the joins of members.
+config-logs-member_leaves = Post the departures of members.
+config-logs-bans = Post the bans and unbans of members.
+config-logs-keep_attachments = Keep the files of attachments as their messages arrive, not only when a message is deleted or edited. Uses storage: a server's files are capped and kept for the message history's retention.
 logs-edited = Message edited
 logs-deleted = Message deleted
 logs-bulk = { $count } messages deleted

@@ -931,6 +931,46 @@ pub trait Module: Send + Sync + 'static {
     async fn on_unload(&self) {}
 }
 
+/// The text of the entry `key` of a Fluent source, when it is one line: `key = text`.
+/// Fluent writes a brace as `{"{"}` or `{"}"}`; the text comes back with plain braces.
+#[must_use]
+pub fn catalog_text(source: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key} = ");
+    source
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(|text| text.replace("{\"{\"}", "{").replace("{\"}\"}", "}"))
+}
+
+/// Replaces each description of a JSON schema that names a catalog entry (`"config-…"`) by the text
+/// `lookup` gives for it. A key without a text stays as it is.
+pub fn resolve_descriptions(
+    schema: &mut serde_json::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) {
+    match schema {
+        serde_json::Value::Object(map) => {
+            let key = map
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .filter(|key| key.starts_with("config-"))
+                .map(str::to_owned);
+            if let Some(text) = key.and_then(|key| lookup(&key)) {
+                map.insert("description".to_owned(), serde_json::Value::String(text));
+            }
+            for value in map.values_mut() {
+                resolve_descriptions(value, lookup);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                resolve_descriptions(item, lookup);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,5 +1046,16 @@ mod tests {
         };
         assert!(accepted(many(25)));
         assert!(!accepted(many(26)));
+    }
+
+    #[test]
+    fn catalog_text_returns_fluent_brace_literals_as_braces() {
+        let source = "config-texts = Fills {\"{\"}name{\"}\"} in.\n";
+
+        assert_eq!(
+            catalog_text(source, "config-texts").as_deref(),
+            Some("Fills {name} in.")
+        );
+        assert_eq!(catalog_text(source, "config-missing"), None);
     }
 }

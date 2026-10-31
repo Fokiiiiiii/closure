@@ -62,7 +62,7 @@ pub fn document_schema_for(registry: &ModuleRegistry, view: View) -> Result<Valu
         properties.insert(
             "language".into(),
             json!({
-                "description": "Language of the bot's messages; `auto` follows the server's community locale.",
+                "description": "config-language",
                 "anyOf": [
                     { "type": "string", "enum": languages, "default": "auto" },
                     // What the parser also takes: any capitalisation, and a regional form.
@@ -74,7 +74,7 @@ pub fn document_schema_for(registry: &ModuleRegistry, view: View) -> Result<Valu
         properties.insert(
             "modules".into(),
             or_null(json!({
-                "description": "Per-module settings, keyed by module id.",
+                "description": "config-modules",
                 "type": "object",
                 "additionalProperties": false,
                 "properties": module_properties
@@ -90,6 +90,10 @@ pub fn document_schema_for(registry: &ModuleRegistry, view: View) -> Result<Valu
     if let Value::Object(root) = &mut schema {
         root.insert("type".into(), json!(["object", "null"]));
     }
+    // The descriptions name entries of the core catalog.
+    closure_core::module::resolve_descriptions(&mut schema, &|key| {
+        closure_core::module::catalog_text(closure_i18n::CORE_EN, key)
+    });
     Ok(schema)
 }
 

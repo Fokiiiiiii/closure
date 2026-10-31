@@ -1,4 +1,5 @@
 module-description = Liveness and version commands.
+config-diagnostics-ephemeral = Only show replies to the person who ran the command.
 command-ping = ping
     .description = Check that the bot is alive
 ping-title = Pong!

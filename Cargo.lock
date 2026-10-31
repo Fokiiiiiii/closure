@@ -477,6 +477,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "closure-core",
+ "closure-i18n",
  "dashmap",
  "jsonschema",
  "proptest",

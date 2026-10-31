@@ -1,4 +1,5 @@
 module-description = 動作確認とバージョンのコマンドです。
+config-diagnostics-ephemeral = 返信を、コマンドを実行した本人にだけ表示します。
 command-ping = ping
     .description = Bot が動作しているか確認します
 ping-title = Pong!

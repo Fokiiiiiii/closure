@@ -16,8 +16,8 @@ const LEVEL_NAME: &str = "^[a-z0-9_-]{1,32}$";
 const CONDITION: &str = "^\\s*(>=|<=|!=|>|<|=)\\s*[0-9]{1,10}\\s*$";
 const MAX_COUNTER_VALUE: i64 = 2_147_483_647;
 
-const REMOVE_ROLES_DOC: &str = "Which roles a role timeout takes off the member: false, true for every role that can be taken off, or a list of role ids.";
-const RESTORE_ROLES_DOC: &str = "Which of the roles taken off come back when the timeout ends: the same forms as remove_roles_on_mute. true by default.";
+const REMOVE_ROLES_DOC: &str = "config-automod-remove_roles_on_mute";
+const RESTORE_ROLES_DOC: &str = "config-automod-restore_roles_on_mute";
 
 /// The schema of a setting that takes roles: `false`, `true`, or a list of role ids.
 fn role_list_setting(description: &str) -> Value {
@@ -39,37 +39,37 @@ pub fn settings() -> (Value, Value) {
             "properties": {
                 "dry_run": {
                     "type": "boolean",
-                    "description": "Act on nothing: post what would have happened to the log channel.",
+                    "description": "config-automod-dry_run",
                     "x-ui": { "level": "basic" }
                 },
                 "warn_expire_days": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 365,
-                    "description": "After how many days a warning of a rule expires.",
+                    "description": "config-automod-warn_expire_days",
                     "x-ui": { "level": "basic" }
                 },
                 "dm_on_action": {
                     "type": "boolean",
-                    "description": "Whether the member gets a direct message about a punishment.",
+                    "description": "config-automod-dm_on_action",
                     "x-ui": { "level": "basic" }
                 },
                 "timeout_method": {
                     "type": "string",
                     "enum": ["discord", "role"],
-                    "description": "How a timeout is given: Discord's timeout, or a role that is taken off when its time is up."
+                    "description": "config-automod-timeout_method"
                 },
                 "timeout_role": {
                     "type": ["string", "null"],
                     "pattern": SNOWFLAKE,
-                    "description": "The id of the role a timeout gives, when timeout_method is role."
+                    "description": "config-automod-timeout_role"
                 },
                 "remove_roles_on_mute": role_list_setting(REMOVE_ROLES_DOC),
                 "restore_roles_on_mute": role_list_setting(RESTORE_ROLES_DOC),
                 "counters": {
                     "type": "object",
                     "maxProperties": 10,
-                    "description": "The counters, keyed by name: the numbers the rules add to, set, and react to.",
+                    "description": "config-automod-counters",
                     "propertyNames": { "pattern": COUNTER_NAME },
                     "additionalProperties": counter()
                 },
@@ -77,7 +77,7 @@ pub fn settings() -> (Value, Value) {
                 "rules": {
                     "type": "object",
                     "maxProperties": 100,
-                    "description": "The rules, keyed by id. Each one is checked on every message; the rules are checked in the order of their ids, and the first one that trips acts unless it says to continue.",
+                    "description": "config-automod-rules",
                     "propertyNames": { "pattern": RULE_ID },
                     "additionalProperties": rule()
                 }
@@ -104,7 +104,7 @@ pub fn settings() -> (Value, Value) {
 fn antiraid() -> Value {
     json!({
         "type": ["object", "null"],
-        "description": "Antiraid: the levels a server is raised to while a raid runs. Absent means antiraid is off.",
+        "description": "config-automod-antiraid",
         "x-ui": { "level": "advanced" },
         "properties": {
             "levels": {
@@ -112,18 +112,18 @@ fn antiraid() -> Value {
                 "minItems": 2,
                 "maxItems": 10,
                 "uniqueItems": true,
-                "description": "The levels, the first being the calm one. Defaults to none, low, medium, high, lockdown.",
+                "description": "config-automod-levels",
                 "items": { "type": "string", "pattern": LEVEL_NAME }
             },
             "effects": {
                 "type": "object",
-                "description": "What each level does, keyed by level name. A level without an entry does nothing.",
+                "description": "config-automod-effects",
                 "propertyNames": { "pattern": LEVEL_NAME },
                 "additionalProperties": antiraid_effect()
             },
             "quarantine_release": {
                 "const": false,
-                "description": "Reserved: a quarantine is released by a moderator, never by a level going down."
+                "description": "config-automod-quarantine_release"
             }
         },
         "additionalProperties": false
@@ -140,7 +140,7 @@ fn antiraid_effect() -> Value {
                     "channels": {
                         "type": "array",
                         "maxItems": 100,
-                        "description": "The channels to slow down. Empty means every text channel of the server.",
+                        "description": "config-automod-channels",
                         "items": { "type": "string", "pattern": SNOWFLAKE }
                     },
                     "seconds": { "type": "integer", "minimum": 0, "maximum": 21600 }
@@ -150,12 +150,12 @@ fn antiraid_effect() -> Value {
             },
             "pause_invites": {
                 "type": "boolean",
-                "description": "Whether new invites are switched off while the level lasts."
+                "description": "config-automod-pause_invites"
             },
             "quarantine": {
                 "type": "object",
                 "properties": {
-                    "role": { "type": "string", "pattern": SNOWFLAKE, "description": "A role of the server. Absent means a role Closure creates." },
+                    "role": { "type": "string", "pattern": SNOWFLAKE, "description": "config-automod-role" },
                     "marker_role": { "type": "string", "pattern": SNOWFLAKE }
                 },
                 "additionalProperties": false
@@ -163,7 +163,7 @@ fn antiraid_effect() -> Value {
             "notify_channel": {
                 "type": "string",
                 "pattern": SNOWFLAKE,
-                "description": "A channel that is told when the level changes."
+                "description": "config-automod-notify_channel"
             }
         },
         "additionalProperties": false
@@ -218,32 +218,32 @@ fn rule() -> Value {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 64,
-                "description": "The name shown in logs. Defaults to the id."
+                "description": "config-automod-name"
             },
             "enabled": { "type": "boolean" },
             "triggers": {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 20,
-                "description": "Any one of them tripping trips the rule.",
+                "description": "config-automod-triggers",
                 "items": trigger()
             },
             "actions": {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 12,
-                "description": "Run in order.",
+                "description": "config-automod-actions",
                 "items": action()
             },
             "scope": scope(),
             "cooldown": {
                 "type": "string",
                 "pattern": DURATION,
-                "description": "After the rule fired for a member, it is skipped for that member for this long."
+                "description": "config-automod-cooldown"
             },
             "continue_after_match": {
                 "type": "boolean",
-                "description": "Whether the rules after this one still run when it trips."
+                "description": "config-automod-continue_after_match"
             }
         },
         "required": ["triggers", "actions"],

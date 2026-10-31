@@ -19,7 +19,7 @@ use unic_langid::LanguageIdentifier;
 /// Namespace of the catalogs shared by every module.
 pub const CORE_NAMESPACE: &str = "core";
 
-const CORE_EN: &str = include_str!("../locales/en/core.ftl");
+pub const CORE_EN: &str = include_str!("../locales/en/core.ftl");
 const CORE_JA: &str = include_str!("../locales/ja/core.ftl");
 
 #[derive(Debug, thiserror::Error)]

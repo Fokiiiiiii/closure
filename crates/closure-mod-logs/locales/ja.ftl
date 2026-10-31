@@ -1,4 +1,11 @@
 module-description = メッセージの編集と削除、チャンネル・スレッド・ロール・メンバー・ボイスの変更、絵文字・スタンプ・ステージの変更をチャンネルに投稿します。
+config-logs-channel = エントリを投稿するチャンネル。省くと、サーバーのログチャンネルを使います。
+config-logs-message_edits = メッセージの編集を投稿します。
+config-logs-message_deletes = メッセージの削除を、履歴が保存していた本文と添付ファイルとともに投稿します。
+config-logs-member_joins = メンバーの参加を投稿します。
+config-logs-member_leaves = メンバーの退出を投稿します。
+config-logs-bans = メンバーの BAN と BAN 解除を投稿します。
+config-logs-keep_attachments = 添付ファイルを、削除や編集のときだけでなく、メッセージが届いたときに保存します。保存領域を使います。サーバーのファイルには上限があり、メッセージ履歴の保持期間の間残ります。
 logs-edited = メッセージ編集
 logs-deleted = メッセージ削除
 logs-bulk = { $count } 件のメッセージを一括削除

@@ -58,18 +58,18 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
         "properties": {
             "channel": {
                 "anyOf": [{ "type": "string", "pattern": "^[1-9][0-9]*$" }, { "type": "null" }],
-                "description": "The channel the entries are posted to. Left out, the guild's log channel.",
+                "description": "config-logs-channel",
                 "x-ui": { "level": "basic" }
             },
-            "message_edits": { "type": "boolean", "description": "Post the edits of messages." },
+            "message_edits": { "type": "boolean", "description": "config-logs-message_edits" },
             "message_deletes": {
                 "type": "boolean",
-                "description": "Post the deletions of messages, with their text and files as the history kept them.",
+                "description": "config-logs-message_deletes",
                 "x-ui": { "level": "basic" }
             },
-            "member_joins": { "type": "boolean", "description": "Post the joins of members." },
-            "member_leaves": { "type": "boolean", "description": "Post the departures of members." },
-            "bans": { "type": "boolean", "description": "Post the bans and unbans of members." },
+            "member_joins": { "type": "boolean", "description": "config-logs-member_joins" },
+            "member_leaves": { "type": "boolean", "description": "config-logs-member_leaves" },
+            "bans": { "type": "boolean", "description": "config-logs-bans" },
             "channels": { "type": "boolean" },
             "threads": { "type": "boolean" },
             "roles": { "type": "boolean" },
@@ -82,7 +82,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "stage_instances": { "type": "boolean" },
             "keep_attachments": {
                 "type": "boolean",
-                "description": "Keep the files of attachments as their messages arrive, not only when a message is deleted or edited. Uses storage: a server's files are capped and kept for the message history's retention.",
+                "description": "config-logs-keep_attachments",
                 "x-ui": { "level": "basic" }
             }
         },
