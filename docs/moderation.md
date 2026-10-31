@@ -300,7 +300,8 @@ the moderator, the reason and, for a warning or a timed action, an expiry.
 ## Direct messages
 
 When `dm_on_action` is on, the member is messaged about a warning, a timeout, a voice mute, a kick or a
-ban. The message is in the server's language and gives the reason.
+ban. The message is an embed in the server's language: its title is the kind of punishment as the log
+names it, its colour is the one the log gives that kind, and its description gives the reason.
 
 - A kick or a ban is messaged **before** it happens, because a kicked member shares no server with
   the bot and cannot be messaged afterwards. If the kick or ban then fails, the message was still sent.

@@ -393,7 +393,14 @@ fn dm_contents(harness: &Harness) -> Vec<String> {
         .actions()
         .into_iter()
         .filter_map(|action| match action {
-            Action::SendDirectMessage { content, .. } => content,
+            Action::SendDirectMessage {
+                content, embeds, ..
+            } => content.or_else(|| {
+                embeds
+                    .into_iter()
+                    .next()
+                    .and_then(|embed| embed.description)
+            }),
             _ => None,
         })
         .collect()
@@ -1011,6 +1018,42 @@ async fn a_ban_for_good_that_replaces_a_timed_one_drops_its_timer() {
         .await
         .unwrap();
     assert_eq!(harness.jobs(), 0, "the old timer would lift the new ban");
+}
+
+#[tokio::test]
+async fn a_direct_message_about_a_punishment_is_an_embed_titled_with_its_kind() {
+    let harness = harness();
+    harness
+        .invoke(with_reason(target("warn", MEMBER), Some("spam")))
+        .await
+        .unwrap();
+
+    let embeds = harness
+        .api()
+        .actions()
+        .into_iter()
+        .find_map(|action| match action {
+            Action::SendDirectMessage {
+                content, embeds, ..
+            } => {
+                assert_eq!(content, None, "the sentence is the embed's description");
+                Some(embeds)
+            }
+            _ => None,
+        })
+        .expect("a direct message");
+    let [embed] = embeds.as_slice() else {
+        panic!("one embed: {embeds:?}")
+    };
+    assert_eq!(embed.title.as_deref(), Some("Warning"));
+    assert_eq!(embed.color, Some(0x00FA_A61A));
+    assert!(
+        embed
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("spam")),
+        "{embed:?}"
+    );
 }
 
 #[tokio::test]

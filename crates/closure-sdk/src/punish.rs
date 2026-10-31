@@ -11,10 +11,11 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use twilight_model::channel::message::Embed;
 
 use crate::dm::{self, DirectMessage, Sent};
 use crate::duration::format_in;
-use crate::embed::escape;
+use crate::embed::{DESCRIPTION_LIMIT, EmbedBuilder, escape, truncate};
 use crate::modlog;
 
 mod roles;
@@ -277,6 +278,7 @@ impl<'a> Punisher<'a> {
         let note = self
             .notify(
                 target,
+                "warn",
                 "punish-dm-warned",
                 &Args::new()
                     .with("reason", dm_reason(self.ctx, reason.as_deref()))
@@ -318,6 +320,7 @@ impl<'a> Punisher<'a> {
         let note = self
             .notify(
                 target,
+                "timeout",
                 "punish-dm-timed-out",
                 &Args::new()
                     .with("duration", format_in(self.ctx, self.ctx.locale, duration))
@@ -375,6 +378,7 @@ impl<'a> Punisher<'a> {
         let note = self
             .notify(
                 target,
+                "kick",
                 "punish-dm-kicked",
                 &Args::new().with("reason", dm_reason(self.ctx, reason.as_deref())),
             )
@@ -406,6 +410,7 @@ impl<'a> Punisher<'a> {
             Some(duration) => {
                 self.notify(
                     target,
+                    "ban",
                     "punish-dm-banned-for",
                     &Args::new()
                         .with("duration", format_in(self.ctx, self.ctx.locale, duration))
@@ -416,6 +421,7 @@ impl<'a> Punisher<'a> {
             None => {
                 self.notify(
                     target,
+                    "ban",
                     "punish-dm-banned",
                     &Args::new().with("reason", dm_reason(self.ctx, reason.as_deref())),
                 )
@@ -508,6 +514,7 @@ impl<'a> Punisher<'a> {
             Some(duration) => {
                 self.notify(
                     target,
+                    "vcmute",
                     "punish-dm-voice-muted-for",
                     &Args::new()
                         .with("duration", format_in(self.ctx, self.ctx.locale, duration))
@@ -518,6 +525,7 @@ impl<'a> Punisher<'a> {
             None => {
                 self.notify(
                     target,
+                    "vcmute",
                     "punish-dm-voice-muted",
                     &Args::new().with("reason", reason_text),
                 )
@@ -866,14 +874,22 @@ impl<'a> Punisher<'a> {
         }
     }
 
-    /// Messages `user` in the server language when the server wants that. Returns the note for the
-    /// reply when the message did not arrive. A member who is not in the server gets no note.
-    async fn notify(&self, user: UserId, key: &str, args: &Args) -> Option<Note> {
+    /// Messages `user` in the server language when the server wants that, as an embed titled with the
+    /// kind of the punishment. Returns the note for the reply when the message did not arrive. A
+    /// member who is not in the server gets no note.
+    async fn notify(&self, user: UserId, kind: &str, key: &str, args: &Args) -> Option<Note> {
         if !self.settings.dm {
             return None;
         }
         let text = self.ctx.t_core(self.ctx.locale, key, args);
-        match dm::send(self.ctx, user, DirectMessage::text(text)).await {
+        let embed = match notice(self.ctx, kind, &text) {
+            Ok(embed) => embed,
+            Err(error) => {
+                tracing::error!(user = %user, kind, ?error, "a direct message could not be built");
+                return Some(Note::DmNotDelivered);
+            }
+        };
+        match dm::send(self.ctx, user, DirectMessage::embed(embed)).await {
             Ok(Sent::Delivered(_))
             | Err(UserError::Module(ModuleError::Discord(DiscordError::NotFound))) => None,
             Ok(Sent::Closed) | Err(_) => Some(Note::DmNotDelivered),
@@ -950,6 +966,17 @@ fn timeout_seconds(duration: Duration) -> Result<u32, UserError> {
         .ok()
         .filter(|seconds| *seconds <= MAX_TIMEOUT_SECONDS)
         .ok_or_else(|| UserError::sdk("punish-timeout-too-long"))
+}
+
+/// The direct message about a punishment as an embed: the kind of the punishment as its title, in the
+/// colour the moderation log gives that kind, and the sentence as its description.
+fn notice(ctx: &EventContext, kind: &str, text: &str) -> Result<Embed, UserError> {
+    Ok(EmbedBuilder::new()
+        .title(modlog::kind_name(ctx, kind))
+        .color(modlog::color(kind, false))
+        .description(truncate(text, DESCRIPTION_LIMIT))
+        .timestamp(ctx.now())
+        .build()?)
 }
 
 /// The reason of a punishment as a direct message says it: escaped, or the words for no reason.

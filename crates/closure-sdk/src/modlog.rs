@@ -13,7 +13,7 @@ use crate::duration::{TimeStyle, timestamp};
 use crate::embed::{Color, EmbedBuilder, FIELD_VALUE_LIMIT, escape, truncate};
 
 /// The kinds the catalog names (`modlog-kind-<kind>`). Any other kind is shown as it is.
-const KNOWN_KINDS: [&str; 7] = [
+const KNOWN_KINDS: [&str; 9] = [
     "warn",
     "timeout",
     "untimeout",
@@ -21,6 +21,8 @@ const KNOWN_KINDS: [&str; 7] = [
     "ban",
     "unban",
     "note",
+    "vcmute",
+    "vcunmute",
 ];
 
 /// Grey, for a case that was revoked whatever its kind.
@@ -114,7 +116,7 @@ pub fn embed(ctx: &EventContext, case: &Case) -> EmbedBuilder {
     builder
 }
 
-fn kind_name(ctx: &EventContext, kind: &str) -> String {
+pub(crate) fn kind_name(ctx: &EventContext, kind: &str) -> String {
     if KNOWN_KINDS.contains(&kind) {
         ctx.t_core(ctx.locale, &format!("modlog-kind-{kind}"), &Args::new())
     } else {
@@ -122,14 +124,14 @@ fn kind_name(ctx: &EventContext, kind: &str) -> String {
     }
 }
 
-fn color(kind: &str, revoked: bool) -> Color {
+pub(crate) fn color(kind: &str, revoked: bool) -> Color {
     if revoked {
         return REVOKED_COLOR;
     }
     match kind {
-        "warn" | "timeout" | "kick" => Color::Warning,
+        "warn" | "timeout" | "kick" | "vcmute" => Color::Warning,
         "ban" => Color::Error,
-        "unban" | "untimeout" => Color::Success,
+        "unban" | "untimeout" | "vcunmute" => Color::Success,
         _ => Color::Info,
     }
 }

@@ -313,6 +313,8 @@ async fn the_color_and_title_follow_the_kind() {
         ("ban", 0x00F0_4747, "Ban"),
         ("unban", 0x0043_B581, "Unban"),
         ("note", 0x002B_2D31, "Note"),
+        ("vcmute", 0x00FA_A61A, "Voice mute"),
+        ("vcunmute", 0x0043_B581, "Voice unmute"),
         ("custom", 0x002B_2D31, "custom"),
     ];
     for (kind, _, _) in kinds {

@@ -690,7 +690,14 @@ fn dm_contents(harness: &Harness) -> Vec<String> {
         .actions()
         .into_iter()
         .filter_map(|action| match action {
-            Action::SendDirectMessage { content, .. } => content,
+            Action::SendDirectMessage {
+                content, embeds, ..
+            } => content.or_else(|| {
+                embeds
+                    .into_iter()
+                    .next()
+                    .and_then(|embed| embed.description)
+            }),
             _ => None,
         })
         .collect()

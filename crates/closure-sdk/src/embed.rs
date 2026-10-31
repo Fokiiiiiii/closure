@@ -10,7 +10,7 @@ use twilight_model::util::Timestamp;
 use crate::UserError;
 
 const TITLE_LIMIT: usize = 256;
-const DESCRIPTION_LIMIT: usize = 4096;
+pub(crate) const DESCRIPTION_LIMIT: usize = 4096;
 const FIELDS_LIMIT: usize = 25;
 const FIELD_NAME_LIMIT: usize = 256;
 pub const FIELD_VALUE_LIMIT: usize = 1024;
