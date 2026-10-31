@@ -162,9 +162,10 @@ pub fn merge_basic(
     yaml: &str,
     registry: &ModuleRegistry,
 ) -> Result<GuildOverrides, ConfigError> {
-    // The typed parse gives the line-numbered errors and the size and alias limits.
-    parse_overrides(yaml)?;
-    let patch = match parse_value(yaml)? {
+    // The typed parse gives the line-numbered errors and the size and alias limits, and it reads
+    // each scalar as a full document does. The raw parse is kept only for the `null`s, which clear.
+    let typed = to_value(&parse_overrides(yaml)?)?;
+    let patch = match normalize(parse_value(yaml)?, Some(&typed)) {
         Value::Null => Map::new(),
         Value::Object(map) => map,
         _ => {
@@ -190,6 +191,24 @@ pub fn merge_basic(
         return Err(ConfigError::Invalid(issues));
     }
     from_value(Value::Object(merged))
+}
+
+/// The patch with each value taken as the typed parse reads it, so that `"1"` or `"yes"` mean what
+/// they mean in a full document. `null` stays `null`: it clears, and the typed form has no trace of it.
+fn normalize(raw: Value, typed: Option<&Value>) -> Value {
+    match (raw, typed) {
+        (Value::Null, _) => Value::Null,
+        (Value::Object(raw), Some(Value::Object(typed))) => Value::Object(
+            raw.into_iter()
+                .map(|(key, item)| {
+                    let normalized = normalize(item, typed.get(&key));
+                    (key, normalized)
+                })
+                .collect(),
+        ),
+        (_, Some(typed)) if !typed.is_null() => typed.clone(),
+        (raw, _) => raw,
+    }
 }
 
 fn merge_modules(
@@ -580,5 +599,14 @@ mod tests {
         });
         let basic = basic_schema(&schema, false).unwrap();
         assert_eq!(basic["required"], json!(["inner"]));
+    }
+
+    #[test]
+    fn a_basic_merge_reads_each_scalar_as_the_full_document_does() {
+        let yaml = "version: \"1\"\nlog_channel: \"123456789012345678\"\nmoderator_roles: [\"1\", 2]\n\
+                    modules:\n  warn:\n    enabled: \"yes\"\n    config: { limit: 4 }\n";
+        let basic = merge_basic(&GuildOverrides::default(), yaml, &registry()).unwrap();
+        let full = crate::yaml::parse_overrides(yaml).unwrap();
+        assert_eq!(value(&basic), value(&full));
     }
 }
