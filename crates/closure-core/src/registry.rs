@@ -9,6 +9,9 @@ use crate::module::{CommandSpec, ContextCommandSpec, ContextKind, Module, Module
 use crate::permission::{PermissionKey, PermissionSpec};
 use crate::subscription::Subscription;
 
+/// How many context-menu commands of each kind Discord takes for an application.
+const MAX_CONTEXT_COMMANDS_PER_KIND: usize = 15;
+
 /// The validated, dependency-ordered set of modules the bot runs.
 ///
 /// Construction fails on any inconsistency (duplicate ids, unknown or cyclic dependencies,
@@ -63,6 +66,7 @@ impl ModuleRegistry {
 
         let registry = Self { modules, index };
         registry.check_command_collisions()?;
+        registry.check_context_commands()?;
         Ok(registry)
     }
 
@@ -78,6 +82,33 @@ impl ModuleRegistry {
                         second: manifest.id.clone(),
                     });
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Discord takes at most 15 context-menu commands of each kind for an application, and a
+    /// name can be taken once per kind across all modules.
+    fn check_context_commands(&self) -> Result<(), CoreError> {
+        let mut owners: HashMap<(ContextKind, &str), &ModuleId> = HashMap::new();
+        let mut counts: BTreeMap<ContextKind, usize> = BTreeMap::new();
+        for (module, spec) in self.context_commands() {
+            if let Some(first) = owners.insert((spec.kind, spec.name.as_str()), module) {
+                return Err(CoreError::CommandCollision {
+                    command: spec.name.clone(),
+                    first: first.clone(),
+                    second: module.clone(),
+                });
+            }
+            *counts.entry(spec.kind).or_default() += 1;
+        }
+        for (kind, count) in counts {
+            if count > MAX_CONTEXT_COMMANDS_PER_KIND {
+                return Err(CoreError::TooManyContextCommands {
+                    kind,
+                    count,
+                    limit: MAX_CONTEXT_COMMANDS_PER_KIND,
+                });
             }
         }
         Ok(())
@@ -426,49 +457,86 @@ mod tests {
     }
 
     #[test]
-    fn context_commands_are_limited_to_five_per_kind_and_named_once() {
-        use crate::module::ContextKind;
+    fn context_commands_are_limited_to_fifteen_per_kind_for_the_application() {
         let spec = |name: &str, kind| ContextCommandSpec {
             name: name.into(),
             kind,
         };
-        let module = |commands: Vec<ContextCommandSpec>| {
-            let manifest = commands.into_iter().fold(
-                ModuleManifest::new(id("a"), "a", "0.1.0"),
+        let commands = |prefix: &str, count: usize, kind: ContextKind| -> Vec<ContextCommandSpec> {
+            (0..count)
+                .map(|n| spec(&format!("{prefix} {n}"), kind))
+                .collect()
+        };
+        let module = |name: &str, specs: Vec<ContextCommandSpec>| -> Arc<dyn Module> {
+            let manifest = specs.into_iter().fold(
+                ModuleManifest::new(id(name), name, "0.1.0"),
                 ModuleManifest::context_command,
             );
-            ModuleRegistry::new(vec![Arc::new(Stub(manifest))])
+            Arc::new(Stub(manifest))
         };
-        let users: Vec<_> = (0..5)
-            .map(|n| spec(&format!("user {n}"), ContextKind::User))
-            .collect();
-        assert!(module(users.clone()).is_ok());
-        let mut six = users;
-        six.push(spec("user 5", ContextKind::User));
-        assert!(module(six).is_err(), "six user commands");
+        let single = |specs: Vec<ContextCommandSpec>| ModuleRegistry::new(vec![module("a", specs)]);
+
         assert!(
-            module(vec![spec("", ContextKind::Message)]).is_err(),
-            "empty name"
-        );
-        assert!(
-            module(vec![spec(&"x".repeat(33), ContextKind::Message)]).is_err(),
-            "name over 32"
-        );
-        assert!(
-            module(vec![
-                spec("report", ContextKind::Message),
-                spec("report", ContextKind::Message)
+            ModuleRegistry::new(vec![
+                module("a", commands("a", 10, ContextKind::User)),
+                module("b", commands("b", 5, ContextKind::User)),
             ])
-            .is_err(),
-            "declared twice"
+            .is_ok(),
+            "fifteen user commands over two modules"
+        );
+        let sixteen = ModuleRegistry::new(vec![
+            module("a", commands("a", 10, ContextKind::User)),
+            module("b", commands("b", 6, ContextKind::User)),
+        ]);
+        assert_eq!(
+            sixteen.unwrap_err(),
+            CoreError::TooManyContextCommands {
+                kind: ContextKind::User,
+                count: 16,
+                limit: 15,
+            },
+            "sixteen user commands over two modules"
+        );
+        let mut mixed = commands("u", 15, ContextKind::User);
+        mixed.extend(commands("m", 15, ContextKind::Message));
+        assert!(single(mixed).is_ok(), "fifteen of each kind");
+
+        let duplicate = ModuleRegistry::new(vec![
+            module("a", vec![spec("report", ContextKind::Message)]),
+            module("b", vec![spec("report", ContextKind::Message)]),
+        ]);
+        assert_eq!(
+            duplicate.unwrap_err(),
+            CoreError::CommandCollision {
+                command: "report".into(),
+                first: id("a"),
+                second: id("b"),
+            },
+            "one message name in two modules"
         );
         assert!(
-            module(vec![
+            single(vec![
                 spec("report", ContextKind::User),
-                spec("report", ContextKind::Message)
+                spec("report", ContextKind::Message),
             ])
             .is_ok(),
             "one name for a user and a message command"
+        );
+        assert!(
+            single(vec![spec("", ContextKind::Message)]).is_err(),
+            "empty name"
+        );
+        assert!(
+            single(vec![spec(&"x".repeat(33), ContextKind::Message)]).is_err(),
+            "name over 32"
+        );
+        assert!(
+            single(vec![
+                spec("report", ContextKind::Message),
+                spec("report", ContextKind::Message),
+            ])
+            .is_err(),
+            "declared twice"
         );
     }
 

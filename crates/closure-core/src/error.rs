@@ -3,7 +3,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::capability::Capability;
-use crate::module::ModuleId;
+use crate::module::{ContextKind, ModuleId};
 
 /// Errors raised while assembling modules at startup. All of them are fatal by design:
 /// a mis-wired module set must never reach the gateway.
@@ -43,6 +43,14 @@ pub enum CoreError {
         command: String,
         first: ModuleId,
         second: ModuleId,
+    },
+    #[error(
+        "{count} {kind:?} context-menu commands are declared, but an application takes at most {limit} of each kind"
+    )]
+    TooManyContextCommands {
+        kind: ContextKind,
+        count: usize,
+        limit: usize,
     },
     #[error("invalid command `{command}` in module `{module}`: {reason}")]
     InvalidCommand {

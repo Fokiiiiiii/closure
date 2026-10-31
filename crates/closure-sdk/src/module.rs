@@ -794,21 +794,6 @@ impl ModuleBuilder {
                 ));
             }
         }
-        // Discord takes five context-menu commands of each kind for an application.
-        for kind in [ContextKind::User, ContextKind::Message] {
-            let count = self
-                .manifest
-                .context_commands
-                .iter()
-                .filter(|spec| spec.kind == kind)
-                .count();
-            if count > 5 {
-                self.problem.get_or_insert(self.invalid(
-                    "",
-                    format!("has {count} {kind:?} commands; at most 5 are allowed"),
-                ));
-            }
-        }
         // Each autocomplete has to name a command and an option that can be autocompleted, and
         // the option is published as such.
         let declared: Vec<_> = self.autocompletes.keys().cloned().collect();

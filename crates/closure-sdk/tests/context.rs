@@ -103,13 +103,18 @@ async fn a_context_command_of_the_other_kind_or_of_no_name_is_not_answered() {
 }
 
 #[test]
-fn at_most_five_user_and_five_message_commands_are_built() {
+fn a_module_builds_with_fifteen_commands_of_each_kind() {
     let mut builder = ModuleBuilder::new("review", "Review", "0.1.0").unwrap();
-    for n in 0..6 {
+    for n in 0..15 {
         builder = builder.user_command(
             &format!("user {n}"),
             |cx| async move { cx.reply("x").await },
         );
+        builder =
+            builder.message_command(
+                &format!("message {n}"),
+                |cx| async move { cx.reply("x").await },
+            );
     }
-    assert!(builder.build().is_err(), "six user commands");
+    assert!(builder.build().is_ok(), "fifteen of each kind");
 }

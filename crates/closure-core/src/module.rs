@@ -537,21 +537,6 @@ impl ModuleManifest {
                 return Err(invalid("is declared twice"));
             }
         }
-        for kind in [ContextKind::User, ContextKind::Message] {
-            if self
-                .context_commands
-                .iter()
-                .filter(|spec| spec.kind == kind)
-                .count()
-                > 5
-            {
-                return Err(CoreError::InvalidCommand {
-                    module: self.id.clone(),
-                    command: format!("{kind:?}"),
-                    reason: "at most 5 user and 5 message commands are allowed per module".into(),
-                });
-            }
-        }
         let mut kinds = BTreeSet::new();
         for subscription in &self.subscriptions {
             let invalid = |reason: &str| CoreError::InvalidSubscription {
