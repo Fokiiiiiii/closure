@@ -8,6 +8,7 @@ Warn members, note about them, and look at and revoke the cases of a server.
 ## Capabilities
 
 - `send_messages`
+- `manage_messages`
 - `read_guild`
 - `kick_members`
 - `ban_members`
@@ -20,6 +21,7 @@ Warn members, note about them, and look at and revoke the cases of a server.
 - `schedule`
 - `cases`
 - `send_direct_messages`
+- `read_messages`
 
 ## Permissions
 
@@ -33,6 +35,7 @@ Warn members, note about them, and look at and revoke the cases of a server.
 | `moderation.kick` | 50 | Kick members |
 | `moderation.ban` | 75 | Ban and unban members |
 | `moderation.voice` | 50 | Mute members in voice channels and lift it |
+| `moderation.clear` | 50 | Delete the newest messages of a channel |
 
 ## Commands
 
@@ -70,6 +73,17 @@ Show the active warnings of a member
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member |
+
+### `/clear`
+
+Delete the newest messages of the channel
+
+- Japanese name: `一括削除`
+- Japanese description: チャンネルの新しいメッセージを消します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `count` | 件数 | integer | yes | - | How many messages, from 1 to 100 |
 
 ### `/case`
 

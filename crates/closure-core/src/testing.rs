@@ -119,6 +119,8 @@ pub struct MockApi {
     lookups: Mutex<usize>,
     /// The entries of the pretend Discord's audit log, oldest first.
     audit_log: Mutex<Vec<AuditLogEntry>>,
+    /// The messages of each channel, as the pretend Discord holds them.
+    channel_messages: Mutex<HashMap<ChannelId, Vec<Message>>>,
 }
 
 impl MockApi {
@@ -195,7 +197,10 @@ impl MockApi {
             } => Ok(sent_message(*channel_id, message_id.get())
                 .map_or(Outcome::None, |message| Outcome::Message(Box::new(message)))),
             // The pretend Discord holds nothing else: lists come back empty, counts as zero.
-            Action::GetMessages { .. } | Action::GetPins { .. } => Ok(Outcome::Messages(vec![])),
+            Action::GetMessages {
+                channel_id, limit, ..
+            } => Ok(self.newest_messages(*channel_id, *limit)),
+            Action::GetPins { .. } => Ok(Outcome::Messages(vec![])),
             Action::GetReactionUsers { .. } => Ok(Outcome::Users(vec![])),
             Action::ListThreadMembers { .. } => Ok(Outcome::ThreadMembers(vec![])),
             Action::ListInvites { .. } => Ok(Outcome::Invites(vec![])),
@@ -228,6 +233,27 @@ impl MockApi {
         let id = u64::try_from(lock(&self.actions).len()).unwrap_or(u64::MAX) + 1;
         sent_message(channel, id)
             .map_or(Outcome::None, |message| Outcome::Message(Box::new(message)))
+    }
+
+    /// The newest messages of a channel, up to `limit`, as Discord lists them.
+    fn newest_messages(&self, channel: ChannelId, limit: u16) -> Outcome {
+        let mut messages = lock(&self.channel_messages)
+            .get(&channel)
+            .cloned()
+            .unwrap_or_default();
+        messages.sort_by_key(|message| std::cmp::Reverse(message.id.get()));
+        messages.truncate(usize::from(limit));
+        Outcome::Messages(messages)
+    }
+
+    /// Adds a message to a channel, as Discord holds it. The id gives the message its age.
+    pub fn add_channel_message(&self, channel: ChannelId, id: u64) {
+        if let Some(message) = sent_message(channel, id) {
+            lock(&self.channel_messages)
+                .entry(channel)
+                .or_default()
+                .push(message);
+        }
     }
 
     /// Adds an entry to the guild's audit log, as Discord would have it.

@@ -22,6 +22,7 @@ them, keeps notes, and records every one of these as a case. The code is in
 | `/unban user [reason]` | Lifts the ban of a member. | `moderation.ban` (admin) |
 | `/vcmute user [duration] [reason]` | Mutes a member in voice channels, for `duration` (or until a date and time) or until `/vcunmute`. | `moderation.voice` (moderator) |
 | `/vcunmute user [reason]` | Lifts the voice mute of a member. | `moderation.voice` (moderator) |
+| `/clear count` | Deletes the newest messages of the channel, from 1 to 100, whoever wrote them. A message older than 14 days cannot be deleted in bulk, so it is left, and the reply counts it. | `moderation.clear` (moderator) |
 
 A permission key can be changed per server with `permissions.keys` (see [configuration](configuration.md)).
 
@@ -356,7 +357,7 @@ lift it with `/unban` or ban it again with a duration.
 ## What the bot needs from Discord
 
 - Permissions: **Kick Members**, **Ban Members**, **Moderate Members** (for timeouts), **Mute Members**
-  (for voice mutes), **Manage Roles** and **Manage Channels** (for the `role` methods), and **Send Messages** in the log
+  (for voice mutes), **Manage Messages** (for `/clear`), **Manage Roles** and **Manage Channels** (for the `role` methods), and **Send Messages** in the log
   channel. The module does not need View Audit Log.
 - Gateway intent: **Server Members**, a privileged intent for the [rejoining members](#rejoining-members).
   Switch it on for the bot under *Bot* → *Privileged Gateway Intents* in the developer portal. The

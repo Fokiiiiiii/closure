@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::json;
 use twilight_model::gateway::Intents;
 
+mod clear;
 mod history;
 mod rejoin;
 mod restrict;
@@ -994,31 +995,9 @@ fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
     punish::jobs(builder)
 }
 
-/// The module, still open for a test to build on.
-pub fn builder() -> Result<ModuleBuilder, CoreError> {
-    let (schema, defaults) = settings();
-    let builder = ModuleBuilder::new("moderation", "Moderation", env!("CARGO_PKG_VERSION"))?
-        .capability(Capability::Cases)
-        .capability(Capability::SendMessages)
-        .capability(Capability::ReadGuild)
-        .capability(Capability::SendDirectMessages)
-        .capability(Capability::KickMembers)
-        .capability(Capability::BanMembers)
-        .capability(Capability::TimeoutMembers)
-        .capability(Capability::ManageRoles)
-        .capability(Capability::MuteMembers)
-        .capability(Capability::ManageChannels)
-        .capability(Capability::Schedule)
-        .capability(Capability::Storage)
-        // A privileged intent: it must be switched on for the bot in the Discord developer portal,
-        // or Discord refuses the gateway connection altogether.
-        .intents(Intents::GUILD_MEMBERS)
-        .on(Subscription::new(EventKind::MemberJoined), rejoin::on_join)
-        .on(Subscription::new(EventKind::ConfigChanged), config_changed)
-        .on(
-            Subscription::new(EventKind::ChannelCreated),
-            channel_created,
-        )
+/// The permission keys of the module, one for each kind of action a moderator takes.
+fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
+    Ok(builder
         .permission(PermissionSpec::new(
             "moderation.warn",
             Level::MODERATOR,
@@ -1059,6 +1038,40 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             Level::MODERATOR,
             "permission-moderation-voice",
         )?)
+        .permission(PermissionSpec::new(
+            "moderation.clear",
+            Level::MODERATOR,
+            "permission-moderation-clear",
+        )?))
+}
+
+/// The module, still open for a test to build on.
+pub fn builder() -> Result<ModuleBuilder, CoreError> {
+    let (schema, defaults) = settings();
+    let builder = ModuleBuilder::new("moderation", "Moderation", env!("CARGO_PKG_VERSION"))?
+        .capability(Capability::Cases)
+        .capability(Capability::SendMessages)
+        .capability(Capability::ReadGuild)
+        .capability(Capability::SendDirectMessages)
+        .capability(Capability::KickMembers)
+        .capability(Capability::BanMembers)
+        .capability(Capability::TimeoutMembers)
+        .capability(Capability::ManageRoles)
+        .capability(Capability::ManageMessages)
+        .capability(Capability::ReadMessages)
+        .capability(Capability::MuteMembers)
+        .capability(Capability::ManageChannels)
+        .capability(Capability::Schedule)
+        .capability(Capability::Storage)
+        // A privileged intent: it must be switched on for the bot in the Discord developer portal,
+        // or Discord refuses the gateway connection altogether.
+        .intents(Intents::GUILD_MEMBERS)
+        .on(Subscription::new(EventKind::MemberJoined), rejoin::on_join)
+        .on(Subscription::new(EventKind::ConfigChanged), config_changed)
+        .on(
+            Subscription::new(EventKind::ChannelCreated),
+            channel_created,
+        )
         .config(schema, defaults)
         .component(templates::ROUTE, templates::pick)
         .component(undo::ROUTE, undo::press)
@@ -1078,6 +1091,12 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 .requires("moderation.cases")
                 .handler(warnings),
         )
+        .command(
+            Command::<clear::Clear>::new("clear")
+                .requires("moderation.clear")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(clear::clear),
+        )
         .group(
             "case",
             [
@@ -1092,7 +1111,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                     .handler(case_revoke),
             ],
         );
-    Ok(punishments(builder)
+    Ok(permissions(punishments(builder))?
         .catalog(Locale::En, EN)
         .catalog(Locale::Ja, JA))
 }
