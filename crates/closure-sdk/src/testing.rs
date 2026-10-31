@@ -802,6 +802,7 @@ impl Harness {
             &attachment,
             data.as_deref(),
             0,
+            closure_core::attachments::GUILD_FILE_BYTES,
         )
         .await
     }

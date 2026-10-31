@@ -278,6 +278,7 @@ impl HistoryBackend for Db {
         Ok(removed)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn save_file(
         &self,
         guild: GuildId,
@@ -286,7 +287,10 @@ impl HistoryBackend for Db {
         attachment: &AttachmentInfo,
         data: Option<&[u8]>,
         at: i64,
+        max_bytes: u64,
     ) -> Result<(), HistoryError> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        lock_files(&mut tx, guild).await?;
         sqlx::query(
             "INSERT INTO message_files
                 (guild_id, message_id, attachment_id, channel_id, filename, size, content_type,
@@ -309,10 +313,11 @@ impl HistoryBackend for Db {
         .bind(data.is_some())
         .bind(data)
         .bind(at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(backend)?;
-        Ok(())
+        trim_stored(&mut tx, guild, max_bytes).await?;
+        tx.commit().await.map_err(backend)
     }
 
     async fn files_of(
@@ -355,11 +360,40 @@ impl HistoryBackend for Db {
     }
 
     async fn trim_files(&self, guild: GuildId, max_bytes: u64) -> Result<u64, HistoryError> {
-        // A stored file goes when the stored bytes older than it are less than the excess over the
-        // limit: the oldest files go first, and the last of them takes the excess past the limit.
-        let max = i64::try_from(max_bytes).unwrap_or(i64::MAX);
-        let removed = sqlx::query(
-            "WITH kept AS (
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        lock_files(&mut tx, guild).await?;
+        let removed = trim_stored(&mut tx, guild, max_bytes).await?;
+        tx.commit().await.map_err(backend)?;
+        Ok(removed)
+    }
+}
+
+/// Holds the guild's file lock until `tx` ends. Saves and trims of one guild then run one after the
+/// other, and each sees what the others left.
+async fn lock_files(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    guild: GuildId,
+) -> Result<(), HistoryError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("message_files:{}", guild.get()))
+        .execute(&mut **tx)
+        .await
+        .map_err(backend)?;
+    Ok(())
+}
+
+/// Drops the oldest stored files of `guild` until their bytes come to at most `max_bytes`, in the
+/// transaction `tx`; returns how many.
+async fn trim_stored(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    guild: GuildId,
+    max_bytes: u64,
+) -> Result<u64, HistoryError> {
+    // A stored file goes when the stored bytes older than it are less than the excess over the
+    // limit: the oldest files go first, and the last of them takes the excess past the limit.
+    let max = i64::try_from(max_bytes).unwrap_or(i64::MAX);
+    let removed = sqlx::query(
+        "WITH kept AS (
                 SELECT message_id, attachment_id, octet_length(data) AS size,
                        COALESCE(SUM(octet_length(data)) OVER (
                            ORDER BY kept_at, message_id, attachment_id
@@ -375,15 +409,14 @@ impl HistoryBackend for Db {
                AND files.message_id = kept.message_id
                AND files.attachment_id = kept.attachment_id
                AND kept.older < total.bytes - $2",
-        )
-        .bind(to_db(guild).map_err(backend)?)
-        .bind(max)
-        .execute(&self.pool)
-        .await
-        .map_err(backend)?
-        .rows_affected();
-        Ok(removed)
-    }
+    )
+    .bind(to_db(guild).map_err(backend)?)
+    .bind(max)
+    .execute(&mut **tx)
+    .await
+    .map_err(backend)?
+    .rows_affected();
+    Ok(removed)
 }
 
 #[cfg(test)]

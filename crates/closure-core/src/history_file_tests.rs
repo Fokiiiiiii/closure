@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::attachments::{Fetcher, keep_missing};
+use crate::attachments::{Fetcher, GUILD_FILE_BYTES, keep_missing};
 use crate::capability::{Capability, CapabilitySet};
 use crate::event::{AttachmentInfo, GuildId, MessageId};
 use crate::history::{HistoryBackend, HistoryError, MemoryHistory, MessageHistory};
@@ -62,7 +62,15 @@ fn message(id: u64) -> MessageId {
 
 async fn keep(backend: &MemoryHistory, attachment: &AttachmentInfo, data: Option<&[u8]>, at: i64) {
     backend
-        .save_file(guild(), Id::new(CHANNEL), message(10), attachment, data, at)
+        .save_file(
+            guild(),
+            Id::new(CHANNEL),
+            message(10),
+            attachment,
+            data,
+            at,
+            GUILD_FILE_BYTES,
+        )
         .await
         .unwrap();
 }

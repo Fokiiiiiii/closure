@@ -82,11 +82,16 @@ pub async fn keep_missing(
         .collect();
     while let Some((attachment, data)) = in_flight.next().await {
         backend
-            .save_file(guild, channel, message, attachment, data.as_deref(), at)
+            .save_file(
+                guild,
+                channel,
+                message,
+                attachment,
+                data.as_deref(),
+                at,
+                GUILD_FILE_BYTES,
+            )
             .await?;
-        if data.is_some() {
-            backend.trim_files(guild, GUILD_FILE_BYTES).await?;
-        }
     }
     Ok(())
 }

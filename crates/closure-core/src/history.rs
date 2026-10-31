@@ -160,6 +160,9 @@ pub trait HistoryBackend: Send + Sync {
     /// Keeps the file of an attachment of a message. `data` is `None` when the file could not be
     /// fetched. Keeping the same attachment again replaces its file,
     /// unless `data` is `None` and a file is already stored: then nothing changes.
+    /// Then the oldest stored files of the guild go past `max_bytes`, as [`Self::trim_files`] drops
+    /// them, all in the same step: a save never leaves the guild over its limit.
+    #[allow(clippy::too_many_arguments)]
     async fn save_file(
         &self,
         guild: GuildId,
@@ -168,6 +171,7 @@ pub trait HistoryBackend: Send + Sync {
         attachment: &AttachmentInfo,
         data: Option<&[u8]>,
         at: i64,
+        max_bytes: u64,
     ) -> Result<(), HistoryError>;
 
     /// The files kept for a message, in the order they were kept.
@@ -236,6 +240,7 @@ impl HistoryBackend for NoHistory {
         Err(HistoryError::Unavailable)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn save_file(
         &self,
         _: GuildId,
@@ -244,6 +249,7 @@ impl HistoryBackend for NoHistory {
         _: &AttachmentInfo,
         _: Option<&[u8]>,
         _: i64,
+        _: u64,
     ) -> Result<(), HistoryError> {
         Err(HistoryError::Unavailable)
     }
@@ -532,6 +538,7 @@ impl HistoryBackend for MemoryHistory {
         Ok(u64::try_from(removed).unwrap_or(u64::MAX))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn save_file(
         &self,
         guild: GuildId,
@@ -540,6 +547,7 @@ impl HistoryBackend for MemoryHistory {
         attachment: &AttachmentInfo,
         data: Option<&[u8]>,
         at: i64,
+        max_bytes: u64,
     ) -> Result<(), HistoryError> {
         let mut guilds = self.lock();
         let files = &mut guilds.entry(guild).or_default().files;
@@ -565,6 +573,7 @@ impl HistoryBackend for MemoryHistory {
             },
             data: data.map(<[u8]>::to_vec),
         });
+        trim(files, max_bytes);
         Ok(())
     }
 
@@ -605,27 +614,31 @@ impl HistoryBackend for MemoryHistory {
 
     async fn trim_files(&self, guild: GuildId, max_bytes: u64) -> Result<u64, HistoryError> {
         let mut guilds = self.lock();
-        let Some(messages) = guilds.get_mut(&guild) else {
-            return Ok(0);
-        };
-        messages.files.sort_by_key(|file| kept_order(&file.kept));
-        let size = |file: &MemoryFile| {
-            file.data
-                .as_ref()
-                .map_or(0, |data| u64::try_from(data.len()).unwrap_or(u64::MAX))
-        };
-        let mut total: u64 = messages.files.iter().map(size).sum();
-        let mut removed = 0;
-        while total > max_bytes {
-            let Some(oldest) = messages.files.iter().position(|file| file.data.is_some()) else {
-                break;
-            };
-            total = total.saturating_sub(size(&messages.files[oldest]));
-            messages.files.remove(oldest);
-            removed += 1;
-        }
-        Ok(removed)
+        Ok(guilds
+            .get_mut(&guild)
+            .map_or(0, |messages| trim(&mut messages.files, max_bytes)))
     }
+}
+
+/// Drops the oldest stored files until their bytes come to at most `max_bytes`; returns how many.
+fn trim(files: &mut Vec<MemoryFile>, max_bytes: u64) -> u64 {
+    files.sort_by_key(|file| kept_order(&file.kept));
+    let size = |file: &MemoryFile| {
+        file.data
+            .as_ref()
+            .map_or(0, |data| u64::try_from(data.len()).unwrap_or(u64::MAX))
+    };
+    let mut total: u64 = files.iter().map(size).sum();
+    let mut removed = 0;
+    while total > max_bytes {
+        let Some(oldest) = files.iter().position(|file| file.data.is_some()) else {
+            break;
+        };
+        total = total.saturating_sub(size(&files[oldest]));
+        files.remove(oldest);
+        removed += 1;
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -930,11 +943,27 @@ mod tests {
         };
         // Attachment 2 is saved first but kept later: the time it was kept decides the order.
         backend
-            .save_file(guild, channel, message, &picture(2), Some(b"later"), 200)
+            .save_file(
+                guild,
+                channel,
+                message,
+                &picture(2),
+                Some(b"later"),
+                200,
+                u64::MAX,
+            )
             .await
             .unwrap();
         backend
-            .save_file(guild, channel, message, &picture(1), Some(b"first"), 100)
+            .save_file(
+                guild,
+                channel,
+                message,
+                &picture(1),
+                Some(b"first"),
+                100,
+                u64::MAX,
+            )
             .await
             .unwrap();
         let listed: Vec<u64> = backend
@@ -951,6 +980,51 @@ mod tests {
         assert_eq!(
             backend.file_data(guild, message, 2).await.unwrap(),
             Some(b"later".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_save_past_the_limit_drops_the_oldest_at_once() {
+        let backend = MemoryHistory::default();
+        let (guild, channel, message) = (Id::new(1), Id::new(5), Id::new(10));
+        let picture = |id: u64| AttachmentInfo {
+            id,
+            filename: "photo.png".into(),
+            size: 6,
+            content_type: None,
+            url: format!("https://cdn.discordapp.com/attachments/5/{id}/photo.png"),
+        };
+        backend
+            .save_file(
+                guild,
+                channel,
+                message,
+                &picture(1),
+                Some(b"aaaaaa"),
+                100,
+                8,
+            )
+            .await
+            .unwrap();
+        backend
+            .save_file(
+                guild,
+                channel,
+                message,
+                &picture(2),
+                Some(b"bbbbbb"),
+                200,
+                8,
+            )
+            .await
+            .unwrap();
+
+        // The second save kept the limit by itself: nothing is left for a trim to drop.
+        assert_eq!(backend.trim_files(guild, 8).await.unwrap(), 0);
+        assert_eq!(backend.file_data(guild, message, 1).await.unwrap(), None);
+        assert_eq!(
+            backend.file_data(guild, message, 2).await.unwrap(),
+            Some(b"bbbbbb".to_vec())
         );
     }
 }

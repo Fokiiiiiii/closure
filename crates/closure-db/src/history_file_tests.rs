@@ -43,6 +43,7 @@ async fn keep(db: &Db, attachment: &AttachmentInfo, data: Option<&[u8]>, at: i64
         attachment,
         data,
         at,
+        closure_core::attachments::GUILD_FILE_BYTES,
     )
     .await
     .unwrap();
@@ -110,6 +111,69 @@ async fn trimming_drops_the_oldest_stored_files_until_the_bytes_fit(pool: PgPool
 
     assert_eq!(removed, 1);
     assert_eq!(attachment_ids(&db).await, [5, 6]);
+}
+
+#[sqlx::test]
+async fn a_save_past_the_limit_drops_the_oldest_at_once(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    db.migrate().await.unwrap();
+    for (id, data, at) in [
+        (4, &b"aaaaaa"[..], 1_700_000_100),
+        (5, &b"bbbbbb"[..], 1_700_000_200),
+    ] {
+        db.save_file(
+            Id::new(GUILD),
+            Id::new(CHANNEL),
+            Id::new(MESSAGE),
+            &picture(id),
+            Some(data),
+            at,
+            8,
+        )
+        .await
+        .unwrap();
+    }
+
+    // The second save kept the limit by itself: a trim afterwards has nothing left to drop.
+    assert_eq!(db.trim_files(Id::new(GUILD), 8).await.unwrap(), 0);
+    assert_eq!(attachment_ids(&db).await, [5]);
+}
+
+#[sqlx::test]
+async fn concurrent_saves_leave_the_guild_within_its_limit(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    db.migrate().await.unwrap();
+    let saves: Vec<_> = (1..=8_u64)
+        .map(|id| {
+            let db = db.clone();
+            tokio::spawn(async move {
+                let at = 1_700_000_000 + i64::try_from(id).unwrap();
+                db.save_file(
+                    Id::new(GUILD),
+                    Id::new(CHANNEL),
+                    Id::new(MESSAGE),
+                    &picture(id),
+                    Some(b"abc"),
+                    at,
+                    10,
+                )
+                .await
+            })
+        })
+        .collect();
+    for save in saves {
+        save.await.unwrap().unwrap();
+    }
+
+    // Three files of three bytes fit in ten: the five oldest went when the limit was passed.
+    let kept: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(octet_length(data)), 0)::bigint FROM message_files WHERE guild_id = $1",
+    )
+    .bind(i64::try_from(GUILD).unwrap())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 9);
 }
 
 #[sqlx::test]
