@@ -124,27 +124,27 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .permission(PermissionSpec::new(
             "automod.view",
             Level::MODERATOR,
-            "See the rules and the state of automod",
+            "permission-automod-view",
         )?)
         .permission(PermissionSpec::new(
             "automod.counters",
             Level::MODERATOR,
-            "Look at and change the counters of automod",
+            "permission-automod-counters",
         )?)
         .permission(PermissionSpec::new(
             "automod.antiraid.view",
             Level::MODERATOR,
-            "See the antiraid level and its quarantine",
+            "permission-automod-antiraid-view",
         )?)
         .permission(PermissionSpec::new(
             "automod.antiraid.set",
             Level::ADMIN,
-            "Raise or lower the antiraid level",
+            "permission-automod-antiraid-set",
         )?)
         .permission(PermissionSpec::new(
             "automod.antiraid.release",
             Level::MODERATOR,
-            "Release members from the antiraid quarantine",
+            "permission-automod-antiraid-release",
         )?)
         .config(schema, defaults)
         .group(

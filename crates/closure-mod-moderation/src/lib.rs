@@ -1022,42 +1022,42 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .permission(PermissionSpec::new(
             "moderation.warn",
             Level::MODERATOR,
-            "Warn members",
+            "permission-moderation-warn",
         )?)
         .permission(PermissionSpec::new(
             "moderation.note",
             Level::MODERATOR,
-            "Add notes about members",
+            "permission-moderation-note",
         )?)
         .permission(PermissionSpec::new(
             "moderation.cases",
             Level::MODERATOR,
-            "See the cases and warnings of members",
+            "permission-moderation-cases",
         )?)
         .permission(PermissionSpec::new(
             "moderation.revoke",
             Level::MODERATOR,
-            "Revoke cases",
+            "permission-moderation-revoke",
         )?)
         .permission(PermissionSpec::new(
             "moderation.timeout",
             Level::MODERATOR,
-            "Time members out and lift timeouts",
+            "permission-moderation-timeout",
         )?)
         .permission(PermissionSpec::new(
             "moderation.kick",
             Level::MODERATOR,
-            "Kick members",
+            "permission-moderation-kick",
         )?)
         .permission(PermissionSpec::new(
             "moderation.ban",
             Level::ADMIN,
-            "Ban and unban members",
+            "permission-moderation-ban",
         )?)
         .permission(PermissionSpec::new(
             "moderation.voice",
             Level::MODERATOR,
-            "Mute members in voice channels and lift it",
+            "permission-moderation-voice",
         )?)
         .config(schema, defaults)
         .component(templates::ROUTE, templates::pick)

@@ -899,7 +899,7 @@ pub async fn cleanup(cx: JobCx) -> Result<(), ModuleError> {
         .delete_message(
             channel,
             message,
-            Reason::truncated("automod: a reply whose time is up"),
+            Reason::truncated(&cx.t("reason-automod-reply-expired", &Args::new())),
         )
         .await
     {

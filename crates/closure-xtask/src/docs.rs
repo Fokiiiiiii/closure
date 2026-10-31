@@ -63,7 +63,7 @@ pub fn render_module(manifest: &ModuleManifest, translator: &dyn Translator) -> 
         }
     );
     push_capabilities(&mut out, manifest);
-    push_permissions(&mut out, manifest);
+    push_permissions(&mut out, manifest, translator);
     push_commands(&mut out, manifest, translator);
     push_configuration(&mut out, manifest);
     out
@@ -81,7 +81,7 @@ fn push_capabilities(out: &mut String, manifest: &ModuleManifest) {
     out.push('\n');
 }
 
-fn push_permissions(out: &mut String, manifest: &ModuleManifest) {
+fn push_permissions(out: &mut String, manifest: &ModuleManifest, translator: &dyn Translator) {
     out.push_str("## Permissions\n\n");
     if manifest.permissions.is_empty() {
         out.push_str("This module declares no permissions.\n\n");
@@ -94,7 +94,11 @@ fn push_permissions(out: &mut String, manifest: &ModuleManifest) {
             "| `{}` | {} | {} |",
             permission.key.as_str(),
             permission.default_level.get(),
-            cell(&permission.description)
+            cell(&default_text(
+                translator,
+                manifest.id.as_str(),
+                &permission.description
+            ))
         );
     }
     out.push('\n');
@@ -364,6 +368,7 @@ mod tests {
 
     const EN: &str = "
 module-description = A sample | with a pipe.
+permission-sample-use = Use | it
 command-sample = sample
     .description = Run the sample
 option-sample-count = count
@@ -411,7 +416,10 @@ option-tools-add-user = ユーザー
         ModuleManifest::new(ModuleId::new("sample").unwrap(), "Sample", "0.1.0")
             .description("A sample | with a pipe.")
             .capabilities([Capability::SendMessages])
-            .permission(PermissionSpec::new("sample.use", Level::MODERATOR, "Use | it").unwrap())
+            .permission(
+                PermissionSpec::new("sample.use", Level::MODERATOR, "permission-sample-use")
+                    .unwrap(),
+            )
             .config(
                 json!({
                     "type": "object",
