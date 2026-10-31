@@ -68,7 +68,7 @@ fn card(replies: &[Reply]) -> &Reply {
 }
 
 #[tokio::test]
-async fn a_warning_shows_its_case() {
+async fn showcase_warning_shows_its_case() {
     let h = harness();
     let invocation = Invocation::new("warn")
         .option("user", user(TARGET))
@@ -82,7 +82,7 @@ async fn a_warning_shows_its_case() {
 }
 
 #[tokio::test]
-async fn a_timeout_shows_its_case() {
+async fn showcase_timeout_shows_its_case() {
     let h = harness();
     let invocation = Invocation::new("timeout")
         .option("user", user(TARGET))
@@ -97,7 +97,7 @@ async fn a_timeout_shows_its_case() {
 }
 
 #[tokio::test]
-async fn a_kick_shows_its_case() {
+async fn showcase_kick_shows_its_case() {
     let h = harness();
     let invocation = Invocation::new("kick")
         .option("user", user(TARGET))
@@ -111,7 +111,7 @@ async fn a_kick_shows_its_case() {
 }
 
 #[tokio::test]
-async fn a_ban_shows_its_case() {
+async fn showcase_ban_shows_its_case() {
     let h = harness();
     let invocation = Invocation::new("ban")
         .option("user", user(TARGET))
@@ -126,7 +126,7 @@ async fn a_ban_shows_its_case() {
 }
 
 #[tokio::test]
-async fn a_note_shows_its_case() {
+async fn showcase_note_shows_its_case() {
     let h = harness();
     let invocation = Invocation::new("note")
         .option("user", user(TARGET))

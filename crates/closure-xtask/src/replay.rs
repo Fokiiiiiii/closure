@@ -26,8 +26,9 @@ use twilight_model::id::Id;
 
 /// The variable the bot reads its token from.
 pub(crate) const TOKEN_VARIABLE: &str = "DISCORD_TOKEN";
-/// The name prefix of the tests that make the showcase.
-const SHOWCASE_PREFIX: &str = "showcase::";
+/// The name prefix of the tests that make the showcase; a test binary does not name its tests by
+/// module, so the prefix is in the function name.
+const SHOWCASE_PREFIX: &str = "showcase_";
 /// How much of a message's opening tells its kind apart from another message of the same kind.
 const TEMPLATE_CHARS: usize = 25;
 /// Messages with less text than this are left out: they are progress lines or test values.
@@ -361,7 +362,7 @@ mod tests {
     /// The line a showcase test records for `action`.
     fn line(action: &Action) -> String {
         let mut value = serde_json::to_value(action).unwrap();
-        value["test"] = json!("showcase::example");
+        value["test"] = json!("showcase_example");
         value.to_string()
     }
 
