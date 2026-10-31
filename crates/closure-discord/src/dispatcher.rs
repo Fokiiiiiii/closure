@@ -1154,6 +1154,7 @@ fn context_for(
         id.clone(),
         guild,
     ))
+    .with_restrictions(Store::restrictions(Arc::clone(&shared.storage), guild))
     .with_cases(Cases::new(
         Arc::clone(&shared.cases),
         &settings.granted,

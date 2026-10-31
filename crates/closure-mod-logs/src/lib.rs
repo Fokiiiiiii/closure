@@ -43,7 +43,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
         "type": "object",
         "properties": {
             "channel": {
-                "anyOf": [{ "type": "string", "pattern": "^[0-9]+$" }, { "type": "null" }],
+                "anyOf": [{ "type": "string", "pattern": "^[1-9][0-9]*$" }, { "type": "null" }],
                 "description": "The channel the entries are posted to. Left out, the guild's log channel.",
                 "x-ui": { "level": "basic" }
             },

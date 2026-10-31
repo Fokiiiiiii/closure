@@ -24,6 +24,10 @@ use crate::settings::GuildPolicy;
 use crate::storage::Store;
 use crate::subscription::{Flow, Subscription};
 
+/// The id of the state that the modules of a bot share, such as the roles a restriction took off a
+/// member. No module can have it (see [`ModuleId::restrictions`]).
+const RESTRICTIONS_ID: &str = "restrictions";
+
 /// Stable identifier of a module, used in configuration keys, metrics and translation
 /// namespaces. Restricted to `[a-z0-9_-]`, starting with a letter, at most 32 characters.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -37,7 +41,8 @@ impl ModuleId {
             && id.starts_with(|c: char| c.is_ascii_lowercase())
             && id
                 .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            && id != RESTRICTIONS_ID;
         if valid {
             Ok(Self(id))
         } else {
@@ -49,6 +54,12 @@ impl ModuleId {
     #[must_use]
     pub fn system() -> Self {
         Self("system".to_owned())
+    }
+
+    /// The identity of the state that the modules of a bot share, which is not a module.
+    #[must_use]
+    pub fn restrictions() -> Self {
+        Self(RESTRICTIONS_ID.to_owned())
     }
 
     #[must_use]
@@ -672,6 +683,7 @@ pub struct EventContext {
     policy: Arc<GuildPolicy>,
     permissions: Arc<GuildPermissions>,
     store: Store,
+    restrictions: Store,
     scheduler: Scheduler,
     cases: Cases,
     history: MessageHistory,
@@ -707,6 +719,7 @@ impl EventContext {
         let (config, texts) = split_texts(config);
         Self {
             store: Store::unavailable(module.clone(), guild_id),
+            restrictions: Store::unavailable(ModuleId::restrictions(), guild_id),
             scheduler: Scheduler::unavailable(module.clone(), guild_id),
             cases: Cases::unavailable(module.clone(), guild_id),
             history: MessageHistory::unavailable(module.clone(), guild_id),
@@ -775,6 +788,20 @@ impl EventContext {
     #[must_use]
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Gives the context the state that the modules share in this guild (see
+    /// [`ModuleId::restrictions`]); without it every call fails.
+    #[must_use]
+    pub fn with_restrictions(mut self, store: Store) -> Self {
+        self.restrictions = store;
+        self
+    }
+
+    /// The state that the modules of a bot share in this guild, for the punishments of the SDK.
+    #[must_use]
+    pub fn restrictions(&self) -> &Store {
+        &self.restrictions
     }
 
     /// Gives the context the module's scheduler in this guild; without it every call fails.

@@ -283,6 +283,18 @@ impl Store {
         }
     }
 
+    /// The state that the modules of a bot share in `guild`. It is always usable: every module's
+    /// punishments write and read it.
+    #[must_use]
+    pub fn restrictions(backend: Arc<dyn StorageBackend>, guild: GuildId) -> Self {
+        Self {
+            backend,
+            granted: true,
+            module: ModuleId::restrictions(),
+            guild,
+        }
+    }
+
     /// A store that fails every call, for contexts that have no storage.
     #[must_use]
     pub fn unavailable(module: ModuleId, guild: GuildId) -> Self {

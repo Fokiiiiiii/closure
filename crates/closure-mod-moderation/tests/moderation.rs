@@ -408,6 +408,17 @@ async fn a_punishment_is_a_case_card_in_the_colour_of_its_kind_and_a_list_stays_
     );
 }
 
+#[tokio::test]
+async fn a_long_undo_label_is_cut_so_the_warning_is_still_answered() {
+    let harness = harness();
+    harness.set_config(json!({ "texts": { "undo-button-warn": "x".repeat(120) } }));
+
+    let warned = harness.invoke(warn(MEMBER, Some("tone"))).await;
+
+    assert!(warned.is_ok(), "{warned:?}");
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+}
+
 // ---- /warnings ----
 
 #[tokio::test]

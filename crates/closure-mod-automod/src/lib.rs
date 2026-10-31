@@ -65,7 +65,8 @@ fn with_role_events(builder: ModuleBuilder) -> ModuleBuilder {
 /// punishment, as moderation does.
 async fn config_changed(ctx: EventContext, _event: Event) -> Result<Flow, ModuleError> {
     let config: config::Config = parse_module_config(&ctx)?;
-    if config.timeout_method == Method::Role {
+    // A dry run changes nothing, so it does not create the role either.
+    if config.timeout_method == Method::Role && !config.dry_run {
         ensure_role(
             &ctx,
             RestrictionRole::Timeout,

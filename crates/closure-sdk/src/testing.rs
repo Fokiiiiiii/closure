@@ -584,6 +584,53 @@ impl Harness {
         })
     }
 
+    /// Another module in the same pretend server, as the modules of one bot are: it shares the
+    /// Discord, the storage, the cases, the scheduler and the clock with `self`.
+    pub fn sibling(
+        &self,
+        builder: ModuleBuilder,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let elapsed = Arc::clone(&self.elapsed);
+        let start = Instant::now();
+        let clock_elapsed = Arc::clone(&elapsed);
+        let module = Arc::new(
+            builder
+                .clock(move || {
+                    start + *clock_elapsed.lock().unwrap_or_else(PoisonError::into_inner)
+                })
+                .build()?,
+        );
+        let registry = ModuleRegistry::new(vec![Arc::clone(&module) as Arc<dyn Module>])?;
+        let mut catalogs = TranslatorBuilder::new()?;
+        catalogs.add_registry(&registry)?;
+        let manifest = module.manifest();
+        let mut permissions = GuildPermissions::default();
+        for spec in &manifest.permissions {
+            permissions
+                .defaults
+                .insert(spec.key.clone(), spec.default_level);
+        }
+        Ok(Self {
+            api: Arc::clone(&self.api),
+            translator: Arc::new(catalogs.build()),
+            interactions: Arc::clone(&self.interactions),
+            permissions: Mutex::new(permissions),
+            config: Mutex::new(manifest.default_config.clone()),
+            storage: Arc::clone(&self.storage),
+            scheduler: Arc::clone(&self.scheduler),
+            cases: Arc::clone(&self.cases),
+            history: Arc::clone(&self.history),
+            clock: Arc::clone(&self.clock),
+            elapsed,
+            policy: Mutex::new(GuildPolicy::default()),
+            locale: Mutex::new(Locale::DEFAULT),
+            next: AtomicU64::new(self.next.load(std::sync::atomic::Ordering::Relaxed)),
+            bot: Mutex::new(Some(Id::new(BOT))),
+            gateway: Arc::clone(&self.gateway),
+            module,
+        })
+    }
+
     /// Changes the guild's permissions (levels of roles and users, rules for keys).
     pub fn permissions(&self, change: impl FnOnce(&mut GuildPermissions)) {
         change(
@@ -823,6 +870,10 @@ impl Harness {
             Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
             &manifest.capabilities,
             manifest.id.clone(),
+            guild,
+        ))
+        .with_restrictions(Store::restrictions(
+            Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
             guild,
         ))
         .with_cases(Cases::new(

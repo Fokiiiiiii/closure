@@ -8,6 +8,7 @@
 //! The button of an older punishment while a newer one still stands only revokes its own case:
 //! the newer one is still in force, so Discord and the timers are left alone.
 
+use closure_sdk::embed::truncate;
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{Args, Case, CaseError, ComponentCx, Cx, InteractionRef, UserError, UserId};
 use twilight_model::channel::message::Component;
@@ -18,6 +19,10 @@ use crate::{Config, mention, punisher_for, stands};
 
 /// The route of the undo buttons.
 pub(crate) const ROUTE: &str = "undo";
+
+/// How many characters a button's label may have: Discord refuses a longer one, and a text that
+/// a server overrode can be longer than the default.
+const LABEL_CHARS: usize = 80;
 
 /// The punishments a button undoes. A kick has nothing to undo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +80,7 @@ pub(crate) fn button<I: InteractionRef + 'static>(
         .encode(cx.module());
     ui::button(
         ButtonStyle::Secondary,
-        cx.t(kind.label_key(), &Args::new()),
+        truncate(&cx.t(kind.label_key(), &Args::new()), LABEL_CHARS),
         custom_id,
     )
 }

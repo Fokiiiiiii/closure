@@ -603,7 +603,7 @@ async fn strip_now(
         return Ok(skipped);
     }
     // Saved before the first removal: a failure midway then keeps the ones already taken off.
-    ctx.store()
+    ctx.restrictions()
         .set(&stripped_key(target), &plan)
         .await
         .map_err(|error| store_error(&error))?;
@@ -627,7 +627,7 @@ async fn strip_now(
     }
     if !failed.is_empty() {
         plan.retain(|id| !failed.contains(id));
-        ctx.store()
+        ctx.restrictions()
             .set(&stripped_key(target), &plan)
             .await
             .map_err(|error| store_error(&error))?;
@@ -721,12 +721,12 @@ async fn restore_now(
         .filter(|id| !given.contains(id) && !gone.contains(id))
         .collect();
     if left.is_empty() {
-        ctx.store()
+        ctx.restrictions()
             .delete(&stripped_key(target))
             .await
             .map_err(|error| store_error(&error))?;
     } else {
-        ctx.store()
+        ctx.restrictions()
             .set_for(&stripped_key(target), &left, RESTORE_KEEP)
             .await
             .map_err(|error| store_error(&error))?;
@@ -779,14 +779,17 @@ fn older_stripped_keys(user: UserId) -> [String; 2] {
     ]
 }
 
-/// The roles remembered for a member, under the shared key and the older ones.
+/// The roles remembered for a member: the list every module shares, and the ones a module kept in
+/// its own storage before the list was shared (see [`forget_older`]).
 async fn stripped(ctx: &EventContext, user: UserId) -> Result<Vec<u64>, StorageError> {
     let mut all: Vec<u64> = ctx
-        .store()
+        .restrictions()
         .get(&stripped_key(user))
         .await?
         .unwrap_or_default();
-    for key in older_stripped_keys(user) {
+    let mut own = vec![stripped_key(user)];
+    own.extend(older_stripped_keys(user));
+    for key in own {
         for id in ctx.store().get::<Vec<u64>>(&key).await?.unwrap_or_default() {
             if !all.contains(&id) {
                 all.push(id);
@@ -796,8 +799,10 @@ async fn stripped(ctx: &EventContext, user: UserId) -> Result<Vec<u64>, StorageE
     Ok(all)
 }
 
-/// Forgets the roles remembered under the older keys, which are now in the shared list.
+/// Forgets the roles a module kept in its own storage under the keys before the list was shared:
+/// they are in the shared list now, which every module reads.
 async fn forget_older(ctx: &EventContext, user: UserId) -> Result<(), StorageError> {
+    ctx.store().delete(&stripped_key(user)).await?;
     for key in older_stripped_keys(user) {
         ctx.store().delete(&key).await?;
     }

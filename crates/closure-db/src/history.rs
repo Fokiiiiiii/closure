@@ -125,7 +125,7 @@ fn roles_to_db(roles: &[RoleId]) -> Result<Vec<i64>, HistoryError> {
 
 #[async_trait]
 impl HistoryBackend for Db {
-    /// An empty `content` keeps the stored text (see the trait), and the time it was sent and
+    /// An empty `content` clears the stored text (see the trait), and the time it was sent and
     /// the time it was deleted are never replaced.
     async fn save(&self, message: &SavedMessage) -> Result<(), HistoryError> {
         sqlx::query(
