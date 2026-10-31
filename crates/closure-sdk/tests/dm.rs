@@ -26,7 +26,7 @@ fn describe(result: &Result<Sent, UserError>) -> &'static str {
 }
 
 fn text_command() -> BoundCommand {
-    Command::<Notify>::new("notify", "Message a member").handler(|cx, args| async move {
+    Command::<Notify>::new("notify").handler(|cx, args| async move {
         let sent = cx
             .direct_message(args.user, DirectMessage::text("hi"))
             .await;
@@ -35,7 +35,7 @@ fn text_command() -> BoundCommand {
 }
 
 fn embed_command() -> BoundCommand {
-    Command::<Notify>::new("notice", "Message a member an embed").handler(|cx, args| async move {
+    Command::<Notify>::new("notice").handler(|cx, args| async move {
         let embed = EmbedBuilder::new().title("Notice").build().unwrap();
         let sent = cx
             .direct_message(args.user, DirectMessage::embed(embed))

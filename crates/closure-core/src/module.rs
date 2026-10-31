@@ -158,8 +158,7 @@ impl From<f64> for ChoiceValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptionSpec {
     pub name: String,
-    /// English description; other languages come from the catalog.
-    pub description: String,
+    /// The description Discord shows, resolved from the module's catalog when the command is built.
     pub kind: OptionKind,
     pub required: bool,
     /// The only values the user may pick (strings, integers and numbers; at most 25).
@@ -187,10 +186,9 @@ pub struct OptionSpec {
 impl OptionSpec {
     /// An optional option without further limits.
     #[must_use]
-    pub fn new(name: impl Into<String>, description: impl Into<String>, kind: OptionKind) -> Self {
+    pub fn new(name: impl Into<String>, kind: OptionKind) -> Self {
         Self {
             name: name.into(),
-            description: description.into(),
             kind,
             required: false,
             choices: Vec::new(),
@@ -253,7 +251,6 @@ impl OptionSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubcommandSpec {
     pub name: String,
-    pub description: String,
     pub options: Vec<OptionSpec>,
     /// Non-empty for a subcommand group: `/command group sub`. The subcommands of a group have
     /// options of their own and no further subcommands.
@@ -289,8 +286,6 @@ pub struct ContextCommandSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub name: String,
-    /// English description.
-    pub description: String,
     pub options: Vec<OptionSpec>,
     pub subcommands: Vec<SubcommandSpec>,
     /// Permissions a member needs to see the command by default. `None` means everyone.
@@ -310,13 +305,9 @@ impl CommandSpec {
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
         };
-        let text_ok = |text: &str| (1..=100).contains(&text.chars().count());
 
         if !name_ok(&self.name) {
             return Err(invalid("name must be 1-32 chars of [a-z0-9_-]"));
-        }
-        if !text_ok(&self.description) {
-            return Err(invalid("description must be 1-100 characters"));
         }
         if !self.options.is_empty() && !self.subcommands.is_empty() {
             return Err(invalid(
@@ -336,23 +327,15 @@ impl CommandSpec {
         if self.options.len() > 25 || self.subcommands.len() > 25 {
             return Err(invalid("at most 25 options or subcommands"));
         }
-        let option_ok = |option: &OptionSpec| {
-            name_ok(&option.name) && text_ok(&option.description) && option.limits_ok()
-        };
+        let option_ok = |option: &OptionSpec| name_ok(&option.name) && option.limits_ok();
         if !self.options.iter().all(option_ok) {
-            return Err(invalid(
-                "an option has an invalid name, description or limit",
-            ));
+            return Err(invalid("an option has an invalid name or limit"));
         }
         if !required_first(&self.options) {
             return Err(invalid("required options must come before optional ones"));
         }
         for sub in &self.subcommands {
-            if !name_ok(&sub.name)
-                || !text_ok(&sub.description)
-                || sub.options.len() > 25
-                || sub.subcommands.len() > 25
-            {
+            if !name_ok(&sub.name) || sub.options.len() > 25 || sub.subcommands.len() > 25 {
                 return Err(invalid("a subcommand is invalid"));
             }
             if !sub.subcommands.is_empty() && !sub.options.is_empty() {
@@ -370,11 +353,7 @@ impl CommandSpec {
                 if !leaves.insert(leaf.name.as_str()) {
                     return Err(invalid("a subcommand of a group is named twice"));
                 }
-                if !name_ok(&leaf.name)
-                    || !text_ok(&leaf.description)
-                    || leaf.options.len() > 25
-                    || !leaf.subcommands.is_empty()
-                {
+                if !name_ok(&leaf.name) || leaf.options.len() > 25 || !leaf.subcommands.is_empty() {
                     return Err(invalid("a subcommand of a group is invalid"));
                 }
                 if !leaf.options.iter().all(option_ok) {
@@ -959,7 +938,6 @@ mod tests {
     fn leaf(name: &str) -> SubcommandSpec {
         SubcommandSpec {
             name: name.into(),
-            description: "d".into(),
             options: vec![],
             subcommands: vec![],
         }
@@ -968,7 +946,6 @@ mod tests {
     fn group(name: &str, leaves: Vec<SubcommandSpec>) -> SubcommandSpec {
         SubcommandSpec {
             name: name.into(),
-            description: "d".into(),
             options: vec![],
             subcommands: leaves,
         }
@@ -979,7 +956,6 @@ mod tests {
         ModuleManifest::new(ModuleId::new("warn").unwrap(), "warn", "0.1.0")
             .command(CommandSpec {
                 name: "warn".into(),
-                description: "d".into(),
                 options: vec![],
                 subcommands,
                 default_member_permissions: None,

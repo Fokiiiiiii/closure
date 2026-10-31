@@ -1,6 +1,6 @@
 # Logs (`logs`)
 
-Post the edits and deletions of messages, and the joins, leaves and bans of members, to a channel.
+Post the edits and deletions of messages, the changes of channels, threads, roles, members and voice, and of emojis, stickers and stages, to a channel.
 
 - Version: 0.1.0
 - Enabled by default: no

@@ -1,3 +1,4 @@
+module-description = Automatic moderation: rules that check every message, and act on the first one that hits.
 command-automod = automod
     .description = Automatic moderation: its rules and state
 subcommand-automod-status = status

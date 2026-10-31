@@ -33,7 +33,7 @@ struct Revoke {
 
 /// Records a case about the member and posts it.
 fn log_command(name: &str) -> BoundCommand {
-    Command::<Log>::new(name, "Record a case").handler(|cx, args| async move {
+    Command::<Log>::new(name).handler(|cx, args| async move {
         let case = cx
             .cases()
             .create(NewCase {
@@ -61,7 +61,7 @@ fn module() -> ModuleBuilder {
         .capability(Capability::SendMessages)
         .command(log_command("log"))
         .command(
-            Command::<Revoke>::new("revoke", "Revoke a case").handler(|cx, args| async move {
+            Command::<Revoke>::new("revoke").handler(|cx, args| async move {
                 let case = cx
                     .cases()
                     .revoke(args.number, cx.user().id, args.reason)
@@ -77,24 +77,20 @@ fn module_without_send_messages() -> ModuleBuilder {
     ModuleBuilder::new("quiet", "Quiet", "0.1.0")
         .unwrap()
         .capability(Capability::Cases)
-        .command(
-            Command::<Log>::new("try", "Record a case and try to log it").handler(
-                |cx, args| async move {
-                    let case = cx
-                        .cases()
-                        .create(NewCase {
-                            kind: CaseKind::new(&args.kind)?,
-                            target: args.user,
-                            moderator: cx.user().id,
-                            reason: args.reason,
-                            expires_at: args.expires_at,
-                        })
-                        .await?;
-                    let refused = cx.modlog(&case).await.is_err();
-                    cx.reply(if refused { "refused" } else { "posted" }).await
-                },
-            ),
-        )
+        .command(Command::<Log>::new("try").handler(|cx, args| async move {
+            let case = cx
+                .cases()
+                .create(NewCase {
+                    kind: CaseKind::new(&args.kind)?,
+                    target: args.user,
+                    moderator: cx.user().id,
+                    reason: args.reason,
+                    expires_at: args.expires_at,
+                })
+                .await?;
+            let refused = cx.modlog(&case).await.is_err();
+            cx.reply(if refused { "refused" } else { "posted" }).await
+        }))
 }
 
 fn texts(replies: &[Reply]) -> Vec<&str> {

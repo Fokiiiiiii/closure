@@ -1,3 +1,4 @@
+module-description = メンバーに警告し、メモを残し、サーバーのケースを確認・取り消しします。
 command-warn = 警告
     .description = メンバーに警告します。警告は設定した日数で失効します
 option-warn-user = ユーザー

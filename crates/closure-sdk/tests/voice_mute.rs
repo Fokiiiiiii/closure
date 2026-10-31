@@ -17,7 +17,7 @@ struct Mute {
 }
 
 fn mute_command() -> BoundCommand {
-    Command::<Mute>::new("mute", "Mute a member in voice").handler(|cx, args| async move {
+    Command::<Mute>::new("mute").handler(|cx, args| async move {
         let guild = cx.guild_id();
         let reason = Reason::new("noisy").unwrap();
         let result = cx

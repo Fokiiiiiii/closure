@@ -19,51 +19,43 @@ fn module() -> ModuleBuilder {
     ModuleBuilder::new("mute", "Mutes", "0.1.0")
         .unwrap()
         .capability(Capability::Storage)
-        .command(
-            Command::<()>::new("mute", "Mute for ten minutes").handler(|cx, ()| async move {
-                let user = cx.user().id.get();
-                cx.ctx()
-                    .scheduler()
-                    .job("unmute", &Unmute { user })?
-                    .key(&format!("unmute:{user}"))
-                    .after(Duration::from_secs(600))
-                    .await?;
-                cx.reply("Muted.").await
-            }),
-        )
-        .command(
-            Command::<()>::new("unmute", "Stop the timer").handler(|cx, ()| async move {
-                let user = cx.user().id.get();
-                let found = cx
-                    .ctx()
-                    .scheduler()
-                    .cancel(&format!("unmute:{user}"))
-                    .await?;
-                cx.reply(if found { "Cancelled." } else { "No timer." })
-                    .await
-            }),
-        )
-        .command(
-            Command::<()>::new("watch", "Check every minute").handler(|cx, ()| async move {
-                cx.ctx()
-                    .scheduler()
-                    .job("tick", &())?
-                    .key("tick")
-                    .every(Duration::from_secs(60), Duration::from_secs(60))
-                    .await?;
-                cx.reply("Watching.").await
-            }),
-        )
-        .command(
-            Command::<()>::new("flaky", "A job that fails once").handler(|cx, ()| async move {
-                cx.ctx()
-                    .scheduler()
-                    .job("flaky", &())?
-                    .after(Duration::ZERO)
-                    .await?;
-                cx.reply("Queued.").await
-            }),
-        )
+        .command(Command::<()>::new("mute").handler(|cx, ()| async move {
+            let user = cx.user().id.get();
+            cx.ctx()
+                .scheduler()
+                .job("unmute", &Unmute { user })?
+                .key(&format!("unmute:{user}"))
+                .after(Duration::from_secs(600))
+                .await?;
+            cx.reply("Muted.").await
+        }))
+        .command(Command::<()>::new("unmute").handler(|cx, ()| async move {
+            let user = cx.user().id.get();
+            let found = cx
+                .ctx()
+                .scheduler()
+                .cancel(&format!("unmute:{user}"))
+                .await?;
+            cx.reply(if found { "Cancelled." } else { "No timer." })
+                .await
+        }))
+        .command(Command::<()>::new("watch").handler(|cx, ()| async move {
+            cx.ctx()
+                .scheduler()
+                .job("tick", &())?
+                .key("tick")
+                .every(Duration::from_secs(60), Duration::from_secs(60))
+                .await?;
+            cx.reply("Watching.").await
+        }))
+        .command(Command::<()>::new("flaky").handler(|cx, ()| async move {
+            cx.ctx()
+                .scheduler()
+                .job("flaky", &())?
+                .after(Duration::ZERO)
+                .await?;
+            cx.reply("Queued.").await
+        }))
         .job("unmute", |cx| async move {
             let who: Unmute = cx.payload()?;
             cx.store()

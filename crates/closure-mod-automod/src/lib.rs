@@ -33,9 +33,6 @@ use closure_sdk::{
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 
-/// `/automod` is made by two calls (its status and its counters), which both give this text.
-const AUTOMOD_DESCRIPTION: &str = "Automatic moderation: its rules and state";
-
 /// The events the rules read: messages, members, roles, cases and threads.
 const EVENTS: [EventKind; 10] = [
     EventKind::MessageCreated,
@@ -100,9 +97,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         }
     };
     let mut builder = ModuleBuilder::new("automod", "Automod", env!("CARGO_PKG_VERSION"))?
-        .description(
-            "Automatic moderation: rules that check every message, and act on the first one that hits.",
-        )
         .capability(Capability::Cases)
         .capability(Capability::SendMessages)
         .capability(Capability::ManageMessages)
@@ -155,18 +149,11 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .config(schema, defaults)
         .group(
             "automod",
-            AUTOMOD_DESCRIPTION,
-            [
-                Command::<()>::new("status", "Show whether dry run is on and which rules run")
-                    .requires("automod.view")
-                    .handler(status::status),
-            ],
+            [Command::<()>::new("status")
+                .requires("automod.view")
+                .handler(status::status)],
         )
-        .groups(
-            "automod",
-            AUTOMOD_DESCRIPTION,
-            [counters_group(&state), antiraid_group(&state)],
-        )
+        .groups("automod", [counters_group(&state), antiraid_group(&state)])
         .autocomplete("automod antiraid set", "level", {
             let state = Arc::clone(&state);
             move |cx| {
@@ -196,9 +183,9 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
 
 /// `/automod counters`: the commands that look at and change the counters.
 fn counters_group(state: &Arc<engine::State>) -> SubcommandGroup {
-    SubcommandGroup::new("counters", "Look at and change the counters of automod")
+    SubcommandGroup::new("counters")
         .subcommand(
-            Command::<commands::View>::new("view", "Show the value of a counter")
+            Command::<commands::View>::new("view")
                 .requires("automod.counters")
                 .handler({
                     let state = Arc::clone(state);
@@ -206,7 +193,7 @@ fn counters_group(state: &Arc<engine::State>) -> SubcommandGroup {
                 }),
         )
         .subcommand(
-            Command::<commands::Set>::new("set", "Set the value of a counter")
+            Command::<commands::Set>::new("set")
                 .requires("automod.counters")
                 .handler({
                     let state = Arc::clone(state);
@@ -214,7 +201,7 @@ fn counters_group(state: &Arc<engine::State>) -> SubcommandGroup {
                 }),
         )
         .subcommand(
-            Command::<commands::Add>::new("add", "Add to a counter")
+            Command::<commands::Add>::new("add")
                 .requires("automod.counters")
                 .handler({
                     let state = Arc::clone(state);
@@ -222,7 +209,7 @@ fn counters_group(state: &Arc<engine::State>) -> SubcommandGroup {
                 }),
         )
         .subcommand(
-            Command::<commands::Reset>::new("reset", "Put a counter back to its start")
+            Command::<commands::Reset>::new("reset")
                 .requires("automod.counters")
                 .handler({
                     let state = Arc::clone(state);
@@ -234,50 +221,47 @@ fn counters_group(state: &Arc<engine::State>) -> SubcommandGroup {
 /// `/automod antiraid`: the antiraid level, and the quarantine of the members who joined at a level
 /// that has one.
 fn antiraid_group(state: &Arc<engine::State>) -> SubcommandGroup {
-    SubcommandGroup::new(
-        "antiraid",
-        "Raise or lower the antiraid level, and release the quarantined members",
-    )
-    .subcommand(
-        Command::<()>::new("view", "Show the antiraid level and the quarantine")
-            .requires("automod.antiraid.view")
-            .handler({
-                let state = Arc::clone(state);
-                move |cx, args| commands::antiraid_view(Arc::clone(&state), cx, args)
-            }),
-    )
-    .subcommand(
-        Command::<commands::AntiraidSet>::new("set", "Raise or lower the antiraid level")
-            .requires("automod.antiraid.set")
-            .handler({
-                let state = Arc::clone(state);
-                move |cx, args| commands::antiraid_set(Arc::clone(&state), cx, args)
-            }),
-    )
-    .subcommand(
-        Command::<()>::new("clear", "Put the antiraid level back to the calm one")
-            .requires("automod.antiraid.set")
-            .handler({
-                let state = Arc::clone(state);
-                move |cx, args| commands::antiraid_clear(Arc::clone(&state), cx, args)
-            }),
-    )
-    .subcommand(
-        Command::<commands::AntiraidRelease>::new("release", "Take a member out of the quarantine")
-            .requires("automod.antiraid.release")
-            .handler({
-                let state = Arc::clone(state);
-                move |cx, args| commands::antiraid_release(Arc::clone(&state), cx, args)
-            }),
-    )
-    .subcommand(
-        Command::<()>::new("release-all", "Take every member out of the quarantine")
-            .requires("automod.antiraid.release")
-            .handler({
-                let state = Arc::clone(state);
-                move |cx, args| commands::antiraid_release_all(Arc::clone(&state), cx, args)
-            }),
-    )
+    SubcommandGroup::new("antiraid")
+        .subcommand(
+            Command::<()>::new("view")
+                .requires("automod.antiraid.view")
+                .handler({
+                    let state = Arc::clone(state);
+                    move |cx, args| commands::antiraid_view(Arc::clone(&state), cx, args)
+                }),
+        )
+        .subcommand(
+            Command::<commands::AntiraidSet>::new("set")
+                .requires("automod.antiraid.set")
+                .handler({
+                    let state = Arc::clone(state);
+                    move |cx, args| commands::antiraid_set(Arc::clone(&state), cx, args)
+                }),
+        )
+        .subcommand(
+            Command::<()>::new("clear")
+                .requires("automod.antiraid.set")
+                .handler({
+                    let state = Arc::clone(state);
+                    move |cx, args| commands::antiraid_clear(Arc::clone(&state), cx, args)
+                }),
+        )
+        .subcommand(
+            Command::<commands::AntiraidRelease>::new("release")
+                .requires("automod.antiraid.release")
+                .handler({
+                    let state = Arc::clone(state);
+                    move |cx, args| commands::antiraid_release(Arc::clone(&state), cx, args)
+                }),
+        )
+        .subcommand(
+            Command::<()>::new("release-all")
+                .requires("automod.antiraid.release")
+                .handler({
+                    let state = Arc::clone(state);
+                    move |cx, args| commands::antiraid_release_all(Arc::clone(&state), cx, args)
+                }),
+        )
 }
 
 /// The module as the host loads it.

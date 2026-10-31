@@ -15,45 +15,35 @@ fn module() -> ModuleBuilder {
     ModuleBuilder::new("replies", "Replies", "0.1.0")
         .unwrap()
         .command(
-            Command::<()>::new("slow-public", "Takes a while, then fails privately").handler(
-                |cx, ()| async move {
-                    cx.defer(false).await?;
-                    Err(UserError::message("secret"))
-                },
-            ),
-        )
-        .command(
-            Command::<()>::new("slow-private", "Takes a while, privately").handler(
-                |cx, ()| async move {
-                    cx.defer(true).await?;
-                    cx.reply_private_t("secret", &closure_sdk::Args::new())
-                        .await
-                },
-            ),
-        )
-        .command(
-            Command::<()>::new("too-long", "A first answer that cannot be sent").handler(
-                |cx, ()| async move {
-                    // Refused before anything is sent (an embed holds 4096 characters); the
-                    // handler tries again with less.
-                    if cx.reply("x".repeat(4097)).await.is_err() {
-                        cx.reply("short").await?;
-                    }
-                    Ok(())
-                },
-            ),
-        )
-        .command(
-            Command::<()>::new("menu", "A message with a button").handler(|cx, ()| async move {
-                let id = CustomId::new("go").encode(cx.module());
-                cx.reply_with(InteractionReply {
-                    content: Some("choose".into()),
-                    components: vec![row([button(ButtonStyle::Primary, "Go", id)])],
-                    ..InteractionReply::default()
-                })
-                .await
+            Command::<()>::new("slow-public").handler(|cx, ()| async move {
+                cx.defer(false).await?;
+                Err(UserError::message("secret"))
             }),
         )
+        .command(
+            Command::<()>::new("slow-private").handler(|cx, ()| async move {
+                cx.defer(true).await?;
+                cx.reply_private_t("secret", &closure_sdk::Args::new())
+                    .await
+            }),
+        )
+        .command(Command::<()>::new("too-long").handler(|cx, ()| async move {
+            // Refused before anything is sent (an embed holds 4096 characters); the
+            // handler tries again with less.
+            if cx.reply("x".repeat(4097)).await.is_err() {
+                cx.reply("short").await?;
+            }
+            Ok(())
+        }))
+        .command(Command::<()>::new("menu").handler(|cx, ()| async move {
+            let id = CustomId::new("go").encode(cx.module());
+            cx.reply_with(InteractionReply {
+                content: Some("choose".into()),
+                components: vec![row([button(ButtonStyle::Primary, "Go", id)])],
+                ..InteractionReply::default()
+            })
+            .await
+        }))
         .component("go", |cx| async move {
             // Acknowledge at once, work, then change the message.
             cx.defer_update().await?;
@@ -63,29 +53,21 @@ fn module() -> ModuleBuilder {
             })
             .await
         })
-        .command(
-            Command::<()>::new("ask", "Asks with a button whose answer is private").handler(
-                |cx, ()| async move {
-                    let id = CustomId::new("open").encode(cx.module());
-                    cx.reply_with(InteractionReply {
-                        content: Some("choose".into()),
-                        components: vec![row([button(ButtonStyle::Primary, "Open", id)])],
-                        ..InteractionReply::default()
-                    })
-                    .await
-                },
-            ),
-        )
+        .command(Command::<()>::new("ask").handler(|cx, ()| async move {
+            let id = CustomId::new("open").encode(cx.module());
+            cx.reply_with(InteractionReply {
+                content: Some("choose".into()),
+                components: vec![row([button(ButtonStyle::Primary, "Open", id)])],
+                ..InteractionReply::default()
+            })
+            .await
+        }))
         .component("open", |cx| async move {
             cx.defer_update().await?;
             cx.reply_private("only you").await
         })
         .command(
-            Command::<()>::new(
-                "ask-update",
-                "Asks with two buttons that change the message",
-            )
-            .handler(|cx, ()| async move {
+            Command::<()>::new("ask-update").handler(|cx, ()| async move {
                 let fresh = CustomId::new("update").encode(cx.module());
                 let deferred = CustomId::new("update-after-defer").encode(cx.module());
                 cx.reply_with(InteractionReply {
@@ -125,11 +107,7 @@ fn module() -> ModuleBuilder {
             }
         })
         .command(
-            Command::<()>::new(
-                "public-then-secret",
-                "Closes a public wait, then answers privately",
-            )
-            .handler(|cx, ()| async move {
+            Command::<()>::new("public-then-secret").handler(|cx, ()| async move {
                 cx.defer(false).await?;
                 // If closing the public message fails, the retry must not leak the secret.
                 if cx

@@ -285,7 +285,6 @@ mod tests {
     fn with_command(name: &str, command: &str) -> Arc<dyn Module> {
         let manifest = ModuleManifest::new(id(name), name, "0.1.0").command(CommandSpec {
             name: command.into(),
-            description: "d".into(),
             options: vec![],
             subcommands: vec![],
             default_member_permissions: None,
@@ -367,16 +366,14 @@ mod tests {
 
     #[test]
     fn a_command_cannot_mix_options_and_subcommands() {
-        let option = OptionSpec::new("user", "d", OptionKind::User).required();
+        let option = OptionSpec::new("user", OptionKind::User).required();
         let sub = crate::module::SubcommandSpec {
             name: "add".into(),
-            description: "d".into(),
             options: vec![],
             subcommands: vec![],
         };
         let manifest = ModuleManifest::new(id("a"), "a", "0.1.0").command(CommandSpec {
             name: "warn".into(),
-            description: "d".into(),
             options: vec![option],
             subcommands: vec![sub],
             default_member_permissions: None,
@@ -392,21 +389,19 @@ mod tests {
     fn a_subcommand_group_holds_subcommands_only_and_there_are_two_levels() {
         let sub = |name: &str, options, subcommands| crate::module::SubcommandSpec {
             name: name.into(),
-            description: "d".into(),
             options,
             subcommands,
         };
         let check = |group| {
             let manifest = ModuleManifest::new(id("a"), "a", "0.1.0").command(CommandSpec {
                 name: "warn".into(),
-                description: "d".into(),
                 options: vec![],
                 subcommands: vec![group],
                 default_member_permissions: None,
             });
             ModuleRegistry::new(vec![Arc::new(Stub(manifest))])
         };
-        let option = OptionSpec::new("user", "d", OptionKind::User);
+        let option = OptionSpec::new("user", OptionKind::User);
         assert!(
             check(sub(
                 "list",
@@ -480,12 +475,11 @@ mod tests {
     #[test]
     fn required_options_must_come_first() {
         let option = |name: &str, required| {
-            let option = OptionSpec::new(name, "d", OptionKind::String);
+            let option = OptionSpec::new(name, OptionKind::String);
             if required { option.required() } else { option }
         };
         let command = |options| CommandSpec {
             name: "warn".into(),
-            description: "d".into(),
             options,
             subcommands: vec![],
             default_member_permissions: None,
@@ -507,11 +501,10 @@ mod tests {
             value,
         };
         let with = |kind: OptionKind, change: &dyn Fn(&mut OptionSpec)| {
-            let mut option = OptionSpec::new("value", "d", kind);
+            let mut option = OptionSpec::new("value", kind);
             change(&mut option);
             let manifest = ModuleManifest::new(id("a"), "a", "0.1.0").command(CommandSpec {
                 name: "warn".into(),
-                description: "d".into(),
                 options: vec![option],
                 subcommands: vec![],
                 default_member_permissions: None,

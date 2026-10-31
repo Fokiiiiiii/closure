@@ -36,14 +36,12 @@ struct Span {
 fn module() -> ModuleBuilder {
     ModuleBuilder::new("mute", "Mutes", "0.1.0")
         .unwrap()
+        .command(Command::<Mute>::new("mute").handler(|cx, args| async move {
+            cx.reply(format!("{} {}", args.user.get(), args.time.as_secs()))
+                .await
+        }))
         .command(
-            Command::<Mute>::new("mute", "Mute a member").handler(|cx, args| async move {
-                cx.reply(format!("{} {}", args.user.get(), args.time.as_secs()))
-                    .await
-            }),
-        )
-        .command(
-            Command::<Lapse>::new("lapse", "A duration").handler(|cx, args| async move {
+            Command::<Lapse>::new("lapse").handler(|cx, args| async move {
                 cx.reply(
                     args.time
                         .map_or("none".to_owned(), |time| time.as_secs().to_string()),
@@ -51,12 +49,10 @@ fn module() -> ModuleBuilder {
                 .await
             }),
         )
-        .command(
-            Command::<Span>::new("span", "Describe a length").handler(|cx, args| async move {
-                let time = Duration::from_secs(u64::try_from(args.seconds).unwrap_or(0));
-                cx.reply(cx.format_duration(time)).await
-            }),
-        )
+        .command(Command::<Span>::new("span").handler(|cx, args| async move {
+            let time = Duration::from_secs(u64::try_from(args.seconds).unwrap_or(0));
+            cx.reply(cx.format_duration(time)).await
+        }))
 }
 
 async fn run(invocation: Invocation) -> Vec<Reply> {
@@ -167,7 +163,7 @@ struct Act {
 /// unless `read_guild` is false.
 fn guarded(read_guild: bool) -> Harness {
     let mut builder = ModuleBuilder::new("act", "Acts", "0.1.0").unwrap().command(
-        Command::<Act>::new("act", "Act on a member").handler(|cx, args| async move {
+        Command::<Act>::new("act").handler(|cx, args| async move {
             cx.check_target(args.user).await?;
             cx.reply("ok").await
         }),
@@ -373,7 +369,7 @@ async fn checking_a_target_needs_the_read_guild_capability() {
 #[tokio::test]
 async fn a_time_can_be_said_in_another_language_than_the_users() {
     let module = ModuleBuilder::new("fmt", "Fmt", "0.1.0").unwrap().command(
-        Command::<()>::new("say", "Says a time twice").handler(|cx, ()| async move {
+        Command::<()>::new("say").handler(|cx, ()| async move {
             let hour = Duration::from_secs(3600);
             cx.reply(format!(
                 "{} | {}",

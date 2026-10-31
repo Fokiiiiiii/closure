@@ -90,6 +90,14 @@ impl Localizer<'_> {
         out
     }
 
+    /// The text of one catalog entry in the default language, or the key itself when the catalog
+    /// has no entry for it: a module's tests check that every command has one.
+    fn default_text(&self, key: &str) -> String {
+        self.translator
+            .exact(Locale::DEFAULT, self.namespace, key, &Args::new())
+            .unwrap_or_else(|| key.to_owned())
+    }
+
     fn names(&self, key: &str) -> Vec<(String, String)> {
         self.localized(key, valid_name)
     }
@@ -100,12 +108,14 @@ impl Localizer<'_> {
 }
 
 macro_rules! build_option {
-    ($builder:ident, $spec:expr, $names:expr, $descriptions:expr) => {
-        build_option!($builder, $spec, $names, $descriptions, |builder| builder)
+    ($builder:ident, $spec:expr, $text:expr, $names:expr, $descriptions:expr) => {
+        build_option!($builder, $spec, $text, $names, $descriptions, |builder| {
+            builder
+        })
     };
-    ($builder:ident, $spec:expr, $names:expr, $descriptions:expr, $limits:expr) => {
+    ($builder:ident, $spec:expr, $text:expr, $names:expr, $descriptions:expr, $limits:expr) => {
         $limits(
-            $builder::new(&$spec.name, &$spec.description)
+            $builder::new(&$spec.name, &$text)
                 .required($spec.required)
                 .name_localizations($names)
                 .description_localizations($descriptions),
@@ -134,6 +144,7 @@ fn option(spec: &OptionSpec, localizer: &Localizer<'_>, key: &str) -> CommandOpt
 fn typed_option(spec: &OptionSpec, localizer: &Localizer<'_>, key: &str) -> CommandOption {
     let names = localizer.names(key);
     let descriptions = localizer.descriptions(key);
+    let description = localizer.default_text(&format!("{key}.description"));
     // Whole numbers a range may be written with; the manifest checked that it is in order.
     #[allow(clippy::cast_possible_truncation)]
     let whole = |value: f64| value as i64;
@@ -141,6 +152,7 @@ fn typed_option(spec: &OptionSpec, localizer: &Localizer<'_>, key: &str) -> Comm
         OptionKind::String => build_option!(
             StringBuilder,
             spec,
+            description,
             names,
             descriptions,
             |mut b: StringBuilder| {
@@ -163,6 +175,7 @@ fn typed_option(spec: &OptionSpec, localizer: &Localizer<'_>, key: &str) -> Comm
         OptionKind::Integer => build_option!(
             IntegerBuilder,
             spec,
+            description,
             names,
             descriptions,
             |mut b: IntegerBuilder| {
@@ -185,6 +198,7 @@ fn typed_option(spec: &OptionSpec, localizer: &Localizer<'_>, key: &str) -> Comm
         OptionKind::Number => build_option!(
             NumberBuilder,
             spec,
+            description,
             names,
             descriptions,
             |mut b: NumberBuilder| {
@@ -204,12 +218,20 @@ fn typed_option(spec: &OptionSpec, localizer: &Localizer<'_>, key: &str) -> Comm
                 b
             }
         ),
-        OptionKind::Boolean => build_option!(BooleanBuilder, spec, names, descriptions),
-        OptionKind::User => build_option!(UserBuilder, spec, names, descriptions),
-        OptionKind::Channel => build_option!(ChannelBuilder, spec, names, descriptions),
-        OptionKind::Role => build_option!(RoleBuilder, spec, names, descriptions),
-        OptionKind::Mentionable => build_option!(MentionableBuilder, spec, names, descriptions),
-        OptionKind::Attachment => build_option!(AttachmentBuilder, spec, names, descriptions),
+        OptionKind::Boolean => {
+            build_option!(BooleanBuilder, spec, description, names, descriptions)
+        }
+        OptionKind::User => build_option!(UserBuilder, spec, description, names, descriptions),
+        OptionKind::Channel => {
+            build_option!(ChannelBuilder, spec, description, names, descriptions)
+        }
+        OptionKind::Role => build_option!(RoleBuilder, spec, description, names, descriptions),
+        OptionKind::Mentionable => {
+            build_option!(MentionableBuilder, spec, description, names, descriptions)
+        }
+        OptionKind::Attachment => {
+            build_option!(AttachmentBuilder, spec, description, names, descriptions)
+        }
     }
 }
 
@@ -222,7 +244,8 @@ fn subcommand_builder(
 ) -> SubCommandBuilder {
     let path = format!("{parent}-{}", spec.name);
     let key = format!("subcommand-{parent}-{}", spec.name);
-    let mut builder = SubCommandBuilder::new(&spec.name, &spec.description)
+    let text = localizer.default_text(&format!("{key}.description"));
+    let mut builder = SubCommandBuilder::new(&spec.name, &text)
         .name_localizations(localizer.names(&key))
         .description_localizations(localizer.descriptions(&key));
     for opt in &spec.options {
@@ -239,7 +262,8 @@ fn subcommand(parent: &str, spec: &SubcommandSpec, localizer: &Localizer<'_>) ->
     }
     let path = format!("{parent}-{}", spec.name);
     let key = format!("subcommand-{parent}-{}", spec.name);
-    SubCommandGroupBuilder::new(&spec.name, &spec.description)
+    let text = localizer.default_text(&format!("{key}.description"));
+    SubCommandGroupBuilder::new(&spec.name, &text)
         .name_localizations(localizer.names(&key))
         .description_localizations(localizer.descriptions(&key))
         .subcommands(
@@ -260,7 +284,8 @@ fn command(
         namespace: module.as_str(),
     };
     let key = format!("command-{}", spec.name);
-    let mut builder = CommandBuilder::new(&spec.name, &spec.description, CommandType::ChatInput)
+    let text = localizer.default_text(&format!("{key}.description"));
+    let mut builder = CommandBuilder::new(&spec.name, &text, CommandType::ChatInput)
         .name_localizations(localizer.names(&key))
         .description_localizations(localizer.descriptions(&key))
         // Moderation commands only make sense inside a server.
@@ -383,7 +408,7 @@ subcommand-warn-list = 一覧
     }
 
     fn option_spec(name: &str, kind: OptionKind, required: bool) -> OptionSpec {
-        let option = OptionSpec::new(name, format!("{name} option"), kind);
+        let option = OptionSpec::new(name, kind);
         if required { option.required() } else { option }
     }
 
@@ -404,7 +429,6 @@ subcommand-warn-list = 一覧
     fn warn_spec() -> CommandSpec {
         CommandSpec {
             name: "warn".into(),
-            description: "Warn a member".into(),
             options: vec![
                 option_spec("user", OptionKind::User, true),
                 option_spec("note", OptionKind::String, false),
@@ -478,7 +502,6 @@ subcommand-warn-list = 一覧
             options: vec![],
             subcommands: vec![SubcommandSpec {
                 name: "list".into(),
-                description: "List warnings".into(),
                 options: vec![option_spec("user", OptionKind::User, true)],
                 subcommands: vec![],
             }],
@@ -515,15 +538,15 @@ subcommand-warn-list = 一覧
 
     #[test]
     fn choices_ranges_and_lengths_are_published() {
-        let mut level = OptionSpec::new("level", "How serious", OptionKind::Integer);
+        let mut level = OptionSpec::new("level", OptionKind::Integer);
         level.min_value = Some(1.0);
         level.max_value = Some(5.0);
-        let mut ratio = OptionSpec::new("ratio", "A ratio", OptionKind::Number);
+        let mut ratio = OptionSpec::new("ratio", OptionKind::Number);
         ratio.min_value = Some(0.5);
-        let mut note = OptionSpec::new("note", "A note", OptionKind::String);
+        let mut note = OptionSpec::new("note", OptionKind::String);
         note.min_length = Some(2);
         note.max_length = Some(40);
-        let mut kind = OptionSpec::new("kind", "Which", OptionKind::String);
+        let mut kind = OptionSpec::new("kind", OptionKind::String);
         kind.choices = vec![
             OptionChoice {
                 name: "Spam".into(),
@@ -600,11 +623,9 @@ subcommand-warn-list = 一覧
     fn subcommand_groups_are_published_with_their_subcommands() {
         let group = SubcommandSpec {
             name: "list".into(),
-            description: "List warnings".into(),
             options: vec![],
             subcommands: vec![SubcommandSpec {
                 name: "add".into(),
-                description: "Add one".into(),
                 options: vec![option_spec("user", OptionKind::User, true)],
                 subcommands: vec![],
             }],
@@ -630,17 +651,14 @@ subcommand-warn-list = 一覧
             subcommands: vec![
                 SubcommandSpec {
                     name: "status".into(),
-                    description: "Show status".into(),
                     options: vec![],
                     subcommands: vec![],
                 },
                 SubcommandSpec {
                     name: "counters".into(),
-                    description: "Look at counters".into(),
                     options: vec![],
                     subcommands: vec![SubcommandSpec {
                         name: "view".into(),
-                        description: "Show one".into(),
                         options: vec![option_spec("counter", OptionKind::String, true)],
                         subcommands: vec![],
                     }],

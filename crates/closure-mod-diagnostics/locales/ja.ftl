@@ -1,3 +1,4 @@
+module-description = 動作確認とバージョンのコマンドです。
 command-ping = ping
     .description = Bot が動作しているか確認します
 ping-title = Pong!

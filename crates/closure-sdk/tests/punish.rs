@@ -261,30 +261,20 @@ fn module() -> ModuleBuilder {
         .capability(Capability::ReadGuild)
         .capability(Capability::Storage)
         .config(json!({ "type": "object", "properties": {} }), json!({}))
-        .command(Command::<Kick>::new("kick", "Kick").handler(kick))
-        .command(Command::<Kick>::new("bot_kick", "Kick as the bot").handler(bot_kick))
-        .command(
-            Command::<Kick>::new("english_kick", "Kick, answer in English").handler(english_kick),
-        )
-        .command(Command::<TimeOut>::new("timeout", "Time out").handler(timeout))
-        .command(Command::<Lift>::new("untimeout", "Lift a timeout").handler(untimeout))
-        .command(Command::<Ban>::new("ban", "Ban").handler(ban))
-        .command(Command::<Lift>::new("unban", "Lift a ban").handler(unban))
-        .command(Command::<Lift>::new("warn", "Warn").handler(warn))
-        .command(Command::<Mute>::new("vcmute", "Voice mute").handler(voice_mute))
-        .command(Command::<Lift>::new("vcunmute", "Lift a voice mute").handler(voice_unmute))
-        .command(
-            Command::<Undo>::new("undo_untimeout", "Lift a timeout, undoing a case")
-                .handler(undo_untimeout),
-        )
-        .command(
-            Command::<Undo>::new("undo_unban", "Lift a ban, undoing a case").handler(undo_unban),
-        )
-        .command(
-            Command::<Undo>::new("undo_vcunmute", "Lift a voice mute, undoing a case")
-                .handler(undo_voice_unmute),
-        )
-        .command(Command::<RawBan>::new("ban_raw", "Ban, reason unchecked").handler(ban_raw));
+        .command(Command::<Kick>::new("kick").handler(kick))
+        .command(Command::<Kick>::new("bot_kick").handler(bot_kick))
+        .command(Command::<Kick>::new("english_kick").handler(english_kick))
+        .command(Command::<TimeOut>::new("timeout").handler(timeout))
+        .command(Command::<Lift>::new("untimeout").handler(untimeout))
+        .command(Command::<Ban>::new("ban").handler(ban))
+        .command(Command::<Lift>::new("unban").handler(unban))
+        .command(Command::<Lift>::new("warn").handler(warn))
+        .command(Command::<Mute>::new("vcmute").handler(voice_mute))
+        .command(Command::<Lift>::new("vcunmute").handler(voice_unmute))
+        .command(Command::<Undo>::new("undo_untimeout").handler(undo_untimeout))
+        .command(Command::<Undo>::new("undo_unban").handler(undo_unban))
+        .command(Command::<Undo>::new("undo_vcunmute").handler(undo_voice_unmute))
+        .command(Command::<RawBan>::new("ban_raw").handler(ban_raw));
     punish::jobs(builder)
 }
 
@@ -299,7 +289,7 @@ fn module_without_cases() -> ModuleBuilder {
         .capability(Capability::BanMembers)
         .capability(Capability::Schedule)
         .config(json!({ "type": "object", "properties": {} }), json!({}))
-        .command(Command::<Ban>::new("ban", "Ban").handler(ban));
+        .command(Command::<Ban>::new("ban").handler(ban));
     punish::jobs(builder)
 }
 

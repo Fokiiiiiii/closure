@@ -63,7 +63,6 @@ impl Choice {
 #[derive(Debug)]
 pub struct Command<A> {
     name: String,
-    description: String,
     requires: Option<String>,
     cooldown: Option<Cooldown>,
     default_member_permissions: Option<Permissions>,
@@ -71,12 +70,12 @@ pub struct Command<A> {
 }
 
 impl<A: CommandArgs> Command<A> {
-    /// A command (or, inside a group, a subcommand) with an English description.
+    /// A command (or, inside a group, a subcommand). Its description is the one of the module's
+    /// catalog, under the key of the command.
     #[must_use]
-    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            description: description.into(),
             requires: None,
             cooldown: None,
             default_member_permissions: None,
@@ -121,7 +120,6 @@ impl<A: CommandArgs> Command<A> {
         });
         BoundCommand {
             name: self.name,
-            description: self.description,
             options: A::options(),
             requires: self.requires,
             cooldown: self.cooldown,
@@ -134,7 +132,6 @@ impl<A: CommandArgs> Command<A> {
 /// A command with its handler.
 pub struct BoundCommand {
     name: String,
-    description: String,
     options: Vec<closure_core::module::OptionSpec>,
     requires: Option<String>,
     cooldown: Option<Cooldown>,
@@ -156,17 +153,15 @@ impl std::fmt::Debug for BoundCommand {
 #[derive(Debug)]
 pub struct SubcommandGroup {
     name: String,
-    description: String,
     subcommands: Vec<BoundCommand>,
 }
 
 impl SubcommandGroup {
-    /// A group with an English description; it needs at least one subcommand.
+    /// A group; it needs at least one subcommand.
     #[must_use]
-    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            description: description.into(),
             subcommands: Vec::new(),
         }
     }
@@ -334,10 +329,21 @@ impl ModuleBuilder {
         })
     }
 
-    #[must_use]
-    pub fn description(mut self, description: impl Into<String>) -> Self {
-        self.manifest = self.manifest.description(description);
-        self
+    /// The description of a module: the line `module-description` of its default-language catalog, so
+    /// that the text is in the locale files and not in the code.
+    fn module_description(manifest: &ModuleManifest) -> String {
+        manifest
+            .catalogs
+            .iter()
+            .find(|catalog| catalog.locale == Locale::DEFAULT)
+            .and_then(|catalog| {
+                catalog
+                    .source
+                    .lines()
+                    .find_map(|line| line.strip_prefix("module-description = "))
+            })
+            .map(str::to_owned)
+            .unwrap_or_default()
     }
 
     /// A capability the module needs besides answering commands (which it always has).
@@ -548,7 +554,6 @@ impl ModuleBuilder {
         }
         let spec = CommandSpec {
             name: command.name.clone(),
-            description: command.description.clone(),
             options: command.options.clone(),
             subcommands: Vec::new(),
             default_member_permissions: command.default_member_permissions,
@@ -566,7 +571,6 @@ impl ModuleBuilder {
     pub fn group(
         mut self,
         name: impl Into<String>,
-        description: impl Into<String>,
         subcommands: impl IntoIterator<Item = BoundCommand>,
     ) -> Self {
         let name = name.into();
@@ -581,14 +585,13 @@ impl ModuleBuilder {
             }
             specs.push(SubcommandSpec {
                 name: sub.name.clone(),
-                description: sub.description.clone(),
                 options: sub.options.clone(),
                 subcommands: Vec::new(),
             });
             let sub_name = sub.name.clone();
             self.route(&name, Some(sub_name), sub);
         }
-        self.add_subcommands(&name, description.into(), specs);
+        self.add_subcommands(&name, specs);
         self
     }
 
@@ -599,14 +602,12 @@ impl ModuleBuilder {
     pub fn groups(
         mut self,
         name: impl Into<String>,
-        description: impl Into<String>,
         groups: impl IntoIterator<Item = SubcommandGroup>,
     ) -> Self {
         let name = name.into();
         let mut specs = Vec::new();
         for SubcommandGroup {
             name: group,
-            description: group_description,
             subcommands,
         } in groups
         {
@@ -626,7 +627,6 @@ impl ModuleBuilder {
                 }
                 leaves.push(SubcommandSpec {
                     name: sub.name.clone(),
-                    description: sub.description.clone(),
                     options: sub.options.clone(),
                     subcommands: Vec::new(),
                 });
@@ -635,23 +635,17 @@ impl ModuleBuilder {
             }
             specs.push(SubcommandSpec {
                 name: group,
-                description: group_description,
                 options: Vec::new(),
                 subcommands: leaves,
             });
         }
-        self.add_subcommands(&name, description.into(), specs);
+        self.add_subcommands(&name, specs);
         self
     }
 
     /// Adds subcommands to the command `name`, which may already have some. A name is used once
     /// among a command's subcommands and groups, and a command holds at most 25 of them.
-    fn add_subcommands(
-        &mut self,
-        name: &str,
-        description: String,
-        subcommands: Vec<SubcommandSpec>,
-    ) {
+    fn add_subcommands(&mut self, name: &str, subcommands: Vec<SubcommandSpec>) {
         if self.routes.contains_key(&(name.to_owned(), None)) {
             self.problem.get_or_insert(self.invalid(
                 name,
@@ -664,7 +658,6 @@ impl ModuleBuilder {
         } else {
             commands.push(CommandSpec {
                 name: name.to_owned(),
-                description,
                 options: Vec::new(),
                 subcommands: Vec::new(),
                 default_member_permissions: None,
@@ -841,6 +834,7 @@ impl ModuleBuilder {
 
     /// The module, or what is wrong with its declaration.
     pub fn build(mut self) -> Result<SdkModule, CoreError> {
+        self.manifest.description = Self::module_description(&self.manifest);
         // Looked at here and not as each command is added, so the order of the calls does not
         // matter: a permission may be declared after the command that requires it.
         for ((command, _), route) in &self.routes {

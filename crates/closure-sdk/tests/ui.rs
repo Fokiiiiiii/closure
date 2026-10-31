@@ -10,84 +10,72 @@ use twilight_model::channel::message::component::ButtonStyle;
 fn module() -> ModuleBuilder {
     ModuleBuilder::new("ui", "Interface", "0.1.0")
         .unwrap()
-        .command(
-            Command::<()>::new("danger", "Ask before doing it").handler(|cx, ()| async move {
-                let user = cx.user().id;
-                let yes = button(
-                    ButtonStyle::Danger,
-                    "Yes",
-                    CustomId::new("confirm")
-                        .only_for(user)
-                        .data("42")
-                        .encode(cx.module()),
-                );
-                let no = button(
-                    ButtonStyle::Secondary,
-                    "No",
-                    CustomId::new("cancel").only_for(user).encode(cx.module()),
-                );
-                cx.reply_with(InteractionReply {
-                    content: Some("Sure?".into()),
-                    components: vec![row([yes, no])],
-                    ..InteractionReply::default()
-                })
-                .await
-            }),
-        )
-        .command(
-            Command::<()>::new("report", "Open a form").handler(|cx, ()| async move {
-                let form = ui::modal(
-                    CustomId::new("report").encode(cx.module()),
-                    "Report",
-                    [text_input(cx.module(), "why", "Why", true, true, 200)],
-                );
-                cx.show_modal(form).await
-            }),
-        )
-        .command(
-            Command::<()>::new("menu", "Pick one").handler(|cx, ()| async move {
-                let menu = select(
-                    CustomId::new("pick").encode(cx.module()),
-                    Some("Choose"),
-                    [
-                        ("Spam".to_owned(), "spam".to_owned()),
-                        ("Abuse".to_owned(), "abuse".to_owned()),
-                    ],
-                    1,
-                    1,
-                );
-                cx.reply_with(InteractionReply {
-                    content: Some("Which?".into()),
-                    components: vec![row([menu])],
-                    ..InteractionReply::default()
-                })
-                .await
-            }),
-        )
-        .command(
-            Command::<()>::new("pages", "Three pages").handler(|cx, ()| async move {
-                cx.reply_with(InteractionReply {
-                    content: Some("page 0".into()),
-                    components: vec![Pager::new("page", 0, 3).row(cx.module())],
-                    ..InteractionReply::default()
-                })
-                .await
-            }),
-        )
-        .command(
-            Command::<()>::new("forge", "Names another module's route").handler(
-                |cx, ()| async move {
-                    let other = closure_sdk::ModuleId::new("other").unwrap();
-                    let id = CustomId::new("confirm").encode(&other);
-                    cx.reply_with(InteractionReply {
-                        content: Some("hi".into()),
-                        components: vec![row([button(ButtonStyle::Primary, "x", id)])],
-                        ..InteractionReply::default()
-                    })
-                    .await
-                },
-            ),
-        )
+        .command(Command::<()>::new("danger").handler(|cx, ()| async move {
+            let user = cx.user().id;
+            let yes = button(
+                ButtonStyle::Danger,
+                "Yes",
+                CustomId::new("confirm")
+                    .only_for(user)
+                    .data("42")
+                    .encode(cx.module()),
+            );
+            let no = button(
+                ButtonStyle::Secondary,
+                "No",
+                CustomId::new("cancel").only_for(user).encode(cx.module()),
+            );
+            cx.reply_with(InteractionReply {
+                content: Some("Sure?".into()),
+                components: vec![row([yes, no])],
+                ..InteractionReply::default()
+            })
+            .await
+        }))
+        .command(Command::<()>::new("report").handler(|cx, ()| async move {
+            let form = ui::modal(
+                CustomId::new("report").encode(cx.module()),
+                "Report",
+                [text_input(cx.module(), "why", "Why", true, true, 200)],
+            );
+            cx.show_modal(form).await
+        }))
+        .command(Command::<()>::new("menu").handler(|cx, ()| async move {
+            let menu = select(
+                CustomId::new("pick").encode(cx.module()),
+                Some("Choose"),
+                [
+                    ("Spam".to_owned(), "spam".to_owned()),
+                    ("Abuse".to_owned(), "abuse".to_owned()),
+                ],
+                1,
+                1,
+            );
+            cx.reply_with(InteractionReply {
+                content: Some("Which?".into()),
+                components: vec![row([menu])],
+                ..InteractionReply::default()
+            })
+            .await
+        }))
+        .command(Command::<()>::new("pages").handler(|cx, ()| async move {
+            cx.reply_with(InteractionReply {
+                content: Some("page 0".into()),
+                components: vec![Pager::new("page", 0, 3).row(cx.module())],
+                ..InteractionReply::default()
+            })
+            .await
+        }))
+        .command(Command::<()>::new("forge").handler(|cx, ()| async move {
+            let other = closure_sdk::ModuleId::new("other").unwrap();
+            let id = CustomId::new("confirm").encode(&other);
+            cx.reply_with(InteractionReply {
+                content: Some("hi".into()),
+                components: vec![row([button(ButtonStyle::Primary, "x", id)])],
+                ..InteractionReply::default()
+            })
+            .await
+        }))
         .component("confirm", |cx| async move {
             cx.update(InteractionReply {
                 content: Some(format!("done {}", cx.data())),

@@ -31,7 +31,7 @@ fn module() -> ModuleBuilder {
         .unwrap()
         .permission(PermissionSpec::new("find.use", Level::MODERATOR, "Find members").unwrap())
         .command(
-            Command::<Find>::new("find", "Find a member")
+            Command::<Find>::new("find")
                 .requires("find.use")
                 .handler(|cx, args| async move { cx.reply(args.query).await }),
         )
@@ -122,7 +122,7 @@ fn the_derive_publishes_the_autocomplete_flag() {
 fn autocomplete_is_refused_for_an_option_that_is_not_text_or_a_number_or_for_no_option() {
     let on_a_flag = ModuleBuilder::new("flag", "Flag", "0.1.0")
         .unwrap()
-        .command(Command::<Flag>::new("flag", "A flag").handler(|_, _| async move { Ok(()) }))
+        .command(Command::<Flag>::new("flag").handler(|_, _| async move { Ok(()) }))
         .autocomplete(
             "flag",
             "on",

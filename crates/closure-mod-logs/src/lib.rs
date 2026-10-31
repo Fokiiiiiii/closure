@@ -114,7 +114,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
     let (schema, defaults) = settings();
     Ok(
         ModuleBuilder::new("logs", "Logs", env!("CARGO_PKG_VERSION"))?
-            .description("Post the edits and deletions of messages, and the joins, leaves and bans of members, to a channel.")
             .capability(Capability::SendMessages)
             .capability(Capability::ReadMessageHistory)
             .capability(Capability::KeepAttachments)

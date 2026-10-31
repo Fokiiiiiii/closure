@@ -38,7 +38,7 @@ Warn members, note about them, and look at and revoke the cases of a server.
 
 ### `/warn`
 
-Warn a member
+Warn a member; the warning expires after a set number of days
 
 - Japanese name: `警告`
 - Japanese description: メンバーに警告します。警告は設定した日数で失効します
@@ -50,7 +50,7 @@ Warn a member
 
 ### `/note`
 
-Add a note about a member
+Add a note about a member that is not a warning
 
 - Japanese name: `メモ`
 - Japanese description: 警告ではないメモを相手に残します
@@ -91,7 +91,7 @@ Show a case
 
 #### `/case list`
 
-List the cases of a member
+List the cases of a member, newest first
 
 - Japanese name: `一覧`
 - Japanese description: メンバーのケースを新しい順に一覧表示します
@@ -115,7 +115,7 @@ Revoke a case
 
 ### `/timeout`
 
-Time a member out
+Time a member out for a while; Discord allows 28 days at most
 
 - Japanese name: `タイムアウト`
 - Japanese description: メンバーを一定時間タイムアウトします。Discord の上限は 28 日です
@@ -123,7 +123,7 @@ Time a member out
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member to time out |
-| `duration` | 期間 | string | no | - | How long, such as 1h or 7d, or until a date and time; at most 28 days. A template may give it. |
+| `duration` | 期間 | string | no | - | How long (1h, 7d) or until (2026-11-01 18:00); a template may give it |
 | `reason` | 理由 | string | no | max_length 512 | Why |
 
 ### `/untimeout`
@@ -140,14 +140,14 @@ Lift the timeout of a member
 
 ### `/kick`
 
-Kick a member
+Kick a member from the server
 
 - Japanese name: `キック`
 - Japanese description: メンバーをサーバーから追い出します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `user` | ユーザー | user | yes | - | Member |
+| `user` | ユーザー | user | yes | - | Member to kick |
 | `reason` | 理由 | string | no | max_length 512 | Why |
 
 ### `/ban`
@@ -161,8 +161,8 @@ Ban a member, for good or for a while
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member to ban |
 | `reason` | 理由 | string | no | max_length 512 | Why |
-| `duration` | 期間 | string | no | - | How long the ban lasts, such as 7d, or until a date and time; forever when left out |
-| `delete_days` | 削除日数 | integer | no | min 0; max 7 | How many days of the member's messages to delete, 0 to 7 |
+| `duration` | 期間 | string | no | - | How long (7d) or until (2026-11-01 18:00); forever if left out |
+| `delete_days` | 削除日数 | integer | no | min 0; max 7 | Days of the member's messages to delete, 0 to 7 |
 
 ### `/unban`
 
@@ -178,7 +178,7 @@ Lift the ban of a member
 
 ### `/vcmute`
 
-Mute a member in voice channels
+Mute a member in voice channels, for a while or until it is lifted
 
 - Japanese name: `vcミュート`
 - Japanese description: メンバーをボイスチャンネルでミュートします。期間を付けなければ解除するまで続きます
@@ -186,7 +186,7 @@ Mute a member in voice channels
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member to mute in voice channels |
-| `duration` | 期間 | string | no | - | How long, such as 1h or 7d, or until a date and time; until lifted when left out |
+| `duration` | 期間 | string | no | - | How long (1h, 7d) or until (2026-11-01 18:00); until lifted if left out |
 | `reason` | 理由 | string | no | max_length 512 | Why |
 
 ### `/vcunmute`

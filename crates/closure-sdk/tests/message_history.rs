@@ -9,26 +9,20 @@ fn reader() -> ModuleBuilder {
     ModuleBuilder::new("automod", "Automod", "0.1.0")
         .unwrap()
         .capability(Capability::ReadMessageHistory)
-        .command(
-            Command::<()>::new("recent", "Count the recent messages of the caller").handler(
-                |cx, ()| async move {
-                    let found = cx.history().by_author(cx.user().id, 0, 10).await?;
-                    cx.reply(format!("{}", found.len())).await
-                },
-            ),
-        )
+        .command(Command::<()>::new("recent").handler(|cx, ()| async move {
+            let found = cx.history().by_author(cx.user().id, 0, 10).await?;
+            cx.reply(format!("{}", found.len())).await
+        }))
 }
 
 /// A module that did not declare the capability `message_history`.
 fn plain() -> ModuleBuilder {
     ModuleBuilder::new("plain", "Plain", "0.1.0")
         .unwrap()
-        .command(
-            Command::<()>::new("peek", "Try to read the history").handler(|cx, ()| async move {
-                cx.history().by_author(cx.user().id, 0, 10).await?;
-                cx.reply("Read.").await
-            }),
-        )
+        .command(Command::<()>::new("peek").handler(|cx, ()| async move {
+            cx.history().by_author(cx.user().id, 0, 10).await?;
+            cx.reply("Read.").await
+        }))
 }
 
 fn message(id: u64, author: u64, content: &str) -> SavedMessage {

@@ -1,3 +1,4 @@
+module-description = Post the edits and deletions of messages, the changes of channels, threads, roles, members and voice, and of emojis, stickers and stages, to a channel.
 logs-edited = Message edited
 logs-deleted = Message deleted
 logs-bulk = { $count } messages deleted

@@ -160,7 +160,6 @@ impl Probe {
             .commands
             .push(CommandSpec {
                 name: command.into(),
-                description: "d".into(),
                 options: vec![],
                 subcommands: vec![],
                 default_member_permissions: None,
@@ -1133,7 +1132,6 @@ async fn the_bot_id_reaches_the_events_commands_and_jobs_of_a_module() {
         .commands
         .push(CommandSpec {
             name: "ping".into(),
-            description: "d".into(),
             options: vec![],
             subcommands: vec![],
             default_member_permissions: None,
@@ -1177,7 +1175,6 @@ async fn a_module_sees_the_gateway_latency_the_dispatcher_was_given() {
         .commands
         .push(CommandSpec {
             name: "ping".into(),
-            description: "d".into(),
             options: vec![],
             subcommands: vec![],
             default_member_permissions: None,
@@ -2190,7 +2187,6 @@ async fn a_client_kept_from_one_guild_cannot_answer_an_interaction_of_another() 
         .commands
         .push(CommandSpec {
             name: "ping".into(),
-            description: "d".into(),
             options: vec![],
             subcommands: vec![],
             default_member_permissions: None,
@@ -2241,10 +2237,9 @@ fn warn_module(behavior: Behavior) -> Arc<Probe> {
         .commands
         .push(CommandSpec {
             name: "warn".into(),
-            description: "d".into(),
             options: vec![
-                OptionSpec::new("user", "d", OptionKind::User).required(),
-                OptionSpec::new("reason", "d", OptionKind::String),
+                OptionSpec::new("user", OptionKind::User).required(),
+                OptionSpec::new("reason", OptionKind::String),
             ],
             subcommands: vec![],
             default_member_permissions: None,

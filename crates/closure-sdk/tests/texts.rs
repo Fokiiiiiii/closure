@@ -33,29 +33,23 @@ fn module() -> ModuleBuilder {
             }),
             json!({ "limit": 1 }),
         )
+        .command(Command::<()>::new("warn").handler(|cx, ()| async move {
+            cx.reply_t("warned", &Args::new().with("reason", "spam"))
+                .await
+        }))
         .command(
-            Command::<()>::new("warn", "Warn with a reason").handler(|cx, ()| async move {
-                cx.reply_t("warned", &Args::new().with("reason", "spam"))
-                    .await
-            }),
-        )
-        .command(
-            Command::<()>::new("plain", "A plain text")
+            Command::<()>::new("plain")
                 .handler(|cx, ()| async move { cx.reply_t("plain", &Args::new()).await }),
         )
         .command(
-            Command::<()>::new("long", "A text that is too long")
+            Command::<()>::new("long")
                 .handler(|cx, ()| async move { cx.reply_t("long", &Args::new()).await }),
         )
-        .command(
-            Command::<()>::new("quiet", "Answers nothing").handler(|_cx, ()| async move { Ok(()) }),
-        )
-        .command(
-            Command::<()>::new("limit", "Reads its own settings").handler(|cx, ()| async move {
-                let settings: Settings = cx.config()?;
-                cx.reply(settings.limit.to_string()).await
-            }),
-        )
+        .command(Command::<()>::new("quiet").handler(|_cx, ()| async move { Ok(()) }))
+        .command(Command::<()>::new("limit").handler(|cx, ()| async move {
+            let settings: Settings = cx.config()?;
+            cx.reply(settings.limit.to_string()).await
+        }))
         .catalog(closure_sdk::Locale::En, EN)
 }
 

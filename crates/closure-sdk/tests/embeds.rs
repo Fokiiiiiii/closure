@@ -10,32 +10,26 @@ use twilight_model::id::Id;
 fn module() -> ModuleBuilder {
     ModuleBuilder::new("cards", "Cards", "0.1.0")
         .unwrap()
-        .command(
-            Command::<()>::new("card", "Show a card").handler(|cx, ()| async move {
-                let embed = EmbedBuilder::new()
-                    .title("t")
-                    .field("a", "b", true)
-                    .color(Color::Warning)
-                    .build()?;
-                cx.reply_with(InteractionReply {
-                    embeds: vec![embed],
-                    ..InteractionReply::default()
-                })
-                .await
-            }),
-        )
-        .command(
-            Command::<()>::new("broken", "Show a card with a title that is too long").handler(
-                |cx, ()| async move {
-                    let embed = EmbedBuilder::new().title("a".repeat(257)).build()?;
-                    cx.reply_with(InteractionReply {
-                        embeds: vec![embed],
-                        ..InteractionReply::default()
-                    })
-                    .await
-                },
-            ),
-        )
+        .command(Command::<()>::new("card").handler(|cx, ()| async move {
+            let embed = EmbedBuilder::new()
+                .title("t")
+                .field("a", "b", true)
+                .color(Color::Warning)
+                .build()?;
+            cx.reply_with(InteractionReply {
+                embeds: vec![embed],
+                ..InteractionReply::default()
+            })
+            .await
+        }))
+        .command(Command::<()>::new("broken").handler(|cx, ()| async move {
+            let embed = EmbedBuilder::new().title("a".repeat(257)).build()?;
+            cx.reply_with(InteractionReply {
+                embeds: vec![embed],
+                ..InteractionReply::default()
+            })
+            .await
+        }))
 }
 
 #[tokio::test]
@@ -69,21 +63,19 @@ fn posting_module() -> ModuleBuilder {
     ModuleBuilder::new("posts", "Posts", "0.1.0")
         .unwrap()
         .capability(Capability::SendMessages)
-        .command(
-            Command::<()>::new("post", "Post six long entries").handler(|cx, ()| async move {
-                let entries = (0..6)
-                    .map(|_| LogEntry {
-                        embed: EmbedBuilder::new()
-                            .description("x".repeat(1500))
-                            .build()
-                            .unwrap(),
-                        files: Vec::new(),
-                    })
-                    .collect();
-                files::post(cx.ctx(), Id::new(77), entries).await?;
-                cx.reply("posted").await
-            }),
-        )
+        .command(Command::<()>::new("post").handler(|cx, ()| async move {
+            let entries = (0..6)
+                .map(|_| LogEntry {
+                    embed: EmbedBuilder::new()
+                        .description("x".repeat(1500))
+                        .build()
+                        .unwrap(),
+                    files: Vec::new(),
+                })
+                .collect();
+            files::post(cx.ctx(), Id::new(77), entries).await?;
+            cx.reply("posted").await
+        }))
 }
 
 #[tokio::test]

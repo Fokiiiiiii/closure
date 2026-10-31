@@ -951,43 +951,43 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
 fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
     let builder = builder
         .command(
-            Command::<TimeoutArgs>::new("timeout", "Time a member out")
+            Command::<TimeoutArgs>::new("timeout")
                 .requires("moderation.timeout")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(timeout),
         )
         .command(
-            Command::<MemberReason>::new("untimeout", "Lift the timeout of a member")
+            Command::<MemberReason>::new("untimeout")
                 .requires("moderation.timeout")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(untimeout),
         )
         .command(
-            Command::<MemberReason>::new("kick", "Kick a member")
+            Command::<MemberReason>::new("kick")
                 .requires("moderation.kick")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(kick),
         )
         .command(
-            Command::<BanArgs>::new("ban", "Ban a member, for good or for a while")
+            Command::<BanArgs>::new("ban")
                 .requires("moderation.ban")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(ban),
         )
         .command(
-            Command::<MemberReason>::new("unban", "Lift the ban of a member")
+            Command::<MemberReason>::new("unban")
                 .requires("moderation.ban")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(unban),
         )
         .command(
-            Command::<restrict::VoiceMute>::new("vcmute", "Mute a member in voice channels")
+            Command::<restrict::VoiceMute>::new("vcmute")
                 .requires("moderation.voice")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(restrict::voice_mute),
         )
         .command(
-            Command::<MemberReason>::new("vcunmute", "Lift the voice mute of a member")
+            Command::<MemberReason>::new("vcunmute")
                 .requires("moderation.voice")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(restrict::voice_unmute),
@@ -999,7 +999,6 @@ fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
     let (schema, defaults) = settings();
     let builder = ModuleBuilder::new("moderation", "Moderation", env!("CARGO_PKG_VERSION"))?
-        .description("Warn members, note about them, and look at and revoke the cases of a server.")
         .capability(Capability::Cases)
         .capability(Capability::SendMessages)
         .capability(Capability::ReadGuild)
@@ -1065,32 +1064,31 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .component(templates::ROUTE, templates::pick)
         .component(undo::ROUTE, undo::press)
         .command(
-            Command::<Warn>::new("warn", "Warn a member")
+            Command::<Warn>::new("warn")
                 .requires("moderation.warn")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(warn),
         )
         .command(
-            Command::<Note>::new("note", "Add a note about a member")
+            Command::<Note>::new("note")
                 .requires("moderation.note")
                 .handler(note),
         )
         .command(
-            Command::<Target>::new("warnings", "Show the active warnings of a member")
+            Command::<Target>::new("warnings")
                 .requires("moderation.cases")
                 .handler(warnings),
         )
         .group(
             "case",
-            "Look at, list and revoke cases",
             [
-                Command::<Number>::new("view", "Show a case")
+                Command::<Number>::new("view")
                     .requires("moderation.cases")
                     .handler(case_view),
-                Command::<Listing>::new("list", "List the cases of a member")
+                Command::<Listing>::new("list")
                     .requires("moderation.cases")
                     .handler(case_list),
-                Command::<Revoke>::new("revoke", "Revoke a case")
+                Command::<Revoke>::new("revoke")
                     .requires("moderation.revoke")
                     .handler(case_revoke),
             ],

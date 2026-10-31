@@ -16,7 +16,7 @@ use super::*;
 const PREFIX: &str = "!";
 
 fn opt(name: &str, kind: OptionKind) -> OptionSpec {
-    OptionSpec::new(name, "d", kind)
+    OptionSpec::new(name, kind)
 }
 
 fn required(name: &str, kind: OptionKind) -> OptionSpec {
@@ -26,7 +26,6 @@ fn required(name: &str, kind: OptionKind) -> OptionSpec {
 fn spec(name: &str, options: Vec<OptionSpec>, subcommands: Vec<SubcommandSpec>) -> CommandSpec {
     CommandSpec {
         name: name.into(),
-        description: "d".into(),
         options,
         subcommands,
         default_member_permissions: None,
@@ -36,7 +35,6 @@ fn spec(name: &str, options: Vec<OptionSpec>, subcommands: Vec<SubcommandSpec>) 
 fn sub(name: &str, options: Vec<OptionSpec>) -> SubcommandSpec {
     SubcommandSpec {
         name: name.into(),
-        description: "d".into(),
         options,
         subcommands: Vec::new(),
     }
@@ -45,7 +43,6 @@ fn sub(name: &str, options: Vec<OptionSpec>) -> SubcommandSpec {
 fn group(name: &str, subcommands: Vec<SubcommandSpec>) -> SubcommandSpec {
     SubcommandSpec {
         name: name.into(),
-        description: "d".into(),
         options: Vec::new(),
         subcommands,
     }

@@ -18,18 +18,16 @@ fn module() -> ModuleBuilder {
         .capability(Capability::Storage)
         .capability(Capability::Schedule)
         .command(
-            Command::<()>::new("now", "Say the time")
+            Command::<()>::new("now")
                 .handler(|cx, ()| async move { cx.reply(cx.now().to_string()).await }),
         )
-        .command(
-            Command::<()>::new("later", "Run a job in ten seconds").handler(|cx, ()| async move {
-                cx.scheduler()
-                    .job("stamp", &())?
-                    .after(Duration::from_secs(10))
-                    .await?;
-                Ok(())
-            }),
-        )
+        .command(Command::<()>::new("later").handler(|cx, ()| async move {
+            cx.scheduler()
+                .job("stamp", &())?
+                .after(Duration::from_secs(10))
+                .await?;
+            Ok(())
+        }))
         .job("stamp", |cx| async move {
             cx.store()
                 .set("stamp", &cx.now())

@@ -1,3 +1,4 @@
+module-description = Warn members, note about them, and look at and revoke the cases of a server.
 command-warn = warn
     .description = Warn a member; the warning expires after a set number of days
 option-warn-user = user

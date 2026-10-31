@@ -26,7 +26,7 @@ async fn until(cx: CommandCx, args: Until) -> Result<(), UserError> {
 fn harness() -> Harness {
     let builder = ModuleBuilder::new("span-test", "Span test", "0.1.0")
         .expect("a module id")
-        .command(Command::<Until>::new("until", "Test").handler(until));
+        .command(Command::<Until>::new("until").handler(until));
     Harness::new(builder).expect("a harness")
 }
 

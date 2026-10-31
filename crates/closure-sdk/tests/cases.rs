@@ -11,47 +11,41 @@ fn module() -> ModuleBuilder {
     ModuleBuilder::new("warn", "Warnings", "0.1.0")
         .unwrap()
         .capability(Capability::Cases)
-        .command(
-            Command::<()>::new("warn", "Record a warning").handler(|cx, ()| async move {
-                let case = cx
-                    .cases()
-                    .create(NewCase {
-                        kind: CaseKind::new("warn")?,
-                        target: cx.user().id,
-                        moderator: cx.user().id,
-                        reason: Some("spam".into()),
-                        expires_at: None,
-                    })
-                    .await?;
-                cx.reply(format!("Case {}.", case.number)).await
-            }),
-        )
-        .command(
-            Command::<()>::new("revoke", "Revoke case 1").handler(|cx, ()| async move {
-                cx.cases().revoke(1, cx.user().id, None).await?;
-                cx.reply("Revoked.").await
-            }),
-        )
+        .command(Command::<()>::new("warn").handler(|cx, ()| async move {
+            let case = cx
+                .cases()
+                .create(NewCase {
+                    kind: CaseKind::new("warn")?,
+                    target: cx.user().id,
+                    moderator: cx.user().id,
+                    reason: Some("spam".into()),
+                    expires_at: None,
+                })
+                .await?;
+            cx.reply(format!("Case {}.", case.number)).await
+        }))
+        .command(Command::<()>::new("revoke").handler(|cx, ()| async move {
+            cx.cases().revoke(1, cx.user().id, None).await?;
+            cx.reply("Revoked.").await
+        }))
 }
 
 /// A module that did not declare the capability `cases`.
 fn module_without_the_capability() -> ModuleBuilder {
     ModuleBuilder::new("plain", "Plain", "0.1.0")
         .unwrap()
-        .command(
-            Command::<()>::new("warn", "Try to record a warning").handler(|cx, ()| async move {
-                cx.cases()
-                    .create(NewCase {
-                        kind: CaseKind::new("warn")?,
-                        target: cx.user().id,
-                        moderator: cx.user().id,
-                        reason: None,
-                        expires_at: None,
-                    })
-                    .await?;
-                cx.reply("Recorded.").await
-            }),
-        )
+        .command(Command::<()>::new("warn").handler(|cx, ()| async move {
+            cx.cases()
+                .create(NewCase {
+                    kind: CaseKind::new("warn")?,
+                    target: cx.user().id,
+                    moderator: cx.user().id,
+                    reason: None,
+                    expires_at: None,
+                })
+                .await?;
+            cx.reply("Recorded.").await
+        }))
 }
 
 fn texts(replies: &[Reply]) -> Vec<&str> {

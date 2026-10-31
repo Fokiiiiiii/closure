@@ -11,9 +11,10 @@
 //! }
 //! ```
 //!
-//! Each field is one option: its name is the field's, its description the doc comment (or
-//! `desc = "..."`), it is required unless the type is `Option<_>`. Attributes inside `#[arg(..)]`:
-//! `name`, `desc`, `min`, `max` (numbers), `min_length`, `max_length` (strings), `choices`
+//! Each field is one option: its name is the field's, and it is required unless the type is
+//! `Option<_>`. The description comes from the module's catalog (`option-<command>-<field>`), not
+//! from the code. Attributes inside `#[arg(..)]`: `name`, `min`, `max` (numbers), `min_length`,
+//! `max_length` (strings), `choices`
 //! (a list of strings or of integers) and `autocomplete` (a flag: the option's choices come from
 //! the handler registered with `ModuleBuilder::autocomplete`).
 
@@ -37,7 +38,6 @@ pub fn derive_command_args(input: TokenStream) -> TokenStream {
 struct OptionField {
     ident: Ident,
     name: String,
-    description: String,
     ty: Type,
     optional: bool,
     min: Option<f64>,
@@ -94,7 +94,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 }
 
 fn spec_of(option: &OptionField) -> TokenStream2 {
-    let (name, description, ty) = (&option.name, &option.description, &option.ty);
+    let (name, ty) = (&option.name, &option.ty);
     let required = (!option.optional).then(|| quote! { option.required = true; });
     let min = option
         .min
@@ -119,7 +119,6 @@ fn spec_of(option: &OptionField) -> TokenStream2 {
         {
             let mut option = ::closure_sdk::OptionSpec::new(
                 #name,
-                #description,
                 <#ty as ::closure_sdk::OptionType>::KIND,
             );
             #required #min #max #min_length #max_length #choices #autocomplete
@@ -138,7 +137,6 @@ fn option_of(field: &syn::Field) -> syn::Result<OptionField> {
     };
     let mut option = OptionField {
         name: ident.to_string(),
-        description: doc_of(field),
         ident,
         ty,
         optional,
@@ -158,7 +156,6 @@ fn option_of(field: &syn::Field) -> syn::Result<OptionField> {
                 .unwrap_or_default();
             match key.as_str() {
                 "name" => option.name = meta.value()?.parse::<LitStr>()?.value(),
-                "desc" => option.description = meta.value()?.parse::<LitStr>()?.value(),
                 "min" => option.min = Some(number(&meta.value()?.parse()?)?),
                 "max" => option.max = Some(number(&meta.value()?.parse()?)?),
                 "min_length" => option.min_length = Some(length(&meta.value()?.parse()?)?),
@@ -169,12 +166,6 @@ fn option_of(field: &syn::Field) -> syn::Result<OptionField> {
             }
             Ok(())
         })?;
-    }
-    if option.description.is_empty() {
-        return Err(syn::Error::new_spanned(
-            field,
-            "an option needs a description: write a doc comment or `#[arg(desc = \"...\")]`",
-        ));
     }
     Ok(option)
 }
@@ -193,26 +184,6 @@ fn option_inner(ty: &Type) -> Option<&Type> {
         GenericArgument::Type(inner) => Some(inner),
         _ => None,
     }
-}
-
-/// The doc comment, as one line.
-fn doc_of(field: &syn::Field) -> String {
-    let lines: Vec<String> = field
-        .attrs
-        .iter()
-        .filter(|a| a.path().is_ident("doc"))
-        .filter_map(|a| match &a.meta {
-            syn::Meta::NameValue(value) => match &value.value {
-                Expr::Lit(ExprLit {
-                    lit: Lit::Str(text),
-                    ..
-                }) => Some(text.value().trim().to_owned()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    lines.join(" ").trim().to_owned()
 }
 
 fn number(expr: &Expr) -> syn::Result<f64> {

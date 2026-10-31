@@ -48,7 +48,7 @@ fn module() -> ModuleBuilder {
         .unwrap()
         .permission(PermissionSpec::new("warn.add", Level::MODERATOR, "Warn members").unwrap())
         .command(
-            Command::<Warn>::new("warn", "Warn a member")
+            Command::<Warn>::new("warn")
                 .requires("warn.add")
                 .cooldown(Cooldown::per_user(Duration::from_secs(10)))
                 .handler(|cx, args| async move {
@@ -66,11 +66,9 @@ fn module() -> ModuleBuilder {
         )
         .group(
             "warnings",
-            "Look at warnings",
             [
-                Command::<Kind>::new("show", "Show a list")
-                    .handler(|_cx, _args| async move { Ok(()) }),
-                Command::<()>::new("clear", "Clear everything")
+                Command::<Kind>::new("show").handler(|_cx, _args| async move { Ok(()) }),
+                Command::<()>::new("clear")
                     .requires("warn.add")
                     .handler(|cx, ()| async move {
                         cx.defer(false).await?;
@@ -111,7 +109,6 @@ async fn the_options_are_published_from_the_struct() {
         .map(|o| (o.name.as_str(), o.required))
         .collect();
     assert_eq!(names, [("user", true), ("reason", false), ("level", false)]);
-    assert_eq!(options[0].description, "Member to warn");
     assert_eq!(options[1].max_length, Some(512));
     assert_eq!(
         (options[2].min_value, options[2].max_value),
@@ -275,14 +272,14 @@ async fn a_failure_of_discord_reaches_the_dispatcher_instead_of_being_swallowed(
 fn a_declaration_that_cannot_work_is_refused_when_the_module_is_built() {
     // A permission nobody declared.
     let undeclared = ModuleBuilder::new("warn", "w", "0.1.0").unwrap().command(
-        Command::<()>::new("a", "d")
+        Command::<()>::new("a")
             .requires("warn.nope")
             .handler(|_cx, ()| async { Ok(()) }),
     );
     assert!(undeclared.build().is_err());
     // A key outside the module's own namespace.
     let outside = ModuleBuilder::new("warn", "w", "0.1.0").unwrap().command(
-        Command::<()>::new("a", "d")
+        Command::<()>::new("a")
             .requires("Not A Key")
             .handler(|_cx, ()| async { Ok(()) }),
     );
@@ -290,8 +287,8 @@ fn a_declaration_that_cannot_work_is_refused_when_the_module_is_built() {
     // The same command twice.
     let twice = ModuleBuilder::new("warn", "w", "0.1.0")
         .unwrap()
-        .command(Command::<()>::new("a", "d").handler(|_cx, ()| async { Ok(()) }))
-        .command(Command::<()>::new("a", "d").handler(|_cx, ()| async { Ok(()) }));
+        .command(Command::<()>::new("a").handler(|_cx, ()| async { Ok(()) }))
+        .command(Command::<()>::new("a").handler(|_cx, ()| async { Ok(()) }));
     assert!(twice.build().is_err());
 }
 
@@ -412,7 +409,7 @@ fn counting_module() -> ModuleBuilder {
         .unwrap()
         .capability(Capability::Storage)
         .command(
-            Command::<Warn>::new("count", "Count a warning").handler(|cx, args| async move {
+            Command::<Warn>::new("count").handler(|cx, args| async move {
                 let total = cx.store().counter_add("warns", args.user, 1).await?;
                 let recent = cx
                     .store()
@@ -422,12 +419,10 @@ fn counting_module() -> ModuleBuilder {
                 cx.reply(format!("total {total}, recent {recent}")).await
             }),
         )
-        .command(
-            Command::<()>::new("last", "Who was counted last").handler(|cx, ()| async move {
-                let last: Option<u64> = cx.store().get("last").await?;
-                cx.reply(format!("{last:?}")).await
-            }),
-        )
+        .command(Command::<()>::new("last").handler(|cx, ()| async move {
+            let last: Option<u64> = cx.store().get("last").await?;
+            cx.reply(format!("{last:?}")).await
+        }))
 }
 
 #[tokio::test]
@@ -471,12 +466,10 @@ async fn a_module_without_the_capability_cannot_keep_data() {
     // The same module, but it did not declare `storage`.
     let module = ModuleBuilder::new("count", "Counting", "0.1.0")
         .unwrap()
-        .command(
-            Command::<()>::new("last", "Who was counted last").handler(|cx, ()| async move {
-                cx.store().set("k", &1).await?;
-                Ok(())
-            }),
-        );
+        .command(Command::<()>::new("last").handler(|cx, ()| async move {
+            cx.store().set("k", &1).await?;
+            Ok(())
+        }));
     let harness = Harness::new(module).unwrap();
     let error = harness.invoke(Invocation::new("last")).await.unwrap_err();
     assert!(error.to_string().contains("storage"), "{error}");
@@ -512,7 +505,7 @@ fn the_order_of_the_calls_does_not_matter_for_a_permission_and_its_command() {
     let module = ModuleBuilder::new("warn", "w", "0.1.0")
         .unwrap()
         .command(
-            Command::<()>::new("a", "d")
+            Command::<()>::new("a")
                 .requires("warn.add")
                 .handler(|_cx, ()| async { Ok(()) }),
         )
@@ -608,8 +601,7 @@ fn a_route_is_measured_in_characters_not_bytes() {
 fn a_subcommand_cannot_carry_what_only_a_command_can() {
     let group = ModuleBuilder::new("warn", "w", "0.1.0").unwrap().group(
         "warn",
-        "d",
-        [Command::<()>::new("add", "d")
+        [Command::<()>::new("add")
             .default_member_permissions(twilight_model::guild::Permissions::BAN_MEMBERS)
             .handler(|_cx, ()| async { Ok(()) })],
     );
@@ -621,14 +613,12 @@ async fn a_command_asks_about_its_own_permission_keys_only() {
     let module = ModuleBuilder::new("warn", "w", "0.1.0")
         .unwrap()
         .permission(PermissionSpec::new("warn.add", Level::MODERATOR, "Warn").unwrap())
-        .command(
-            Command::<()>::new("probe", "d").handler(|cx, ()| async move {
-                cx.require("warn.add").await?;
-                // The server's key of another module is not for this one to ask about.
-                cx.require("ban.use").await?;
-                cx.reply("both").await
-            }),
-        );
+        .command(Command::<()>::new("probe").handler(|cx, ()| async move {
+            cx.require("warn.add").await?;
+            // The server's key of another module is not for this one to ask about.
+            cx.require("ban.use").await?;
+            cx.reply("both").await
+        }));
     let harness = Harness::new(module).unwrap();
     harness.permissions(|permissions| {
         permissions.role_levels.insert(Id::new(10), Level::OWNER);
@@ -650,7 +640,7 @@ fn upload_module() -> ModuleBuilder {
     ModuleBuilder::new("upload", "Upload", "0.1.0")
         .unwrap()
         .command(
-            Command::<Upload>::new("upload", "Keep a file").handler(|cx, args| async move {
+            Command::<Upload>::new("upload").handler(|cx, args| async move {
                 let about = match args.who {
                     Some(Mentionable::User(_)) => "user",
                     Some(Mentionable::Role(_)) => "role",
@@ -705,21 +695,20 @@ fn tree_module() -> ModuleBuilder {
         .permission(PermissionSpec::new("tree.edit", Level::MODERATOR, "Edit the tree").unwrap())
         .groups(
             "warn",
-            "Warnings",
             [
-                SubcommandGroup::new("list", "Look at warnings")
+                SubcommandGroup::new("list")
                     .subcommand(
-                        Command::<()>::new("all", "Every warning")
+                        Command::<()>::new("all")
                             .cooldown(Cooldown::per_user(Duration::from_secs(10)))
                             .handler(|cx, ()| async move { cx.reply("all").await }),
                     )
                     .subcommand(
-                        Command::<()>::new("kind", "Those of one kind")
+                        Command::<()>::new("kind")
                             .requires("tree.edit")
                             .handler(|cx, ()| async move { cx.reply("kind").await }),
                     ),
-                SubcommandGroup::new("clear", "Remove warnings").subcommand(
-                    Command::<()>::new("all", "Everything")
+                SubcommandGroup::new("clear").subcommand(
+                    Command::<()>::new("all")
                         .handler(|cx, ()| async move { cx.reply("cleared").await }),
                 ),
             ],
@@ -769,20 +758,17 @@ async fn subcommands_of_a_group_route_by_both_names_with_their_permission_and_co
 
 #[test]
 fn a_group_is_refused_when_none_is_empty_or_two_routes_share_a_name() {
-    let empty = ModuleBuilder::new("tree", "Tree", "0.1.0").unwrap().groups(
-        "warn",
-        "Warnings",
-        [SubcommandGroup::new("list", "Look")],
-    );
+    let empty = ModuleBuilder::new("tree", "Tree", "0.1.0")
+        .unwrap()
+        .groups("warn", [SubcommandGroup::new("list")]);
     assert!(empty.build().is_err(), "a group without subcommands");
     let twice = ModuleBuilder::new("tree", "Tree", "0.1.0").unwrap().groups(
         "warn",
-        "Warnings",
         [
-            SubcommandGroup::new("list", "a")
-                .subcommand(Command::<()>::new("all", "a").handler(|_, ()| async move { Ok(()) })),
-            SubcommandGroup::new("list", "b")
-                .subcommand(Command::<()>::new("all", "b").handler(|_, ()| async move { Ok(()) })),
+            SubcommandGroup::new("list")
+                .subcommand(Command::<()>::new("all").handler(|_, ()| async move { Ok(()) })),
+            SubcommandGroup::new("list")
+                .subcommand(Command::<()>::new("all").handler(|_, ()| async move { Ok(()) })),
         ],
     );
     assert!(twice.build().is_err(), "`list all` declared twice");
@@ -791,7 +777,7 @@ fn a_group_is_refused_when_none_is_empty_or_two_routes_share_a_name() {
 /// A plain subcommand that answers with its own name.
 fn plain(name: &str) -> BoundCommand {
     let reply = name.to_owned();
-    Command::<()>::new(name, "Plain").handler(move |cx, ()| {
+    Command::<()>::new(name).handler(move |cx, ()| {
         let reply = reply.clone();
         async move { cx.reply(reply).await }
     })
@@ -799,7 +785,7 @@ fn plain(name: &str) -> BoundCommand {
 
 /// A subcommand `sub` inside the group `group`, answering with `group sub`.
 fn grouped(group: &str, sub: &str) -> SubcommandGroup {
-    SubcommandGroup::new(group, "Grouped").subcommand(plain(sub))
+    SubcommandGroup::new(group).subcommand(plain(sub))
 }
 
 /// The command `warn`: a plain `status`, which needs `tree.edit`, and the group `list` with `all`
@@ -811,18 +797,13 @@ fn tree(first_groups: bool) -> ModuleBuilder {
     let plain_call = |builder: ModuleBuilder| {
         builder.group(
             "warn",
-            "Warnings",
-            [Command::<()>::new("status", "Plain")
+            [Command::<()>::new("status")
                 .requires("tree.edit")
                 .handler(|cx, ()| async move { cx.reply("status").await })],
         )
     };
     let groups_call = |builder: ModuleBuilder| {
-        builder.groups(
-            "warn",
-            "Warnings",
-            [grouped("list", "all"), grouped("clear", "all")],
-        )
+        builder.groups("warn", [grouped("list", "all"), grouped("clear", "all")])
     };
     if first_groups {
         plain_call(groups_call(base))
@@ -877,69 +858,56 @@ async fn plain_subcommands_and_groups_share_one_command_in_either_order() {
 #[test]
 fn a_plain_name_and_a_group_name_cannot_clash_nor_a_command_with_options() {
     let base = || ModuleBuilder::new("tree", "Tree", "0.1.0").unwrap();
-    let with_options = base().command(
-        Command::<Kind>::new("warn", "Warnings").handler(|_cx, _args| async move { Ok(()) }),
-    );
+    let with_options =
+        base().command(Command::<Kind>::new("warn").handler(|_cx, _args| async move { Ok(()) }));
     assert!(
         with_options
-            .group("warn", "Warnings", [plain("status")])
+            .group("warn", [plain("status")])
             .build()
             .is_err(),
         "a command with options cannot take subcommands"
     );
     let no_options = base().command(plain("warn"));
     assert!(
-        no_options
-            .group("warn", "Warnings", [plain("status")])
-            .build()
-            .is_err(),
+        no_options.group("warn", [plain("status")]).build().is_err(),
         "a plain command cannot take subcommands"
     );
     let command_after = base()
-        .group("warn", "Warnings", [plain("status")])
+        .group("warn", [plain("status")])
         .command(plain("warn"));
     assert!(
         command_after.build().is_err(),
         "a command with subcommands cannot become a plain command"
     );
-    let plain_then_group = base().group("warn", "Warnings", [plain("list")]).groups(
-        "warn",
-        "Warnings",
-        [grouped("list", "all")],
-    );
+    let plain_then_group = base()
+        .group("warn", [plain("list")])
+        .groups("warn", [grouped("list", "all")]);
     assert!(
         plain_then_group.build().is_err(),
         "a subcommand and a group share a name"
     );
     let group_then_plain = base()
-        .groups("warn", "Warnings", [grouped("list", "all")])
-        .group("warn", "Warnings", [plain("list")]);
+        .groups("warn", [grouped("list", "all")])
+        .group("warn", [plain("list")]);
     assert!(group_then_plain.build().is_err());
     let groups_twice = base()
-        .groups("warn", "Warnings", [grouped("list", "all")])
-        .groups("warn", "Warnings", [grouped("list", "clear")]);
+        .groups("warn", [grouped("list", "all")])
+        .groups("warn", [grouped("list", "clear")]);
     assert!(groups_twice.build().is_err(), "a group named twice");
-    let plain_twice = base().group("warn", "Warnings", [plain("status")]).group(
-        "warn",
-        "Warnings",
-        [plain("status")],
-    );
+    let plain_twice = base()
+        .group("warn", [plain("status")])
+        .group("warn", [plain("status")]);
     assert!(plain_twice.build().is_err(), "a subcommand named twice");
 }
 
 /// `plain` plain subcommands and `groups` groups in one command, split over two calls.
 fn many(plain_count: usize, groups_count: usize) -> ModuleBuilder {
     let base = ModuleBuilder::new("tree", "Tree", "0.1.0").unwrap();
-    base.group(
-        "warn",
-        "Warnings",
-        (0..plain_count).map(|i| plain(&format!("p{i}"))),
-    )
-    .groups(
-        "warn",
-        "Warnings",
-        (0..groups_count).map(|i| grouped(&format!("g{i}"), "all")),
-    )
+    base.group("warn", (0..plain_count).map(|i| plain(&format!("p{i}"))))
+        .groups(
+            "warn",
+            (0..groups_count).map(|i| grouped(&format!("g{i}"), "all")),
+        )
 }
 
 #[test]

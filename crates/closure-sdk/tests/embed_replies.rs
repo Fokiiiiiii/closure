@@ -35,70 +35,55 @@ fn module() -> ModuleBuilder {
             json!({ "limit": 1 }),
         )
         .command(
-            Command::<()>::new("plain", "A plain reply")
-                .handler(|cx, ()| async move { cx.reply("Hello.").await }),
+            Command::<()>::new("plain").handler(|cx, ()| async move { cx.reply("Hello.").await }),
         )
         .command(
-            Command::<()>::new("private", "A private reply")
+            Command::<()>::new("private")
                 .handler(|cx, ()| async move { cx.reply_private("Hello.").await }),
         )
+        .command(Command::<()>::new("tones").handler(|cx, ()| async move {
+            cx.say(Tone::Success, "one").await?;
+            cx.say(Tone::Warning, "two").await?;
+            cx.say(Tone::Error, "three").await
+        }))
         .command(
-            Command::<()>::new("tones", "One reply per tone").handler(|cx, ()| async move {
-                cx.say(Tone::Success, "one").await?;
-                cx.say(Tone::Warning, "two").await?;
-                cx.say(Tone::Error, "three").await
-            }),
-        )
-        .command(
-            Command::<()>::new("empty-success", "An empty success is refused").handler(
-                |cx, ()| async move {
-                    if cx.say(Tone::Success, "").await.is_err() {
-                        cx.reply("refused").await?;
-                    }
-                    Ok(())
-                },
-            ),
-        )
-        .command(
-            Command::<()>::new("empty", "An empty reply is refused").handler(|cx, ()| async move {
-                if cx.reply("").await.is_err() {
+            Command::<()>::new("empty-success").handler(|cx, ()| async move {
+                if cx.say(Tone::Success, "").await.is_err() {
                     cx.reply("refused").await?;
                 }
                 Ok(())
             }),
         )
+        .command(Command::<()>::new("empty").handler(|cx, ()| async move {
+            if cx.reply("").await.is_err() {
+                cx.reply("refused").await?;
+            }
+            Ok(())
+        }))
         .command(
-            Command::<()>::new("fits", "The longest description Discord takes")
+            Command::<()>::new("fits")
                 .handler(|cx, ()| async move { cx.reply("x".repeat(4096)).await }),
         )
         .command(
-            Command::<()>::new("defer-false", "Defers privately or publicly").handler(
-                |cx, ()| async move {
-                    cx.defer(false).await?;
-                    cx.reply("done.").await
-                },
-            ),
+            Command::<()>::new("defer-false").handler(|cx, ()| async move {
+                cx.defer(false).await?;
+                cx.reply("done.").await
+            }),
         )
         .command(
-            Command::<()>::new("defer-true", "Defers publicly or privately").handler(
-                |cx, ()| async move {
-                    cx.defer(true).await?;
-                    cx.reply("done.").await
-                },
-            ),
+            Command::<()>::new("defer-true").handler(|cx, ()| async move {
+                cx.defer(true).await?;
+                cx.reply("done.").await
+            }),
         )
         .command(
-            Command::<()>::new("fail", "Fails with a message for the user")
+            Command::<()>::new("fail")
                 .handler(|_cx, ()| async move { Err(UserError::message("secret")) }),
         )
-        .command(
-            Command::<()>::new("limit", "Reads its own configuration").handler(
-                |cx, ()| async move {
-                    let settings: Settings = cx.config()?;
-                    cx.reply(settings.limit.to_string()).await
-                },
-            ),
-        )
+        .command(Command::<()>::new("limit").handler(|cx, ()| async move {
+            let settings: Settings = cx.config()?;
+            cx.reply(settings.limit.to_string()).await
+        }))
         .catalog(closure_sdk::Locale::En, EN)
 }
 

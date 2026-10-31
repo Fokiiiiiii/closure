@@ -167,7 +167,6 @@ async fn ping(cx: CommandCx, (): ()) -> Result<(), UserError> {
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
     Ok(
         ModuleBuilder::new("diagnostics", "Diagnostics", env!("CARGO_PKG_VERSION"))?
-            .description("Liveness and version commands.")
             .config(
                 json!({
                     "type": "object",
@@ -182,7 +181,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 }),
                 json!({ "ephemeral": true }),
             )
-            .command(Command::<()>::new("ping", "Check that the bot is alive").handler(ping))
+            .command(Command::<()>::new("ping").handler(ping))
             .catalog(Locale::En, EN)
             .catalog(Locale::Ja, JA)
             .enabled_by_default(),

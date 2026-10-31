@@ -110,7 +110,8 @@ fn push_commands(out: &mut String, manifest: &ModuleManifest, translator: &dyn T
     for command in &manifest.commands {
         let _ = writeln!(out, "### `/{}`\n", command.name);
         let key = format!("command-{}", command.name);
-        push_catalog_names(out, translator, module, &key, &command.description);
+        let english = default_text(translator, module, &format!("{key}.description"));
+        push_catalog_names(out, translator, module, &key, &english);
         // The catalog path of a command is its name; subcommands extend it with their own.
         push_options(out, translator, module, &command.name, &command.options);
         if command.options.is_empty() && command.subcommands.is_empty() {
@@ -145,7 +146,8 @@ fn push_subcommand(
     let catalog_path = format!("{parent}-{}", spec.name);
     let _ = writeln!(out, "{} `/{slash}`\n", "#".repeat(level.min(6)));
     let key = format!("subcommand-{parent}-{}", spec.name);
-    push_catalog_names(out, translator, module, &key, &spec.description);
+    let english = default_text(translator, module, &format!("{key}.description"));
+    push_catalog_names(out, translator, module, &key, &english);
     push_options(out, translator, module, &catalog_path, &spec.options);
     for subcommand in &spec.subcommands {
         push_subcommand(
@@ -180,6 +182,13 @@ fn push_catalog_names(
     }
 }
 
+/// The text of a catalog entry in the default language; empty when the catalog has none.
+fn default_text(translator: &dyn Translator, module: &str, key: &str) -> String {
+    translator
+        .exact(Locale::DEFAULT, module, key, &Args::new())
+        .unwrap_or_default()
+}
+
 fn push_options(
     out: &mut String,
     translator: &dyn Translator,
@@ -206,7 +215,11 @@ fn push_options(
             kind_name(option.kind),
             if option.required { "yes" } else { "no" },
             limits(option),
-            cell(&option.description)
+            cell(&default_text(
+                translator,
+                module,
+                &format!("option-{prefix}-{}.description", option.name),
+            ))
         );
     }
     out.push('\n');
@@ -349,6 +362,27 @@ mod tests {
 
     use super::*;
 
+    const EN: &str = "
+module-description = A sample | with a pipe.
+command-sample = sample
+    .description = Run the sample
+option-sample-count = count
+    .description = How many
+option-sample-level = level
+    .description = Level
+option-sample-limit = limit
+    .description = Most items.
+command-tools = tools
+    .description = Tools
+subcommand-tools-add = add
+    .description = Add one
+option-tools-add-user = user
+    .description = Who to add
+subcommand-tools-lists = lists
+    .description = Lists
+subcommand-tools-lists-show = show
+    .description = Show a list
+";
     const JA: &str = "
 command-sample = サンプル
     .description = サンプルを実行します
@@ -360,7 +394,7 @@ option-tools-add-user = ユーザー
 ";
 
     fn sample() -> ModuleManifest {
-        let count = OptionSpec::new("count", "How many", OptionKind::Integer).required();
+        let count = OptionSpec::new("count", OptionKind::Integer).required();
         let count = OptionSpec {
             min_value: Some(1.0),
             max_value: Some(10.0),
@@ -371,9 +405,9 @@ option-tools-add-user = ユーザー
                 name: "low".into(),
                 value: ChoiceValue::String("l".into()),
             }],
-            ..OptionSpec::new("level", "Level", OptionKind::String)
+            ..OptionSpec::new("level", OptionKind::String)
         };
-        let user = OptionSpec::new("user", "Who to add", OptionKind::User).required();
+        let user = OptionSpec::new("user", OptionKind::User).required();
         ModuleManifest::new(ModuleId::new("sample").unwrap(), "Sample", "0.1.0")
             .description("A sample | with a pipe.")
             .capabilities([Capability::SendMessages])
@@ -395,29 +429,24 @@ option-tools-add-user = ユーザー
             )
             .command(CommandSpec {
                 name: "sample".into(),
-                description: "Run the sample".into(),
                 options: vec![count, level],
                 subcommands: Vec::new(),
                 default_member_permissions: None,
             })
             .command(CommandSpec {
                 name: "tools".into(),
-                description: "Tools".into(),
                 options: Vec::new(),
                 subcommands: vec![
                     SubcommandSpec {
                         name: "add".into(),
-                        description: "Add one".into(),
                         options: vec![user],
                         subcommands: Vec::new(),
                     },
                     SubcommandSpec {
                         name: "lists".into(),
-                        description: "Lists".into(),
                         options: Vec::new(),
                         subcommands: vec![SubcommandSpec {
                             name: "show".into(),
-                            description: "Show a list".into(),
                             options: Vec::new(),
                             subcommands: Vec::new(),
                         }],
@@ -430,6 +459,7 @@ option-tools-add-user = ユーザー
 
     fn japanese() -> impl Translator {
         let mut builder = TranslatorBuilder::new().unwrap();
+        builder.add_catalog("sample", Locale::En, EN).unwrap();
         builder.add_catalog("sample", Locale::Ja, JA).unwrap();
         builder.build()
     }

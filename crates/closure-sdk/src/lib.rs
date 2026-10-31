@@ -14,7 +14,7 @@
 //!     ModuleBuilder::new("warn", "Warnings", env!("CARGO_PKG_VERSION"))?
 //!         .permission(PermissionSpec::new("warn.add", Level::MODERATOR, "Warn members")?)
 //!         .command(
-//!             Command::<Warn>::new("warn", "Warn a member")
+//!             Command::<Warn>::new("warn")
 //!                 .requires("warn.add")
 //!                 .cooldown(Cooldown::per_user(Duration::from_secs(5)))
 //!                 .handler(|cx, args| async move {

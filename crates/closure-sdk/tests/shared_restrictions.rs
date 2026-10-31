@@ -82,7 +82,7 @@ fn alpha() -> ModuleBuilder {
         .capability(Capability::Schedule)
         .capability(Capability::Storage)
         .config(json!({ "type": "object", "properties": {} }), json!({}))
-        .command(Command::<()>::new("strip", "Time the target out").handler(strip));
+        .command(Command::<()>::new("strip").handler(strip));
     punish::jobs(builder)
 }
 
@@ -97,7 +97,7 @@ fn beta() -> ModuleBuilder {
         .capability(Capability::Schedule)
         .capability(Capability::Storage)
         .config(json!({ "type": "object", "properties": {} }), json!({}))
-        .command(Command::<()>::new("lift", "Lift the timeout of the target").handler(lift));
+        .command(Command::<()>::new("lift").handler(lift));
     punish::jobs(builder)
 }
 

@@ -1,3 +1,4 @@
+module-description = Liveness and version commands.
 command-ping = ping
     .description = Check that the bot is alive
 ping-title = Pong!

@@ -1,3 +1,4 @@
+module-description = 自動モデレーション: すべてのメッセージを判定するルール。最初に当たったルールを実行します。
 command-automod = 自動モデレーション
     .description = 自動モデレーションのルールと状態
 subcommand-automod-status = 状態

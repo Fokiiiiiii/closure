@@ -11,23 +11,21 @@ use twilight_model::channel::message::component::ButtonStyle;
 fn module() -> ModuleBuilder {
     ModuleBuilder::new("menu", "Menu", "0.1.0")
         .unwrap()
-        .command(
-            Command::<()>::new("menu", "Show the menu").handler(|cx, ()| async move {
-                let press = button(
-                    ButtonStyle::Primary,
-                    "Go",
-                    CustomId::new("go")
-                        .expires_in(cx.now(), Duration::from_secs(60))
-                        .encode(cx.module()),
-                );
-                cx.reply_with(InteractionReply {
-                    content: Some("Menu".into()),
-                    components: vec![row([press])],
-                    ..InteractionReply::default()
-                })
-                .await
-            }),
-        )
+        .command(Command::<()>::new("menu").handler(|cx, ()| async move {
+            let press = button(
+                ButtonStyle::Primary,
+                "Go",
+                CustomId::new("go")
+                    .expires_in(cx.now(), Duration::from_secs(60))
+                    .encode(cx.module()),
+            );
+            cx.reply_with(InteractionReply {
+                content: Some("Menu".into()),
+                components: vec![row([press])],
+                ..InteractionReply::default()
+            })
+            .await
+        }))
         .component("go", |cx| async move { cx.reply_private("went").await })
 }
 
