@@ -198,11 +198,12 @@ What a burst does:
 - **It fires once.** The first trip takes the messages it counted out of the window, and marks the
   member as handled for the window (`within`). Two messages that trip it at the same moment still
   fire it once.
-- **Its messages are deleted.** A trip deletes every message the window counted (in one bulk
-  delete per channel, or single deletes), whatever the actions of the rule are.
+- **Its messages are deleted when the rule has a delete action.** A trip deletes every message the
+  window counted (in one bulk delete per channel, or single deletes). Without a delete action the
+  messages stay.
 - **Later messages join the burst.** While the member is handled, each of their messages is
-  deleted, and no punishment, reply or alert runs again for them. When the window has passed, a new
-  burst can fire again.
+  deleted when the rule has a delete action, and no other action runs again for them. When the
+  window has passed, a new burst can fire again.
 - **A dry run counts without taking.** A dry run reports every message that would have tripped, and
   does not take or mark anything.
 
