@@ -1,5 +1,6 @@
 use closure_core::action::Action;
 use closure_core::capability::Capability;
+use closure_core::error::DiscordError;
 use closure_core::event::{AttachmentInfo, Event, MemberInfo, MessageInfo, UserInfo};
 use closure_core::history::SavedMessage;
 use closure_core::module::Module;
@@ -342,6 +343,7 @@ async fn the_entries_go_to_the_configured_channel_and_not_the_log_channel() {
     assert_eq!(posted.len(), 1, "{:?}", posted.len());
     assert_eq!(posted[0].channel, OTHER_LOG);
 }
+
 #[tokio::test]
 async fn a_configured_channel_that_is_not_a_channel_is_an_error_and_nothing_is_posted() {
     for channel in ["0", "abc", ""] {
@@ -358,6 +360,23 @@ async fn a_configured_channel_that_is_not_a_channel_is_an_error_and_nothing_is_p
     }
 }
 
+#[tokio::test]
+async fn a_refused_post_is_a_discord_error_and_not_a_module_fault() {
+    let harness = harness();
+    harness
+        .api()
+        .fail_with(DiscordError::Forbidden("missing access".into()));
+
+    let result = harness.emit(deleted(16)).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(ModuleError::Discord(DiscordError::Forbidden(_)))
+        ),
+        "{result:?}"
+    );
+}
 
 #[tokio::test]
 async fn joins_leaves_and_bans_are_logged() {
@@ -418,13 +437,13 @@ fn the_module_reads_the_history_and_keeps_files_it_asks_for() {
     assert!(capabilities.contains(Capability::ReadMessageHistory));
     assert!(capabilities.contains(Capability::KeepAttachments));
 }
+
 #[test]
 fn the_module_asks_for_message_content_so_that_it_can_post_the_text() {
     let module = module().unwrap();
 
     assert!(module.manifest().intents.contains(Intents::MESSAGE_CONTENT));
 }
-
 
 #[test]
 fn both_languages_define_the_same_messages() {

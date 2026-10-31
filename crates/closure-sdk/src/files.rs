@@ -181,5 +181,5 @@ async fn send(ctx: &EventContext, action: Action) -> Result<(), ModuleError> {
         .execute(action)
         .await
         .map(|_| ())
-        .map_err(|error| ModuleError::other(error.to_string()))
+        .map_err(ModuleError::from)
 }
