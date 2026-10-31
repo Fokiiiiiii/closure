@@ -24,7 +24,7 @@ closure (binary)
 | `closure-sdk`, `closure-sdk-macros` | What a module author uses: declare commands (`#[derive(CommandArgs)]`), permissions, buttons and forms, jobs; the SDK checks, parses, answers and tests (`testing::Harness`). |
 | `closure-mod-diagnostics` | `/ping`; the smallest module. |
 | `closure-mod-moderation` | `/warn`, `/note`, `/warnings` and `/case`; the reference module written with the SDK only: permissions, a cooldown, cases, the log, direct messages, two languages. |
-| `closure-mod-automod` | [`automod`](automod.md): rules that check every message and act on the first one that hits; off until a server turns it on. Its frame only: the detailed rules come later. |
+| `closure-mod-automod` | [`automod`](automod.md): rules that check every message and act on the first one that hits; off until a server turns it on. Its rules, counters and antiraid are described in [`automod`](automod.md). |
 | `closure` | The composition root: reads settings, wires everything, shuts it down in order. |
 
 ## From a Discord event to a Discord action
@@ -169,7 +169,8 @@ returned actions into `ApiClient::execute` calls. Nothing else in the system wou
   calls already running keep their threads, so a module that blocks in many guilds at once can
   still take every worker thread for as long as they block. Modules must not block.
 - The HTTP API caps connections (256 at once), cuts off a client that takes more than 10 seconds
-  to send its headers, and turns an address away for the rest of a minute after 10 failed logins.
+  to send its headers, and turns an address away for the rest of a minute after 10 failed logins
+  (an IPv6 client counts as its /64, so it cannot make a new allowance by changing its address).
   It has no TLS and `/readyz` queries the database on every call. Behind a reverse proxy every
   client has the proxy's address and they share one login allowance; put it behind a proxy that
   limits clients if it is reachable by anyone untrusted.

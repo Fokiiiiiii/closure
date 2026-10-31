@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -58,6 +58,19 @@ impl Window {
 /// The allowance of addresses that could not be told apart because too many are followed.
 const OVERFLOW: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
+/// The address an allowance is kept for. An IPv6 client is counted by its /64: the host part of its
+/// address is its own to choose, so counting addresses would give it a new allowance every time.
+fn allowance_key(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(_) => address,
+        IpAddr::V6(address) => {
+            let mut segments = address.segments();
+            segments[4..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(segments))
+        }
+    }
+}
+
 impl FailureLimiter {
     /// `Some(wait)` when `address` has used up its allowance and must wait that long.
     pub(crate) fn blocked(&self, address: IpAddr) -> Option<Duration> {
@@ -71,7 +84,7 @@ impl FailureLimiter {
     fn blocked_at(&self, address: IpAddr, now: Instant) -> Option<Duration> {
         let windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
         // An address that is not followed, because too many are, shares one allowance.
-        let window = windows.get(&address).or_else(|| {
+        let window = windows.get(&allowance_key(address)).or_else(|| {
             windows
                 .get(&OVERFLOW)
                 .filter(|_| windows.len() >= MAX_TRACKED)
@@ -82,7 +95,7 @@ impl FailureLimiter {
 
     fn record_failure_at(&self, address: IpAddr, now: Instant) {
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut key = address;
+        let mut key = allowance_key(address);
         if !windows.contains_key(&key) && windows.len() >= MAX_TRACKED {
             windows.retain(|_, window| !window.expired(now));
             if windows.len() >= MAX_TRACKED {
@@ -161,7 +174,7 @@ mod tests {
         let limiter = FailureLimiter::default();
         let start = Instant::now();
         for n in 0..MAX_TRACKED {
-            let address = IpAddr::V6(std::net::Ipv6Addr::from(u128::try_from(n + 1).unwrap()));
+            let address = IpAddr::V6(Ipv6Addr::from(u128::try_from(n + 1).unwrap() << 64));
             limiter.record_failure_at(address, start);
         }
         // Strangers each fail once; together they use up the shared allowance.
@@ -175,6 +188,20 @@ mod tests {
         let later = start + FAILURE_WINDOW;
         limiter.record_failure_at(ip(201), later);
         assert_eq!(limiter.blocked_at(ip(200), later), None);
+    }
+
+    #[test]
+    fn ipv6_clients_of_one_prefix_share_an_allowance() {
+        let limiter = FailureLimiter::default();
+        let start = Instant::now();
+        let first: IpAddr = "2001:db8:0:1::1".parse().unwrap();
+        let other_host: IpAddr = "2001:db8:0:1:ffff::2".parse().unwrap();
+        let other_prefix: IpAddr = "2001:db8:0:2::1".parse().unwrap();
+        for _ in 0..MAX_FAILURES {
+            limiter.record_failure_at(first, start);
+        }
+        assert!(limiter.blocked_at(other_host, start).is_some());
+        assert_eq!(limiter.blocked_at(other_prefix, start), None);
     }
 
     #[test]
