@@ -140,7 +140,28 @@ async fn publish_commands(
         .await
         .context("could not publish slash commands")?;
     tracing::info!(published, ?scope, "slash commands published");
+    if matches!(scope, CommandScope::Global) {
+        clear_guild_commands(http, application_id).await;
+    }
     Ok(())
+}
+
+/// Empties the commands each guild has of its own. A run that published to one guild left them there,
+/// and Discord shows them next to the global ones, so every command would appear twice.
+async fn clear_guild_commands(http: &Client, application_id: Id<ApplicationMarker>) {
+    let guilds = match joined_guilds(http).await {
+        Ok(guilds) => guilds,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the guild list, so guild commands were not cleared");
+            return;
+        }
+    };
+    for guild in guilds {
+        let scope = CommandScope::Guild(guild);
+        if let Err(error) = register_commands(http, application_id, scope, &[]).await {
+            tracing::warn!(guild = guild.get(), %error, "could not clear the commands of a guild");
+        }
+    }
 }
 
 /// Starts the HTTP API, or reports that it is disabled when no admin token was given.
