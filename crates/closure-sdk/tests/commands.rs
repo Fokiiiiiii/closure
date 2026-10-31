@@ -441,7 +441,7 @@ async fn a_handler_keeps_counters_and_entries_that_follow_the_clock_of_the_test(
         ["total 2, recent 2"]
     );
     // After the window the warnings still count in total, no longer as recent.
-    harness.advance(Duration::from_secs(900));
+    harness.advance(Duration::from_mins(15));
     assert_eq!(
         texts(&harness.invoke(count(7)).await.unwrap()),
         ["total 3, recent 1"]

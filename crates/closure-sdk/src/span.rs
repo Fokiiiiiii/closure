@@ -559,9 +559,9 @@ mod tests {
 
     #[test]
     fn relative_lengths_are_still_lengths() {
-        assert_eq!(at("1h30m", 0), Ok(Duration::from_secs(5_400)));
-        assert_eq!(at("1h 30m", JST), Ok(Duration::from_secs(5_400)));
-        assert_eq!(at("2d", 0), Ok(Duration::from_secs(172_800)));
+        assert_eq!(at("1h30m", 0), Ok(Duration::from_mins(90)));
+        assert_eq!(at("1h 30m", JST), Ok(Duration::from_mins(90)));
+        assert_eq!(at("2d", 0), Ok(Duration::from_hours(48)));
         assert_eq!(at("3650d", 0), Ok(MAX_DELAY));
         assert_eq!(at("3651d", 0), Err(SpanError::TooFar));
     }
@@ -643,7 +643,7 @@ mod tests {
         let typed = Span::parse("2027-01-01 00:30 -05:00").expect("a form");
         assert_eq!(
             typed.resolve_at(new_year_eve_23h_utc, 0),
-            Ok(Duration::from_secs(6 * 3_600 + 30 * 60)),
+            Ok(Duration::from_mins(6 * 60 + 30)),
             "00:30 at -05:00 is 05:30 UTC"
         );
         // 02:00 UTC is still 21:00 of the day before at -05:00.
@@ -651,7 +651,7 @@ mod tests {
         let typed = Span::parse("21:30 -05:00").expect("a form");
         assert_eq!(
             typed.resolve_at(two_utc, 0),
-            Ok(Duration::from_secs(30 * 60)),
+            Ok(Duration::from_mins(30)),
             "21:30 at -05:00 is 02:30 UTC the same day"
         );
     }
@@ -713,8 +713,8 @@ mod tests {
 
     #[test]
     fn a_length_from_a_duration_resolves_to_itself() {
-        let span = Span::from_duration(Duration::from_secs(90 * 60));
-        assert_eq!(span.resolve_at(NOW, 0), Ok(Duration::from_secs(90 * 60)));
+        let span = Span::from_duration(Duration::from_mins(90));
+        assert_eq!(span.resolve_at(NOW, 0), Ok(Duration::from_mins(90)));
     }
 
     /// Every string of up to eight bytes made of multi-byte and combining pieces.

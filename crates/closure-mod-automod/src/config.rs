@@ -30,13 +30,13 @@ const MAX_PATTERN_CHARS: usize = 200;
 const REGEX_SIZE_LIMIT: usize = 256 * 1024;
 const REGEX_DFA_LIMIT: usize = 1024 * 1024;
 /// Discord's longest timeout.
-const MAX_TIMEOUT: Duration = Duration::from_secs(28 * 86_400);
+const MAX_TIMEOUT: Duration = Duration::from_hours(28 * 24);
 /// The longest spam window: recent actions are kept for an hour.
 const MAX_WINDOW: Duration = Duration::from_secs(3_600);
-const MAX_COOLDOWN: Duration = Duration::from_secs(30 * 86_400);
+const MAX_COOLDOWN: Duration = Duration::from_hours(30 * 24);
 /// How far back a purge looks; the history keeps seven days by default.
-const MAX_PURGE: Duration = Duration::from_secs(7 * 86_400);
-const MAX_AUTO_DELETE: Duration = Duration::from_secs(7 * 86_400);
+const MAX_PURGE: Duration = Duration::from_hours(7 * 24);
+const MAX_AUTO_DELETE: Duration = Duration::from_hours(7 * 24);
 const MAX_DELETE_DAYS: u32 = 7;
 const MAX_AMOUNT: u32 = 10_000;
 /// How many counters the module keeps, and how many triggers each one has.
@@ -45,8 +45,8 @@ const MAX_COUNTER_TRIGGERS: usize = 10;
 const MAX_ROLES: usize = 25;
 const MAX_CHANNELS: usize = 10;
 /// Discord's longest slowmode.
-const MAX_SLOWMODE: Duration = Duration::from_secs(6 * 3_600);
-const MAX_NEW_THRESHOLD: Duration = Duration::from_secs(30 * 86_400);
+const MAX_SLOWMODE: Duration = Duration::from_hours(6);
+const MAX_NEW_THRESHOLD: Duration = Duration::from_hours(30 * 24);
 const MAX_NICKNAME_CHARS: usize = 100;
 /// The counter value Discord's counters hold at most.
 const MAX_COUNTER_VALUE: i64 = 2_147_483_647;

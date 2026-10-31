@@ -651,14 +651,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .counter_recent("warns", 7_u64, Duration::from_secs(30 * 60))
+                .counter_recent("warns", 7_u64, Duration::from_mins(30))
                 .await
                 .unwrap(),
             0
         );
         assert_eq!(
             store
-                .counter_recent("warns", 7_u64, Duration::from_secs(61 * 60))
+                .counter_recent("warns", 7_u64, Duration::from_mins(61))
                 .await
                 .unwrap(),
             5

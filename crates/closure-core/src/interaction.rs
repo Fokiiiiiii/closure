@@ -15,7 +15,7 @@ use crate::event::{GuildId, InteractionToken};
 use crate::throttle::LogGate;
 
 /// How long Discord honours an interaction token (15 minutes), plus a little slack.
-const LIFETIME: Duration = Duration::from_secs(16 * 60);
+const LIFETIME: Duration = Duration::from_mins(16);
 
 /// How many interactions may be recorded. A record that cannot be made means the interaction
 /// cannot be answered by a module, so the limits are far above what a real workload reaches and

@@ -912,7 +912,7 @@ prefix_delete_reply_after: 86400
         );
         assert_eq!(
             policy.prefix_delete_reply_after,
-            Some(Duration::from_secs(86_400))
+            Some(Duration::from_hours(24))
         );
         assert_eq!(settings.effective.prefix_delete_command_after, Some(5));
         for key in ["prefix_delete_command_after", "prefix_delete_reply_after"] {

@@ -27,7 +27,7 @@ pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024;
 /// The shortest time between two runs of a repeating job.
 pub const MIN_EVERY: Duration = Duration::from_secs(10);
 /// How far ahead a job may be set (and the longest time between two runs).
-pub const MAX_DELAY: Duration = Duration::from_secs(10 * 365 * 24 * 3600);
+pub const MAX_DELAY: Duration = Duration::from_hours(10 * 365 * 24);
 /// The last time a job may be set for, in unix seconds: the end of the year 9999.
 pub const MAX_AT: i64 = 253_402_300_799;
 

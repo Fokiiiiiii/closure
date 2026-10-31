@@ -27,7 +27,7 @@ impl Default for RecentLimits {
     fn default() -> Self {
         Self {
             max_entries_per_guild: 20_000,
-            max_age: Duration::from_secs(60 * 60),
+            max_age: Duration::from_hours(1),
         }
     }
 }
