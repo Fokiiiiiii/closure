@@ -23,6 +23,10 @@ use twilight_gateway::{
     create_recommended,
 };
 use twilight_http::Client;
+use twilight_model::gateway::payload::incoming::GuildCreate;
+use twilight_model::gateway::payload::outgoing::RequestGuildMembers;
+use twilight_model::id::Id;
+use twilight_model::id::marker::GuildMarker;
 
 use crate::convert;
 use crate::dispatcher::Dispatcher;
@@ -197,6 +201,8 @@ struct ShardContext {
     guild_hooks: Arc<dyn GuildHooks>,
     health: Arc<GatewayHealth>,
     latency: Arc<GatewayLatency>,
+    /// Whether the bot asked for members, which a guild's member list needs to be requested.
+    members_intent: bool,
     shutdown: CancellationToken,
 }
 
@@ -455,6 +461,7 @@ pub async fn start_gateway(
         guild_hooks: Arc::clone(&hooks),
         health: Arc::clone(&health),
         latency: config.latency,
+        members_intent: config.intents.contains(Intents::GUILD_MEMBERS),
         shutdown,
     });
     let tracker = TaskTracker::new();
@@ -488,6 +495,13 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
                 // `Shard` is not `Sync`, so only plain values cross the await points below.
                 let latency = shard.latency().recent().first().copied();
                 handle_event(&context, id, latency, &event);
+                if context.members_intent
+                    && let Some(guild) = guild_to_request(&event)
+                {
+                    // Discord leaves offline members out of a guild's first payload; asking caches them.
+                    // shortcut: no pacing, Discord allows 120 requests a minute per shard, pace them once a shard holds more guilds than that.
+                    shard.command(&RequestGuildMembers::builder(guild).query("", None));
+                }
                 if finished {
                     break;
                 }
@@ -585,6 +599,17 @@ fn before(cache: &InMemoryCache, event: &Event) -> convert::Before {
             ..convert::Before::default()
         },
         _ => convert::Before::default(),
+    }
+}
+
+/// The guild whose members to ask Discord for: one that just became available.
+fn guild_to_request(event: &Event) -> Option<Id<GuildMarker>> {
+    let Event::GuildCreate(created) = event else {
+        return None;
+    };
+    match &**created {
+        GuildCreate::Available(guild) => Some(guild.id),
+        GuildCreate::Unavailable(_) => None,
     }
 }
 
@@ -738,6 +763,21 @@ mod tests {
     }
 
     #[test]
+    fn a_guild_that_is_unavailable_is_not_asked_for_its_members() {
+        let unavailable: GuildCreate =
+            serde_json::from_value(json!({ "id": "1", "unavailable": true })).unwrap();
+        assert_eq!(
+            guild_to_request(&Event::GuildCreate(Box::new(unavailable))),
+            None
+        );
+    }
+
+    #[test]
+    fn an_event_that_is_not_a_guild_is_not_asked_for_its_members() {
+        assert_eq!(guild_to_request(&Event::GatewayHeartbeatAck), None);
+    }
+
+    #[test]
     fn the_archived_state_of_a_cached_thread_is_read_before_it_changes() {
         let cache = new_cache();
         let channel: Channel = serde_json::from_value(json!({
@@ -877,6 +917,7 @@ mod tests {
             guild_hooks: Arc::new(NoHooks),
             health: Arc::new(GatewayHealth::new(2)),
             latency: Arc::default(),
+            members_intent: false,
             shutdown: CancellationToken::new(),
         });
         let second = Arc::clone(&context);
