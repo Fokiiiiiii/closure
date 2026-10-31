@@ -65,7 +65,8 @@ modules:
   not say which message was deleted, so a moderator's deletion of another message by the same author in
   the same channel within the minute can be named for the author's own deletion; and the message history
   must hold the message to know its author. A bulk delete shows who made it when the audit log has an
-  entry for the same channel and the same number of messages. Reading the
+  entry for the same channel and the same number of messages; Discord's documentation does not promise
+  the channel in a bulk delete entry, so an entry without it shows no name. Reading the
   audit log needs the bot to view it: without that, entries are still posted, without who made the change,
   and the failure is logged.
 

@@ -9,7 +9,7 @@ use closure_core::module::EventContext;
 use closure_sdk::duration::snowflake_time;
 use closure_sdk::files::LogEntry;
 use twilight_model::channel::message::embed::EmbedField;
-use twilight_model::guild::audit_log::{AuditLogEntry, AuditLogEventType};
+use twilight_model::guild::audit_log::{AuditLogChange, AuditLogEntry, AuditLogEventType};
 
 use crate::permissions;
 use crate::{Config, code_block, label};
@@ -171,12 +171,31 @@ pub(crate) async fn audit_of(
     let entries = recent_entries(ctx, kind).await?;
     let now = ctx.now();
     let entry = entries.iter().find(|entry| {
-        entry.target_id.is_some_and(|id| id.get() == target) && within_window(now, entry)
+        entry.target_id.is_some_and(|id| id.get() == target)
+            && within_window(now, entry)
+            && changes_the_field(entry, event)
     })?;
     Some(AuditEntry {
-        by: entry.user_id,
+        // A member's own change to its nickname or timeout names no one.
+        by: entry.user_id.filter(|by| by.get() != target),
         reason: entry.reason.clone(),
     })
+}
+
+/// Whether an entry changed the field the event reports. Discord keeps a member's nickname and timeout
+/// in entries of one kind, so the changes of the entry say which of them it is.
+fn changes_the_field(entry: &AuditLogEntry, event: &Event) -> bool {
+    match event {
+        Event::NicknameChanged { .. } => entry
+            .changes
+            .iter()
+            .any(|change| matches!(change, AuditLogChange::Nick { .. })),
+        Event::TimeoutChanged { .. } => entry
+            .changes
+            .iter()
+            .any(|change| matches!(change, AuditLogChange::CommunicationDisabledUntil { .. })),
+        _ => true,
+    }
 }
 
 /// The audit log entry of a change: the change of the event's own target, or, for a channel whose
@@ -202,21 +221,23 @@ pub(crate) async fn change_audit_of(
     overwrite_audit_of(ctx, after.id, &targets).await
 }
 
-/// The audit log entry that changed a permission overwrite of `channel` for one of `targets`, when there
-/// is one. Discord names the channel as the target of the entry, and the overwritten role or member in its options.
+/// The newest audit log entry that changed a permission overwrite of `channel` for one of `targets`,
+/// when there is one, of any of the three kinds of overwrite change. Discord names the channel as the
+/// target of the entry, and the overwritten role or member in its options.
 async fn overwrite_audit_of(
     ctx: &EventContext,
     channel: ChannelId,
     targets: &[u64],
 ) -> Option<AuditEntry> {
     let now = ctx.now();
+    let mut newest: Option<AuditLogEntry> = None;
     for kind in [
         AuditLogEventType::ChannelOverwriteCreate,
         AuditLogEventType::ChannelOverwriteUpdate,
         AuditLogEventType::ChannelOverwriteDelete,
     ] {
         let entries = recent_entries(ctx, kind).await?;
-        let found = entries.iter().find(|entry| {
+        let found = entries.into_iter().find(|entry| {
             entry.target_id.is_some_and(|id| id.get() == channel.get())
                 && entry
                     .options
@@ -224,14 +245,16 @@ async fn overwrite_audit_of(
                     .is_some_and(|options| options.id.is_some_and(|id| targets.contains(&id.get())))
                 && within_window(now, entry)
         });
-        if let Some(entry) = found {
-            return Some(AuditEntry {
-                by: entry.user_id,
-                reason: entry.reason.clone(),
-            });
+        if let Some(entry) = found
+            && newest.as_ref().is_none_or(|current| entry.id > current.id)
+        {
+            newest = Some(entry);
         }
     }
-    None
+    newest.map(|entry| AuditEntry {
+        by: entry.user_id,
+        reason: entry.reason,
+    })
 }
 
 /// The audit log entry of a message that someone other than its author deleted. The entry names the author
@@ -274,7 +297,8 @@ pub(crate) async fn deletion_audit_of(
 }
 
 /// The audit log entry of a bulk delete of `count` messages in `channel`, when there is one. Discord names
-/// the channel and the number of messages in the entry, not the messages themselves.
+/// the channel and the number of messages in the entry, not the messages themselves. The documentation
+/// does not promise the channel for a bulk delete, so an entry without it names no one.
 pub(crate) async fn bulk_audit_of(
     ctx: &EventContext,
     channel: ChannelId,

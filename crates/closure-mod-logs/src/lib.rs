@@ -505,9 +505,11 @@ async fn bulk_deleted(
 
 /// Whether an edit is worth an entry. Not the bot's own messages: an entry is one of them, and Discord edits
 /// a message again when it unfurls the links in it, which would post an entry for every entry. Not an edit
-/// that left the text as it was either.
+/// that left the text and the files as they were.
 fn edit_is_logged(message: &MessageInfo) -> bool {
-    !message.author.bot && message.previous_content.as_deref() != Some(message.content.as_str())
+    !message.author.bot
+        && (!message.removed_attachments.is_empty()
+            || message.previous_content.as_deref() != Some(message.content.as_str()))
 }
 
 /// An edit: the message, its files, the files the edit took away (`removed_attachments`), and the
@@ -764,12 +766,14 @@ fn arrow(before: &str, after: &str) -> String {
     format!("{before} → {after}")
 }
 
+/// The roles as mentions, cut to what a field holds: a member can gain many roles at once.
 fn role_mentions(roles: &[RoleId]) -> String {
-    roles
+    let mentions = roles
         .iter()
         .map(|role| format!("<@&{}>", role.get()))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    clip(&mentions, FIELD_LIMIT)
 }
 
 fn colour_text(colour: u32) -> String {

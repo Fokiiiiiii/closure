@@ -13,7 +13,7 @@ use closure_sdk::Locale;
 use closure_sdk::testing::Harness;
 use serde_json::json;
 use twilight_model::guild::Permissions;
-use twilight_model::guild::audit_log::{AuditLogEntry, AuditLogEventType};
+use twilight_model::guild::audit_log::{AuditLogChange, AuditLogEntry, AuditLogEventType};
 use twilight_model::id::Id;
 
 use super::*;
@@ -942,6 +942,110 @@ async fn an_overwrite_change_names_the_moderator_whose_entry_has_the_same_channe
 }
 
 #[tokio::test]
+async fn a_nickname_change_is_not_named_by_a_timeout_of_the_same_member() {
+    let harness = harness();
+    let mut timeout = audit(AuditLogEventType::MemberUpdate, 40, 9, None, 5);
+    timeout.changes = vec![AuditLogChange::CommunicationDisabledUntil {
+        new: None,
+        old: None,
+    }];
+    let mut nickname = audit(AuditLogEventType::MemberUpdate, 40, 8, None, 3);
+    nickname.changes = vec![AuditLogChange::Nick {
+        new: Some("new".into()),
+        old: None,
+    }];
+    harness.api().add_audit_entry(timeout);
+    harness.api().add_audit_entry(nickname);
+
+    harness
+        .emit(Event::NicknameChanged {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+            before: None,
+            after: Some("new".into()),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(posted[0].embeds.contains("<@8>"), "{}", posted[0].embeds);
+    assert!(!posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_member_who_changes_its_own_nickname_names_no_one() {
+    let harness = harness();
+    let mut nickname = audit(AuditLogEventType::MemberUpdate, 40, 40, None, 3);
+    nickname.changes = vec![AuditLogChange::Nick {
+        new: Some("new".into()),
+        old: None,
+    }];
+    harness.api().add_audit_entry(nickname);
+
+    harness
+        .emit(Event::NicknameChanged {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+            before: None,
+            after: Some("new".into()),
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert_eq!(
+        posted[0].embeds.matches("<@40>").count(),
+        1,
+        "{}",
+        posted[0].embeds
+    );
+}
+
+#[tokio::test]
+async fn an_overwrite_change_is_named_by_the_newest_entry_of_any_kind() {
+    let harness = harness();
+    let mut older = audit(
+        AuditLogEventType::ChannelOverwriteCreate,
+        CHANNEL,
+        5,
+        None,
+        30,
+    );
+    older.options = Some(serde_json::from_value(json!({ "id": "9" })).unwrap());
+    let mut newer = audit(
+        AuditLogEventType::ChannelOverwriteUpdate,
+        CHANNEL,
+        6,
+        None,
+        5,
+    );
+    newer.options = Some(serde_json::from_value(json!({ "id": "9" })).unwrap());
+    harness.api().add_audit_entry(older);
+    harness.api().add_audit_entry(newer);
+    let mut after = channel_info("general", None);
+    after.overwrites = vec![role_overwrite(
+        9,
+        Permissions::VIEW_CHANNEL,
+        Permissions::empty(),
+    )];
+
+    harness
+        .emit(Event::ChannelChanged {
+            before: channel_info("general", None),
+            after,
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{}", posted.len());
+    assert!(posted[0].embeds.contains("<@6>"), "{}", posted[0].embeds);
+    assert!(!posted[0].embeds.contains("<@5>"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
 async fn an_overwrite_change_of_another_channel_is_not_named() {
     let harness = harness();
     harness.api().add_audit_entry(overwrite_audit(
@@ -1251,9 +1355,12 @@ async fn a_ban_names_who_made_it_and_the_reason_they_gave() {
 #[tokio::test]
 async fn a_nickname_change_names_who_made_it() {
     let harness = harness();
-    harness
-        .api()
-        .add_audit_entry(audit(AuditLogEventType::MemberUpdate, 40, 9, None, 5));
+    let mut entry = audit(AuditLogEventType::MemberUpdate, 40, 9, None, 5);
+    entry.changes = vec![AuditLogChange::Nick {
+        new: None,
+        old: Some("Old name".into()),
+    }];
+    harness.api().add_audit_entry(entry);
 
     harness
         .emit(Event::NicknameChanged {
@@ -1448,6 +1555,58 @@ async fn an_edit_of_a_bot_message_is_not_logged() {
     harness.emit(event).await.unwrap();
 
     assert!(sent(&harness).is_empty(), "{:?}", sent(&harness).len());
+}
+
+#[tokio::test]
+async fn an_edit_that_only_removes_a_picture_is_logged_with_the_picture() {
+    let harness = harness();
+    harness
+        .seed_file(CHANNEL, 18, picture(4), Some(b"removed bytes".to_vec()))
+        .await
+        .unwrap();
+
+    harness
+        .emit(replacing(
+            edited(18, "same text", Vec::new(), vec![picture(4)]),
+            "same text",
+        ))
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(
+        posted[0].embeds.contains("Removed by an edit"),
+        "{}",
+        posted[0].embeds
+    );
+    assert_eq!(
+        posted[0].files,
+        [("photo.png".to_owned(), b"removed bytes".to_vec())]
+    );
+}
+
+#[tokio::test]
+async fn a_member_who_gains_many_roles_is_logged_with_the_roles_that_fit() {
+    let harness = harness();
+    let added: Vec<RoleId> = (0..60)
+        .map(|n| Id::new(1_000_000_000_000_000_000 + n))
+        .collect();
+
+    harness
+        .emit(Event::RolesChanged(RolesChange {
+            guild_id: Id::new(GUILD),
+            user: member(7),
+            added,
+            removed: Vec::new(),
+        }))
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(posted[0].embeds.contains("<@&1000000000000000000>"));
+    assert!(!posted[0].embeds.contains("<@&1000000000000000059>"));
 }
 
 #[tokio::test]
