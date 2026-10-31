@@ -203,7 +203,7 @@ pub(crate) async fn change_audit_of(
 }
 
 /// The audit log entry that changed a permission overwrite of `channel` for one of `targets`, when there
-/// is one. Discord names the channel in the options of the entry, and the role or member in its target.
+/// is one. Discord names the channel and the overwritten role or member in the options of the entry, not in its target.
 async fn overwrite_audit_of(
     ctx: &EventContext,
     channel: ChannelId,
@@ -217,14 +217,10 @@ async fn overwrite_audit_of(
     ] {
         let entries = recent_entries(ctx, kind).await?;
         let found = entries.iter().find(|entry| {
-            entry
-                .target_id
-                .is_some_and(|id| targets.contains(&id.get()))
-                && entry
-                    .options
-                    .as_ref()
-                    .is_some_and(|options| options.channel_id == Some(channel))
-                && within_window(now, entry)
+            entry.options.as_ref().is_some_and(|options| {
+                options.channel_id == Some(channel)
+                    && options.id.is_some_and(|id| targets.contains(&id.get()))
+            }) && within_window(now, entry)
         });
         if let Some(entry) = found {
             return Some(AuditEntry {
