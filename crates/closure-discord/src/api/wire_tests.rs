@@ -1162,35 +1162,74 @@ async fn an_evicted_private_deferral_cannot_become_a_public_reply() {
 }
 
 #[tokio::test]
-async fn an_ephemeral_text_command_reply_goes_to_the_invoker_and_not_to_the_channel() {
-    let discord = FakeDiscord::start(vec![
-        (200, MESSAGE_JSON),
-        (200, DM_CHANNEL_JSON),
-        (200, MESSAGE_JSON),
-    ])
-    .await;
-
+async fn an_ephemeral_text_command_reply_goes_to_the_channel_without_components() {
+    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON)]).await;
+    let mut response = ephemeral_reply("only you");
+    if let InteractionResponse::Message { reply } = &mut response {
+        reply
+            .components
+            .push(twilight_model::channel::message::Component::ActionRow(
+                twilight_model::channel::message::component::ActionRow {
+                    id: None,
+                    components: vec![],
+                },
+            ));
+    }
     discord
         .api()
         .execute(Action::Respond {
             interaction_id: Id::new(44),
             token: text_token(),
-            response: ephemeral_reply("only you"),
+            response,
         })
         .await
         .unwrap();
 
     let requests = discord.requests();
-    let paths: Vec<_> = requests
-        .iter()
-        .map(|request| (request.method.as_str(), request.path.as_str()))
-        .collect();
-    assert_eq!(paths.len(), 3, "{paths:?}");
-    assert!(paths[0].1.ends_with("/channels/1/messages/44"), "{paths:?}");
-    assert!(paths[1].1.ends_with("/users/@me/channels"), "{paths:?}");
-    assert!(paths[2].1.ends_with("/channels/300/messages"), "{paths:?}");
-    let message: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
-    assert_eq!(message["content"], "only you");
+    assert_eq!(method_paths(&discord), ["POST /channels/1/messages"]);
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(body["message_reference"]["message_id"], "44");
+    assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
+    assert!(body.get("components").is_none());
+}
+
+#[tokio::test]
+async fn deferred_ephemeral_text_edit_and_followup_stay_in_the_channel() {
+    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (200, MESSAGE_JSON)]).await;
+    let api = discord.api();
+    api.execute(Action::Respond {
+        interaction_id: Id::new(44),
+        token: text_token(),
+        response: InteractionResponse::Defer { ephemeral: true },
+    })
+    .await
+    .unwrap();
+    let reply = closure_core::action::InteractionReply {
+        ephemeral: true,
+        ..text_reply("reply")
+    };
+    api.execute(Action::EditResponse {
+        token: text_token(),
+        reply: reply.clone(),
+    })
+    .await
+    .unwrap();
+    api.execute(Action::Followup {
+        token: text_token(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        method_paths(&discord),
+        ["POST /channels/1/messages", "POST /channels/1/messages"]
+    );
+    for request in discord.requests() {
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["message_reference"]["message_id"], "44");
+        assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
+        assert!(body.get("components").is_none());
+    }
 }
 
 #[tokio::test]

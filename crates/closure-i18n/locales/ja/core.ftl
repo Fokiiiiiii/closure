@@ -13,7 +13,6 @@ error-internal = 内部でエラーが発生しました。内容は記録され
 error-module-disabled = この機能はこのサーバーでは無効になっています。
 error-command-failed = コマンドの実行中に問題が発生しました。しばらくしてからもう一度お試しください。
 error-busy = ほかの処理を実行中のため、少し待ってからもう一度お試しください。
-text-command-private-refused = 非公開の返信を DM で送れませんでした。このサーバーからの DM を許可するか、スラッシュコマンドを使ってください。
 
 # モジュールSDK (closure-sdk) の返信。
 sdk-done = 完了しました。

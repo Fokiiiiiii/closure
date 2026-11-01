@@ -246,6 +246,8 @@ Templates that cannot be used are not offered, and they do not refuse the rest o
   is skipped itself.
 
 A kick takes no duration, so a duration on a kick template is not used.
+Text commands do not show the picker: without a reason they run with none (a timeout still needs its
+duration), unless `require_reason` is set.
 
 - **Placeholders.** A template's `reason` may contain `{user}` (the member's mention), `{moderator}`
   (the moderator's name) and `{server}` (the server's name; "this server" when Discord cannot say). They
@@ -253,6 +255,8 @@ A kick takes no duration, so a duration on a kick template is not used.
   reason, cut to 512 characters. The server's name is asked for only when the reason names it. Other
   words in braces stay as typed, and a reason the moderator typed is never filled in. The menu shows the
   reason as written.
+
+Text-command replies do not include buttons; use the matching un-command to undo an action.
 
 ## Undo and the history line
 

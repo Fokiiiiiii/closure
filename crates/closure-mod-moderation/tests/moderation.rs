@@ -2565,6 +2565,27 @@ fn accepted_settings(config: serde_json::Value) -> bool {
 }
 
 #[tokio::test]
+async fn text_commands_run_without_a_reason_instead_of_offering_templates() {
+    for (kind, without) in [
+        ("timeout", timeout_of(MEMBER, Some("5m"), None)),
+        ("kick", kick(MEMBER, None)),
+        ("ban", ban(MEMBER, None, None, None)),
+        ("vcmute", voice_mute(MEMBER, None, None)),
+    ] {
+        let harness = harness();
+        harness.set_config(templates_for(
+            kind,
+            json!([{
+                "id": "spam", "label": "Spam", "reason": "Spam", "duration": "5m"
+            }]),
+        ));
+        let replies = harness.invoke(without.text_command()).await.unwrap();
+        assert!(!sequence(&harness).is_empty(), "{kind}: {replies:?}");
+        assert_eq!(cases_of(&harness, MEMBER).await.len(), 1, "{kind}");
+    }
+}
+
+#[tokio::test]
 async fn a_punishment_without_a_reason_asks_for_a_template_and_does_nothing_yet() {
     let harness = harness();
     harness.set_config(templates_for(

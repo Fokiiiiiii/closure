@@ -49,9 +49,7 @@ use twilight_model::id::Id;
 
 use crate::breaker::{Breaker, BreakerConfig, Ticket};
 use crate::notice;
-use crate::text_commands::{
-    BoundTextApi, DmComponents, NOTICE_LIFETIME, Reader, Reading, TextCommandApi,
-};
+use crate::text_commands::{NOTICE_LIFETIME, Reader, Reading, TextCommandApi};
 
 /// How long `shutdown` waits for lanes to stop once they were told to abort.
 /// Most usage lines answered at once. A usage line costs a Discord call, so an answer past this is
@@ -255,7 +253,6 @@ struct Shared {
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
     /// The guild of every live interaction, so a module cannot answer another guild's.
     interactions: Arc<InteractionGuilds>,
-    dm_components: Arc<DmComponents>,
     /// Per module, how many of its calls overran the timeout and are still running, because
     /// they block a thread and cannot be aborted. A module with any is not given new calls.
     wedged: DashMap<ModuleId, Arc<AtomicUsize>>,
@@ -516,7 +513,6 @@ impl Dispatcher {
             config,
             guilds: DashMap::new(),
             interactions,
-            dm_components: Arc::default(),
             wedged: DashMap::new(),
             pending_total: AtomicUsize::new(0),
             usage_replies: Arc::new(Semaphore::new(MAX_USAGE_REPLIES)),
@@ -541,24 +537,6 @@ impl Dispatcher {
     #[must_use]
     pub fn try_dispatch(&self, event: Event) -> bool {
         self.enqueue(event, None)
-    }
-
-    pub(crate) fn convert_events(
-        &self,
-        event: &twilight_gateway::Event,
-        before: &crate::convert::Before,
-    ) -> Vec<Event> {
-        if let twilight_gateway::Event::InteractionCreate(interaction) = event
-            && interaction.0.guild_id.is_none()
-        {
-            return self
-                .shared
-                .dm_components
-                .restore(&interaction.0)
-                .into_iter()
-                .collect();
-        }
-        crate::convert::events(event, before)
     }
 
     /// [`Self::dispatch`], and a message that is a text command also runs as that command (see
@@ -1147,7 +1125,7 @@ async fn call_module(
         return Verdict::Skipped;
     };
 
-    let ctx = context_for(shared, guild, &id, &settings, event);
+    let ctx = context_for(shared, guild, &id, &settings);
     // Read per call, so a changed timeout applies to the very next event.
     let handler_timeout = shared.settings.limits(guild).handler_timeout;
     let handler_timeout = match deadline {
@@ -1201,21 +1179,14 @@ fn context_for(
     guild: GuildId,
     id: &ModuleId,
     settings: &ModuleSettings,
-    event: &Event,
 ) -> EventContext {
-    let inner: Arc<dyn DiscordApi> = match event {
-        Event::Command(invocation) if invocation.token.text_command_message().is_some() => {
-            Arc::new(BoundTextApi {
-                inner: Arc::clone(&shared.api),
-                components: Arc::clone(&shared.dm_components),
-                invocation: invocation.clone(),
-            })
-        }
-        _ => Arc::clone(&shared.api),
-    };
-    let api = ApiClient::new(inner, settings.granted.clone(), id.clone())
-        .with_interactions(Arc::clone(&shared.interactions))
-        .scoped_to(guild);
+    let api = ApiClient::new(
+        Arc::clone(&shared.api),
+        settings.granted.clone(),
+        id.clone(),
+    )
+    .with_interactions(Arc::clone(&shared.interactions))
+    .scoped_to(guild);
     let context = EventContext::new(
         id.clone(),
         guild,

@@ -18,7 +18,7 @@ use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{ChoiceValue, CommandSpec, OptionKind, OptionSpec, SubcommandSpec};
 use closure_core::settings::SettingsProvider;
 use closure_i18n::CORE_NAMESPACE;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use twilight_cache_inmemory::InMemoryCache;
 use twilight_model::channel::permission_overwrite::PermissionOverwrite;
 use twilight_model::guild::Permissions;
@@ -459,15 +459,16 @@ pub(crate) fn invoker_permissions(cache: &InMemoryCache, message: &MessageInfo) 
     }
 }
 
-/// How long a notice about a text command stays in the channel, for the invoker to read. Prefix
-/// replies are taken back after it, unless the guild sets its own delay for them.
+/// How long a notice about a text command stays in the channel, for the invoker to read.
 pub(crate) const NOTICE_LIFETIME: Duration = Duration::from_secs(30);
+
+/// How long an ephemeral reply stays when the guild sets no delay.
+const PRIVATE_REPLY_LIFETIME: Duration = Duration::from_secs(30);
 
 /// The audit log reason of the messages a guild's text-command delays delete.
 const CLEANUP_REASON: &str = "Text command cleanup";
 
 /// Most messages of text commands waiting to be deleted by the guilds' delays, in all guilds together.
-/// Past it a message stays, rather than a task waiting for it.
 pub(crate) const MAX_PENDING_DELETIONS: usize = 1_024;
 
 /// The messages a text command's answer deletes later, with the guild's delays.
@@ -476,130 +477,6 @@ struct Deletions {
     command: MessageId,
     command_after: Option<Duration>,
     reply_after: Option<Duration>,
-}
-
-/// Permissions captured for a private component remain valid for at most 15 minutes without refresh.
-#[derive(Default)]
-pub(crate) struct DmComponents {
-    entries: std::sync::Mutex<std::collections::HashMap<MessageId, DmOrigin>>,
-}
-
-#[derive(Clone)]
-struct DmOrigin {
-    guild: GuildId,
-    user: UserId,
-    roles: Vec<Id<RoleMarker>>,
-    permissions: Permissions,
-    locale: Option<Locale>,
-    at: std::time::Instant,
-}
-
-impl DmComponents {
-    pub(crate) fn remember(&self, message: MessageId, invocation: &CommandInvocation) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if entries.len() >= 1_024 && !entries.contains_key(&message) {
-            entries.retain(|_, origin| origin.at.elapsed() < Duration::from_mins(15));
-            if entries.len() >= 1_024
-                && let Some(oldest) = entries
-                    .iter()
-                    .min_by_key(|(_, origin)| origin.at)
-                    .map(|(id, _)| *id)
-            {
-                entries.remove(&oldest);
-            }
-        }
-        entries.insert(
-            message,
-            DmOrigin {
-                guild: invocation.guild_id,
-                user: invocation.user.id,
-                roles: invocation.roles.clone(),
-                permissions: invocation.invoker_permissions,
-                locale: invocation.locale,
-                at: std::time::Instant::now(),
-            },
-        );
-    }
-
-    pub(crate) fn restore(
-        &self,
-        interaction: &twilight_model::application::interaction::Interaction,
-    ) -> Option<closure_core::event::Event> {
-        use twilight_model::application::interaction::InteractionType;
-        use twilight_model::gateway::payload::incoming::InteractionCreate;
-
-        if interaction.guild_id.is_some() || interaction.kind != InteractionType::MessageComponent {
-            return None;
-        }
-        let message = interaction.message.as_ref()?.id;
-        let author = interaction.author()?.id;
-        let origin = {
-            let entries = self
-                .entries
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let origin = entries.get(&message)?;
-            if origin.user != author || origin.at.elapsed() >= Duration::from_mins(15) {
-                return None;
-            }
-            origin.clone()
-        };
-        let mut restored = interaction.clone();
-        restored.guild_id = Some(origin.guild);
-        let gateway =
-            twilight_gateway::Event::InteractionCreate(Box::new(InteractionCreate(restored)));
-        let mut events = crate::convert::events(&gateway, &crate::convert::Before::default());
-        let closure_core::event::Event::Component(component) = events.first_mut()? else {
-            return None;
-        };
-        component.roles = origin.roles;
-        component.invoker_permissions = origin.permissions;
-        component.locale = origin.locale;
-        events.pop()
-    }
-}
-
-pub(crate) struct BoundTextApi {
-    pub(crate) inner: Arc<dyn DiscordApi>,
-    pub(crate) components: Arc<DmComponents>,
-    pub(crate) invocation: CommandInvocation,
-}
-
-#[async_trait]
-impl DiscordApi for BoundTextApi {
-    async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
-        let has_components = match &action {
-            Action::Respond {
-                token,
-                response: InteractionResponse::Message { reply },
-                ..
-            }
-            | Action::Followup { token, reply }
-            | Action::EditResponse { token, reply } => {
-                token.expose() == self.invocation.token.expose() && !reply.components.is_empty()
-            }
-            _ => false,
-        };
-        let outcome = self.inner.execute(action).await?;
-        if has_components
-            && let Outcome::Message(message) = &outcome
-            && message.channel_id != self.invocation.channel_id
-        {
-            self.components.remember(message.id, &self.invocation);
-        }
-        Ok(outcome)
-    }
-
-    async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
-        self.inner.channel_guild(channel).await
-    }
-
-    async fn guild_owner(&self, guild: GuildId) -> Result<Option<UserId>, DiscordError> {
-        self.inner.guild_owner(guild).await
-    }
 }
 
 /// Stands in for the host's API for the one answer a text command cannot give: a form. The
@@ -629,40 +506,65 @@ impl TextCommandApi {
         }
     }
 
-    /// What answering `action` leaves to delete, when it answers a text command in a guild whose
-    /// policy sets a delay.
-    fn deletions(&self, action: &Action) -> Option<Deletions> {
-        let Action::Respond {
-            token,
-            response: InteractionResponse::Message { .. },
-            ..
-        } = action
-        else {
-            return None;
+    fn deletions(&self, action: &Action) -> Option<(Deletions, bool)> {
+        let (token, reply, command) = match action {
+            Action::Respond {
+                token,
+                response: InteractionResponse::Message { reply },
+                ..
+            } => (token, reply, true),
+            Action::EditResponse { token, reply } | Action::Followup { token, reply } => {
+                (token, reply, false)
+            }
+            _ => return None,
         };
-        let (channel, command) = token.text_command_message()?;
-        let policy = self.settings.policy(self.interactions.guild_of(token)?);
-        if policy.prefix_delete_command_after.is_none()
-            && policy.prefix_delete_reply_after.is_none()
-        {
+        let (channel, command_id) = token.text_command_message()?;
+        let policy = self
+            .interactions
+            .guild_of(token)
+            .map(|guild| self.settings.policy(guild));
+        let command_after = policy
+            .as_ref()
+            .and_then(|policy| policy.prefix_delete_command_after)
+            .filter(|_| command);
+        let reply_after = if command || reply.ephemeral {
+            policy
+                .as_ref()
+                .and_then(|policy| policy.prefix_delete_reply_after)
+                .or_else(|| reply.ephemeral.then_some(PRIVATE_REPLY_LIFETIME))
+        } else {
+            None
+        };
+        if command_after.is_none() && reply_after.is_none() {
             return None;
         }
-        Some(Deletions {
-            channel,
-            command,
-            command_after: policy.prefix_delete_command_after,
-            reply_after: policy.prefix_delete_reply_after,
-        })
+        Some((
+            Deletions {
+                channel,
+                command: command_id,
+                command_after,
+                reply_after,
+            },
+            reply.ephemeral,
+        ))
     }
 
-    /// Schedules the deletions once the answer has been sent: the reply is the message `outcome`
-    /// names, so a reply that was not sent leaves nothing to delete.
-    fn schedule_deletions(&self, deletions: &Deletions, reason: &Reason, outcome: &Outcome) {
+    fn schedule_deletions(
+        &self,
+        deletions: &Deletions,
+        reason: &Reason,
+        outcome: &Outcome,
+        permit: Option<OwnedSemaphorePermit>,
+    ) {
         if let Some(after) = deletions.command_after {
             self.delete_after(deletions.channel, deletions.command, after, reason.clone());
         }
         if let (Some(after), Outcome::Message(reply)) = (deletions.reply_after, outcome) {
-            self.delete_after(reply.channel_id, reply.id, after, reason.clone());
+            if let Some(permit) = permit {
+                self.delete_with_permit(reply.channel_id, reply.id, after, reason.clone(), permit);
+            } else {
+                self.delete_after(reply.channel_id, reply.id, after, reason.clone());
+            }
         }
     }
 
@@ -670,22 +572,6 @@ impl TextCommandApi {
         self.interactions
             .guild_of(token)
             .map_or(Locale::DEFAULT, |guild| self.settings.locale(guild))
-    }
-
-    /// The token of a reply that the invoker of a text command gets privately: a message or a
-    /// follow-up that is ephemeral, or an edit of such a reply.
-    fn answer_of(action: &Action) -> Option<InteractionToken> {
-        let (token, private) = match action {
-            Action::Respond {
-                token,
-                response: InteractionResponse::Message { reply },
-                ..
-            }
-            | Action::Followup { token, reply }
-            | Action::EditResponse { token, reply } => (token, reply.ephemeral),
-            _ => return None,
-        };
-        (private && token.text_command_message().is_some()).then(|| token.clone())
     }
 
     /// Posts `text` in the channel of a text command, as a reply to the command, and takes it back
@@ -728,6 +614,17 @@ impl TextCommandApi {
             tracing::warn!("too many messages wait to be deleted; one stays");
             return;
         };
+        self.delete_with_permit(channel, message, after, reason, place);
+    }
+
+    fn delete_with_permit(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+        after: Duration,
+        reason: Reason,
+        place: OwnedSemaphorePermit,
+    ) {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             let _place = place;
@@ -738,7 +635,7 @@ impl TextCommandApi {
                 reason,
             };
             if let Err(error) = inner.execute(action).await {
-                tracing::debug!(%error, "could not delete a text command or its reply");
+                tracing::warn!(%error, "could not delete a text command or its reply");
             }
         });
     }
@@ -762,38 +659,40 @@ impl DiscordApi for TextCommandApi {
                 );
                 self.notice(&token, &content, notice::INFO).await
             }
-            other => {
-                let answered_in_private = Self::answer_of(&other);
+            mut other => {
                 let deletions = self.deletions(&other);
-                let reason = Reason::new(CLEANUP_REASON)?;
-                match self.inner.execute(other).await {
-                    Ok(outcome) => {
-                        if let Some(deletions) = &deletions {
-                            self.schedule_deletions(deletions, &reason, &outcome);
-                        }
-                        Ok(outcome)
+                let permit = if deletions.as_ref().is_some_and(|(_, private)| *private) {
+                    if let Ok(permit) = Arc::clone(&self.pending).try_acquire_owned() {
+                        Some(permit)
+                    } else {
+                        tracing::warn!("too many messages wait to be deleted; text reply refused");
+                        return Err(DiscordError::Invalid(
+                            "text reply cleanup capacity reached".into(),
+                        ));
                     }
-                    // Discord refuses a direct message to someone who does not accept them. The answer
-                    // cannot reach the invoker, so they are told in the channel instead.
-                    Err(error) => match answered_in_private {
-                        Some(token)
-                            if matches!(
-                                error,
-                                DiscordError::Forbidden(_) | DiscordError::DirectMessagesClosed
-                            ) =>
-                        {
-                            let content = self.translator.translate(
-                                self.locale_of(&token),
-                                CORE_NAMESPACE,
-                                "text-command-private-refused",
-                                &Args::new(),
-                            );
-                            self.notice(&token, &content, notice::WAIT).await?;
-                            Ok(Outcome::None)
-                        }
-                        _ => Err(error),
-                    },
+                } else {
+                    None
+                };
+                match &mut other {
+                    Action::Respond {
+                        token,
+                        response: InteractionResponse::Message { reply },
+                        ..
+                    }
+                    | Action::EditResponse { token, reply }
+                    | Action::Followup { token, reply }
+                        if token.text_command_message().is_some() =>
+                    {
+                        reply.components.clear();
+                    }
+                    _ => {}
                 }
+                let reason = Reason::new(CLEANUP_REASON)?;
+                let outcome = self.inner.execute(other).await?;
+                if let Some((deletions, _)) = &deletions {
+                    self.schedule_deletions(deletions, &reason, &outcome, permit);
+                }
+                Ok(outcome)
             }
         }
     }

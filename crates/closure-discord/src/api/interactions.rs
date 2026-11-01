@@ -119,9 +119,7 @@ impl TwilightApi {
         reply: &InteractionReply,
     ) -> Result<Outcome, DiscordError> {
         if let Some((channel, message)) = token.text_command_message() {
-            let sent = self
-                .send_text_reply_as(channel, message, reply, reply.ephemeral)
-                .await?;
+            let sent = self.send_text_reply(channel, message, reply).await?;
             return Ok(Outcome::Message(Box::new(sent)));
         }
         let interaction = self.http.interaction(self.application_id);
@@ -245,9 +243,7 @@ impl TwilightApi {
                 Ok(Outcome::None)
             }
             InteractionResponse::Message { reply } => {
-                let sent = self
-                    .send_text_reply_as(channel, invoker, reply, reply.ephemeral)
-                    .await?;
+                let sent = self.send_text_reply(channel, invoker, reply).await?;
                 self.text.remember(token, Some(sent.id), reply.ephemeral);
                 Ok(Outcome::Message(Box::new(sent)))
             }
@@ -269,7 +265,7 @@ impl TwilightApi {
         reply: &InteractionReply,
     ) -> Result<Outcome, DiscordError> {
         match self.text.fresh(token) {
-            Some((Some(message), false)) => {
+            Some((Some(message), false)) if !reply.ephemeral => {
                 let allowed = AllowedMentions::default();
                 let mut request = self
                     .http
@@ -278,9 +274,7 @@ impl TwilightApi {
                 if let Some(content) = &reply.content {
                     request = request.content(Some(content));
                 }
-                request = request
-                    .embeds(Some(&reply.embeds))
-                    .components(Some(&reply.components));
+                request = request.embeds(Some(&reply.embeds)).components(Some(&[]));
                 run(request).await
             }
             None => Err(DiscordError::Invalid(
@@ -289,9 +283,7 @@ impl TwilightApi {
             // A deferral or a private reply, which is sent again rather than edited.
             Some((_, private)) => {
                 let ephemeral = private || reply.ephemeral;
-                let sent = self
-                    .send_text_reply_as(channel, invoker, reply, ephemeral)
-                    .await?;
+                let sent = self.send_text_reply(channel, invoker, reply).await?;
                 self.text.remember(token, Some(sent.id), ephemeral);
                 Ok(Outcome::Message(Box::new(sent)))
             }
@@ -319,51 +311,6 @@ impl TwilightApi {
         }
         if !reply.embeds.is_empty() {
             request = request.embeds(&reply.embeds);
-        }
-        if !reply.components.is_empty() {
-            request = request.components(&reply.components);
-        }
-        read(request).await
-    }
-
-    /// Sends `reply` as a reply to a text command. An ephemeral one goes to the invoker's direct
-    /// messages instead: a reply in the channel would stay visible to everyone there.
-    async fn send_text_reply_as(
-        &self,
-        channel: ChannelId,
-        invoker: Id<MessageMarker>,
-        reply: &InteractionReply,
-        ephemeral: bool,
-    ) -> Result<Message, DiscordError> {
-        if ephemeral {
-            return self.send_private_reply(channel, invoker, reply).await;
-        }
-        self.send_text_reply(channel, invoker, reply).await
-    }
-
-    /// Sends `reply` to the direct messages of whoever invoked the text command. The author is read
-    /// from the invoking message, so a message that is gone leaves nothing sent.
-    async fn send_private_reply(
-        &self,
-        channel: ChannelId,
-        invoker: Id<MessageMarker>,
-        reply: &InteractionReply,
-    ) -> Result<Message, DiscordError> {
-        let author = read(self.http.message(channel, invoker)).await?.author.id;
-        let direct = read(self.http.create_private_channel(author)).await?;
-        let allowed = AllowedMentions::default();
-        let mut request = self
-            .http
-            .create_message(direct.id)
-            .allowed_mentions(Some(&allowed));
-        if let Some(content) = &reply.content {
-            request = request.content(content);
-        }
-        if !reply.embeds.is_empty() {
-            request = request.embeds(&reply.embeds);
-        }
-        if !reply.components.is_empty() {
-            request = request.components(&reply.components);
         }
         read(request).await
     }

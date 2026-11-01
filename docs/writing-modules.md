@@ -667,13 +667,13 @@ registered for it: a module needs no extra code.
   with a short usage line such as `Usage: !warn <user> [reason]`, in the guild's language, in the channel.
   The line is taken back after 30 seconds, and nothing runs. A command word that names no enabled
   command is ignored: the message is just chat.
-- **Replies.** A reply is sent as a reply to the message that asked, with no mentions, and it is taken
-  back after the guild's reply delay (30 seconds unless set). `defer` sends nothing, and the first
-  `edit_response` sends the reply; later edits change it (for 15 minutes).
-- **Private replies.** An `ephemeral` reply is sent to the author's direct messages, so that nobody else
-  in the channel sees it. When Discord refuses the direct message, the author is told in the channel, in
-  the guild's language, to allow direct messages from the server or to use the slash command; that notice
-  is taken back after 30 seconds.
+- **Replies.** Replies appear in the channel as replies to the command without notifying mentions.
+  An ephemeral reply is deleted after the configured reply delay, or after 30 seconds when unset.
+  Immediate non-ephemeral replies are deleted only when a reply delay is configured. Ephemeral replies remain visible
+  in the channel until deletion; use a slash command for a private answer. When the deletion queue
+  is full, an ephemeral reply is refused.
+- **Components.** Buttons and menus are removed from text-command replies. Moderation commands
+  that would offer a reason template ask for a reason instead.
 - **Forms.** A modal cannot be shown to a text command. The module gets its answer, and the author is
   told in the guild's language to use the slash command.
 - **What the host does not know.** The invoker's permissions are computed from the cache: the owner

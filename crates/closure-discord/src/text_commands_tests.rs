@@ -39,7 +39,7 @@ async fn private_reply_deletion_uses_the_reply_channel() {
         command_after: Some(Duration::from_secs(1)),
         reply_after: Some(Duration::from_secs(1)),
     };
-    api.schedule_deletions(&deletions, &Reason::new("cleanup").unwrap(), &reply);
+    api.schedule_deletions(&deletions, &Reason::new("cleanup").unwrap(), &reply, None);
     tokio::time::sleep(Duration::from_secs(2)).await;
     let deleted: Vec<_> = inner
         .actions()
@@ -57,121 +57,213 @@ async fn private_reply_deletion_uses_the_reply_channel() {
     assert!(deleted.contains(&(300, 55)), "{deleted:?}");
 }
 
-fn dm_click(
-    message_id: u64,
-    user_id: u64,
-) -> twilight_model::application::interaction::Interaction {
-    use serde_json::json;
-    serde_json::from_value(json!({
-        "application_id": "60", "channel": { "id": "300", "type": 1 },
-        "data": { "custom_id": "warn:confirm:*:", "component_type": 3, "values": ["spam"] },
-        "id": "51", "locale": "en-US", "user": { "id": user_id.to_string(), "username": "mod", "discriminator": "0", "avatar": null },
-        "message": { "id": message_id.to_string(), "channel_id": "300", "author": { "id": "60", "username": "bot", "discriminator": "0", "avatar": null },
-            "content": "pick", "timestamp": "2026-10-24T00:00:00.000000+00:00", "edited_timestamp": null,
-            "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
-            "attachments": [], "embeds": [], "pinned": false, "type": 0 },
-        "token": "dm-token", "type": 3, "version": 1, "entitlements": [], "authorizing_integration_owners": {}
-    })).unwrap()
-}
+struct ReplyApi(closure_core::testing::MockApi);
 
-fn prefix_invocation() -> CommandInvocation {
-    let Reading::Run(mut invocation) = read_message(&message("!timeout 9 5m"), PREFIX, Locale::Ja)
-    else {
-        panic!("expected a text command");
-    };
-    invocation.locale = Some(Locale::Ja);
-    invocation
-}
-
-#[tokio::test]
-async fn dm_components_are_recorded_after_private_reply_and_restored() {
-    struct DirectReply;
-    #[async_trait]
-    impl DiscordApi for DirectReply {
-        async fn execute(&self, _: Action) -> Result<Outcome, DiscordError> {
-            closure_core::testing::MockApi::default()
+#[async_trait]
+impl DiscordApi for ReplyApi {
+    async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
+        let text_reply = match &action {
+            Action::EditResponse { token, .. } | Action::Followup { token, .. } => {
+                token.text_command_message()
+            }
+            _ => None,
+        };
+        let outcome = self.0.execute(action).await?;
+        if let Some((channel_id, _)) = text_reply {
+            self.0
                 .execute(Action::GetMessage {
-                    channel_id: Id::new(300),
-                    message_id: Id::new(900),
+                    channel_id,
+                    message_id: Id::new(55),
                 })
                 .await
-        }
-        async fn channel_guild(&self, _: ChannelId) -> Result<Option<GuildId>, DiscordError> {
-            Ok(None)
+        } else {
+            Ok(outcome)
         }
     }
 
-    let invocation = prefix_invocation();
-    let components = Arc::new(DmComponents::default());
-    let api = BoundTextApi {
-        inner: Arc::new(DirectReply),
-        components: Arc::clone(&components),
-        invocation: invocation.clone(),
+    async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
+        self.0.channel_guild(channel).await
+    }
+
+    async fn guild_owner(&self, guild: GuildId) -> Result<Option<UserId>, DiscordError> {
+        self.0.guild_owner(guild).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ephemeral_text_replies_are_stripped_and_deleted_for_all_answer_types() {
+    use closure_core::action::InteractionReply;
+    use closure_core::testing::{MockApi, StaticSettings};
+
+    let inner = Arc::new(ReplyApi(MockApi::default()));
+    let interactions = Arc::new(InteractionGuilds::default());
+    let token = InteractionToken::for_text_command(Id::new(3), Id::new(44));
+    assert!(interactions.register(&token, Id::new(1)).is_recorded());
+    let api = TextCommandApi::new(
+        Arc::clone(&inner) as Arc<dyn DiscordApi>,
+        interactions,
+        Arc::new(StaticSettings::new([])),
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+    );
+    let reply = InteractionReply {
+        content: Some("reply".into()),
+        ephemeral: true,
+        components: vec![twilight_model::channel::message::Component::ActionRow(
+            twilight_model::channel::message::component::ActionRow {
+                id: None,
+                components: vec![],
+            },
+        )],
+        ..InteractionReply::default()
     };
-    api.execute(Action::Respond {
-        interaction_id: invocation.interaction_id,
-        token: invocation.token.clone(),
+    for action in [
+        Action::Respond {
+            interaction_id: Id::new(44),
+            token: token.clone(),
+            response: InteractionResponse::Message {
+                reply: reply.clone(),
+            },
+        },
+        Action::EditResponse {
+            token: token.clone(),
+            reply: reply.clone(),
+        },
+        Action::Followup {
+            token: token.clone(),
+            reply,
+        },
+    ] {
+        api.execute(action).await.unwrap();
+    }
+    let actions = inner.0.actions();
+    for reply in actions.iter().filter_map(|action| match action {
+        Action::Respond {
+            response: InteractionResponse::Message { reply },
+            ..
+        }
+        | Action::EditResponse { reply, .. }
+        | Action::Followup { reply, .. } => Some(reply),
+        _ => None,
+    }) {
+        assert!(reply.components.is_empty());
+    }
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(29)).await;
+    assert_eq!(
+        inner
+            .0
+            .actions()
+            .iter()
+            .filter(|a| matches!(a, Action::DeleteMessage { .. }))
+            .count(),
+        0
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    assert_eq!(inner.0.actions().iter().filter(|a| matches!(a, Action::DeleteMessage { channel_id, .. } if *channel_id == Id::new(3))).count(), 3);
+
+    let public = Action::Respond {
+        interaction_id: Id::new(44),
+        token,
         response: InteractionResponse::Message {
-            reply: closure_core::action::InteractionReply {
-                content: Some("pick".into()),
-                components: vec![twilight_model::channel::message::Component::ActionRow(
-                    twilight_model::channel::message::component::ActionRow {
-                        id: None,
-                        components: vec![],
-                    },
-                )],
+            reply: InteractionReply {
+                content: Some("public".into()),
+                ..InteractionReply::default()
+            },
+        },
+    };
+    api.execute(public).await.unwrap();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    assert_eq!(
+        inner
+            .0
+            .actions()
+            .iter()
+            .filter(|a| matches!(a, Action::DeleteMessage { .. }))
+            .count(),
+        3
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_reply_delay_applies_to_ephemeral_text_replies() {
+    use closure_core::action::InteractionReply;
+    use closure_core::settings::GuildPolicy;
+    use closure_core::testing::{MockApi, StaticSettings};
+    let inner = Arc::new(MockApi::default());
+    let interactions = Arc::new(InteractionGuilds::default());
+    let token = InteractionToken::for_text_command(Id::new(3), Id::new(44));
+    assert!(interactions.register(&token, Id::new(1)).is_recorded());
+    let mut settings = StaticSettings::new([]);
+    settings.policy = Arc::new(GuildPolicy {
+        prefix_delete_reply_after: Some(Duration::from_secs(7)),
+        ..GuildPolicy::default()
+    });
+    let api = TextCommandApi::new(
+        Arc::clone(&inner) as Arc<dyn DiscordApi>,
+        interactions,
+        Arc::new(settings),
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+    );
+    api.execute(Action::Respond {
+        interaction_id: Id::new(44),
+        token,
+        response: InteractionResponse::Message {
+            reply: InteractionReply {
                 ephemeral: true,
-                ..Default::default()
+                content: Some("reply".into()),
+                ..InteractionReply::default()
             },
         },
     })
     .await
     .unwrap();
-    let Some(closure_core::event::Event::Component(click)) = components.restore(&dm_click(900, 7))
-    else {
-        panic!("private selection was dropped");
-    };
-    assert_eq!(click.guild_id, invocation.guild_id);
-    assert_eq!(click.roles, invocation.roles);
-    assert_eq!(click.invoker_permissions, invocation.invoker_permissions);
-    assert_eq!(click.locale, invocation.locale);
-    assert_eq!(click.values, ["spam"]);
-    assert!(components.restore(&dm_click(900, 8)).is_none());
-    assert!(components.restore(&dm_click(901, 7)).is_none());
-
-    components
-        .entries
-        .lock()
-        .unwrap()
-        .get_mut(&Id::new(900))
-        .unwrap()
-        .at = std::time::Instant::now()
-        .checked_sub(Duration::from_mins(15))
-        .unwrap();
-    assert!(components.restore(&dm_click(900, 7)).is_none());
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(
+        !inner
+            .actions()
+            .iter()
+            .any(|a| matches!(a, Action::DeleteMessage { .. }))
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    assert!(
+        inner
+            .actions()
+            .iter()
+            .any(|a| matches!(a, Action::DeleteMessage { .. }))
+    );
 }
 
-#[test]
-fn dm_components_evict_the_oldest_when_full() {
-    let components = DmComponents::default();
-    let invocation = prefix_invocation();
-    for id in 1..=1_024 {
-        components.remember(Id::new(id), &invocation);
-    }
-    components
-        .entries
-        .lock()
-        .unwrap()
-        .get_mut(&Id::new(1))
-        .unwrap()
-        .at = std::time::Instant::now()
-        .checked_sub(Duration::from_secs(1))
+#[tokio::test]
+async fn ephemeral_text_reply_is_refused_when_deletion_queue_is_full() {
+    use closure_core::action::InteractionReply;
+    use closure_core::testing::{MockApi, StaticSettings};
+    let inner = Arc::new(MockApi::default());
+    let api = TextCommandApi::new(
+        Arc::clone(&inner) as Arc<dyn DiscordApi>,
+        Arc::new(InteractionGuilds::default()),
+        Arc::new(StaticSettings::new([])),
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+    );
+    let _permit = Arc::clone(&api.pending)
+        .acquire_many_owned(u32::try_from(MAX_PENDING_DELETIONS).unwrap())
+        .await
         .unwrap();
-    components.remember(Id::new(1_025), &invocation);
-    let entries = components.entries.lock().unwrap();
-    assert_eq!(entries.len(), 1_024);
-    assert!(!entries.contains_key(&Id::new(1)));
-    assert!(entries.contains_key(&Id::new(1_025)));
+    let result = api
+        .execute(Action::Followup {
+            token: InteractionToken::for_text_command(Id::new(3), Id::new(44)),
+            reply: InteractionReply {
+                ephemeral: true,
+                ..InteractionReply::default()
+            },
+        })
+        .await;
+    assert!(result.is_err());
+    assert!(inner.actions().is_empty());
 }
 
 fn opt(name: &str, kind: OptionKind) -> OptionSpec {

@@ -55,6 +55,7 @@ pub struct Invocation {
     owner: bool,
     locale: Option<Locale>,
     channel: u64,
+    text_command: bool,
 }
 
 impl Invocation {
@@ -70,7 +71,15 @@ impl Invocation {
             owner: false,
             locale: None,
             channel: 5,
+            text_command: false,
         }
+    }
+
+    /// Runs this invocation as a prefix command.
+    #[must_use]
+    pub fn text_command(mut self) -> Self {
+        self.text_command = true;
+        self
     }
 
     #[must_use]
@@ -1196,7 +1205,14 @@ impl Harness {
     pub async fn invoke(&self, invocation: Invocation) -> Result<Vec<Reply>, ModuleError> {
         let guild: GuildId = Id::new(GUILD);
         let user = Id::new(invocation.user);
-        let (number, token) = self.new_interaction(guild, user, invocation.owner);
+        let (number, mut token) = self.new_interaction(guild, user, invocation.owner);
+        if invocation.text_command {
+            self.api
+                .add_channel(Id::new(invocation.channel), Some(guild));
+            token =
+                InteractionToken::for_text_command(Id::new(invocation.channel), Id::new(number));
+            let _ = self.interactions.register(&token, guild);
+        }
         let event = CommandInvocation {
             interaction_id: Id::new(number),
             application_id: Id::new(1),

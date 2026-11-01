@@ -30,7 +30,7 @@ pub struct GuildPolicy {
     pub prefix: Option<String>,
     /// How long after a text command its message is deleted; `None` keeps it.
     pub prefix_delete_command_after: Option<Duration>,
-    /// How long after its reply a text command's reply is deleted; `None` keeps it.
+    /// How long after its reply a text command's reply is deleted; `None` keeps non-ephemeral replies.
     pub prefix_delete_reply_after: Option<Duration>,
     /// Put in front of the text of a success reply, followed by a space; empty for none.
     pub success_emoji: String,

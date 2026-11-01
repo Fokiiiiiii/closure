@@ -264,7 +264,12 @@ async fn offer(
     if punishment.reason.is_some() && !needs_duration {
         return Ok(Some(punishment));
     }
-    let templates = usable(config, punishment.kind);
+    // A text command cannot show a picker: it runs with the reason it was given, or with none.
+    let templates = if cx.invocation().token.text_command_message().is_some() {
+        Vec::new()
+    } else {
+        usable(config, punishment.kind)
+    };
     if templates.is_empty() {
         if needs_duration {
             return Err(UserError::message("duration-required"));
