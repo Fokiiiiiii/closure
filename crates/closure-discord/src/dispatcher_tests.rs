@@ -2365,12 +2365,20 @@ async fn a_burst_of_incomplete_text_commands_is_answered_up_to_a_limit() {
     let module = warn_module(Behavior::LogCommand);
     let h = text_harness(&[(&module, true)], Some("!"), Locale::Ja).await;
 
-    for message in 0..(MAX_USAGE_REPLIES as u64 * 4) {
+    for message in 0..MAX_USAGE_REPLIES as u64 {
         h.dispatcher
             .dispatch_message(text_message(100 + message, "!warn"), |_| {
                 Permissions::empty()
             });
     }
+    let admitted_tasks = h.dispatcher.shared.tracker.len();
+    for message in MAX_USAGE_REPLIES as u64..(MAX_USAGE_REPLIES as u64 * 4) {
+        h.dispatcher
+            .dispatch_message(text_message(100 + message, "!warn"), |_| {
+                Permissions::empty()
+            });
+    }
+    assert_eq!(h.dispatcher.shared.tracker.len(), admitted_tasks);
     h.dispatcher.flush().await;
     for _ in 0..500 {
         if h.api.actions().len() >= MAX_USAGE_REPLIES {

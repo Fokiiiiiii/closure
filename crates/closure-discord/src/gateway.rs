@@ -491,8 +491,8 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
                 shard.close(CloseFrame::NORMAL);
                 continue;
             }
-            _ = pacing.tick(), if !members.is_empty() => {
-                if let Some(guild) = members.take_next() {
+            guild = members.next(&mut pacing), if !members.is_empty() => {
+                if let Some(guild) = guild {
                     shard.command(&RequestGuildMembers::builder(guild).query("", None));
                 }
                 continue;
@@ -631,6 +631,11 @@ impl MemberRequests {
 
     fn take_next(&mut self) -> Option<Id<GuildMarker>> {
         self.pending.pop_front()
+    }
+
+    async fn next(&mut self, pacing: &mut tokio::time::Interval) -> Option<Id<GuildMarker>> {
+        pacing.tick().await;
+        self.take_next()
     }
 
     fn is_empty(&self) -> bool {
@@ -806,6 +811,24 @@ mod tests {
             guild_to_request(&Event::GuildCreate(Box::new(unavailable))),
             None
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn member_requests_are_spaced_by_the_interval() {
+        let mut requests = MemberRequests::default();
+        requests.push(Id::new(1));
+        requests.push(Id::new(2));
+        let mut pacing = interval(MEMBER_REQUEST_INTERVAL);
+        pacing.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        assert_eq!(requests.next(&mut pacing).await, Some(Id::new(1)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(499), requests.next(&mut pacing))
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(requests.next(&mut pacing).await, Some(Id::new(2)));
     }
 
     #[test]

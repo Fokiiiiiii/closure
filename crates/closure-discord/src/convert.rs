@@ -625,14 +625,7 @@ fn voice_change(state: &VoiceState, before: &Before) -> Option<Event> {
     if before.voice_channel == state.channel_id {
         return None;
     }
-    let who = match &state.member {
-        Some(member) => user(&member.user),
-        None => UserInfo {
-            id: state.user_id,
-            name: state.user_id.to_string(),
-            bot: false,
-        },
-    };
+    let who = user(&state.member.as_ref()?.user);
     Some(Event::VoiceStateChanged {
         guild_id,
         user: who,
@@ -878,6 +871,7 @@ mod tests {
             "channel_id": "3",
             "guild_id": "1",
             "user_id": "40",
+            "member": { "user": user_json("40", false), "roles": [], "joined_at": "2026-10-24T00:00:00.000000+00:00", "deaf": false, "mute": false, "flags": 0 },
             "session_id": "session",
             "deaf": false,
             "mute": false,
@@ -902,6 +896,19 @@ mod tests {
             ),
             "{event:?}"
         );
+    }
+
+    #[test]
+    fn a_voice_update_without_member_is_not_dispatched() {
+        let state: VoiceState = serde_json::from_value(serde_json::json!({
+            "channel_id": "3", "guild_id": "1", "user_id": "40",
+            "session_id": "session", "deaf": false, "mute": false,
+            "self_deaf": false, "self_mute": false, "self_video": false,
+            "suppress": false, "request_to_speak_timestamp": null
+        }))
+        .unwrap();
+
+        assert!(voice_change(&state, &Before::default()).is_none());
     }
 
     use serde_json::{Value, json};
