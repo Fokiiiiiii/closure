@@ -61,6 +61,7 @@ pub(crate) struct Config {
     warn_expire_days: u32,
     /// Whether the warned member gets a direct message.
     dm_on_action: bool,
+    dm_messages: punish::DmMessages,
     /// Whether a warning needs a reason.
     require_reason: bool,
     /// How many days of messages a ban deletes.
@@ -91,6 +92,7 @@ impl Default for Config {
         Self {
             warn_expire_days: 30,
             dm_on_action: true,
+            dm_messages: punish::DmMessages::default(),
             require_reason: false,
             ban_delete_days: 0,
             escalation: Vec::new(),
@@ -380,6 +382,7 @@ pub(crate) fn settings_from(
 ) -> Settings {
     Settings {
         dm: config.dm_on_action,
+        dm_messages: config.dm_messages.clone(),
         timeout: config.timeout_method,
         timeout_role,
         voice: config.voice_mute_method,
@@ -870,7 +873,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "type": "boolean",
                     "description": "config-moderation-dm_on_action",
                     "x-ui": { "level": "basic" }
-                },
+                }, "dm_messages": punish::dm_messages_schema("config-moderation-dm_messages"),
                 "require_reason": {
                     "type": "boolean",
                     "description": "config-moderation-require_reason",
@@ -942,7 +945,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
         }),
         json!({
             "warn_expire_days": 30,
-            "dm_on_action": true,
+            "dm_on_action": true, "dm_messages": {},
             "require_reason": false,
             "ban_delete_days": 0,
             "escalation": [],
@@ -1129,4 +1132,19 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
 /// The module as the host loads it.
 pub fn module() -> Result<SdkModule, CoreError> {
     builder()?.build()
+}
+
+#[cfg(test)]
+mod dm_config_tests {
+    use super::Config;
+    use serde_json::json;
+
+    #[test]
+    fn dm_templates_are_validated_on_read() {
+        for text in ["{unknown}", "{reason", &"x".repeat(1501)] {
+            assert!(
+                serde_json::from_value::<Config>(json!({"dm_messages": {"warn": text}})).is_err()
+            );
+        }
+    }
 }

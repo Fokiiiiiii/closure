@@ -655,7 +655,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_and_no_required_reason()
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "require_reason": false, "ban_delete_days": 0, "escalation": [], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "templates": {} })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation": [], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "templates": {} })
     );
 }
 
@@ -707,6 +707,14 @@ fn dm_contents(harness: &Harness) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn dm_template_from_moderation_config() {
+    let harness = harness();
+    harness.set_config(json!({"dm_messages": {"warn": "custom {user}"}}));
+    harness.invoke(warn(MEMBER, None)).await.unwrap();
+    assert_eq!(dm_contents(&harness), ["custom <@7>"]);
 }
 
 // ---- /timeout, /untimeout, /kick, /ban, /unban ----

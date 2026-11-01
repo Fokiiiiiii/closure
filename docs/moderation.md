@@ -42,6 +42,7 @@ modules:
     config:
       warn_expire_days: 30   # 1 to 365; after how many days a warning expires
       dm_on_action: true     # whether the member is sent a direct message about the action
+      dm_messages: {}        # optional templates for warn, timeout, vcmute, kick and ban
       require_reason: false  # whether a punishment needs a reason when no template gives one
       ban_delete_days: 0     # 0 to 7; the days of messages a ban deletes unless the command says otherwise
       escalation: []         # rules: what a warning brings about at a number of active warnings
@@ -311,6 +312,15 @@ the moderator, the reason and, for a warning or a timed action, an expiry.
 When `dm_on_action` is on, the member is messaged about a warning, a timeout, a voice mute, a kick or a
 ban. The message is an embed in the server's language: its title is the kind of punishment as the log
 names it, its colour is the one the log gives that kind, and its description gives the reason.
+
+`dm_messages` optionally replaces the description for `warn`, `timeout`, `vcmute`, `kick`, or
+`ban`. Automod has the same setting in its own config. Each value is a single template string of
+at most 1,500 characters; omitted kinds keep their usual description. The available variables are
+`{user}` (mention), `{server}` (server name), `{moderator}` (name), `{reason}`, `{duration}` and
+`{expires}` (a Discord timestamp). A missing reason uses the server language's default; a missing
+duration or expiry is empty. Literal braces are written `{{` and `}}`. Invalid syntax or unknown
+variables are rejected when the config is read. The result is cut to 4,000 characters. If the
+server name cannot be fetched, its ID is used.
 
 - A kick or a ban is messaged **before** it happens, because a kicked member shares no server with
   the bot and cannot be messaged afterwards. If the kick or ban then fails, the message was still sent.

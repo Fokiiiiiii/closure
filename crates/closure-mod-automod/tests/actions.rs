@@ -30,6 +30,27 @@ fn spoiler_rule(actions: Value) -> Value {
     rules(&[("spoilers", rule(json!([words("spoiler")]), actions))])
 }
 
+#[tokio::test]
+async fn dm_template_from_automod_config() {
+    let harness = configured(json!({
+        "dm_messages": {"warn": "custom {user}"},
+        "rules": spoiler_rule(json!([{ "do": "warn" }]))
+    }));
+    say(&harness, MEMBER, "spoiler").await;
+    let description = harness
+        .api()
+        .actions()
+        .into_iter()
+        .find_map(|action| match action {
+            Action::SendDirectMessage { embeds, .. } => embeds
+                .into_iter()
+                .next()
+                .and_then(|embed| embed.description),
+            _ => None,
+        });
+    assert_eq!(description.as_deref(), Some("custom <@7>"));
+}
+
 // ---- delete ----
 
 #[tokio::test]

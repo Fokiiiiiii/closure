@@ -54,6 +54,7 @@ pub fn settings() -> (Value, Value) {
                     "description": "config-automod-dm_on_action",
                     "x-ui": { "level": "basic" }
                 },
+                "dm_messages": closure_sdk::punish::dm_messages_schema("config-automod-dm_messages"),
                 "timeout_method": {
                     "type": "string",
                     "enum": ["discord", "role"],
@@ -88,6 +89,7 @@ pub fn settings() -> (Value, Value) {
             "dry_run": false,
             "warn_expire_days": 30,
             "dm_on_action": true,
+            "dm_messages": {},
             "timeout_method": "discord",
             "timeout_role": null,
             "remove_roles_on_mute": false,

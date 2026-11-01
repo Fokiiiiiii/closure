@@ -47,6 +47,7 @@ fn member(id: u64, roles: &[u64]) -> Member {
 fn settings() -> Settings {
     Settings {
         dm: false,
+        dm_messages: closure_sdk::punish::DmMessages::default(),
         timeout: Method::Role,
         timeout_role: Some(Id::new(TIMEOUT_ROLE)),
         voice: Method::Discord,

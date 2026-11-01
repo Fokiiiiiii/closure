@@ -884,6 +884,7 @@ async fn punish_settings(
     };
     Ok(Settings {
         dm: config.dm_on_action,
+        dm_messages: config.dm_messages.clone(),
         timeout: config.timeout_method,
         timeout_role,
         voice: Method::Discord,

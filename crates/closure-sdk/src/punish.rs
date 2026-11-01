@@ -8,15 +8,16 @@
 //! `ManageRoles`, `MuteMembers`, `ReadGuild` (checking a member) and `Schedule` for the timers,
 //! which [`jobs`] registers.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Embed;
 
 use crate::dm::{self, DirectMessage, Sent};
-use crate::duration::{TimeStyle, ends_at};
+use crate::duration::{TimeStyle, ends_at, format_in, timestamp};
 use crate::embed::{DESCRIPTION_LIMIT, EmbedBuilder, escape, truncate};
 use crate::modlog;
+use crate::template::{Template, Values};
 
 mod roles;
 
@@ -117,6 +118,7 @@ impl Default for Strip {
 pub struct Settings {
     /// Whether the member is messaged about the punishment.
     pub dm: bool,
+    pub dm_messages: DmMessages,
     pub timeout: Method,
     /// The role a timeout gives, when `timeout` is [`Method::Role`].
     pub timeout_role: Option<RoleId>,
@@ -131,12 +133,59 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             dm: true,
+            dm_messages: DmMessages::default(),
             timeout: Method::Discord,
             timeout_role: None,
             voice: Method::Discord,
             voice_role: None,
             strip: Strip::default(),
         }
+    }
+}
+
+/// Validated templates for punishment notifications.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DmMessages(BTreeMap<String, Template>);
+
+/// The public schema of the notification templates.
+#[must_use]
+pub fn dm_messages_schema(description: &str) -> serde_json::Value {
+    let entry = serde_json::json!({
+        "type": "string", "maxLength": 1500, "x-ui": {"widget": "textarea"}
+    });
+    serde_json::json!({
+        "type": "object", "description": description, "x-ui": {"level": "advanced"},
+        "properties": {"warn": entry, "timeout": entry, "vcmute": entry, "kick": entry, "ban": entry},
+        "additionalProperties": false
+    })
+}
+
+impl<'de> Deserialize<'de> for DmMessages {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let messages = BTreeMap::<String, String>::deserialize(deserializer)?;
+        let mut parsed = BTreeMap::new();
+        for (kind, text) in messages {
+            if !["warn", "timeout", "vcmute", "kick", "ban"].contains(&kind.as_str())
+                || text.chars().count() > 1500
+            {
+                return Err(serde::de::Error::custom(
+                    "invalid DM template kind or length",
+                ));
+            }
+            let template = Template::parse(&text).map_err(serde::de::Error::custom)?;
+            if !template.uses_only(&[
+                "user",
+                "server",
+                "moderator",
+                "reason",
+                "duration",
+                "expires",
+            ]) {
+                return Err(serde::de::Error::custom("unknown DM template variable"));
+            }
+            parsed.insert(kind, template);
+        }
+        Ok(Self(parsed))
     }
 }
 
@@ -286,6 +335,19 @@ impl<'a> Punisher<'a> {
                 "punish-dm-warned",
                 &Args::new()
                     .with("reason", dm_reason(self.ctx, reason.as_deref()))
+                    .with(
+                        "expires",
+                        expires_at
+                            .map_or_else(String::new, |at| timestamp(at, TimeStyle::LongDateTime)),
+                    )
+                    .with(
+                        "duration",
+                        expires_at.map_or_else(String::new, |at| {
+                            let seconds =
+                                u64::try_from(at.saturating_sub(self.ctx.now())).unwrap_or(0);
+                            format_in(self.ctx, self.ctx.locale, Duration::from_secs(seconds))
+                        }),
+                    )
                     .with("active", count(active)),
             )
             .await;
@@ -341,6 +403,11 @@ impl<'a> Punisher<'a> {
                     .with(
                         "until",
                         ends_at(self.ctx.now(), duration, TimeStyle::ShortDateTime),
+                    )
+                    .with("duration", format_in(self.ctx, self.ctx.locale, duration))
+                    .with(
+                        "expires",
+                        ends_at(self.ctx.now(), duration, TimeStyle::LongDateTime),
                     )
                     .with("reason", reason_text),
             )
@@ -448,6 +515,11 @@ impl<'a> Punisher<'a> {
                         .with(
                             "until",
                             ends_at(self.ctx.now(), duration, TimeStyle::ShortDateTime),
+                        )
+                        .with("duration", format_in(self.ctx, self.ctx.locale, duration))
+                        .with(
+                            "expires",
+                            ends_at(self.ctx.now(), duration, TimeStyle::LongDateTime),
                         )
                         .with("reason", dm_reason(self.ctx, reason.as_deref())),
                 )
@@ -572,6 +644,11 @@ impl<'a> Punisher<'a> {
                         .with(
                             "until",
                             ends_at(self.ctx.now(), duration, TimeStyle::ShortDateTime),
+                        )
+                        .with("duration", format_in(self.ctx, self.ctx.locale, duration))
+                        .with(
+                            "expires",
+                            ends_at(self.ctx.now(), duration, TimeStyle::LongDateTime),
                         )
                         .with("reason", reason_text),
                 )
@@ -995,7 +1072,29 @@ impl<'a> Punisher<'a> {
         if !self.settings.dm {
             return None;
         }
-        let text = self.ctx.t_core(self.ctx.locale, key, args);
+        let text = if let Some(template) = self.settings.dm_messages.0.get(kind) {
+            let server = if template.uses("server") {
+                self.ctx
+                    .api
+                    .get_guild(self.ctx.guild_id)
+                    .await
+                    .map_or_else(|_| self.ctx.guild_id.to_string(), |guild| guild.name)
+            } else {
+                String::new()
+            };
+            let mut values = Values::new()
+                .with("user", format!("<@{user}>"))
+                .with("server", server)
+                .with("moderator", self.moderator.name.clone());
+            for (name, value) in args.iter() {
+                if let closure_core::locale::ArgValue::Text(text) = value {
+                    values = values.with(name, text.clone());
+                }
+            }
+            template.render(&values)
+        } else {
+            self.ctx.t_core(self.ctx.locale, key, args)
+        };
         let embed = match notice(self.ctx, kind, &text) {
             Ok(embed) => embed,
             Err(error) => {

@@ -30,6 +30,7 @@ const BOT: u64 = 9_999;
 #[serde(default)]
 struct Setup {
     dm: Option<bool>,
+    dm_messages: punish::DmMessages,
     timeout: Method,
     timeout_role: Option<String>,
     voice: Method,
@@ -47,6 +48,7 @@ impl Setup {
         };
         Settings {
             dm: self.dm.unwrap_or(true),
+            dm_messages: self.dm_messages.clone(),
             timeout: self.timeout,
             timeout_role: role(&self.timeout_role),
             voice: self.voice,
@@ -1600,6 +1602,7 @@ fn the_settings_default_to_a_direct_message_and_discord() {
         settings_of(json!({})),
         Settings {
             dm: true,
+            dm_messages: punish::DmMessages::default(),
             timeout: Method::Discord,
             timeout_role: None,
             voice: Method::Discord,
@@ -1608,6 +1611,77 @@ fn the_settings_default_to_a_direct_message_and_discord() {
         }
     );
     assert_eq!(Method::default(), Method::Discord);
+}
+
+#[test]
+fn dm_template_validation() {
+    for text in ["{unknown}", "{reason", "{reason.extra}", &"x".repeat(1501)] {
+        assert!(serde_json::from_value::<punish::DmMessages>(json!({"warn": text})).is_err());
+    }
+    assert!(serde_json::from_value::<punish::DmMessages>(json!({"other": "x"})).is_err());
+    assert!(
+        serde_json::from_value::<punish::DmMessages>(json!({"warn": "{{ok}} {reason}"})).is_ok()
+    );
+}
+
+#[tokio::test]
+async fn dm_template_renders_and_omitted_kind_keeps_default() {
+    let harness = harness();
+    harness.api().set_guild_name(Id::new(1), "Example");
+    harness.set_config(json!({"dm_messages": {"kick": "{user}|{server}|{moderator}|{reason}|{duration}|{expires}"}}));
+    harness.invoke(kick_of(MEMBER, None)).await.unwrap();
+    let messages = dm_contents(&harness);
+    assert!(messages[0].starts_with("<@7>|"), "{messages:?}");
+    assert!(messages[0].contains("|Example|tester|"), "{messages:?}");
+    assert!(messages[0].ends_with("||"), "{messages:?}");
+    assert!(messages[0].contains("no reason given"), "{messages:?}");
+    harness
+        .invoke(with_reason(
+            with_duration(target("timeout", FREE), "1h"),
+            Some("spam"),
+        ))
+        .await
+        .unwrap();
+    assert!(dm_contents(&harness)[1].contains("spam"));
+}
+
+#[tokio::test]
+async fn dm_template_duration_and_output_limit() {
+    let harness = harness();
+    harness.set_config(json!({"dm_messages": {"timeout": "{duration}|{expires}|{reason}"}}));
+    harness
+        .invoke(with_reason(
+            with_duration(target("timeout", MEMBER), "1h"),
+            Some("spam"),
+        ))
+        .await
+        .unwrap();
+    let messages = dm_contents(&harness);
+    assert!(messages[0].contains("<t:"), "{messages:?}");
+    assert!(messages[0].contains(":F>"), "{messages:?}");
+    assert!(messages[0].contains("spam"), "{messages:?}");
+
+    let other = self::harness();
+    other.set_config(json!({"dm_messages": {"kick": "{reason}".repeat(180)}}));
+    other
+        .invoke(kick_of(MEMBER, Some(&"x".repeat(512))))
+        .await
+        .unwrap();
+    assert_eq!(dm_contents(&other)[0].chars().count(), 4000);
+}
+
+#[tokio::test]
+async fn dm_template_uses_server_language() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+    harness.set_config(json!({"dm_messages": {"timeout": "{reason}|{duration}"}}));
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    let message = &dm_contents(&harness)[0];
+    assert!(message.contains("理由なし"), "{message}");
+    assert!(message.contains('時'), "{message}");
 }
 
 #[test]

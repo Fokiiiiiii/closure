@@ -50,6 +50,7 @@ Start with `dry_run: true`, read the log for a while, then turn it off.
 | `dry_run` | `false` | Act on nothing; post what would have happened to the log channel. |
 | `warn_expire_days` | `30` | After how many days a `warn` action expires (1 to 365). |
 | `dm_on_action` | `true` | Whether the member is messaged about a punishment. |
+| `dm_messages` | `{}` | Optional [direct-message templates](moderation.md#direct-messages) by punishment kind. |
 | `timeout_method` | `discord` | `discord`, or `role`: a role that a timer takes off again. |
 | `timeout_role` | none | The role id a `role` timeout gives. Left out, Closure reuses its remembered role or creates a dedicated `Mute` role (`ミュート` in Japanese) with no permissions, and sets it up in every channel as [moderation](moderation.md#timeouts-and-voice-mutes) does. It does not adopt an existing role by name. |
 | `remove_roles_on_mute` | `false` | With a `role` timeout: `false`, `true` (every role of the member that can be taken off), or role ids. The roles are taken off with the role and remembered. |

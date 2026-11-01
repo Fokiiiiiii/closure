@@ -290,3 +290,4 @@ reason-automod-reply-expired = automod: a reply whose time is up
 trigger-thread-create-spam = a member creates threads in a burst
 detail-thread-create-spam = { $count } threads created within { $window }
 config-automod-threads_as_parent_channel = Count known threads under their parent channel in spam windows.
+config-automod-dm_messages = Custom direct-message templates by punishment kind.

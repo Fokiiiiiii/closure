@@ -177,6 +177,23 @@ pub struct Template {
 }
 
 impl Template {
+    /// Whether every variable belongs to the given set.
+    #[must_use]
+    pub fn uses_only(&self, names: &[&str]) -> bool {
+        self.parts.iter().all(|part| match part {
+            Part::Text(_) => true,
+            Part::Path(path) => names.contains(&path.as_str()),
+        })
+    }
+
+    /// Whether the template references a variable.
+    #[must_use]
+    pub fn uses(&self, name: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|part| matches!(part, Part::Path(path) if path == name))
+    }
+
     /// Reads a template. A lone `}` and a variable that is never closed are errors, with the
     /// character position where they were found.
     pub fn parse(text: &str) -> Result<Self, TemplateError> {

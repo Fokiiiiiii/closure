@@ -290,3 +290,4 @@ reason-automod-reply-expired = automod: 返信の期限が来ました
 trigger-thread-create-spam = メンバーが短時間にスレッドを作成
 detail-thread-create-spam = { $window }以内にスレッドを{ $count }個作成
 config-automod-threads_as_parent_channel = スパムの集計で、親が分かるスレッドを親チャンネルとして数えます。
+config-automod-dm_messages = 処罰の種類ごとに送信する DM のテンプレート。

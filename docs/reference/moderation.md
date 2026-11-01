@@ -222,6 +222,7 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | Key | Type | Default | Widget | Description |
 |---|---|---|---|---|
 | `ban_delete_days` | integer | `0` | - | How many days of the messages of a banned member are deleted. |
+| `dm_messages` | object | `{}` | - | Custom direct-message templates by punishment kind. |
 | `dm_on_action` | boolean | `true` | - | Whether the warned member gets a direct message. |
 | `escalation` | array | `[]` | - | What a warning brings about when a member reaches a number of active warnings. |
 | `remove_roles_on_mute` | any | `false` | - | Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids. |
@@ -241,6 +242,7 @@ Default configuration:
 ```json
 {
   "ban_delete_days": 0,
+  "dm_messages": {},
   "dm_on_action": true,
   "escalation": [],
   "remove_roles_on_mute": false,

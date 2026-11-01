@@ -181,3 +181,4 @@ command-clear = 一括削除
     .description = チャンネルの新しいメッセージを消します
 option-clear-count = 件数
     .description = 消すメッセージの数（1 から 100）
+config-moderation-dm_messages = 処罰の種類ごとに送信する DM のテンプレート。

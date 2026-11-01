@@ -123,6 +123,7 @@ Set under `modules.automod.config` in a server's configuration; see [configurati
 |---|---|---|---|---|
 | `antiraid` | object or null | `null` | - | Antiraid: the levels a server is raised to while a raid runs. Absent means antiraid is off. |
 | `counters` | object | `{}` | - | The counters, keyed by name: the numbers the rules add to, set, and react to. |
+| `dm_messages` | object | `{}` | - | Custom direct-message templates by punishment kind. |
 | `dm_on_action` | boolean | `true` | - | Whether the member gets a direct message about a punishment. |
 | `dry_run` | boolean | `false` | - | Act on nothing: post what would have happened to the log channel. |
 | `remove_roles_on_mute` | any | `false` | - | Which roles a role timeout takes off the member: false, true for every role that can be taken off, or a list of role ids. |
@@ -140,6 +141,7 @@ Default configuration:
 {
   "antiraid": null,
   "counters": {},
+  "dm_messages": {},
   "dm_on_action": true,
   "dry_run": false,
   "remove_roles_on_mute": false,

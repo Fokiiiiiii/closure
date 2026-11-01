@@ -61,6 +61,7 @@ pub struct Config {
     pub warn_expire_days: u32,
     /// Whether the member gets a direct message about a punishment.
     pub dm_on_action: bool,
+    pub dm_messages: closure_sdk::punish::DmMessages,
     /// How a timeout is given: Discord's timeout, or a role that a timer takes off again.
     pub timeout_method: Method,
     /// The id of the role a timeout gives, when `timeout_method` is `role`; left out, Closure creates one.
@@ -78,12 +79,28 @@ pub struct Config {
     pub antiraid: Option<Value>,
 }
 
+#[cfg(test)]
+mod dm_config_tests {
+    use super::Config;
+    use serde_json::json;
+
+    #[test]
+    fn dm_templates_are_validated_on_read() {
+        for text in ["{unknown}", "{reason", &"x".repeat(1501)] {
+            assert!(
+                serde_json::from_value::<Config>(json!({"dm_messages": {"warn": text}})).is_err()
+            );
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             dry_run: false,
             warn_expire_days: 30,
             dm_on_action: true,
+            dm_messages: closure_sdk::punish::DmMessages::default(),
             timeout_method: Method::Discord,
             timeout_role: None,
             remove_roles_on_mute: RoleSetting::Flag(false),

@@ -190,3 +190,4 @@ command-clear = clear
     .description = Delete the newest messages of the channel
 option-clear-count = count
     .description = How many messages, from 1 to 100
+config-moderation-dm_messages = Custom direct-message templates by punishment kind.
