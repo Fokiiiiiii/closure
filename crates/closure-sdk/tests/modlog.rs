@@ -337,3 +337,68 @@ async fn a_module_without_send_messages_is_refused_the_log() {
     assert_eq!(texts(&replies), ["refused"]);
     assert!(sent_to(&harness).is_empty());
 }
+
+#[tokio::test]
+async fn failed_case_log_is_retried_after_guild_startup() {
+    let harness = Harness::new(closure_sdk::punish::jobs(
+        module().capability(Capability::Storage),
+    ))
+    .unwrap();
+    harness.set_log_channel(77);
+    harness
+        .api()
+        .fail_nth(1, closure_sdk::DiscordError::Fatal("offline".into()));
+    assert!(harness.invoke(record("log", "warn")).await.is_err());
+    assert!(
+        harness
+            .store()
+            .get::<i64>("modlog-pending:1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    harness
+        .emit(closure_core::event::Event::GuildAvailable {
+            guild_id: Id::new(1),
+            name: "test".into(),
+            preferred_locale: None,
+        })
+        .await
+        .unwrap();
+    harness
+        .api()
+        .fail_nth(1, closure_sdk::DiscordError::Fatal("offline".into()));
+    assert!(
+        harness
+            .run_due_jobs()
+            .await
+            .into_iter()
+            .all(|result| result.is_ok())
+    );
+    assert!(
+        harness
+            .store()
+            .get::<i64>("modlog-pending:1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    harness.advance(std::time::Duration::from_secs(300));
+    assert!(
+        harness
+            .run_due_jobs()
+            .await
+            .into_iter()
+            .all(|result| result.is_ok())
+    );
+    assert_eq!(sent_to(&harness), [77]);
+    assert!(
+        harness
+            .store()
+            .get::<i64>("modlog-pending:1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

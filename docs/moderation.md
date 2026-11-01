@@ -28,6 +28,10 @@ A permission key can be changed per server with `permissions.keys` (see [configu
 
 The moderator's reason is written to Discord's audit log as `name: reason`, cut to 512 characters.
 
+When posting a case log fails, the module retries pending posts after the server becomes available
+and periodically thereafter. If Discord accepted a post but its response was lost, a retry can
+produce a duplicate. Modules need storage to retain pending posts across restarts.
+
 ## Settings
 
 ```yaml

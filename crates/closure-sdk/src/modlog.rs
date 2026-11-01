@@ -35,6 +35,12 @@ pub async fn post(ctx: &EventContext, case: &Case) -> Result<Option<MessageId>, 
     let Some(channel) = ctx.policy().log_channel else {
         return Ok(None);
     };
+    let key = format!("modlog-pending:{}", case.number);
+    let durable = match ctx.store().set(&key, &case.number).await {
+        Ok(()) => true,
+        Err(closure_core::storage::StorageError::NotGranted) => false,
+        Err(error) => return Err(error.into()),
+    };
     let message = embed(ctx, case).build()?;
     let outcome = ctx
         .api
@@ -47,9 +53,36 @@ pub async fn post(ctx: &EventContext, case: &Case) -> Result<Option<MessageId>, 
         })
         .await?;
     match outcome {
-        Outcome::Message(message) => Ok(Some(message.id)),
+        Outcome::Message(message) => {
+            if durable {
+                ctx.store().delete(&key).await?;
+            }
+            Ok(Some(message.id))
+        }
         _ => Err(DiscordError::Fatal("unexpected outcome for `send_message`".into()).into()),
     }
+}
+
+pub(crate) async fn retry_pending(ctx: &EventContext, limit: usize) -> Result<(), UserError> {
+    for (key, entry) in ctx.store().list("modlog-pending:", limit).await? {
+        let result: Result<(), UserError> = async {
+            let number: i64 = serde_json::from_value(entry.value)
+                .map_err(|error| closure_core::storage::StorageError::Value(error.to_string()))?;
+            if let Some(case) = ctx.cases().get(number).await? {
+                if ctx.policy().log_channel.is_some() {
+                    post(ctx, &case).await?;
+                }
+            } else {
+                ctx.store().delete(&key).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(%key, ?error, "could not retry a case log");
+        }
+    }
+    Ok(())
 }
 
 /// The case as the log shows it, in the server's language. A reply that shows a case uses it too.

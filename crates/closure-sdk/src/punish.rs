@@ -37,6 +37,8 @@ const MAX_BAN_DELETE_SECONDS: u32 = 7 * 86_400;
 const DAY: i64 = 86_400;
 /// How long a voice unmute that Discord refuses waits before it is tried again.
 const POSTPONE: Duration = Duration::from_secs(600);
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
+const RECONCILE_BATCH: usize = 50;
 /// How many times a ban's case is recorded before the ban is reported as unrecorded.
 const RECORD_ATTEMPTS: usize = 3;
 /// The case number of a ban whose case could not be recorded. No case has it.
@@ -1201,6 +1203,24 @@ async fn reschedule<T: Serialize>(
 #[must_use]
 pub fn jobs(builder: ModuleBuilder) -> ModuleBuilder {
     builder
+        .on(
+            crate::Subscription::new(closure_core::event::EventKind::GuildAvailable),
+            |ctx, _| async move {
+                ctx.scheduler()
+                    .job("punish_reconcile", &())
+                    .map_err(|error| ModuleError::other(error.to_string()))?
+                    .key("punish_reconcile")
+                    .every(RECONCILE_INTERVAL, Duration::ZERO)
+                    .await
+                    .map_err(|error| ModuleError::other(error.to_string()))?;
+                Ok(crate::Flow::Continue)
+            },
+        )
+        .job("punish_reconcile", |cx| async move {
+            modlog::retry_pending(cx.ctx(), RECONCILE_BATCH)
+                .await
+                .map_err(|error| ModuleError::other(format!("{error:?}")))
+        })
         .job("unban", lift_ban)
         .job("untimeout", end_timeout)
         .job("vc_unmute", end_voice_mute)
