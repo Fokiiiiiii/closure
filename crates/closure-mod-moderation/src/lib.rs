@@ -1081,6 +1081,46 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
         )?))
 }
 
+/// The commands that act on a channel and the ones that look at, or act on, many members.
+fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
+    builder
+        .job(
+            "channel_restore_slowmode",
+            channel_controls::restore_slowmode,
+        )
+        .job("channel_restore_lock", channel_controls::restore_lock)
+        .command(
+            Command::<channel_controls::Slowmode>::new("slowmode")
+                .requires("moderation.slowmode")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(channel_controls::slowmode),
+        )
+        .command(
+            Command::<channel_controls::Lock>::new("lock")
+                .requires("moderation.lock")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(channel_controls::lock),
+        )
+        .command(
+            Command::<channel_controls::Unlock>::new("unlock")
+                .requires("moderation.lock")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(channel_controls::unlock),
+        )
+        .command(
+            Command::<Target>::new("userinfo")
+                .requires("moderation.userinfo")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(userinfo::userinfo),
+        )
+        .command(
+            Command::<massban::Massban>::new("massban")
+                .requires("moderation.massban")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(massban::massban),
+        )
+}
+
 /// The module, still open for a test to build on.
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
     let (schema, defaults) = settings();
@@ -1112,29 +1152,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .config(schema, defaults)
         .component(templates::ROUTE, templates::pick)
         .component(undo::ROUTE, undo::press)
-        .job(
-            "channel_restore_slowmode",
-            channel_controls::restore_slowmode,
-        )
-        .job("channel_restore_lock", channel_controls::restore_lock)
-        .command(
-            Command::<channel_controls::Slowmode>::new("slowmode")
-                .requires("moderation.slowmode")
-                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
-                .handler(channel_controls::slowmode),
-        )
-        .command(
-            Command::<channel_controls::Lock>::new("lock")
-                .requires("moderation.lock")
-                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
-                .handler(channel_controls::lock),
-        )
-        .command(
-            Command::<channel_controls::Unlock>::new("unlock")
-                .requires("moderation.lock")
-                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
-                .handler(channel_controls::unlock),
-        )
         .command(
             Command::<Warn>::new("warn")
                 .requires("moderation.warn")
@@ -1150,18 +1167,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             Command::<Target>::new("warnings")
                 .requires("moderation.cases")
                 .handler(warnings),
-        )
-        .command(
-            Command::<Target>::new("userinfo")
-                .requires("moderation.userinfo")
-                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
-                .handler(userinfo::userinfo),
-        )
-        .command(
-            Command::<massban::Massban>::new("massban")
-                .requires("moderation.massban")
-                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
-                .handler(massban::massban),
         )
         .command(
             Command::<clear::Clear>::new("clear")
@@ -1183,7 +1188,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                     .handler(case_revoke),
             ],
         );
-    Ok(permissions(punishments(builder))?
+    Ok(permissions(punishments(moderator_tools(builder)))?
         .catalog(Locale::En, EN)
         .catalog(Locale::Ja, JA))
 }
