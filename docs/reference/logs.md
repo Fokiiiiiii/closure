@@ -10,6 +10,7 @@ Post the edits and deletions of messages, the changes of channels, threads, role
 - `send_messages`
 - `read_audit_log`
 - `respond_to_interactions`
+- `schedule`
 - `message_history`
 - `keep_attachments`
 

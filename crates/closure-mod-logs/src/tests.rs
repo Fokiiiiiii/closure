@@ -417,6 +417,87 @@ async fn a_refused_post_is_a_discord_error_and_not_a_module_fault() {
         ),
         "{result:?}"
     );
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn failed_log_posts_are_retried_and_bounded() {
+    let harness = harness();
+    harness
+        .api()
+        .fail_with(DiscordError::Transient("offline".into()));
+    assert!(harness.emit(deleted(16)).await.is_err());
+    assert_eq!(harness.jobs(), 1);
+
+    harness.advance(RETRY_DELAY);
+    for attempt in 1..=RETRY_ATTEMPTS {
+        let results = harness.run_due_jobs().await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is_err(), attempt < RETRY_ATTEMPTS);
+        harness.advance(closure_core::schedule::backoff(attempt));
+    }
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn failed_log_post_is_sent_after_retry() {
+    let harness = harness();
+    harness
+        .api()
+        .fail_nth(1, DiscordError::Transient("offline".into()));
+    let member = MemberInfo {
+        guild_id: Id::new(GUILD),
+        user: UserInfo {
+            id: Id::new(40),
+            name: "tester".into(),
+            bot: false,
+        },
+        roles: Vec::new(),
+        nick: None,
+        joined_at: None,
+        timed_out_until: None,
+    };
+    assert!(harness.emit(Event::MemberJoined(member)).await.is_err());
+    assert_eq!(harness.jobs(), 1);
+    harness.advance(RETRY_DELAY);
+    assert!(harness.run_due_jobs().await[0].is_ok());
+    assert_eq!(sent(&harness).len(), 1);
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn expired_log_retry_is_discarded_without_posting() {
+    let harness = harness();
+    harness
+        .api()
+        .fail_with(DiscordError::Transient("offline".into()));
+    assert!(harness.emit(deleted(17)).await.is_err());
+    let sent_before = sent(&harness).len();
+    harness.advance(std::time::Duration::from_secs(601));
+    assert!(harness.run_due_jobs().await[0].is_ok());
+    assert_eq!(sent(&harness).len(), sent_before);
+    assert_eq!(harness.jobs(), 0);
+}
+
+#[tokio::test]
+async fn oversized_log_retry_is_not_scheduled() {
+    let harness = harness();
+    let post = RetryPost {
+        channel: Id::new(LOG),
+        expires_at: i64::MAX,
+        entries: vec![RetryEntry {
+            embed: EmbedBuilder::new().title("test").build().unwrap(),
+            files: vec![FileUpload {
+                filename: "test.bin".into(),
+                data: vec![0; closure_core::schedule::MAX_PAYLOAD_BYTES],
+            }],
+        }],
+    };
+    assert!(matches!(
+        schedule_retry(&harness.scheduler(), &post).await,
+        Err(ScheduleError::TooLarge { .. })
+    ));
+    assert_eq!(harness.jobs(), 0);
 }
 
 #[tokio::test]

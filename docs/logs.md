@@ -75,6 +75,16 @@ modules:
   and the failure is logged. If the audit lookup does not finish within two seconds, the entry is
   posted without who made the change.
 
+## Failed posts
+
+When a post returns an error other than a permission refusal, the logs module schedules up to
+three retries, starting after five seconds and using the scheduler's increasing retry delay. The
+job is persistent across restarts and is discarded when next run after ten minutes. Its serialized
+payload is limited to 16 KiB, including files, and the scheduler allows at most 10,000 pending jobs
+per module and guild. A post that exceeds a limit or cannot be scheduled is dropped with a warning.
+An interrupted handler cannot schedule a retry. A retry sends the whole batch again, so a partial
+success or a lost response can produce duplicate entries.
+
 ## Files
 
 A message's text is kept by the message history, which is on for a guild while a module there holds

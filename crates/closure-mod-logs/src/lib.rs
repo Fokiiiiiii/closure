@@ -2,8 +2,9 @@
 //! channel. A deleted message is shown with what the history kept of it: its text, and its files when
 //! the host kept them. The files and their posting are the SDK's (`closure_sdk::files`).
 
+use closure_core::action::FileUpload;
 use closure_core::capability::Capability;
-use closure_core::error::{CoreError, ModuleError};
+use closure_core::error::{CoreError, DiscordError, ModuleError};
 use closure_core::event::{
     AttachmentInfo, ChannelId, ChannelInfo, Event, EventKind, MemberInfo, MessageId, MessageInfo,
     RoleId, RoleInfo, RolesChange, StageInfo, StickerInfo, ThreadInfo, UserInfo,
@@ -11,13 +12,14 @@ use closure_core::event::{
 use closure_core::history::SavedMessage;
 use closure_core::locale::Locale;
 use closure_core::module::EventContext;
+use closure_core::schedule::{ScheduleError, Scheduler};
 use closure_core::subscription::{Flow, Subscription};
 use closure_sdk::files::{self, Kept, LogEntry};
 use closure_sdk::{
-    Args, Color, EmbedBuilder, Intents, ModuleBuilder, SdkModule, TimeStyle, duration,
+    Args, Color, EmbedBuilder, Intents, JobCx, ModuleBuilder, SdkModule, TimeStyle, duration,
     parse_module_config,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use twilight_model::channel::message::Embed;
 use twilight_model::id::Id;
@@ -33,6 +35,84 @@ const JA: &str = include_str!("../locales/ja.ftl");
 const FIELD_LIMIT: usize = 1024;
 
 const AUDIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+const RETRY_LIFETIME: i64 = 10 * 60;
+const RETRY_ATTEMPTS: u32 = 3;
+
+#[derive(Serialize, Deserialize)]
+struct RetryEntry {
+    embed: Embed,
+    files: Vec<FileUpload>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RetryPost {
+    channel: ChannelId,
+    expires_at: i64,
+    entries: Vec<RetryEntry>,
+}
+
+fn retryable(error: &ModuleError) -> bool {
+    matches!(error, ModuleError::Discord(error) if !matches!(
+        error,
+        DiscordError::Forbidden(_) | DiscordError::CapabilityDenied(_)
+    ))
+}
+
+async fn schedule_retry(scheduler: &Scheduler, post: &RetryPost) -> Result<(), ScheduleError> {
+    scheduler.job("retry_log", post)?.after(RETRY_DELAY).await
+}
+
+async fn post_or_retry(
+    ctx: &EventContext,
+    channel: ChannelId,
+    entries: Vec<LogEntry>,
+) -> Result<(), ModuleError> {
+    let retry = RetryPost {
+        channel,
+        expires_at: ctx.now().saturating_add(RETRY_LIFETIME),
+        entries: entries
+            .iter()
+            .map(|entry| RetryEntry {
+                embed: entry.embed.clone(),
+                files: entry.files.clone(),
+            })
+            .collect(),
+    };
+    if let Err(error) = files::post(ctx, channel, entries).await {
+        if retryable(&error)
+            && let Err(error) = schedule_retry(ctx.scheduler(), &retry).await
+        {
+            tracing::warn!(?error, "could not schedule log retry");
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn retry_post(cx: JobCx) -> Result<(), ModuleError> {
+    let post: RetryPost = cx.payload()?;
+    if cx.now() >= post.expires_at {
+        tracing::warn!("discarding expired log retry");
+        return Ok(());
+    }
+    let entries = post
+        .entries
+        .into_iter()
+        .map(|entry| LogEntry {
+            embed: entry.embed,
+            files: entry.files,
+        })
+        .collect();
+    match files::post(cx.ctx(), post.channel, entries).await {
+        Err(error) if retryable(&error) && cx.attempt() < RETRY_ATTEMPTS => Err(error),
+        Err(error) => {
+            tracing::warn!(?error, "discarding failed log retry");
+            Ok(())
+        }
+        Ok(()) => Ok(()),
+    }
+}
 
 /// The module's section of a guild's configuration. One switch per kind of entry, as the
 /// configuration names them.
@@ -124,6 +204,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .capability(Capability::ReadMessageHistory)
             .capability(Capability::KeepAttachments)
             .capability(Capability::ReadAuditLog)
+            .job("retry_log", retry_post)
             .intents(
                 Intents::GUILD_MESSAGES
                     | Intents::GUILD_MEMBERS
@@ -275,7 +356,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             None => return Ok(Flow::Continue),
         },
     };
-    files::post(&ctx, channel, entries).await?;
+    post_or_retry(&ctx, channel, entries).await?;
     Ok(Flow::Continue)
 }
 
