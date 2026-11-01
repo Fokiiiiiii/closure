@@ -51,7 +51,7 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | `cooldown`, `allow_further_rules`, `conditions.member_age`, `affects_bots/self` | `cooldown` (per rule and member), `continue_after_match`, `scope` (channels, roles, bots, moderators, `member_age`). No `presets` |
 | `match_words` | `words`: whole word or contains, case, `normalize`, `strip_markdown`, message or username targets. No loose matching, no embeds |
 | `match_links`, `match_invites` | `links`: any, allowlist, blocklist, subdomains, bare domains, include and exclude regexes. `invites`: allowed and blocked codes. No guild rules |
-| windowed spam triggers | `spam`: messages, mentions, links, attachments, emojis, lines, characters, stickers, duplicates; `within`, `per_channel`, `distinct_channels`, `threads_as_parent_channel`, identical-text options, burst handled once. No `distinct_users` |
+| windowed spam triggers | `spam`: messages, mentions, links, attachments, emojis, lines, characters, stickers, duplicates; `within`, `per_channel`, `distinct_channels`, `distinct_users`, `threads_as_parent_channel`, identical-text options, burst handled once. Coordinated message and link spam use `distinct_users`. |
 | `match_regex`, attachment type, MIME type | `regex` (linear time, size-limited), `attachments` (count, extensions, MIME types with `type/*`) |
 | `role_added`, `role_removed` | `role_added`, `role_removed`: a role given or taken away (from `RolesChanged`; the bot's own role changes are left out for ten seconds) |
 | `thread_create`, `thread_archive`, `thread_unarchive`, `thread_delete`, `thread_create_spam` | `thread_created`, `thread_archived`, `thread_unarchived`, `thread_deleted`, `thread_create_spam` |
@@ -115,7 +115,5 @@ These are in the reference bot and are left out on purpose, for now:
 - `startThread` and `archiveThread`: threads are for the members, not for automod.
 - `pauseInvites` as a rule action: the invites are paused by antiraid levels only (see the antiraid
   row); a rule cannot switch them off.
-- Coordinated spam (`coordinated_message_spam`, `coordinated_link_spam`): it needs the messages of many
-  members compared at once, and is not built yet.
 - `match_visible_names` and `match_custom_status`: the gateway does not give the names shown in a
   server, or the custom statuses, to the module.

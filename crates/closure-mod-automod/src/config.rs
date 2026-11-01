@@ -471,6 +471,8 @@ pub struct Spam {
     pub per_channel: bool,
     /// The window has to span this many channels.
     pub distinct_channels: Option<u32>,
+    /// Counts identical messages from at least this many users together.
+    pub distinct_users: Option<u32>,
     #[serde(default)]
     pub threads_as_parent_channel: bool,
     /// A text that was sent before in the window counts once.
@@ -1006,6 +1008,7 @@ impl Spam {
         // The measures that compare with other messages need a window to be about.
         let windowed = self.per_channel
             || self.distinct_channels.is_some()
+            || self.distinct_users.is_some()
             || self.measure == Measure::Duplicates;
         match self.within {
             Some(window) if window.is_zero() || window > MAX_WINDOW => {
@@ -1019,6 +1022,9 @@ impl Spam {
             .is_some_and(|distinct| !(2..=50).contains(&distinct))
         {
             return Err(Problem::Key("problem-distinct"));
+        }
+        if self.distinct_users.is_some_and(|distinct| distinct < 2) {
+            return Err(Problem::Key("problem-distinct-users"));
         }
         Ok(())
     }

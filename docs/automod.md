@@ -172,13 +172,14 @@ off.
 
 ### Spam
 
-The `spam` trigger counts something a member sent, across the messages of a window, and trips when
-the count reaches `amount`.
+The `spam` trigger counts something a member sent across a window and trips when the count reaches
+`amount`. With `distinct_users`, it counts matching messages across members instead.
 
 ```yaml
 { type: spam, measure: messages, amount: 5, within: 10s }
 { type: spam, measure: mentions, amount: 20, within: 1m, per_channel: true }
 { type: spam, measure: characters, amount: 500 }     # no window: this one message
+{ type: spam, measure: messages, amount: 5, within: 10s, distinct_users: 3 }
 ```
 
 | Option | Meaning |
@@ -188,6 +189,7 @@ the count reaches `amount`.
 | `within` | The window (at most one hour). Without one, the single message is measured. |
 | `per_channel` | Counts each channel on its own. Needs `within`. |
 | `distinct_channels` | The window has to span that many channels (2 to 50). Needs `within`. |
+| `distinct_users` | Count identical messages across at least this many users (2 or more). Needs `within`. |
 | `threads_as_parent_channel` | Count known threads as their parent for `per_channel` and `distinct_channels`. Defaults to `false`; unknown threads count as themselves. |
 | `ignore_identical_messages` | A text that was sent again in the window counts once. |
 | `group_identical_messages` | Every counted message has to be the same text. |
@@ -197,6 +199,14 @@ After a restart or eviction, a thread counts as itself until another event suppl
 
 A text is "the same" when its words are the same, with single spaces (`Hi  there` and `Hi there`
 are the same). Empty messages are never the same as each other.
+
+With `distinct_users`, each matching message counts once toward `amount`, and all users and messages
+in the matching window are targets. Different texts have separate windows. For `links`, messages
+match when their sets of extracted URLs as written are equal, regardless of order or duplicates;
+surrounding text is ignored. Messages without text or without links, respectively, do not match.
+`group_identical_messages` is redundant in this mode; `ignore_identical_messages` still counts
+identical messages once, so it prevents a coordinated burst with `amount` greater than one.
+`per_channel` and `distinct_channels` retain their usual meanings.
 
 What a burst does:
 
@@ -214,6 +224,10 @@ What a burst does:
 
 The windows live in memory, for an hour at most, and up to 20,000 per server; a restart starts them
 empty. A spam trigger counts only the messages the rule's scope lets through.
+At the entry limit, the oldest entries are discarded, so a burst can be missed. Handled keys are
+limited to 10,000 per server; the key expiring first is discarded at the limit, allowing a repeat.
+For coordinated spam the handled key belongs to the matching content and optional channel, rather
+than a user; later matching messages are deleted without repeating the other actions.
 
 ### Events
 
@@ -338,7 +352,7 @@ run. The table says what each action needs.
 
 | Trigger | Member | Channel | Message |
 | --- | --- | --- | --- |
-| words, regex, links, invites, attachments, caps, repeat, stickers, any_message, spam | the author | the channel | yes |
+| words, regex, links, invites, attachments, caps, repeat, stickers, any_message, spam | the author; all matching authors for coordinated spam | the channel | yes |
 | member_join, member_join_spam, member_leave, role_added, role_removed | the member | none | none |
 | case | the target | none | none |
 | thread_created, thread_archived, thread_unarchived, thread_deleted, thread_create_spam | the owner, when Discord gives one | the parent channel | none |
@@ -526,8 +540,8 @@ one got in some other way.
   Set `whole_words: false` for it.
 - Administrators are not known from a message. Only the moderator level counts for the exemption, so
   an administrator without a moderator role is checked like a member.
-- `distinct_users`, presets, `changePerms`, `startThread` and
-  `archiveThread`, coordinated spam, and the
+- Presets, `changePerms`, `startThread` and
+  `archiveThread`, and the
   `match_visible_names` and `match_custom_status` matchers of the older automod are not in this
   version (see [the parity list](parity.md)).
 - A slowmode is not set again to the same value within ten minutes; a different value is set at once.

@@ -677,6 +677,39 @@ async fn invalid_rules_never_run_and_the_status_lists_them() {
     assert!(text.contains("11 invalid"), "{text}");
 }
 
+#[tokio::test]
+async fn coordinated_spam_config_validation_matches_schema() {
+    let registry = Arc::new(
+        ModuleRegistry::new(vec![Arc::new(module().unwrap()) as Arc<dyn Module>]).unwrap(),
+    );
+    let compiler = ConfigCompiler::new(registry).unwrap();
+    for (distinct, window, valid) in [
+        (1, Some("10s"), false),
+        (2, None, false),
+        (2, Some("10s"), true),
+    ] {
+        let mut trigger = json!({ "type": "spam", "measure": "messages", "amount": 2, "distinct_users": distinct });
+        if let Some(window) = window {
+            trigger["within"] = json!(window);
+        }
+        let config = json!({ "rules": { "flood": rule(json!([trigger]), delete()) } });
+        let yaml = format!(
+            "modules:\n  automod:\n    config: {}\n",
+            serde_json::to_string(&config).unwrap()
+        );
+        assert_eq!(
+            compiler.compile(&parse_overrides(&yaml).unwrap()).is_ok(),
+            valid
+        );
+        let harness = configured(config);
+        let status = status_text(&harness).await;
+        assert!(
+            status.contains(if valid { "0 invalid" } else { "1 invalid" }),
+            "{status}"
+        );
+    }
+}
+
 // ---- /automod status ----
 
 #[tokio::test]

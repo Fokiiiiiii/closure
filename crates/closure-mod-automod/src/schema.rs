@@ -433,7 +433,7 @@ fn trigger_events() -> Vec<Value> {
             }),
             &["counter", "trigger"],
         ),
-        tagged(
+        spam_schema(tagged(
             "spam",
             json!({
                 "measure": { "type": "string", "enum": [
@@ -444,13 +444,19 @@ fn trigger_events() -> Vec<Value> {
                 "within": { "type": "string", "pattern": DURATION },
                 "per_channel": { "type": "boolean" },
                 "distinct_channels": { "type": "integer", "minimum": 2, "maximum": 50 },
+                "distinct_users": { "type": "integer", "minimum": 2, "maximum": 4_294_967_295_u64 },
                 "threads_as_parent_channel": { "type": "boolean", "description": "config-automod-threads_as_parent_channel", "x-ui": { "level": "advanced" } },
                 "ignore_identical_messages": { "type": "boolean" },
                 "group_identical_messages": { "type": "boolean" }
             }),
             &["measure", "amount"],
-        ),
+        )),
     ]
+}
+
+fn spam_schema(mut spam: Value) -> Value {
+    spam["dependentRequired"] = json!({ "distinct_users": ["within"] });
+    spam
 }
 
 /// A variant of the trigger union: its `type`, its own options, and the options it needs.

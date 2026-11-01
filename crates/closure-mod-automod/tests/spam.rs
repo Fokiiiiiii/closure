@@ -29,6 +29,204 @@ fn messages(amount: u32) -> Value {
     json!({ "type": "spam", "measure": "messages", "amount": amount, "within": "10s" })
 }
 
+fn coordinated(measure: &str) -> Value {
+    json!({ "type": "spam", "measure": measure, "amount": 3, "within": "10s", "distinct_users": 3 })
+}
+
+#[tokio::test]
+async fn coordinated_spam_targets_every_user_once() {
+    let harness = flood(
+        coordinated("messages"),
+        json!([{ "do": "delete" }, { "do": "warn" }]),
+    );
+    for user in [MEMBER, OTHER_MEMBER, 11] {
+        declare(&harness, user, &[]);
+        say(&harness, user, "same content").await;
+    }
+    assert_eq!(deletions(&harness), 3);
+    for user in [MEMBER, OTHER_MEMBER, 11] {
+        assert_eq!(cases_of(&harness, user).await.len(), 1);
+    }
+    say(&harness, MEMBER, "same content").await;
+    assert_eq!(deletions(&harness), 4);
+    for user in [MEMBER, OTHER_MEMBER, 11] {
+        assert_eq!(cases_of(&harness, user).await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn coordinated_spam_requires_distinct_users_and_matching_content() {
+    for posts in [
+        vec![(MEMBER, "same"), (OTHER_MEMBER, "same"), (MEMBER, "same")],
+        vec![(MEMBER, "same"), (MEMBER, "same"), (MEMBER, "same")],
+        vec![(MEMBER, "one"), (OTHER_MEMBER, "two"), (11, "three")],
+    ] {
+        let harness = flood(coordinated("messages"), delete());
+        for (user, content) in posts {
+            say(&harness, user, content).await;
+        }
+        assert_eq!(deletions(&harness), 0);
+    }
+}
+
+#[tokio::test]
+async fn coordinated_link_spam_compares_link_sets() {
+    let harness = flood(coordinated("links"), delete());
+    say(&harness, MEMBER, "first https://a.example/x").await;
+    say(&harness, OTHER_MEMBER, "different https://b.example/x").await;
+    say(&harness, 11, "another https://a.example/x").await;
+    assert_eq!(deletions(&harness), 0);
+    say(&harness, 12, "yet another https://a.example/x").await;
+    assert_eq!(deletions(&harness), 3);
+}
+
+#[tokio::test]
+async fn coordinated_link_spam_counts_messages_and_ignores_link_order() {
+    let harness = flood(coordinated("links"), delete());
+    say(&harness, MEMBER, "https://a.example https://b.example").await;
+    say(
+        &harness,
+        OTHER_MEMBER,
+        "https://b.example https://a.example",
+    )
+    .await;
+    assert_eq!(deletions(&harness), 0);
+    say(
+        &harness,
+        11,
+        "https://a.example https://b.example https://a.example",
+    )
+    .await;
+    assert_eq!(deletions(&harness), 3);
+}
+
+#[tokio::test]
+async fn coordinated_spam_keeps_channel_and_identical_options() {
+    let mut trigger = coordinated("messages");
+    trigger["per_channel"] = json!(true);
+    trigger["group_identical_messages"] = json!(true);
+    let harness = flood(trigger, delete());
+    say(&harness, MEMBER, "same").await;
+    say(&harness, OTHER_MEMBER, "same").await;
+    say_in(&harness, 11, OTHER_CHANNEL, "same").await;
+    assert_eq!(deletions(&harness), 0);
+    say(&harness, 12, "same").await;
+    assert_eq!(deletions(&harness), 3);
+
+    let mut trigger = coordinated("messages");
+    trigger["ignore_identical_messages"] = json!(true);
+    let harness = flood(trigger, delete());
+    for user in [MEMBER, OTHER_MEMBER, 11] {
+        say(&harness, user, "same").await;
+    }
+    assert_eq!(deletions(&harness), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn coordinated_spam_concurrent_messages_fire_once() {
+    for _ in 0..20 {
+        let harness = Arc::new(flood(
+            coordinated("messages"),
+            json!([{ "do": "alert", "channel": NOTIFY.to_string(), "text": "burst" }]),
+        ));
+        let tasks = [MEMBER, OTHER_MEMBER, 11].map(|user| {
+            let harness = Arc::clone(&harness);
+            tokio::spawn(async move { post(&harness, custom(user, CHANNEL, "same")).await })
+        });
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(texts_in(&harness, NOTIFY), vec!["burst".to_owned()]);
+    }
+}
+
+#[tokio::test]
+async fn coordinated_spam_excludes_moderators_and_expired_messages() {
+    let harness = flood(coordinated("messages"), delete());
+    let mut moderator = custom(MODERATOR, CHANNEL, "same");
+    moderator.author_roles = vec![twilight_model::id::Id::new(MODERATOR_ROLE)];
+    post(&harness, moderator).await;
+    say(&harness, MEMBER, "same").await;
+    say(&harness, OTHER_MEMBER, "same").await;
+    assert_eq!(deletions(&harness), 0);
+    harness.advance(Duration::from_secs(11));
+    say(&harness, 11, "same").await;
+    assert_eq!(deletions(&harness), 0);
+    say(&harness, 12, "same").await;
+    say(&harness, 13, "same").await;
+    assert_eq!(deletions(&harness), 3);
+}
+
+#[tokio::test]
+async fn coordinated_spam_dry_run_does_not_act() {
+    let harness = configured(
+        json!({ "dry_run": true, "rules": rules(&[("flood", rule(json!([coordinated("messages")]), json!([{ "do": "delete" }, { "do": "warn" }])) )]) }),
+    );
+    for user in [MEMBER, OTHER_MEMBER, 11] {
+        say(&harness, user, "same").await;
+    }
+    assert_eq!(deletions(&harness), 0);
+    for user in [MEMBER, OTHER_MEMBER, 11] {
+        assert!(cases_of(&harness, user).await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn coordinated_spam_continues_when_a_target_has_left() {
+    use closure_core::action::Action;
+    use closure_sdk::DiscordError;
+    use std::io::{self, Write};
+    use std::sync::Mutex;
+    use twilight_model::id::Id;
+
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let captured = Capture(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let captured = captured.clone();
+            move || captured.clone()
+        })
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let harness = configured(json!({
+        "dm_on_action": false,
+        "rules": rules(&[("flood", rule(json!([coordinated("messages")]), json!([{ "do": "kick" }])))])
+    }));
+    for user in [MEMBER, OTHER_MEMBER, 11] {
+        declare(&harness, user, &[]);
+    }
+    say(&harness, MEMBER, "same").await;
+    say(&harness, OTHER_MEMBER, "same").await;
+    harness.api().fail_nth(1, DiscordError::NotFound);
+    let result = harness
+        .message(Message::new(11, CHANNEL).content("same"))
+        .await;
+    assert!(result.is_err());
+    let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("automod action failed for target") && log.contains("user=7"),
+        "{log}"
+    );
+    for user in [OTHER_MEMBER, 11] {
+        assert!(harness.api().actions().iter().any(
+            |action| matches!(action, Action::Kick { user_id, .. } if *user_id == Id::new(user))
+        ));
+    }
+}
+
 // ---- the window ----
 
 #[tokio::test]

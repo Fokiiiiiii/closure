@@ -16,10 +16,12 @@ serde_json.workspace = true
 twilight-model.workspace = true
 regex.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 closure-config.workspace = true
 closure-i18n.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

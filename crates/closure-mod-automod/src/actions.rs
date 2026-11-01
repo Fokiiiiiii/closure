@@ -413,6 +413,7 @@ where
     let mut first_error = None;
     for target in targets.iter().copied() {
         if let Err(error) = act(target).await {
+            tracing::warn!(user = %target, %error, "automod action failed for target");
             first_error.get_or_insert(error);
         }
     }

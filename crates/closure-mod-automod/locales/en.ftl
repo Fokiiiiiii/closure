@@ -57,6 +57,7 @@ problem-stickers = Stickers max is 0 to 10.
 problem-amount = A spam amount is 1 to 10000.
 problem-window = A spam window is at least one second and at most one hour. Per channel, distinct channels and duplicates need one.
 problem-distinct = Distinct channels is 2 to 50.
+problem-distinct-users = Distinct users must be at least 2.
 problem-purge = A purge looks back at least one second and at most seven days.
 problem-timeout = A timeout lasts at least one second and at most 28 days.
 problem-duration = A duration is readable, such as 1h, 30m or 7d, and not zero.

@@ -39,16 +39,24 @@ pub fn record(scan: &Scan<'_>, rule: &Rule, context: &Context, now: i64) {
                 if count == 0 {
                     continue;
                 }
+                let tag = spam_fingerprint(spam, message);
+                if spam.distinct_users.is_some() && tag.is_none() {
+                    continue;
+                }
                 scan.recent.record(
                     guild,
                     Recent {
-                        kind: kind(&rule.id, index),
+                        kind: window_kind(&rule.id, index, spam, tag.as_deref()),
                         subject: message.author.id.get(),
                         group: Some(spam_channel(scan, spam, message).get().to_string()),
-                        count,
+                        count: if spam.distinct_users.is_some() {
+                            1
+                        } else {
+                            count
+                        },
                         at: now,
                         messages: vec![(message.channel_id, message.id)],
-                        tag: fingerprint(&message.content),
+                        tag,
                     },
                 );
             }
@@ -99,38 +107,36 @@ pub fn evaluate(
     }
     let ctx = scan.ctx;
     let Some(within) = spam.within else {
-        let count = u64::from(measure(spam.measure, message));
-        if count < u64::from(spam.amount) {
-            return None;
-        }
-        let args = Args::new()
-            .with("what", measure_label(ctx, spam.measure))
-            .with("count", count);
-        let detail = ctx.t_in(ctx.locale, "detail-spam-message", &args);
-        return Some(Hit {
-            detail,
-            messages: vec![(message.channel_id, message.id)],
-            targets: vec![message.author.id],
-            count,
-            join: false,
-        });
+        return evaluate_single(ctx, spam, message);
     };
 
-    let kind = kind(rule, index);
+    let tag = spam_fingerprint(spam, message);
+    if spam.distinct_users.is_some() && tag.is_none() {
+        return None;
+    }
+    let kind = window_kind(rule, index, spam, tag.as_deref());
     let author = message.author.id;
     let channel = spam_channel(scan, spam, message);
-    let key = handled_key(&kind, message, spam.per_channel, channel);
+    let key = handled_key(
+        &kind,
+        message,
+        spam.per_channel,
+        channel,
+        spam.distinct_users.is_some(),
+    );
     let now = ctx.now();
     let filter = RecentFilter {
         group: spam.per_channel.then(|| channel.get().to_string()),
         distinct_groups_at_least: spam
             .distinct_channels
             .map(|distinct| usize::try_from(distinct).unwrap_or(usize::MAX)),
-        distinct_subjects_at_least: None,
+        distinct_subjects_at_least: spam
+            .distinct_users
+            .map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
     };
     let burst = Burst {
         kind: &kind,
-        subject: Some(author.get()),
+        subject: spam.distinct_users.is_none().then_some(author.get()),
         within,
         filter: &filter,
         handled_key: &key,
@@ -163,18 +169,55 @@ pub fn evaluate(
                 .flat_map(|entry| entry.messages.iter().copied())
                 .collect();
             let args = Args::new()
-                .with("what", measure_label(ctx, spam.measure))
+                .with(
+                    "what",
+                    measure_label(
+                        ctx,
+                        if spam.distinct_users.is_some() {
+                            Measure::Messages
+                        } else {
+                            spam.measure
+                        },
+                    ),
+                )
                 .with("count", count)
                 .with("window", window_text(ctx, within));
+            let targets = if spam.distinct_users.is_some() {
+                targets(&entries)
+            } else {
+                vec![author]
+            };
             Some(Hit {
                 detail: ctx.t_in(ctx.locale, "detail-spam", &args),
                 messages,
-                targets: vec![author],
+                targets,
                 count,
                 join: false,
             })
         }
     }
+}
+
+fn evaluate_single(
+    ctx: &closure_sdk::EventContext,
+    spam: &Spam,
+    message: &MessageInfo,
+) -> Option<Hit> {
+    let count = u64::from(measure(spam.measure, message));
+    if count < u64::from(spam.amount) {
+        return None;
+    }
+    let args = Args::new()
+        .with("what", measure_label(ctx, spam.measure))
+        .with("count", count);
+    let detail = ctx.t_in(ctx.locale, "detail-spam-message", &args);
+    Some(Hit {
+        detail,
+        messages: vec![(message.channel_id, message.id)],
+        targets: vec![message.author.id],
+        count,
+        join: false,
+    })
 }
 
 /// Counts thread creations per owner and handles each burst once.
@@ -282,14 +325,7 @@ pub fn evaluate_join(
         }
         Claim::Short => None,
         Claim::Counted { count, entries } => {
-            let mut targets: Vec<UserId> = Vec::new();
-            for entry in &entries {
-                if let Some(user) = UserId::new_checked(entry.subject)
-                    && !targets.contains(&user)
-                {
-                    targets.push(user);
-                }
-            }
+            let targets = targets(&entries);
             let args = Args::new()
                 .with("count", count)
                 .with("window", window_text(ctx, spam.within));
@@ -302,6 +338,15 @@ pub fn evaluate_join(
             })
         }
     }
+}
+
+fn targets(entries: &[Recent]) -> Vec<UserId> {
+    let mut seen = HashSet::new();
+    entries
+        .iter()
+        .filter_map(|entry| UserId::new_checked(entry.subject))
+        .filter(|user| seen.insert(*user))
+        .collect()
 }
 
 /// What a message measures, for the measure of its kind.
@@ -363,6 +408,29 @@ fn fingerprint(content: &str) -> Option<String> {
     Some(format!("{:x}", hasher.finish()))
 }
 
+fn spam_fingerprint(spam: &Spam, message: &MessageInfo) -> Option<String> {
+    if spam.distinct_users.is_some() && spam.measure == Measure::Links {
+        let mut links: Vec<String> = text::links(&message.content)
+            .into_iter()
+            .map(|link| link.url)
+            .collect();
+        links.sort_unstable();
+        links.dedup();
+        fingerprint(&links.join(" "))
+    } else {
+        fingerprint(&message.content)
+    }
+}
+
+fn window_kind(rule: &str, index: usize, spam: &Spam, tag: Option<&str>) -> String {
+    let kind = kind(rule, index);
+    if spam.distinct_users.is_some() {
+        format!("{kind}:{}", tag.unwrap_or_default())
+    } else {
+        kind
+    }
+}
+
 fn spam_channel(scan: &Scan<'_>, spam: &Spam, message: &MessageInfo) -> closure_sdk::ChannelId {
     if spam.threads_as_parent_channel {
         scan.memory
@@ -377,7 +445,15 @@ fn handled_key(
     message: &MessageInfo,
     per_channel: bool,
     channel: closure_sdk::ChannelId,
+    coordinated: bool,
 ) -> String {
+    if coordinated {
+        return if per_channel {
+            format!("{kind}:{}", channel.get())
+        } else {
+            kind.to_owned()
+        };
+    }
     if per_channel {
         format!("{kind}:{}:{}", message.author.id.get(), channel.get())
     } else {

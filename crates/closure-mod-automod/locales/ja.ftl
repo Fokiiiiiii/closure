@@ -57,6 +57,7 @@ problem-stickers = stickers の max は 0〜10 です。
 problem-amount = spam の amount は 1〜10000 です。
 problem-window = spam の期間は 1 秒以上、1 時間以下です。チャンネルごと、異なるチャンネル数、重複の指定には期間が必要です。
 problem-distinct = 異なるチャンネル数は 2〜50 です。
+problem-distinct-users = 異なるユーザー数は 2 以上です。
 problem-purge = purge がさかのぼる期間は 1 秒以上、7 日以下です。
 problem-timeout = タイムアウトは 1 秒以上、28 日以下です。
 problem-duration = 期間は 1h、30m、7d のように読める形で、0 ではいけません。
