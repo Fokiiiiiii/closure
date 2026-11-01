@@ -299,6 +299,8 @@ async fn one_at_a_time<T>(ctx: &EventContext, target: UserId, work: impl Future<
 /// role Closure remembered, or else a new role with no permissions at all, which is then set up in
 /// every channel by a sync job. A role another party made is never adopted by its name: a role of
 /// the same name may grant access in channels that the name does not show.
+/// Unmarked legacy roles are replaced, with their IDs retained for lifting existing restrictions.
+/// Only a role created and marked by Closure is reused automatically.
 pub async fn ensure_role(
     ctx: &EventContext,
     which: RestrictionRole,
@@ -358,8 +360,21 @@ async fn ensure_role_now(
     configured: Option<RoleId>,
 ) -> Result<RoleId, RoleError> {
     let roles = roles(ctx).await?;
-    let exists = |id: RoleId| roles.iter().any(|role| role.id == id);
-    if let Some(role) = configured.filter(|role| exists(*role)) {
+    let explicit = configured.filter(|id| roles.iter().any(|role| role.id == *id));
+    let saved = match remembered(ctx, which).await {
+        Ok(saved) => saved,
+        Err(StorageError::NotGranted) => {
+            return explicit.ok_or_else(|| StorageError::NotGranted.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let made = ctx.store().get::<u64>(&made_key(which)).await?;
+    if let Some(old) = saved.filter(|id| Some(id.get()) != made) {
+        ctx.restrictions()
+            .set(&legacy_key(which, old), &old.get())
+            .await?;
+    }
+    if let Some(role) = explicit {
         // The explicit role is the one in use now, so the auto role is no longer channel-managed.
         match ctx.store().delete(&remembered_key(which)).await {
             Ok(_) | Err(StorageError::NotGranted) => {}
@@ -369,8 +384,8 @@ async fn ensure_role_now(
     }
     let bot_top = bot_top_position(ctx, &roles).await?;
     let safe = |role: &Role| is_safe(ctx, role, bot_top);
-    let kept = remembered(ctx, which)
-        .await?
+    let kept = saved
+        .filter(|id| Some(id.get()) == made)
         .filter(|id| roles.iter().any(|role| role.id == *id && safe(role)));
     let name = which.role_name(ctx);
     let role = if let Some(role) = kept {
@@ -378,6 +393,7 @@ async fn ensure_role_now(
         role
     } else {
         let created = create(ctx, which).await?;
+        ctx.store().set(&made_key(which), &created.get()).await?;
         remember(ctx, which, created).await?;
         created
     };
@@ -959,6 +975,68 @@ fn remembered_key(which: RestrictionRole) -> String {
     format!("auto-role:{}", which.key())
 }
 
+fn made_key(which: RestrictionRole) -> String {
+    format!("auto-role-made:{}", which.key())
+}
+
+fn legacy_key(which: RestrictionRole, role: RoleId) -> String {
+    format!("auto-role-legacy:{}:{}", which.key(), role.get())
+}
+
+pub(super) async fn legacy_roles(
+    ctx: &EventContext,
+    which: RestrictionRole,
+) -> Result<Vec<RoleId>, StorageError> {
+    let prefix = format!("auto-role-legacy:{}:", which.key());
+    Ok(ctx
+        .restrictions()
+        .list(&prefix, 1000)
+        .await?
+        .into_iter()
+        .filter_map(|(_, entry)| entry.value.as_u64().and_then(RoleId::new_checked))
+        .collect())
+}
+
+pub(super) async fn remove_legacy(
+    ctx: &EventContext,
+    which: RestrictionRole,
+    user: UserId,
+    current: RoleId,
+    reason: Reason,
+) -> Result<(), RoleError> {
+    let roles = legacy_roles(ctx, which).await?;
+    if roles.iter().all(|role| *role == current) {
+        return Ok(());
+    }
+    let member = match ctx
+        .api
+        .execute(Action::GetMember {
+            guild_id: ctx.guild_id,
+            user_id: user,
+        })
+        .await
+    {
+        Ok(Outcome::Member(member)) => member,
+        Err(DiscordError::NotFound) => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err(DiscordError::Fatal("the member was not read".to_owned()).into()),
+    };
+    for role in roles {
+        if role == current || !member.roles.contains(&role) {
+            continue;
+        }
+        match ctx
+            .api
+            .remove_role(ctx.guild_id, user, role, reason.clone())
+            .await
+        {
+            Ok(()) | Err(DiscordError::NotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 /// The role whose sync is running, while its lease lasts.
 fn pending_key(which: RestrictionRole) -> String {
     format!("pending:{}", which.key())
@@ -1029,6 +1107,7 @@ async fn restriction_ids(
         if let Some(role) = remembered(ctx, which).await? {
             ids.push(role);
         }
+        ids.extend(legacy_roles(ctx, which).await?);
     }
     Ok(ids)
 }

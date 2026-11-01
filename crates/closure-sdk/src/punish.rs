@@ -28,7 +28,7 @@ use crate::{
 pub use roles::{
     MemberTurn, RestrictionRole, RoleError, channel_created, ensure_role, member_turn,
 };
-use roles::{restore_when_free, strip};
+use roles::{remove_legacy, restore_when_free, strip};
 
 /// Discord's longest timeout, 28 days in seconds.
 const MAX_TIMEOUT_SECONDS: u32 = 28 * 86_400;
@@ -374,6 +374,14 @@ impl<'a> Punisher<'a> {
                     .api
                     .remove_role(guild, target, role, self.audit(reason.as_deref()))
                     .await?;
+                remove_legacy(
+                    self.ctx,
+                    RestrictionRole::Timeout,
+                    target,
+                    role,
+                    self.audit(reason.as_deref()),
+                )
+                .await?;
                 let _ = self.ctx.scheduler().cancel(&untimeout_key(target)).await;
                 self.restore_if_last(target, RestrictionRole::Timeout, "timeout")
                     .await?;
@@ -608,6 +616,14 @@ impl<'a> Punisher<'a> {
                     .api
                     .remove_role(guild, target, role, self.audit(reason.as_deref()))
                     .await?;
+                remove_legacy(
+                    self.ctx,
+                    RestrictionRole::Voice,
+                    target,
+                    role,
+                    self.audit(reason.as_deref()),
+                )
+                .await?;
                 self.restore_if_last(target, RestrictionRole::Voice, "vcmute")
                     .await?;
             }
@@ -1242,10 +1258,13 @@ async fn end_timeout(cx: JobCx) -> Result<(), ModuleError> {
     ));
     match cx
         .api()
-        .remove_role(cx.guild_id(), user, role, reason)
+        .remove_role(cx.guild_id(), user, role, reason.clone())
         .await
     {
         Ok(()) | Err(DiscordError::NotFound) => {
+            remove_legacy(cx.ctx(), RestrictionRole::Timeout, user, role, reason)
+                .await
+                .map_err(|error| ModuleError::other(error.to_string()))?;
             // The timer's case has run out: nothing of it stands any more.
             restore_when_free(
                 cx.ctx(),
@@ -1281,12 +1300,12 @@ async fn end_voice_mute(cx: JobCx) -> Result<(), ModuleError> {
     let result = match (payload.via, payload.role.and_then(RoleId::new_checked)) {
         (Method::Discord, _) => {
             cx.api()
-                .set_voice_mute(cx.guild_id(), user, false, reason)
+                .set_voice_mute(cx.guild_id(), user, false, reason.clone())
                 .await
         }
         (Method::Role, Some(role)) => {
             cx.api()
-                .remove_role(cx.guild_id(), user, role, reason)
+                .remove_role(cx.guild_id(), user, role, reason.clone())
                 .await
         }
         (Method::Role, None) => {
@@ -1295,6 +1314,11 @@ async fn end_voice_mute(cx: JobCx) -> Result<(), ModuleError> {
     };
     if matches!(payload.via, Method::Role) && matches!(result, Ok(()) | Err(DiscordError::NotFound))
     {
+        if let Some(role) = payload.role.and_then(RoleId::new_checked) {
+            remove_legacy(cx.ctx(), RestrictionRole::Voice, user, role, reason)
+                .await
+                .map_err(|error| ModuleError::other(error.to_string()))?;
+        }
         restore_when_free(cx.ctx(), user, RestrictionRole::Voice, 0, &payload.restore).await?;
     }
     match result {

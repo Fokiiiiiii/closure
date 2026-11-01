@@ -1289,9 +1289,11 @@ async fn quarantine_join(
     let role = ensure_role(ctx, RestrictionRole::Quarantine, quarantine.role)
         .await
         .map_err(|error| ModuleError::other(error.to_string()))?;
-    // A member who is recorded already keeps that record; the role is given all the same.
-    let fresh = held_for(store, user.get()).await?.is_empty();
-    if fresh {
+    let held = held_for(store, user.get()).await?;
+    let fresh = held.is_empty();
+    if !held.iter().any(|entry| {
+        entry.role == role.get() && entry.marker == quarantine.marker.map_or(0, RoleId::get)
+    }) {
         hold(
             store,
             Held {

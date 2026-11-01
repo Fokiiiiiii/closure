@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use closure_core::action::Action;
+use closure_core::error::DiscordError;
 use closure_sdk::punish::{self, Method, Moderator, Punisher, RoleSelection, Settings, Strip};
 use closure_sdk::testing::{Harness, Invocation};
 use closure_sdk::{Capability, Command, CommandCx, ModuleBuilder, UserError};
@@ -64,6 +65,49 @@ async fn strip(cx: CommandCx, (): ()) -> Result<(), UserError> {
     Ok(())
 }
 
+async fn strip_legacy(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let mut settings = settings();
+    settings.strip.remove = RoleSelection::Some(vec![Id::new(701)]);
+    Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings)
+        .timeout(Id::new(TARGET), Duration::from_secs(3600), None)
+        .await?;
+    Ok(())
+}
+
+async fn migrate(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    punish::ensure_role(cx.ctx(), punish::RestrictionRole::Timeout, None).await?;
+    Ok(())
+}
+
+async fn migrate_voice(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    punish::ensure_role(cx.ctx(), punish::RestrictionRole::Voice, None).await?;
+    Ok(())
+}
+
+async fn voice(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let settings = Settings {
+        voice: Method::Role,
+        voice_role: Some(Id::new(TIMEOUT_ROLE)),
+        ..settings()
+    };
+    Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings)
+        .voice_mute(Id::new(TARGET), Some(Duration::from_secs(3600)), None)
+        .await?;
+    Ok(())
+}
+
+async fn unvoice(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let settings = Settings {
+        voice: Method::Role,
+        voice_role: Some(Id::new(TIMEOUT_ROLE)),
+        ..settings()
+    };
+    Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings)
+        .voice_unmute(Id::new(TARGET), None)
+        .await?;
+    Ok(())
+}
+
 async fn lift(cx: CommandCx, (): ()) -> Result<(), UserError> {
     Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings())
         .lift_timeout(Id::new(TARGET), None)
@@ -82,7 +126,11 @@ fn alpha() -> ModuleBuilder {
         .capability(Capability::Schedule)
         .capability(Capability::Storage)
         .config(json!({ "type": "object", "properties": {} }), json!({}))
-        .command(Command::<()>::new("strip").handler(strip));
+        .command(Command::<()>::new("strip").handler(strip))
+        .command(Command::<()>::new("strip_legacy").handler(strip_legacy))
+        .command(Command::<()>::new("migrate").handler(migrate))
+        .command(Command::<()>::new("migrate_voice").handler(migrate_voice))
+        .command(Command::<()>::new("voice").handler(voice));
     punish::jobs(builder)
 }
 
@@ -97,7 +145,8 @@ fn beta() -> ModuleBuilder {
         .capability(Capability::Schedule)
         .capability(Capability::Storage)
         .config(json!({ "type": "object", "properties": {} }), json!({}))
-        .command(Command::<()>::new("lift").handler(lift));
+        .command(Command::<()>::new("lift").handler(lift))
+        .command(Command::<()>::new("unvoice").handler(unvoice));
     punish::jobs(builder)
 }
 
@@ -114,6 +163,170 @@ fn given(harness: &Harness) -> Vec<u64> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn a_legacy_timeout_role_is_removed_by_another_module_after_migration() {
+    let first = Harness::new(alpha()).unwrap();
+    let second = first.sibling(beta()).unwrap();
+    first.api().set_roles(
+        Id::new(GUILD),
+        vec![role(701, "Mute", 1), role(TIMEOUT_ROLE, "Mute", 1)],
+    );
+    first
+        .api()
+        .set_member(Id::new(GUILD), member(TARGET, &[701]));
+    first
+        .store()
+        .set("auto-role:timeout", &701_u64)
+        .await
+        .unwrap();
+    first.invoke(Invocation::new("migrate")).await.unwrap();
+
+    second
+        .invoke(Invocation::new("lift").user(MODERATOR))
+        .await
+        .unwrap();
+    assert!(first.api().actions().iter().any(|action| matches!(
+        action, Action::RemoveRole { user_id, role_id, .. }
+            if user_id.get() == TARGET && role_id.get() == 701
+    )));
+}
+
+#[tokio::test]
+async fn a_lift_skips_a_legacy_role_the_member_does_not_have() {
+    let first = Harness::new(alpha()).unwrap();
+    let second = first.sibling(beta()).unwrap();
+    first.api().set_roles(
+        Id::new(GUILD),
+        vec![role(701, "Mute", 1), role(TIMEOUT_ROLE, "Mute", 1)],
+    );
+    first.api().set_member(Id::new(GUILD), member(TARGET, &[]));
+    first
+        .store()
+        .set("auto-role:timeout", &701_u64)
+        .await
+        .unwrap();
+    first.invoke(Invocation::new("migrate")).await.unwrap();
+    first
+        .api()
+        .fail_role(Id::new(701), DiscordError::Forbidden("role".into()));
+
+    second
+        .invoke(Invocation::new("lift").user(MODERATOR))
+        .await
+        .unwrap();
+    assert!(!first.api().actions().iter().any(|action| matches!(
+        action, Action::RemoveRole { user_id, role_id, .. }
+            if user_id.get() == TARGET && role_id.get() == 701
+    )));
+}
+
+#[tokio::test]
+async fn a_new_timeout_timer_also_removes_the_legacy_role() {
+    let first = Harness::new(alpha()).unwrap();
+    first.api().set_roles(
+        Id::new(GUILD),
+        vec![role(701, "Mute", 1), role(TIMEOUT_ROLE, "Mute", 1)],
+    );
+    first
+        .api()
+        .set_member(Id::new(GUILD), member(TARGET, &[701]));
+    first
+        .store()
+        .set("auto-role:timeout", &701_u64)
+        .await
+        .unwrap();
+    first.invoke(Invocation::new("migrate")).await.unwrap();
+    first
+        .invoke(Invocation::new("strip").user(MODERATOR))
+        .await
+        .unwrap();
+    first.advance(Duration::from_secs(3600));
+    let results = first.run_due_jobs().await;
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert!(first.api().actions().iter().any(|action| matches!(
+        action, Action::RemoveRole { user_id, role_id, .. }
+            if user_id.get() == TARGET && role_id.get() == 701
+    )));
+}
+
+#[tokio::test]
+async fn a_legacy_voice_role_is_removed_by_a_manual_lift_and_a_new_timer() {
+    for by_timer in [false, true] {
+        let first = Harness::new(alpha()).unwrap();
+        let second = first.sibling(beta()).unwrap();
+        first.api().set_roles(
+            Id::new(GUILD),
+            vec![role(701, "VC mute", 1), role(TIMEOUT_ROLE, "VC mute", 1)],
+        );
+        first
+            .api()
+            .set_member(Id::new(GUILD), member(TARGET, &[701]));
+        first
+            .store()
+            .set("auto-role:vcmute", &701_u64)
+            .await
+            .unwrap();
+        first
+            .invoke(Invocation::new("migrate_voice"))
+            .await
+            .unwrap();
+        first
+            .invoke(Invocation::new("voice").user(MODERATOR))
+            .await
+            .unwrap();
+        if by_timer {
+            first.advance(Duration::from_secs(3600));
+            let results = first.run_due_jobs().await;
+            assert!(results.iter().all(Result::is_ok), "{results:?}");
+        } else {
+            second
+                .invoke(Invocation::new("unvoice").user(MODERATOR))
+                .await
+                .unwrap();
+        }
+        assert!(
+            first.api().actions().iter().any(|action| matches!(
+                action, Action::RemoveRole { user_id, role_id, .. }
+                    if user_id.get() == TARGET && role_id.get() == 701
+            )),
+            "by_timer: {by_timer}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_legacy_restriction_role_is_not_stripped_and_remembered_as_an_ordinary_role() {
+    let first = Harness::new(alpha()).unwrap();
+    first.api().set_roles(
+        Id::new(GUILD),
+        vec![
+            role(BOT_ROLE, "Bot", 50),
+            role(701, "Mute", 1),
+            role(TIMEOUT_ROLE, "Mute", 1),
+        ],
+    );
+    first
+        .api()
+        .set_member(Id::new(GUILD), member(BOT, &[BOT_ROLE]));
+    first
+        .api()
+        .set_member(Id::new(GUILD), member(TARGET, &[701]));
+    first
+        .store()
+        .set("auto-role:timeout", &701_u64)
+        .await
+        .unwrap();
+    first.invoke(Invocation::new("migrate")).await.unwrap();
+    first
+        .invoke(Invocation::new("strip_legacy").user(MODERATOR))
+        .await
+        .unwrap();
+    assert!(!first.api().actions().iter().any(|action| matches!(
+        action, Action::RemoveRole { user_id, role_id, .. }
+            if user_id.get() == TARGET && role_id.get() == 701
+    )));
 }
 
 #[tokio::test]

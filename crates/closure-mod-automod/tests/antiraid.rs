@@ -970,6 +970,41 @@ async fn a_quarantined_member_stays_recorded_when_its_marker_role_cannot_be_give
 }
 
 #[tokio::test]
+async fn a_rejoined_member_can_be_released_from_both_legacy_and_new_quarantine_roles() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": { "role": ROLE.to_string() } } }
+    }));
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(ROLE, "Quarantine")]);
+    set(&harness, "high").await;
+    join(&harness, MEMBER).await;
+    harness
+        .store()
+        .set("auto-role:quarantine", &ROLE)
+        .await
+        .unwrap();
+    harness.set_config(json!({ "antiraid": {
+        "levels": LEVELS, "effects": { "high": { "quarantine": {} } }
+    }}));
+    join(&harness, MEMBER).await;
+    let new_role = role_changes(&harness)
+        .iter()
+        .find_map(|(added, user, role)| {
+            (*added && *user == MEMBER && *role != ROLE).then_some(*role)
+        })
+        .unwrap();
+
+    harness
+        .invoke(sub("antiraid release").option("user", CommandOptionValue::User(Id::new(MEMBER))))
+        .await
+        .unwrap();
+    assert!(role_changes(&harness).contains(&(false, MEMBER, ROLE)));
+    assert!(role_changes(&harness).contains(&(false, MEMBER, new_role)));
+}
+
+#[tokio::test]
 async fn a_join_of_a_member_who_is_still_recorded_gives_the_role_again() {
     let harness = raid(json!({
         "levels": LEVELS,

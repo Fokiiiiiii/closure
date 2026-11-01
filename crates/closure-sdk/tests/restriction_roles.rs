@@ -240,6 +240,42 @@ async fn a_role_of_the_same_name_that_closure_did_not_make_is_not_used() {
 }
 
 #[tokio::test]
+async fn an_unmarked_legacy_role_with_a_channel_allow_is_replaced_and_the_new_role_is_reused() {
+    let harness = Harness::new(module(None)).unwrap();
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(700, "Mute")]);
+    harness.api().set_channels(
+        Id::new(GUILD),
+        vec![channel(5, &[(700, 0, Permissions::VIEW_CHANNEL.bits())])],
+    );
+    harness
+        .store()
+        .set("auto-role:timeout", &700_u64)
+        .await
+        .unwrap();
+
+    harness.config_changed().await.unwrap();
+    let made = harness
+        .store()
+        .get::<u64>("auto-role:timeout")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(made, 700);
+    assert_eq!(
+        harness
+            .store()
+            .get::<u64>("auto-role-made:timeout")
+            .await
+            .unwrap(),
+        Some(made)
+    );
+    harness.config_changed().await.unwrap();
+    assert_eq!(created_names(&harness), ["Mute", "VC mute"]);
+}
+
+#[tokio::test]
 async fn a_second_setup_does_not_create_a_second_role() {
     let harness = Harness::new(module(None)).unwrap();
     harness.config_changed().await.unwrap();
