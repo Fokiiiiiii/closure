@@ -195,13 +195,14 @@ async fn turn_of(
         let mut map = gates.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
     };
-    let turn = Arc::clone(&gate).lock_owned().await;
-    MemberTurn {
+    let mut turn = MemberTurn {
         key,
         gates,
         gate,
-        turn: Some(turn),
-    }
+        turn: None,
+    };
+    turn.turn = Some(Arc::clone(&turn.gate).lock_owned().await);
+    turn
 }
 
 impl Drop for MemberTurn {
@@ -236,6 +237,27 @@ mod turn_tests {
         let second = second.await.unwrap();
         drop(second);
         assert!(!gates().lock().unwrap().contains_key(&(1, 7)));
+    }
+
+    #[tokio::test]
+    async fn an_aborted_waiter_is_forgotten_after_the_holder() {
+        for abort_first in [true, false] {
+            let first = turn_of((1, 8), gates()).await;
+            let second = tokio::spawn(turn_of((1, 8), gates()));
+            while Arc::strong_count(gates().lock().unwrap().get(&(1, 8)).unwrap()) < 4 {
+                tokio::task::yield_now().await;
+            }
+            if abort_first {
+                second.abort();
+                assert!(matches!(second.await, Err(error) if error.is_cancelled()));
+                drop(first);
+            } else {
+                drop(first);
+                second.abort();
+                assert!(matches!(second.await, Err(error) if error.is_cancelled()));
+            }
+            assert!(!gates().lock().unwrap().contains_key(&(1, 8)));
+        }
     }
 
     #[tokio::test]

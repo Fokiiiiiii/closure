@@ -4448,3 +4448,111 @@ async fn roles_left_under_the_keys_of_the_older_layout_are_given_back() {
     harness.invoke(untimeout(MEMBER, None)).await.unwrap();
     assert_eq!(given_back(&harness), [60]);
 }
+
+mod rejoin_expiry_race {
+    use super::*;
+    use closure_core::action::Outcome;
+    use closure_core::capability::CapabilitySet;
+    use closure_core::client::{ApiClient, DiscordApi};
+    use closure_core::event::{ChannelId, GuildId};
+    use closure_core::testing::MockApi;
+    use closure_sdk::{Command, CommandCx, EventContext, UserError};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    static CONTEXT: Mutex<Option<EventContext>> = Mutex::new(None);
+
+    async fn capture(cx: CommandCx, (): ()) -> Result<(), UserError> {
+        *CONTEXT.lock().unwrap() = Some(cx.ctx().clone());
+        Ok(())
+    }
+
+    struct AdvanceOnAdd {
+        inner: Arc<MockApi>,
+        harness: Arc<Harness>,
+    }
+
+    impl DiscordApi for AdvanceOnAdd {
+        fn execute<'a, 'b>(
+            &'a self,
+            action: Action,
+        ) -> Pin<Box<dyn Future<Output = Result<Outcome, DiscordError>> + Send + 'b>>
+        where
+            'a: 'b,
+            Self: 'b,
+        {
+            Box::pin(async move {
+                if matches!(&action, Action::AddRole { role_id, .. } if role_id.get() == 31) {
+                    self.harness.advance(Duration::from_secs(3601));
+                }
+                self.inner.execute(action).await
+            })
+        }
+
+        fn channel_guild<'a, 'b>(
+            &'a self,
+            channel: ChannelId,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<GuildId>, DiscordError>> + Send + 'b>>
+        where
+            'a: 'b,
+            Self: 'b,
+        {
+            Box::pin(async move { self.inner.channel_guild(channel).await })
+        }
+    }
+
+    #[tokio::test]
+    async fn role_added_after_expiry_is_lifted_by_the_rearmed_job() {
+        for voice in [false, true] {
+            let builder = builder()
+                .unwrap()
+                .command(Command::<()>::new("capture").handler(capture));
+            let harness = Arc::new(Harness::new(builder).unwrap());
+            harness.permissions(|permissions| {
+                permissions
+                    .role_levels
+                    .insert(Id::new(MODERATOR_ROLE), Level::MODERATOR);
+            });
+            harness
+                .api()
+                .set_roles(Id::new(GUILD), vec![role(30, 1), role(31, 1)]);
+            harness
+                .api()
+                .set_not_a_member(Id::new(GUILD), Id::new(MEMBER));
+            if voice {
+                harness.set_config(json!({ "voice_mute_method": "role", "voice_mute_role": "30" }));
+                harness
+                    .invoke(voice_mute(MEMBER, Some("1h"), Some("noise")))
+                    .await
+                    .unwrap();
+                harness.set_config(json!({ "voice_mute_method": "role", "voice_mute_role": "31" }));
+            } else {
+                harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
+                harness
+                    .invoke(timeout(MEMBER, "1h", Some("spam")))
+                    .await
+                    .unwrap();
+                harness.set_config(json!({ "timeout_method": "role", "timeout_role": "31" }));
+            }
+            assert_eq!(harness.jobs(), 1);
+            harness.invoke(Invocation::new("capture")).await.unwrap();
+            let mut ctx = CONTEXT.lock().unwrap().take().unwrap();
+            let api = Arc::new(AdvanceOnAdd {
+                inner: Arc::clone(harness.api()),
+                harness: Arc::clone(&harness),
+            });
+            ctx.api = ApiClient::new(api, CapabilitySet::all(), ctx.module.clone())
+                .scoped_to(ctx.guild_id);
+            module()
+                .unwrap()
+                .on_event_flow(&ctx, &joined(MEMBER, false))
+                .await
+                .unwrap();
+            assert_eq!(roles_added(&harness).last(), Some(&31));
+            let ended = harness.run_due_jobs().await;
+            assert!(ended.iter().all(Result::is_ok), "{ended:?}");
+            assert!(removed(&harness).contains(&31));
+        }
+    }
+}

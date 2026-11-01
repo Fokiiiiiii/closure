@@ -4,7 +4,9 @@
 
 use std::time::Duration;
 
-use closure_sdk::punish::{Method, Moderator, Punisher, RestrictionRole, RoleError, ensure_role};
+use closure_sdk::punish::{
+    Method, Moderator, Punisher, RestrictionRole, RoleError, ensure_role, member_turn,
+};
 use closure_sdk::{
     Args, Case, DiscordError, Event, EventContext, Flow, ModuleError, Reason, RoleId, UserId,
 };
@@ -22,6 +24,7 @@ pub(crate) async fn on_join(ctx: EventContext, event: Event) -> Result<Flow, Mod
     }
     let config: Config = closure_sdk::parse_module_config(&ctx)?;
     let user = member.user.id;
+    let _turn = member_turn(&ctx, user).await;
     // Both are tried even when the first fails, so one refused action does not undo the other.
     let timeout = match standing(&ctx, user, "timeout").await? {
         Some(case) => give_timeout_again(&ctx, &config, user, &case).await,
@@ -107,9 +110,7 @@ async fn rearm(
     let Some(expires_at) = case.expires_at else {
         return Ok(());
     };
-    let Ok(left) = u64::try_from(expires_at - ctx.now()) else {
-        return Ok(());
-    };
+    let left = u64::try_from(expires_at.saturating_sub(ctx.now())).unwrap_or(0);
     let punisher = Punisher::new(
         ctx,
         Moderator::bot(ctx, "rejoin").map_err(|error| DiscordError::Fatal(error.to_string()))?,

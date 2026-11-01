@@ -307,7 +307,7 @@ impl<'a> Punisher<'a> {
             .give_timeout(target, duration, reason.as_deref())
             .await?;
         let recorded = self
-            .record("timeout", target, reason, Some(now + secs(duration)))
+            .save_case("timeout", target, reason, Some(now + secs(duration)))
             .await;
         // The timer is set even when the case is not recorded: the timeout holds all the same.
         let timer = match role {
@@ -326,6 +326,7 @@ impl<'a> Punisher<'a> {
             None => None,
         };
         let case = recorded?;
+        let _ = modlog::post(self.ctx, &case).await;
         let stripped = self
             .strip_for(target, role, RestrictionRole::Timeout)
             .await?;
@@ -355,6 +356,7 @@ impl<'a> Punisher<'a> {
         target: UserId,
         reason: Option<String>,
     ) -> Result<Case, UserError> {
+        let _turn = member_turn(self.ctx, target).await;
         if let Some(undone) = self.superseded(target, "timeout").await? {
             return Ok(undone);
         }
@@ -481,6 +483,7 @@ impl<'a> Punisher<'a> {
             None => None,
         };
         let case = recorded?;
+        let _ = modlog::post(self.ctx, &case).await;
         Ok(Done {
             case,
             notes: [note, timer].into_iter().flatten().collect(),
@@ -490,6 +493,7 @@ impl<'a> Punisher<'a> {
     /// Lifts the ban of `target` and records an `unban` case, which revokes the newest ban that
     /// still stands.
     pub async fn unban(&self, target: UserId, reason: Option<String>) -> Result<Case, UserError> {
+        let _turn = member_turn(self.ctx, target).await;
         if let Some(undone) = self.superseded(target, "ban").await? {
             return Ok(undone);
         }
@@ -527,7 +531,7 @@ impl<'a> Punisher<'a> {
         let role = self.mute_in_voice(target, reason.as_deref()).await?;
         let stripped = self.strip_for(target, role, RestrictionRole::Voice).await?;
         let expires_at = duration.map(|duration| now + secs(duration));
-        let recorded = self.record("vcmute", target, reason, expires_at).await;
+        let recorded = self.save_case("vcmute", target, reason, expires_at).await;
         // A new mute replaces the timer of an earlier one, which would lift this mute too early.
         let _ = self.ctx.scheduler().cancel(&voice_key(target)).await;
         // The timer is set even when the case is not recorded: the mute holds all the same.
@@ -547,6 +551,7 @@ impl<'a> Punisher<'a> {
             None => None,
         };
         let case = recorded?;
+        let _ = modlog::post(self.ctx, &case).await;
         let note = match duration {
             Some(duration) => {
                 self.notify(
@@ -585,6 +590,7 @@ impl<'a> Punisher<'a> {
         target: UserId,
         reason: Option<String>,
     ) -> Result<Case, UserError> {
+        let _turn = member_turn(self.ctx, target).await;
         if let Some(undone) = self.superseded(target, "vcmute").await? {
             return Ok(undone);
         }
@@ -852,7 +858,20 @@ impl<'a> Punisher<'a> {
         reason: Option<String>,
         expires_at: Option<i64>,
     ) -> Result<Case, UserError> {
-        let case = self
+        let case = self.save_case(kind, target, reason, expires_at).await?;
+        let _ = modlog::post(self.ctx, &case).await;
+        Ok(case)
+    }
+
+    async fn save_case(
+        &self,
+        kind: &str,
+        target: UserId,
+        reason: Option<String>,
+        expires_at: Option<i64>,
+    ) -> Result<Case, UserError> {
+        // shortcut: abort after Discord succeeds can still skip the case and timer; use durable reconciliation to close the gap.
+        Ok(self
             .ctx
             .cases()
             .create(NewCase {
@@ -862,9 +881,7 @@ impl<'a> Punisher<'a> {
                 reason,
                 expires_at,
             })
-            .await?;
-        let _ = modlog::post(self.ctx, &case).await;
-        Ok(case)
+            .await?)
     }
 
     /// Revokes what the lift `lift` undoes: the case that `undoing` names, else the newest case of
@@ -933,7 +950,10 @@ impl<'a> Punisher<'a> {
     ) -> Result<Case, UserError> {
         let mut attempt = 1;
         loop {
-            match self.record("ban", target, reason.clone(), expires_at).await {
+            match self
+                .save_case("ban", target, reason.clone(), expires_at)
+                .await
+            {
                 Ok(case) => return Ok(case),
                 Err(error) if attempt < RECORD_ATTEMPTS => {
                     tracing::warn!(user = %target, attempt, ?error, "a ban could not be recorded, trying again");
