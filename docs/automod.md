@@ -561,7 +561,7 @@ one got in some other way.
   Set `whole_words: false` for it.
 - Administrators are not known from a message. Only the moderator level counts for the exemption, so
   an administrator without a moderator role is checked like a member.
-- Presets, `changePerms`, `startThread` and
+- Presets, `startThread` and
   `archiveThread`, and the
   `match_visible_names` and `match_custom_status` matchers of the older automod are not in this
   version (see [the parity list](parity.md)).
