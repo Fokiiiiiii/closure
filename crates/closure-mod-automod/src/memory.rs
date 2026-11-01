@@ -31,6 +31,7 @@ pub struct Memory {
     reported: Mutex<HashMap<String, i64>>,
     /// The slowmode last set for a channel, and when.
     slowmodes: Mutex<HashMap<ChannelId, (u16, i64)>>,
+    thread_parents: Mutex<VecDeque<(GuildId, ChannelId, ChannelId)>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -39,6 +40,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Memory {
+    pub fn remember_thread(&self, guild: GuildId, thread: ChannelId, parent: Option<ChannelId>) {
+        let mut threads = lock(&self.thread_parents);
+        threads.retain(|(g, t, _)| *g != guild || *t != thread);
+        if let Some(parent) = parent {
+            if threads.len() >= MAX_REMEMBERED {
+                threads.pop_front();
+            }
+            threads.push_back((guild, thread, parent));
+        }
+    }
+
+    pub fn parent_or_channel(&self, guild: GuildId, channel: ChannelId) -> ChannelId {
+        lock(&self.thread_parents)
+            .iter()
+            .find(|(g, thread, _)| *g == guild && *thread == channel)
+            .map_or(channel, |(_, _, parent)| *parent)
+    }
+
     /// Remembers that the bot is about to give or take `role` from `user`.
     pub fn ignore_role(&self, guild: GuildId, user: UserId, role: RoleId, now: i64) {
         let mut changes = lock(&self.own_roles);

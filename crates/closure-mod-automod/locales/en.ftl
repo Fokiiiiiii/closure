@@ -281,3 +281,7 @@ permission-automod-antiraid-view = See the antiraid level and its quarantine
 permission-automod-antiraid-set = Raise or lower the antiraid level
 permission-automod-antiraid-release = Release members from the antiraid quarantine
 reason-automod-reply-expired = automod: a reply whose time is up
+
+trigger-thread-create-spam = a member creates threads in a burst
+detail-thread-create-spam = { $count } threads created within { $window }
+config-automod-threads_as_parent_channel = Count known threads under their parent channel in spam windows.

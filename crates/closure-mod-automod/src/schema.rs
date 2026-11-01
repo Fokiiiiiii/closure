@@ -412,6 +412,14 @@ fn trigger_events() -> Vec<Value> {
             }),
             &[],
         ),
+        tagged(
+            "thread_create_spam",
+            json!({
+                "amount": { "type": "integer", "minimum": 1, "maximum": 10000 },
+                "within": { "type": "string", "pattern": DURATION }
+            }),
+            &["amount", "within"],
+        ),
         tagged("thread_created", json!({}), &[]),
         tagged("thread_archived", json!({}), &[]),
         tagged("thread_unarchived", json!({}), &[]),
@@ -436,6 +444,7 @@ fn trigger_events() -> Vec<Value> {
                 "within": { "type": "string", "pattern": DURATION },
                 "per_channel": { "type": "boolean" },
                 "distinct_channels": { "type": "integer", "minimum": 2, "maximum": 50 },
+                "threads_as_parent_channel": { "type": "boolean", "description": "config-automod-threads_as_parent_channel", "x-ui": { "level": "advanced" } },
                 "ignore_identical_messages": { "type": "boolean" },
                 "group_identical_messages": { "type": "boolean" }
             }),

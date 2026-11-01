@@ -13,7 +13,7 @@ use closure_sdk::text;
 use closure_sdk::{Args, MessageInfo, UserId};
 
 use crate::config::{JoinSpam, Measure, Rule, Spam, Trigger};
-use crate::context::{Context, Source};
+use crate::context::{Context, Source, ThreadEvent};
 use crate::triggers::{Hit, Scan, window_text};
 
 /// The kind a spam trigger is recorded under.
@@ -44,7 +44,7 @@ pub fn record(scan: &Scan<'_>, rule: &Rule, context: &Context, now: i64) {
                     Recent {
                         kind: kind(&rule.id, index),
                         subject: message.author.id.get(),
-                        group: Some(message.channel_id.get().to_string()),
+                        group: Some(spam_channel(scan, spam, message).get().to_string()),
                         count,
                         at: now,
                         messages: vec![(message.channel_id, message.id)],
@@ -52,8 +52,16 @@ pub fn record(scan: &Scan<'_>, rule: &Rule, context: &Context, now: i64) {
                     },
                 );
             }
-            Trigger::MemberJoinSpam(_) => {
-                let (Source::Join, Some(who)) = (&context.source, context.user.as_ref()) else {
+            Trigger::MemberJoinSpam(_) | Trigger::ThreadCreateSpam(_) => {
+                let matches_event = matches!(
+                    (trigger, &context.source),
+                    (Trigger::MemberJoinSpam(_), Source::Join)
+                        | (
+                            Trigger::ThreadCreateSpam(_),
+                            Source::Thread(ThreadEvent::Created)
+                        )
+                );
+                let Some(who) = context.user.as_ref().filter(|_| matches_event) else {
                     continue;
                 };
                 scan.recent.record(
@@ -110,12 +118,11 @@ pub fn evaluate(
 
     let kind = kind(rule, index);
     let author = message.author.id;
-    let key = handled_key(&kind, message, spam.per_channel);
+    let channel = spam_channel(scan, spam, message);
+    let key = handled_key(&kind, message, spam.per_channel, channel);
     let now = ctx.now();
     let filter = RecentFilter {
-        group: spam
-            .per_channel
-            .then(|| message.channel_id.get().to_string()),
+        group: spam.per_channel.then(|| channel.get().to_string()),
         distinct_groups_at_least: spam
             .distinct_channels
             .map(|distinct| usize::try_from(distinct).unwrap_or(usize::MAX)),
@@ -168,6 +175,59 @@ pub fn evaluate(
             })
         }
     }
+}
+
+/// Counts thread creations per owner and handles each burst once.
+pub fn evaluate_thread(
+    scan: &Scan<'_>,
+    rule: &str,
+    index: usize,
+    spam: &JoinSpam,
+    context: &Context,
+) -> Option<Hit> {
+    let (Source::Thread(ThreadEvent::Created), Some(who)) =
+        (&context.source, context.user.as_ref())
+    else {
+        return None;
+    };
+    let kind = kind(rule, index);
+    let key = format!("{kind}:{}", who.id.get());
+    let now = scan.ctx.now();
+    let filter = RecentFilter::default();
+    let burst = Burst {
+        kind: &kind,
+        subject: Some(who.id.get()),
+        within: spam.within,
+        filter: &filter,
+        handled_key: &key,
+        handled_until: now + i64::try_from(spam.within.as_secs()).unwrap_or(i64::MAX),
+    };
+    let counts = |entries: &[&Recent]| {
+        let count: u64 = entries.iter().map(|entry| u64::from(entry.count)).sum();
+        (count >= u64::from(spam.amount)).then_some(count)
+    };
+    let claim = if scan.commit {
+        scan.recent
+            .claim_burst(scan.ctx.guild_id, now, &burst, counts)
+    } else {
+        scan.recent
+            .inspect_burst(scan.ctx.guild_id, now, &burst, counts)
+    };
+    let Claim::Counted { count, .. } = claim else {
+        return None;
+    };
+    let args = Args::new()
+        .with("count", count)
+        .with("window", window_text(scan.ctx, spam.within));
+    Some(Hit {
+        detail: scan
+            .ctx
+            .t_in(scan.ctx.locale, "detail-thread-create-spam", &args),
+        messages: Vec::new(),
+        targets: vec![who.id],
+        count,
+        join: false,
+    })
 }
 
 /// Members who joined within the window, counted together. Once a burst has fired, each member who
@@ -303,13 +363,23 @@ fn fingerprint(content: &str) -> Option<String> {
     Some(format!("{:x}", hasher.finish()))
 }
 
-fn handled_key(kind: &str, message: &MessageInfo, per_channel: bool) -> String {
+fn spam_channel(scan: &Scan<'_>, spam: &Spam, message: &MessageInfo) -> closure_sdk::ChannelId {
+    if spam.threads_as_parent_channel {
+        scan.memory
+            .parent_or_channel(message.guild_id, message.channel_id)
+    } else {
+        message.channel_id
+    }
+}
+
+fn handled_key(
+    kind: &str,
+    message: &MessageInfo,
+    per_channel: bool,
+    channel: closure_sdk::ChannelId,
+) -> String {
     if per_channel {
-        format!(
-            "{kind}:{}:{}",
-            message.author.id.get(),
-            message.channel_id.get()
-        )
+        format!("{kind}:{}:{}", message.author.id.get(), channel.get())
     } else {
         format!("{kind}:{}", message.author.id.get())
     }

@@ -56,6 +56,7 @@ impl Hit {
 pub struct Scan<'a> {
     pub ctx: &'a EventContext,
     pub recent: &'a closure_sdk::recent::RecentActions,
+    pub memory: &'a crate::memory::Memory,
     pub commit: bool,
     /// Whether the message is new. Edits count for the triggers that read text, not for spam.
     pub created: bool,
@@ -67,6 +68,9 @@ pub fn check(scan: &Scan<'_>, rule: &Rule, index: usize, context: &Context) -> O
     match &rule.triggers[index] {
         Trigger::Spam(spam) => spam::evaluate(scan, &rule.id, index, spam, context),
         Trigger::MemberJoinSpam(spam) => spam::evaluate_join(scan, &rule.id, index, spam, context),
+        Trigger::ThreadCreateSpam(spam) => {
+            spam::evaluate_thread(scan, &rule.id, index, spam, context)
+        }
         Trigger::MemberJoin(join) => member_join(ctx, join.only_new, join.new_threshold, context),
         Trigger::MemberLeave(_) => matches!(context.source, Source::Leave)
             .then(|| Hit::about(say(ctx, "detail-leave", &Args::new()), context)),

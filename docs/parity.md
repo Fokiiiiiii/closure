@@ -51,11 +51,11 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | `cooldown`, `allow_further_rules`, `conditions.member_age`, `affects_bots/self` | `cooldown` (per rule and member), `continue_after_match`, `scope` (channels, roles, bots, moderators, `member_age`). No `presets` |
 | `match_words` | `words`: whole word or contains, case, `normalize`, `strip_markdown`, message or username targets. No loose matching, no embeds |
 | `match_links`, `match_invites` | `links`: any, allowlist, blocklist, subdomains, bare domains, include and exclude regexes. `invites`: allowed and blocked codes. No guild rules |
-| windowed spam triggers | `spam`: messages, mentions, links, attachments, emojis, lines, characters, stickers, duplicates; `within`, `per_channel`, `distinct_channels`, identical-text options, burst handled once. No `distinct_users`, no thread-parent channels |
+| windowed spam triggers | `spam`: messages, mentions, links, attachments, emojis, lines, characters, stickers, duplicates; `within`, `per_channel`, `distinct_channels`, `threads_as_parent_channel`, identical-text options, burst handled once. No `distinct_users` |
 | `match_regex`, attachment type, MIME type | `regex` (linear time, size-limited), `attachments` (count, extensions, MIME types with `type/*`) |
 | `role_added`, `role_removed` | `role_added`, `role_removed`: a role given or taken away (from `RolesChanged`; the bot's own role changes are left out for ten seconds) |
-| `thread_create`, `thread_archive`, `thread_unarchive`, `thread_delete` | `thread_created`, `thread_archived`, `thread_unarchived`, `thread_deleted`. No `thread_create_spam` yet |
-| `ban`, `unban`, `kick`, `warn`, `mute`, `unmute` | `case` with `kinds`: the cases the moderation modules record (`timeout` and `untimeout` stand for mute and unmute); `note` is not recorded yet |
+| `thread_create`, `thread_archive`, `thread_unarchive`, `thread_delete`, `thread_create_spam` | `thread_created`, `thread_archived`, `thread_unarchived`, `thread_deleted`, `thread_create_spam` |
+| `ban`, `unban`, `kick`, `warn`, `note`, `mute`, `unmute` | `case` with `kinds`: the cases the moderation modules record (`timeout` and `untimeout` stand for mute and unmute) |
 | `member_join` (`only_new`, `new_threshold`), `member_leave`, `member_join_spam` | `member_join`, `member_join_spam`, `member_leave` |
 | `counter_trigger` | `counter` (a trigger of a counter fired, or its reverse) |
 | `antiraid_level` | `antiraid_level` (the level changed, to or from the levels named). Its context carries `{level}` and `{old}` |

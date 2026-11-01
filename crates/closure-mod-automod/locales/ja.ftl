@@ -281,3 +281,7 @@ permission-automod-antiraid-view = 荒らし対策のレベルと隔離を見る
 permission-automod-antiraid-set = 荒らし対策のレベルを上げ下げする
 permission-automod-antiraid-release = 荒らし対策の隔離からメンバーを解放する
 reason-automod-reply-expired = automod: 返信の期限が来ました
+
+trigger-thread-create-spam = メンバーが短時間にスレッドを作成
+detail-thread-create-spam = { $window }以内にスレッドを{ $count }個作成
+config-automod-threads_as_parent_channel = スパムの集計で、親が分かるスレッドを親チャンネルとして数えます。

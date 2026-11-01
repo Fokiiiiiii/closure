@@ -213,6 +213,7 @@ pub enum Trigger {
     Spam(Spam),
     MemberJoin(MemberJoin),
     MemberJoinSpam(JoinSpam),
+    ThreadCreateSpam(JoinSpam),
     MemberLeave(Empty),
     RoleAdded(RoleList),
     RoleRemoved(RoleList),
@@ -457,6 +458,7 @@ pub struct Stickers {
 /// A count of something across the messages of a member within a window.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools, reason = "independent spam options")]
 pub struct Spam {
     pub measure: Measure,
     /// Trips when the measure, summed over the window, reaches this.
@@ -469,6 +471,8 @@ pub struct Spam {
     pub per_channel: bool,
     /// The window has to span this many channels.
     pub distinct_channels: Option<u32>,
+    #[serde(default)]
+    pub threads_as_parent_channel: bool,
     /// A text that was sent before in the window counts once.
     #[serde(default)]
     pub ignore_identical_messages: bool,
@@ -846,7 +850,7 @@ impl Trigger {
                     Ok(())
                 }
             }
-            Self::MemberJoinSpam(spam) => {
+            Self::MemberJoinSpam(spam) | Self::ThreadCreateSpam(spam) => {
                 let ok = (1..=MAX_AMOUNT).contains(&spam.amount)
                     && !spam.within.is_zero()
                     && spam.within <= MAX_WINDOW;
@@ -1197,6 +1201,7 @@ pub fn trigger_key(trigger: &Trigger) -> &'static str {
         Trigger::RoleAdded(_) => "trigger-role-added",
         Trigger::RoleRemoved(_) => "trigger-role-removed",
         Trigger::Case(_) => "trigger-case",
+        Trigger::ThreadCreateSpam(_) => "trigger-thread-create-spam",
         Trigger::ThreadCreated(_) => "trigger-thread-created",
         Trigger::ThreadArchived(_) => "trigger-thread-archived",
         Trigger::ThreadUnarchived(_) => "trigger-thread-unarchived",
@@ -1254,7 +1259,8 @@ pub fn event_key(trigger: &Trigger) -> &'static str {
         Trigger::MemberLeave(_) => "event-leaves",
         Trigger::RoleAdded(_) | Trigger::RoleRemoved(_) => "event-roles",
         Trigger::Case(_) => "event-cases",
-        Trigger::ThreadCreated(_)
+        Trigger::ThreadCreateSpam(_)
+        | Trigger::ThreadCreated(_)
         | Trigger::ThreadArchived(_)
         | Trigger::ThreadUnarchived(_)
         | Trigger::ThreadDeleted(_) => "event-threads",

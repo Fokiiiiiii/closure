@@ -405,3 +405,86 @@ async fn two_joins_of_one_join_burst_on_two_threads_punish_once() {
         );
     }
 }
+
+#[tokio::test]
+async fn thread_create_spam_counts_each_owner_within_the_window() {
+    use closure_core::event::ThreadInfo;
+    use closure_sdk::Event;
+    use twilight_model::id::Id;
+
+    let harness = flood(
+        json!({ "type": "thread_create_spam", "amount": 2, "within": "30s" }),
+        json!([{ "do": "warn" }]),
+    );
+    declare(&harness, MEMBER, &[]);
+    declare(&harness, OTHER_MEMBER, &[]);
+    let emit = |id, owner: Option<u64>| {
+        Event::ThreadCreated(ThreadInfo {
+            id: Id::new(id),
+            guild_id: Id::new(GUILD),
+            parent_id: Some(Id::new(CHANNEL)),
+            name: String::new(),
+            owner_id: owner.map(Id::new),
+            archived: false,
+            locked: false,
+            created_at: None,
+        })
+    };
+    harness.emit(emit(100, Some(MEMBER))).await.unwrap();
+    harness.emit(emit(101, Some(OTHER_MEMBER))).await.unwrap();
+    harness.emit(emit(102, None)).await.unwrap();
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
+    harness.emit(emit(103, Some(MEMBER))).await.unwrap();
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+    assert!(cases_of(&harness, OTHER_MEMBER).await.is_empty());
+    harness.advance(std::time::Duration::from_secs(31));
+    harness.emit(emit(104, Some(OTHER_MEMBER))).await.unwrap();
+    assert!(cases_of(&harness, OTHER_MEMBER).await.is_empty());
+}
+
+#[tokio::test]
+async fn spam_can_count_threads_as_their_parent_channel() {
+    for enabled in [false, true] {
+        let harness = flood(
+            json!({ "type": "spam", "measure": "messages", "amount": 2, "within": "30s",
+                "per_channel": true, "threads_as_parent_channel": enabled }),
+            delete(),
+        );
+        declare(&harness, 999_999_999, &[]);
+        for channel in [90, 91] {
+            harness.api().add_channel(
+                twilight_model::id::Id::new(channel),
+                Some(twilight_model::id::Id::new(GUILD)),
+            );
+        }
+        harness.thread_created(90, CHANNEL).await.unwrap();
+        harness.thread_created(91, CHANNEL).await.unwrap();
+        say_in(&harness, MEMBER, 90, "one").await;
+        say_in(&harness, MEMBER, 91, "two").await;
+        assert_eq!(
+            deletions(&harness),
+            if enabled { 2 } else { 0 },
+            "{:?}",
+            harness.api().actions()
+        );
+    }
+    let harness = flood(
+        json!({ "type": "spam", "measure": "messages", "amount": 2, "within": "30s",
+            "distinct_channels": 2, "threads_as_parent_channel": true }),
+        delete(),
+    );
+    declare(&harness, 999_999_999, &[]);
+    for channel in [90, 91, 92] {
+        harness.api().add_channel(
+            twilight_model::id::Id::new(channel),
+            Some(twilight_model::id::Id::new(GUILD)),
+        );
+    }
+    harness.thread_created(90, CHANNEL).await.unwrap();
+    harness.thread_created(91, CHANNEL).await.unwrap();
+    say_in(&harness, MEMBER, 90, "one").await;
+    say_in(&harness, MEMBER, 91, "two").await;
+    assert_eq!(deletions(&harness), 0);
+    say_in(&harness, MEMBER, 92, "unknown thread").await;
+    assert_eq!(deletions(&harness), 3);
+}

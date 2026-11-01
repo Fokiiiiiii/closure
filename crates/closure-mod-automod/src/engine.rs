@@ -96,6 +96,21 @@ struct Work {
 
 /// Handles a gateway event the rules read.
 pub async fn on_event(state: &State, ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
+    match &event {
+        Event::ThreadCreated(thread)
+        | Event::ThreadArchived(thread)
+        | Event::ThreadUnarchived(thread) => {
+            state
+                .memory
+                .remember_thread(thread.guild_id, thread.id, thread.parent_id);
+        }
+        Event::ThreadDeleted {
+            guild_id,
+            thread_id,
+            ..
+        } => state.memory.remember_thread(*guild_id, *thread_id, None),
+        _ => {}
+    }
     let Some(mut context) = Context::of_event(&event) else {
         return Ok(Flow::Continue);
     };
@@ -201,6 +216,7 @@ async fn process(
     let scan = Scan {
         ctx,
         recent: &state.recent,
+        memory: &state.memory,
         commit: !loaded.config.dry_run,
         created: context.created,
     };

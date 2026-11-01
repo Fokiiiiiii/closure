@@ -840,6 +840,8 @@ fn the_schema_accepts_the_events_actions_and_counters_and_rejects_unknown_keys()
                 "triggers": [
                     { "type": "member_join", "only_new": true, "new_threshold": "1h" },
                     { "type": "member_join_spam", "amount": 10, "within": "30s" },
+                    { "type": "thread_create_spam", "amount": 3, "within": "30s" },
+                    { "type": "spam", "measure": "messages", "amount": 3, "within": "30s", "threads_as_parent_channel": true },
                     { "type": "member_leave" },
                     { "type": "role_added", "roles": ["77"] },
                     { "type": "role_removed", "roles": ["77", "78"] },

@@ -188,8 +188,12 @@ the count reaches `amount`.
 | `within` | The window (at most one hour). Without one, the single message is measured. |
 | `per_channel` | Counts each channel on its own. Needs `within`. |
 | `distinct_channels` | The window has to span that many channels (2 to 50). Needs `within`. |
+| `threads_as_parent_channel` | Count known threads as their parent for `per_channel` and `distinct_channels`. Defaults to `false`; unknown threads count as themselves. |
 | `ignore_identical_messages` | A text that was sent again in the window counts once. |
 | `group_identical_messages` | Every counted message has to be the same text. |
+
+Thread parents are remembered from thread events in memory, up to 1,024 entries across servers.
+After a restart or eviction, a thread counts as itself until another event supplies its parent.
 
 A text is "the same" when its words are the same, with single spaces (`Hi  there` and `Hi there`
 are the same). Empty messages are never the same as each other.
@@ -224,6 +228,9 @@ own event and on no other. A member the event does not name is left out of the a
 # member_join_spam: members joined within a window; every member counted is punished, and a
 # member who joins while the burst is handled is punished on its own
 { type: member_join_spam, amount: 10, within: 30s }
+
+# thread_create_spam: one member creates this many threads within a window
+{ type: thread_create_spam, amount: 5, within: 30s }
 
 # member_leave: a member left the server
 { type: member_leave }
@@ -334,7 +341,7 @@ run. The table says what each action needs.
 | words, regex, links, invites, attachments, caps, repeat, stickers, any_message, spam | the author | the channel | yes |
 | member_join, member_join_spam, member_leave, role_added, role_removed | the member | none | none |
 | case | the target | none | none |
-| thread_created, thread_archived, thread_unarchived, thread_deleted | the owner, when Discord gives one | the parent channel | none |
+| thread_created, thread_archived, thread_unarchived, thread_deleted, thread_create_spam | the owner, when Discord gives one | the parent channel | none |
 | counter | the member the change was for, if it had one | the channel of the change | none |
 
 ### Templates
@@ -519,7 +526,7 @@ one got in some other way.
   Set `whole_words: false` for it.
 - Administrators are not known from a message. Only the moderator level counts for the exemption, so
   an administrator without a moderator role is checked like a member.
-- `distinct_users`, thread parents for spam, presets, `changePerms`, `startThread` and
+- `distinct_users`, presets, `changePerms`, `startThread` and
   `archiveThread`, coordinated spam, and the
   `match_visible_names` and `match_custom_status` matchers of the older automod are not in this
   version (see [the parity list](parity.md)).
