@@ -44,43 +44,6 @@ Warn members, note about them, and look at and revoke the cases of a server.
 
 ## Commands
 
-### `/slowmode`
-
-Set channel slowmode
-
-- Japanese name: `slowmode`
-- Japanese description: チャンネルの低速モードを設定
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `seconds` | seconds | integer | yes | min 0; max 21600 | Seconds from 0 to 21600 |
-| `channel` | channel | channel | no | - | Channel to change |
-| `duration` | duration | string | no | - | Time before restoring the previous value |
-
-### `/lock`
-
-Lock a channel
-
-- Japanese name: `lock`
-- Japanese description: チャンネルをロック
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `channel` | channel | channel | no | - | Channel to lock |
-| `duration` | duration | string | no | - | Time before restoring the previous permissions |
-| `reason` | reason | string | no | max_length 512 | Why |
-
-### `/unlock`
-
-Restore a locked channel
-
-- Japanese name: `unlock`
-- Japanese description: チャンネルのロックを解除
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `channel` | channel | channel | no | - | Channel to unlock |
-
 ### `/warn`
 
 Warn a member; the warning expires after a set number of days
@@ -115,30 +78,6 @@ Show the active warnings of a member
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member |
-
-### `/userinfo`
-
-Show a user's membership and case history
-
-- Japanese name: `userinfo`
-- Japanese description: ユーザーの参加情報とケース履歴を表示
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `user` | user | user | yes | - | User to inspect |
-
-### `/massban`
-
-Ban up to 50 users
-
-- Japanese name: `massban`
-- Japanese description: 最大50人をBAN
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `users` | users | string | yes | - | User IDs or mentions separated by spaces or commas |
-| `reason` | reason | string | yes | max_length 512 | Why |
-| `delete_days` | delete_days | integer | no | min 0; max 7 | Days of messages to delete, 0 to 7 |
 
 ### `/clear`
 
@@ -192,6 +131,67 @@ Revoke a case
 |---|---|---|---|---|---|
 | `number` | 番号 | integer | yes | - | Number of the case |
 | `reason` | 理由 | string | no | max_length 512 | Why it is revoked |
+
+### `/slowmode`
+
+Set channel slowmode
+
+- Japanese name: `slowmode`
+- Japanese description: チャンネルの低速モードを設定
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `seconds` | seconds | integer | yes | min 0; max 21600 | Seconds from 0 to 21600 |
+| `channel` | channel | channel | no | - | Channel to change |
+| `duration` | duration | string | no | - | Time before restoring the previous value |
+
+### `/lock`
+
+Lock a channel
+
+- Japanese name: `lock`
+- Japanese description: チャンネルをロック
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `channel` | channel | channel | no | - | Channel to lock |
+| `duration` | duration | string | no | - | Time before restoring the previous permissions |
+| `reason` | reason | string | no | max_length 512 | Why |
+
+### `/unlock`
+
+Restore a locked channel
+
+- Japanese name: `unlock`
+- Japanese description: チャンネルのロックを解除
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `channel` | channel | channel | no | - | Channel to unlock |
+
+### `/userinfo`
+
+Show a user's membership and case history
+
+- Japanese name: `userinfo`
+- Japanese description: ユーザーの参加情報とケース履歴を表示
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `user` | user | user | yes | - | User to inspect |
+
+### `/massban`
+
+Ban up to 50 users
+
+- Japanese name: `massban`
+- Japanese description: 最大50人をBAN
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `users` | users | string | yes | - | User IDs or mentions separated by spaces or commas |
+| `reason` | reason | string | yes | max_length 512 | Why |
+| `delete_days` | delete_days | integer | no | min 0; max 7 | Days of messages to delete, 0 to 7 |
 
 ### `/timeout`
 
