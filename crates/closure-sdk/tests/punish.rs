@@ -825,6 +825,8 @@ async fn a_lift_that_leaves_a_role_out_does_not_let_a_later_lift_give_it_back() 
 
 #[tokio::test]
 async fn a_role_taken_off_while_a_lift_gives_roles_back_is_given_back_later() {
+    // Its own member: the turns of a member are shared by every test of this binary.
+    const RACE_MEMBER: u64 = 8_100;
     let harness = harness();
     let held: Vec<u64> = (700..708).collect();
     let mut known: Vec<Role> = held.iter().map(|id| guild_role(*id, 1)).collect();
@@ -832,10 +834,10 @@ async fn a_role_taken_off_while_a_lift_gives_roles_back_is_given_back_later() {
     harness.api().set_roles(Id::new(1), known);
     harness
         .api()
-        .set_member(Id::new(1), member_with_roles(MEMBER, &held));
+        .set_member(Id::new(1), member_with_roles(RACE_MEMBER, &held));
     harness.set_config(json!({ "timeout": "role", "timeout_role": "30", "strip_remove": true }));
     harness
-        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .invoke(with_duration(target("timeout", RACE_MEMBER), "1h"))
         .await
         .unwrap();
     assert!(
@@ -847,18 +849,19 @@ async fn a_role_taken_off_while_a_lift_gives_roles_back_is_given_back_later() {
     // and a timeout that starts a few calls later takes 900 off while the lift is still running.
     harness
         .api()
-        .set_member(Id::new(1), member_with_roles(MEMBER, &[900]));
+        .set_member(Id::new(1), member_with_roles(RACE_MEMBER, &[900]));
     let (lift, punish) = tokio::time::timeout(Duration::from_secs(10), async {
         let later = async {
-            // Three calls: the lift has checked for other punishments by then, and is in its restore.
-            for _ in 0..3 {
+            // The lift holds the member's turn from its first call, so the timeout waits for it;
+            // starting once the first role is given back keeps the lift ahead of the timeout.
+            while !role_changed(&harness, 700, true) {
                 tokio::task::yield_now().await;
             }
             harness
-                .invoke(with_duration(target("timeout", MEMBER), "1h"))
+                .invoke(with_duration(target("timeout", RACE_MEMBER), "1h"))
                 .await
         };
-        tokio::join!(harness.invoke(target("untimeout", MEMBER)), later)
+        tokio::join!(harness.invoke(target("untimeout", RACE_MEMBER)), later)
     })
     .await
     .expect("the lift and the timeout finish");
@@ -873,7 +876,10 @@ async fn a_role_taken_off_while_a_lift_gives_roles_back_is_given_back_later() {
         "the timeout takes 900 off"
     );
 
-    harness.invoke(target("untimeout", MEMBER)).await.unwrap();
+    harness
+        .invoke(target("untimeout", RACE_MEMBER))
+        .await
+        .unwrap();
     assert!(
         role_changed(&harness, 900, true),
         "900 was taken off while the lift ran, and must be given back by a later lift"
