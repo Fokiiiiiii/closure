@@ -654,6 +654,21 @@ fn guild_to_request(event: &Event) -> Option<Id<GuildMarker>> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn dispatch_test_event(dispatcher: Dispatcher, event: &Event) {
+    let context = ShardContext {
+        cache: new_cache(),
+        dispatcher,
+        hooks: Arc::new(HookQueue::default()),
+        guild_hooks: Arc::new(NoHooks),
+        health: Arc::new(GatewayHealth::new(1)),
+        latency: Arc::default(),
+        members_intent: false,
+        shutdown: CancellationToken::new(),
+    };
+    handle_event(&context, ShardId::new(0, 1), None, event);
+}
+
 fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, event: &Event) {
     let before = before(&context.cache, event);
     context.cache.update(event);
@@ -668,7 +683,7 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
         context.latency.record(u64::from(id.number()), latency);
     }
 
-    for converted in convert::events(event, &before) {
+    for converted in context.dispatcher.convert_events(event, &before) {
         let recorded = offer_message(&context.hooks, &*context.guild_hooks, &converted);
         let hook = match &converted {
             ModuleEvent::GuildAvailable {

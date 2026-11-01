@@ -478,6 +478,130 @@ struct Deletions {
     reply_after: Option<Duration>,
 }
 
+/// Permissions captured for a private component remain valid for at most 15 minutes without refresh.
+#[derive(Default)]
+pub(crate) struct DmComponents {
+    entries: std::sync::Mutex<std::collections::HashMap<MessageId, DmOrigin>>,
+}
+
+#[derive(Clone)]
+struct DmOrigin {
+    guild: GuildId,
+    user: UserId,
+    roles: Vec<Id<RoleMarker>>,
+    permissions: Permissions,
+    locale: Option<Locale>,
+    at: std::time::Instant,
+}
+
+impl DmComponents {
+    pub(crate) fn remember(&self, message: MessageId, invocation: &CommandInvocation) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.len() >= 1_024 && !entries.contains_key(&message) {
+            entries.retain(|_, origin| origin.at.elapsed() < Duration::from_mins(15));
+            if entries.len() >= 1_024
+                && let Some(oldest) = entries
+                    .iter()
+                    .min_by_key(|(_, origin)| origin.at)
+                    .map(|(id, _)| *id)
+            {
+                entries.remove(&oldest);
+            }
+        }
+        entries.insert(
+            message,
+            DmOrigin {
+                guild: invocation.guild_id,
+                user: invocation.user.id,
+                roles: invocation.roles.clone(),
+                permissions: invocation.invoker_permissions,
+                locale: invocation.locale,
+                at: std::time::Instant::now(),
+            },
+        );
+    }
+
+    pub(crate) fn restore(
+        &self,
+        interaction: &twilight_model::application::interaction::Interaction,
+    ) -> Option<closure_core::event::Event> {
+        use twilight_model::application::interaction::InteractionType;
+        use twilight_model::gateway::payload::incoming::InteractionCreate;
+
+        if interaction.guild_id.is_some() || interaction.kind != InteractionType::MessageComponent {
+            return None;
+        }
+        let message = interaction.message.as_ref()?.id;
+        let author = interaction.author()?.id;
+        let origin = {
+            let entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let origin = entries.get(&message)?;
+            if origin.user != author || origin.at.elapsed() >= Duration::from_mins(15) {
+                return None;
+            }
+            origin.clone()
+        };
+        let mut restored = interaction.clone();
+        restored.guild_id = Some(origin.guild);
+        let gateway =
+            twilight_gateway::Event::InteractionCreate(Box::new(InteractionCreate(restored)));
+        let mut events = crate::convert::events(&gateway, &crate::convert::Before::default());
+        let closure_core::event::Event::Component(component) = events.first_mut()? else {
+            return None;
+        };
+        component.roles = origin.roles;
+        component.invoker_permissions = origin.permissions;
+        component.locale = origin.locale;
+        events.pop()
+    }
+}
+
+pub(crate) struct BoundTextApi {
+    pub(crate) inner: Arc<dyn DiscordApi>,
+    pub(crate) components: Arc<DmComponents>,
+    pub(crate) invocation: CommandInvocation,
+}
+
+#[async_trait]
+impl DiscordApi for BoundTextApi {
+    async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
+        let has_components = match &action {
+            Action::Respond {
+                token,
+                response: InteractionResponse::Message { reply },
+                ..
+            }
+            | Action::Followup { token, reply }
+            | Action::EditResponse { token, reply } => {
+                token.expose() == self.invocation.token.expose() && !reply.components.is_empty()
+            }
+            _ => false,
+        };
+        let outcome = self.inner.execute(action).await?;
+        if has_components
+            && let Outcome::Message(message) = &outcome
+            && message.channel_id != self.invocation.channel_id
+        {
+            self.components.remember(message.id, &self.invocation);
+        }
+        Ok(outcome)
+    }
+
+    async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
+        self.inner.channel_guild(channel).await
+    }
+
+    async fn guild_owner(&self, guild: GuildId) -> Result<Option<UserId>, DiscordError> {
+        self.inner.guild_owner(guild).await
+    }
+}
+
 /// Stands in for the host's API for the one answer a text command cannot give: a form. The
 /// module is told so in the guild's language, and nothing is shown.
 pub(crate) struct TextCommandApi {

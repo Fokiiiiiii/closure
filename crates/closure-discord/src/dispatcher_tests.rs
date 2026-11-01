@@ -1552,6 +1552,52 @@ async fn a_click_nobody_owns_or_whose_module_is_off_is_answered_in_the_users_lan
 }
 
 #[tokio::test]
+async fn dm_components_reach_the_existing_handler() {
+    use twilight_model::gateway::payload::incoming::InteractionCreate;
+    let warn = Probe::new("warn", &[], &[Capability::RespondToInteractions]);
+    warn.set(Behavior::RespondToClick);
+    let h = harness(&[(&warn, true)], limits(64, 4), DispatcherConfig::default()).await;
+    let Event::Command(mut invocation) = command("warn", None) else {
+        unreachable!()
+    };
+    invocation.token = InteractionToken::for_text_command(Id::new(3), Id::new(44));
+    invocation.user.id = Id::new(7);
+    invocation.roles = vec![Id::new(10)];
+    invocation.invoker_permissions = Permissions::MODERATE_MEMBERS;
+    h.dispatcher
+        .shared
+        .dm_components
+        .remember(Id::new(900), &invocation);
+    let interaction = serde_json::from_value(json!({
+        "application_id": "60", "channel": { "id": "300", "type": 1 },
+        "data": { "custom_id": "warn:confirm:*:", "component_type": 3, "values": ["spam"] },
+        "id": "51", "user": { "id": "7", "username": "mod", "discriminator": "0", "avatar": null },
+        "message": { "id": "900", "channel_id": "300", "author": { "id": "60", "username": "bot", "discriminator": "0", "avatar": null },
+            "content": "pick", "timestamp": "2026-10-24T00:00:00.000000+00:00", "edited_timestamp": null,
+            "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+            "attachments": [], "embeds": [], "pinned": false, "type": 0 },
+        "token": "dm-token", "type": 3, "version": 1, "entitlements": [], "authorizing_integration_owners": {}
+    })).unwrap();
+    let event =
+        twilight_gateway::Event::InteractionCreate(Box::new(InteractionCreate(interaction)));
+    let converted = h
+        .dispatcher
+        .convert_events(&event, &crate::convert::Before::default());
+    assert_eq!(converted.len(), 1);
+    let Event::Component(click) = &converted[0] else {
+        panic!("expected component")
+    };
+    assert_eq!(click.roles, invocation.roles);
+    assert_eq!(click.invoker_permissions, invocation.invoker_permissions);
+    crate::gateway::dispatch_test_event(h.dispatcher.clone(), &event);
+    h.dispatcher.flush().await;
+    assert_eq!(
+        warn.log(),
+        ["load", "component", "answered:true forged:true"]
+    );
+}
+
+#[tokio::test]
 async fn a_module_can_answer_the_click_it_was_given_and_no_other() {
     // The click is recorded under its guild before any module sees it, like a command.
     let warn = Probe::new("warn", &[], &[Capability::RespondToInteractions]);
