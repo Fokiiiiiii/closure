@@ -64,9 +64,13 @@ fn allowance_key(address: IpAddr) -> IpAddr {
     match address {
         IpAddr::V4(_) => address,
         IpAddr::V6(address) => {
-            let mut segments = address.segments();
-            segments[4..].fill(0);
-            IpAddr::V6(Ipv6Addr::from(segments))
+            if let Some(address) = address.to_ipv4_mapped() {
+                IpAddr::V4(address)
+            } else {
+                let mut segments = address.segments();
+                segments[4..].fill(0);
+                IpAddr::V6(Ipv6Addr::from(segments))
+            }
         }
     }
 }
@@ -202,6 +206,20 @@ mod tests {
         }
         assert!(limiter.blocked_at(other_host, start).is_some());
         assert_eq!(limiter.blocked_at(other_prefix, start), None);
+    }
+
+    #[test]
+    fn mapped_ipv4_addresses_keep_independent_allowances_and_match_ipv4() {
+        let limiter = FailureLimiter::default();
+        let start = Instant::now();
+        let first: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
+        let other: IpAddr = "::ffff:192.0.2.2".parse().unwrap();
+        for _ in 0..MAX_FAILURES {
+            limiter.record_failure_at(first, start);
+        }
+        assert!(limiter.blocked_at(first, start).is_some());
+        assert_eq!(limiter.blocked_at(other, start), None);
+        assert!(limiter.blocked_at(ip(1), start).is_some());
     }
 
     #[test]

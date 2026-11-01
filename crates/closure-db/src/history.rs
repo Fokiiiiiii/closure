@@ -166,8 +166,7 @@ impl HistoryBackend for Db {
                  channel_id = EXCLUDED.channel_id,
                  author_id = EXCLUDED.author_id,
                  author_bot = EXCLUDED.author_bot,
-                 content = CASE WHEN EXCLUDED.content = '' THEN saved_messages.content
-                     ELSE EXCLUDED.content END,
+                 content = EXCLUDED.content,
                  attachments = EXCLUDED.attachments,
                  embed_count = EXCLUDED.embed_count,
                  sticker_count = EXCLUDED.sticker_count,
@@ -527,7 +526,7 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn an_edit_replaces_the_text_and_an_empty_one_keeps_it(pool: PgPool) {
+    async fn an_edit_replaces_the_text_and_an_empty_one_clears_it(pool: PgPool) {
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
         let history = history(&db, 1);
@@ -550,15 +549,12 @@ mod tests {
         without_text.edited_at = Some(1_700_000_200);
         history.save(&without_text).await.unwrap();
         let stored = history.get(Id::new(5), Id::new(10)).await.unwrap().unwrap();
-        assert_eq!(
-            stored.content, "second",
-            "an empty text keeps the stored one"
-        );
+        assert_eq!(stored.content, "", "an empty update clears the stored text");
         assert_eq!(stored.edited_at, Some(1_700_000_200));
     }
 
     #[sqlx::test]
-    async fn an_edit_without_text_keeps_the_stored_text(pool: PgPool) {
+    async fn an_empty_edit_with_attachments_stays_empty_after_deletion(pool: PgPool) {
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
         let history = history(&db, 1);
@@ -566,15 +562,29 @@ mod tests {
             .save(&saved(10, 5, 7, 1_700_000_000, "abc"))
             .await
             .unwrap();
+
         let mut emptied = saved(10, 5, 7, 1_700_000_000, "");
+        emptied.attachments = vec![AttachmentInfo {
+            id: 3,
+            filename: "a.png".into(),
+            size: 9,
+            content_type: None,
+            url: "https://cdn.example/a.png".into(),
+        }];
         emptied.edited_at = Some(1_700_000_100);
         history.save(&emptied).await.unwrap();
+
         let stored = history.get(Id::new(5), Id::new(10)).await.unwrap().unwrap();
-        assert_eq!(
-            stored.content, "abc",
-            "an edit without text keeps the stored text"
-        );
-        assert_eq!(stored.edited_at, Some(1_700_000_100));
+        assert_eq!(stored.content, "");
+        assert_eq!(stored.attachments, emptied.attachments);
+
+        history
+            .mark_deleted(&[Id::new(10)], 1_700_000_200)
+            .await
+            .unwrap();
+        let deleted = history.get(Id::new(5), Id::new(10)).await.unwrap().unwrap();
+        assert_eq!(deleted.content, "");
+        assert_eq!(deleted.deleted_at, Some(1_700_000_200));
     }
 
     #[sqlx::test]
