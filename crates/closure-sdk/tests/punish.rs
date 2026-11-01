@@ -170,6 +170,20 @@ async fn timeout(cx: CommandCx, args: TimeOut) -> Result<(), UserError> {
     answer(&cx, &punisher, done).await
 }
 
+async fn auto_timeout(cx: CommandCx, args: TimeOut) -> Result<(), UserError> {
+    let role = punish::ensure_role(cx.ctx(), punish::RestrictionRole::Timeout, None)
+        .await
+        .unwrap();
+    let mut settings = Setup::default().settings();
+    settings.timeout = Method::Role;
+    settings.timeout_role = Some(role);
+    let punisher = Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings);
+    let done = punisher
+        .timeout(args.user, args.duration, args.reason)
+        .await?;
+    answer(&cx, &punisher, done).await
+}
+
 async fn untimeout(cx: CommandCx, args: Lift) -> Result<(), UserError> {
     let punisher = setup(&cx, Moderator::of(cx.user()))?;
     let case = punisher.lift_timeout(args.user, args.reason).await?;
@@ -2250,24 +2264,31 @@ fn named_role(id: u64, name: &str, position: i64) -> Role {
 
 #[tokio::test]
 async fn a_role_of_the_same_name_that_closure_did_not_make_is_not_adopted() {
-    let harness = harness();
+    let harness = Harness::new(
+        module().command(Command::<TimeOut>::new("auto_timeout").handler(auto_timeout)),
+    )
+    .unwrap();
     harness
         .api()
         .set_roles(Id::new(1), vec![named_role(700, "Mute", 1)]);
     harness
         .api()
         .set_member(Id::new(1), member_with_roles(MEMBER, &[]));
-    harness.set_config(json!({ "timeout": "role" }));
 
-    harness
-        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+    let replies = harness
+        .invoke(with_duration(target("auto_timeout", MEMBER), "1h"))
         .await
         .unwrap();
-
-    assert!(
-        !role_changed(&harness, 700, true),
-        "a same-named role that someone else made may grant access the name does not show"
-    );
+    let created = harness
+        .api()
+        .roles(Id::new(1))
+        .into_iter()
+        .find(|role| role.name == "Mute" && role.id.get() != 700)
+        .expect("dedicated role created");
+    assert!(role_changed(&harness, created.id.get(), true));
+    assert!(!role_changed(&harness, 700, true));
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+    assert!(format!("{replies:?}").contains("case #"));
 }
 
 #[tokio::test]
