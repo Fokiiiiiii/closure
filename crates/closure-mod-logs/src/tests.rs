@@ -827,6 +827,10 @@ fn member(id: u64) -> UserInfo {
 fn overwrite_audit(kind: AuditLogEventType, channel: u64, target: u64, by: u64) -> AuditLogEntry {
     let mut entry = audit(kind, channel, by, None, 5);
     entry.options = Some(serde_json::from_value(json!({ "id": target.to_string() })).unwrap());
+    entry.changes = vec![AuditLogChange::Allow {
+        old: None,
+        new: Some(Permissions::VIEW_CHANNEL),
+    }];
     entry
 }
 
@@ -1022,8 +1026,18 @@ async fn an_overwrite_change_is_named_by_the_newest_entry_of_any_kind() {
         5,
     );
     newer.options = Some(serde_json::from_value(json!({ "id": "9" })).unwrap());
+    newer.changes = vec![AuditLogChange::Allow {
+        old: Some(Permissions::SEND_MESSAGES),
+        new: Some(Permissions::VIEW_CHANNEL),
+    }];
     harness.api().add_audit_entry(older);
     harness.api().add_audit_entry(newer);
+    let mut before = channel_info("general", None);
+    before.overwrites = vec![role_overwrite(
+        9,
+        Permissions::SEND_MESSAGES,
+        Permissions::empty(),
+    )];
     let mut after = channel_info("general", None);
     after.overwrites = vec![role_overwrite(
         9,
@@ -1032,10 +1046,7 @@ async fn an_overwrite_change_is_named_by_the_newest_entry_of_any_kind() {
     )];
 
     harness
-        .emit(Event::ChannelChanged {
-            before: channel_info("general", None),
-            after,
-        })
+        .emit(Event::ChannelChanged { before, after })
         .await
         .unwrap();
 
@@ -1670,4 +1681,252 @@ async fn an_edit_that_leaves_the_text_as_it_was_is_not_logged() {
         .unwrap();
 
     assert!(sent(&harness).is_empty(), "{:?}", sent(&harness).len());
+}
+
+#[tokio::test]
+async fn bulk_deletion_excludes_bots_from_the_summary() {
+    for (ids, expected_count, unknown) in [
+        (vec![22], 0, false),
+        (vec![22, 23], 1, false),
+        (vec![22, 23, 24], 2, true),
+    ] {
+        let harness = harness();
+        let mut bot = saved(22, "bot", Vec::new());
+        bot.author_bot = true;
+        harness.seed_message(bot).await.unwrap();
+        harness
+            .seed_message(saved(23, "human", Vec::new()))
+            .await
+            .unwrap();
+        harness
+            .emit(Event::MessagesBulkDeleted {
+                guild_id: Id::new(GUILD),
+                channel_id: Id::new(CHANNEL),
+                message_ids: ids.into_iter().map(Id::new).collect(),
+            })
+            .await
+            .unwrap();
+
+        let posted = sent(&harness);
+        if expected_count == 0 {
+            assert!(posted.is_empty());
+        } else {
+            assert_eq!(posted.len(), 1);
+            assert!(
+                posted[0]
+                    .embeds
+                    .contains(&format!("{expected_count} messages deleted")),
+                "{}",
+                posted[0].embeds
+            );
+            assert_eq!(
+                posted[0].embeds.contains("1 of them were not kept"),
+                unknown
+            );
+            assert!(!posted[0].embeds.contains("bot"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn mismatched_audit_values_do_not_name_an_actor() {
+    let harness = self::harness();
+    let mut nick = audit(AuditLogEventType::MemberUpdate, 40, 9, None, 5);
+    nick.changes = vec![AuditLogChange::Nick {
+        old: None,
+        new: Some("other".into()),
+    }];
+    harness.api().add_audit_entry(nick);
+    harness
+        .emit(Event::NicknameChanged {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+            before: None,
+            after: Some("new".into()),
+        })
+        .await
+        .unwrap();
+    assert!(!sent(&harness)[0].embeds.contains("<@9>"));
+
+    let harness = self::harness();
+    let mut timeout = audit(AuditLogEventType::MemberUpdate, 40, 9, None, 5);
+    timeout.changes = vec![AuditLogChange::CommunicationDisabledUntil {
+        old: None,
+        new: None,
+    }];
+    harness.api().add_audit_entry(timeout);
+    harness
+        .emit(Event::TimeoutChanged {
+            guild_id: Id::new(GUILD),
+            user: member(40),
+            before: None,
+            after: Some(1_800_000_000),
+        })
+        .await
+        .unwrap();
+    assert!(!sent(&harness)[0].embeds.contains("<@9>"));
+
+    let harness = self::harness();
+    harness
+        .api()
+        .add_audit_entry(audit(AuditLogEventType::ChannelUpdate, CHANNEL, 9, None, 5));
+    let mut wrong = overwrite_audit(AuditLogEventType::ChannelOverwriteCreate, CHANNEL, 9, 8);
+    wrong.changes = vec![AuditLogChange::Allow {
+        old: None,
+        new: Some(Permissions::SEND_MESSAGES),
+    }];
+    harness.api().add_audit_entry(wrong);
+    let mut after = channel_info("general", None);
+    after.overwrites = vec![role_overwrite(
+        9,
+        Permissions::VIEW_CHANNEL,
+        Permissions::empty(),
+    )];
+    harness
+        .emit(Event::ChannelChanged {
+            before: channel_info("general", None),
+            after,
+        })
+        .await
+        .unwrap();
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1);
+    assert!(!posted[0].embeds.contains("<@9>"));
+    assert!(!posted[0].embeds.contains("<@8>"));
+}
+
+#[tokio::test]
+async fn overwrite_update_without_old_permissions_names_no_one() {
+    let harness = harness();
+    harness.api().add_audit_entry(overwrite_audit(
+        AuditLogEventType::ChannelOverwriteUpdate,
+        CHANNEL,
+        9,
+        8,
+    ));
+    let mut before = channel_info("general", None);
+    before.overwrites = vec![role_overwrite(
+        9,
+        Permissions::empty(),
+        Permissions::empty(),
+    )];
+    let mut after = before.clone();
+    after.overwrites[0].allow = Permissions::VIEW_CHANNEL;
+    harness
+        .emit(Event::ChannelChanged { before, after })
+        .await
+        .unwrap();
+    assert!(!sent(&harness)[0].embeds.contains("<@8>"));
+}
+
+#[tokio::test]
+async fn role_update_requires_matching_values() {
+    for (old, expected) in [("old", true), ("different", false)] {
+        let harness = harness();
+        let mut entry = audit(AuditLogEventType::RoleUpdate, 60, 9, None, 5);
+        entry.changes = vec![AuditLogChange::Name {
+            old: Some(old.into()),
+            new: Some("new".into()),
+        }];
+        harness.api().add_audit_entry(entry);
+        let role = |name: &str| RoleInfo {
+            id: Id::new(60),
+            guild_id: Id::new(GUILD),
+            name: name.into(),
+            position: 0,
+            permissions: Permissions::empty(),
+            color: 0,
+            hoist: false,
+            mentionable: false,
+        };
+        harness
+            .emit(Event::RoleChanged {
+                before: role("old"),
+                after: role("new"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(sent(&harness)[0].embeds.contains("<@9>"), expected);
+    }
+}
+
+#[derive(Debug, Default)]
+struct SlowAuditApi {
+    inner: closure_core::testing::MockApi,
+}
+
+#[async_trait::async_trait]
+impl closure_core::client::DiscordApi for SlowAuditApi {
+    async fn execute(&self, action: Action) -> Result<closure_core::action::Outcome, DiscordError> {
+        if matches!(action, Action::GetAuditLog { .. }) {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+        closure_core::client::DiscordApi::execute(&self.inner, action).await
+    }
+
+    async fn channel_guild(
+        &self,
+        _channel: ChannelId,
+    ) -> Result<Option<closure_core::event::GuildId>, DiscordError> {
+        Ok(Some(Id::new(GUILD)))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_audit_lookup_still_posts_without_an_actor() {
+    use closure_core::client::ApiClient;
+    use closure_core::settings::GuildPolicy;
+    use closure_i18n::TranslatorBuilder;
+    use std::sync::Arc;
+
+    let module = module().unwrap();
+    let manifest = module.manifest();
+    let api = Arc::new(SlowAuditApi::default());
+    let client = ApiClient::new(
+        api.clone(),
+        manifest.capabilities.clone(),
+        manifest.id.clone(),
+    )
+    .scoped_to(Id::new(GUILD));
+    let policy = GuildPolicy {
+        log_channel: Some(Id::new(LOG)),
+        ..GuildPolicy::default()
+    };
+    let translator = Arc::new(TranslatorBuilder::new().unwrap().build());
+    let ctx = EventContext::new(
+        manifest.id.clone(),
+        Id::new(GUILD),
+        client,
+        Locale::En,
+        Arc::new(policy),
+        Arc::new(config(None, true)),
+        translator,
+    );
+    let task = tokio::spawn(on_event(
+        ctx,
+        Event::RoleCreated(RoleInfo {
+            id: Id::new(60),
+            guild_id: Id::new(GUILD),
+            name: "mods".into(),
+            position: 0,
+            permissions: Permissions::empty(),
+            color: 0,
+            hoist: false,
+            mentionable: false,
+        }),
+    ));
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+    assert!(task.is_finished());
+    task.await.unwrap().unwrap();
+    let actions = api.inner.actions();
+    let posted = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SendMessage { embeds, .. } => Some(serde_json::to_string(embeds).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!posted.contains("<@9>"));
 }

@@ -1,7 +1,7 @@
 //! Who made a change, from the audit log. Discord reports a kick as a leave, and the events of a change
 //! do not name whoever made it; the audit log names both. An event is given the newest entry of its kind
-//! that names the same target within [`AUDIT_WINDOW_SECONDS`], so an older change to the same member or
-//! role is never named for this one.
+//! that names the same target within [`AUDIT_WINDOW_SECONDS`]. Where values are available, they are
+//! checked against the event; the time window alone cannot distinguish every repeated action.
 
 use closure_core::action::{Action, AuditLogQuery, Outcome};
 use closure_core::event::{ChannelId, Event, MessageId, UserId};
@@ -189,78 +189,144 @@ pub(crate) async fn audit_of(
     })
 }
 
-/// Whether an entry changed the field the event reports. Discord keeps a member's nickname and timeout
-/// in entries of one kind, so the changes of the entry say which of them it is.
+/// Whether an entry's values match the event's change.
 fn changes_the_field(entry: &AuditLogEntry, event: &Event) -> bool {
     match event {
-        Event::NicknameChanged { .. } => entry
-            .changes
-            .iter()
-            .any(|change| matches!(change, AuditLogChange::Nick { .. })),
-        Event::TimeoutChanged { .. } => entry
-            .changes
-            .iter()
-            .any(|change| matches!(change, AuditLogChange::CommunicationDisabledUntil { .. })),
+        Event::NicknameChanged { before, after, .. } => entry.changes.iter().any(|change| {
+            matches!(change, AuditLogChange::Nick { old, new } if old == before && new == after)
+        }),
+        Event::TimeoutChanged { before, after, .. } => entry.changes.iter().any(|change| {
+            matches!(change, AuditLogChange::CommunicationDisabledUntil { old, new }
+                if old.map(twilight_model::util::Timestamp::as_secs) == *before && new.map(twilight_model::util::Timestamp::as_secs) == *after)
+        }),
+        Event::ChannelChanged { before, after } => {
+            permissions::overwrite_changes(&before.overwrites, &after.overwrites).is_empty()
+                && [before.name != after.name, before.topic != after.topic, before.nsfw != after.nsfw, before.parent_id != after.parent_id].into_iter().filter(|changed| *changed).count() == 1
+                && entry.changes.iter().any(|change| match change {
+                    AuditLogChange::Name { old, new } => old == &before.name && new == &after.name && before.name != after.name,
+                    AuditLogChange::Topic { old, new } => old == &before.topic && new == &after.topic && before.topic != after.topic,
+                    AuditLogChange::Nsfw { old, new } => *old == Some(before.nsfw) && *new == Some(after.nsfw) && before.nsfw != after.nsfw,
+                    _ => false,
+                })
+        }
+        Event::RoleChanged { before, after } => {
+            [before.name != after.name, before.color != after.color, before.position != after.position, before.hoist != after.hoist, before.mentionable != after.mentionable, before.permissions != after.permissions].into_iter().filter(|changed| *changed).count() == 1
+                && entry.changes.iter().any(|change| match change {
+                    AuditLogChange::Name { old, new } => old.as_ref() == Some(&before.name) && new.as_ref() == Some(&after.name) && before.name != after.name,
+                    AuditLogChange::Color { old, new } => *old == Some(u64::from(before.color)) && *new == Some(u64::from(after.color)) && before.color != after.color,
+                    AuditLogChange::Position { old, new } => old.and_then(|v| i64::try_from(v).ok()) == Some(before.position) && new.and_then(|v| i64::try_from(v).ok()) == Some(after.position) && before.position != after.position,
+                    AuditLogChange::Hoist { old, new } => *old == Some(before.hoist) && *new == Some(after.hoist) && before.hoist != after.hoist,
+                    AuditLogChange::Mentionable { old, new } => *old == Some(before.mentionable) && *new == Some(after.mentionable) && before.mentionable != after.mentionable,
+                    AuditLogChange::Permissions { old, new } => *old == Some(before.permissions) && *new == Some(after.permissions) && before.permissions != after.permissions,
+                    _ => false,
+                })
+        }
+        Event::EmojiUpdated { before, after } => before.name != after.name && entry.changes.iter().any(|change| matches!(change, AuditLogChange::Name { old, new } if old.as_ref() == Some(&before.name) && new.as_ref() == Some(&after.name))),
+        Event::StickerUpdated { before, after } => {
+            (before.name != after.name) != (before.description != after.description)
+                && entry.changes.iter().any(|change| match change {
+                    AuditLogChange::Name { old, new } => before.name != after.name && old.as_ref() == Some(&before.name) && new.as_ref() == Some(&after.name),
+                    AuditLogChange::Description { old, new } => before.description != after.description && old.as_ref() == Some(&before.description) && new.as_ref() == Some(&after.description),
+                    _ => false,
+                })
+        }
+        Event::StageUpdated { before, after } => before.topic != after.topic && entry.changes.iter().any(|change| matches!(change, AuditLogChange::Topic { old, new } if old.as_ref() == Some(&before.topic) && new.as_ref() == Some(&after.topic))),
+        Event::ThreadArchived(_) => entry.changes.iter().any(|change| matches!(change, AuditLogChange::Archived { old: Some(false), new: Some(true) })),
+        Event::ThreadUnarchived(_) => entry.changes.iter().any(|change| matches!(change, AuditLogChange::Archived { old: Some(true), new: Some(false) })),
+        Event::RolesChanged(change) => {
+            let mut added = Vec::new();
+            let mut removed = Vec::new();
+            for item in &entry.changes {
+                match item {
+                    AuditLogChange::RoleAdded { new, old } if old.is_empty() => added.extend(new.iter().map(|role| role.id)),
+                    AuditLogChange::RoleRemoved { new, old } if old.is_empty() => removed.extend(new.iter().map(|role| role.id)),
+                    _ => {}
+                }
+            }
+            added.sort_unstable();
+            removed.sort_unstable();
+            let mut expected_added = change.added.clone();
+            let mut expected_removed = change.removed.clone();
+            expected_added.sort_unstable();
+            expected_removed.sort_unstable();
+            (!added.is_empty() || !removed.is_empty()) && added == expected_added && removed == expected_removed
+        }
         _ => true,
     }
 }
 
-/// The audit log entry of a change: the change of the event's own target, or, for a channel whose
-/// permission overwrites changed, the change of one of them.
 pub(crate) async fn change_audit_of(
     ctx: &EventContext,
     config: &Config,
     event: &Event,
 ) -> Option<AuditEntry> {
-    if let Some(audit) = audit_of(ctx, config, event).await {
-        return Some(audit);
+    if let Event::ChannelChanged { before, after } = event {
+        let changes = permissions::overwrite_changes(&before.overwrites, &after.overwrites);
+        if !changes.is_empty() {
+            if changes.len() != 1
+                || !config.channels
+                || before.name != after.name
+                || before.topic != after.topic
+                || before.parent_id != after.parent_id
+                || before.nsfw != after.nsfw
+            {
+                return None;
+            }
+            let change = &changes[0];
+            let existed = before
+                .overwrites
+                .iter()
+                .any(|item| item.target == change.target);
+            let exists = after
+                .overwrites
+                .iter()
+                .any(|item| item.target == change.target);
+            let kind = match (existed, exists) {
+                (false, true) => AuditLogEventType::ChannelOverwriteCreate,
+                (true, false) => AuditLogEventType::ChannelOverwriteDelete,
+                (true, true) => AuditLogEventType::ChannelOverwriteUpdate,
+                (false, false) => return None,
+            };
+            return overwrite_audit_of(ctx, after.id, change, kind).await;
+        }
     }
-    let Event::ChannelChanged { before, after } = event else {
-        return None;
-    };
-    let targets: Vec<u64> = permissions::overwrite_changes(&before.overwrites, &after.overwrites)
-        .iter()
-        .map(|change| permissions::target_id(change.target))
-        .collect();
-    if targets.is_empty() {
-        return None;
-    }
-    overwrite_audit_of(ctx, after.id, &targets).await
+    audit_of(ctx, config, event).await
 }
 
-/// The newest audit log entry that changed a permission overwrite of `channel` for one of `targets`,
-/// when there is one, of any of the three kinds of overwrite change. Discord names the channel as the
-/// target of the entry, and the overwritten role or member in its options.
 async fn overwrite_audit_of(
     ctx: &EventContext,
     channel: ChannelId,
-    targets: &[u64],
+    change: &permissions::OverwriteChange,
+    kind: AuditLogEventType,
 ) -> Option<AuditEntry> {
-    let now = ctx.now();
-    let mut newest: Option<AuditLogEntry> = None;
-    for kind in [
-        AuditLogEventType::ChannelOverwriteCreate,
-        AuditLogEventType::ChannelOverwriteUpdate,
-        AuditLogEventType::ChannelOverwriteDelete,
-    ] {
-        let entries = recent_entries(ctx, kind).await?;
-        let found = entries.into_iter().find(|entry| {
-            entry.target_id.is_some_and(|id| id.get() == channel.get())
-                && entry
-                    .options
-                    .as_ref()
-                    .is_some_and(|options| options.id.is_some_and(|id| targets.contains(&id.get())))
-                && within_window(now, entry)
+    let entries = recent_entries(ctx, kind).await?;
+    let entry = entries.iter().find(|entry| {
+        let matches_permissions = |old: Option<twilight_model::guild::Permissions>, new: Option<twilight_model::guild::Permissions>, before, after| {
+            match kind {
+                AuditLogEventType::ChannelOverwriteCreate => old.is_none() && new == Some(after),
+                AuditLogEventType::ChannelOverwriteDelete => old == Some(before) && new.is_none(),
+                AuditLogEventType::ChannelOverwriteUpdate => old == Some(before) && new == Some(after),
+                _ => false,
+            }
+        };
+        let allow = change.before.allow == change.after.allow || entry.changes.iter().any(|item| {
+            matches!(item, AuditLogChange::Allow { old, new } if matches_permissions(*old, *new, change.before.allow, change.after.allow))
         });
-        if let Some(entry) = found
-            && newest.as_ref().is_none_or(|current| entry.id > current.id)
-        {
-            newest = Some(entry);
-        }
-    }
-    newest.map(|entry| AuditEntry {
+        let deny = change.before.deny == change.after.deny || entry.changes.iter().any(|item| {
+            matches!(item, AuditLogChange::Deny { old, new } if matches_permissions(*old, *new, change.before.deny, change.after.deny))
+        });
+        let consistent = entry.changes.iter().all(|item| match item {
+            AuditLogChange::Allow { old, new } => matches_permissions(*old, *new, change.before.allow, change.after.allow),
+            AuditLogChange::Deny { old, new } => matches_permissions(*old, *new, change.before.deny, change.after.deny),
+            _ => true,
+        });
+        entry.target_id.is_some_and(|id| id.get() == channel.get())
+            && entry.options.as_ref().is_some_and(|options| options.id.is_some_and(|id| id.get() == permissions::target_id(change.target)))
+            && within_window(ctx.now(), entry) && allow && deny && consistent
+    })?;
+    Some(AuditEntry {
         by: entry.user_id,
-        reason: entry.reason,
+        reason: entry.reason.clone(),
     })
 }
 

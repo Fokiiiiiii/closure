@@ -62,7 +62,8 @@ modules:
   threads, bans, unbans, and a voice disconnect or move show who made the change and the reason they gave,
   from the audit log. A kick shows as a kick, not as a departure. The audit log is read for the newest
   entry of the same kind that names the same target and is less than a minute old; that minute is an
-  assumption, not measured. A change the member made to themselves, or one Discord made, shows no name.
+  assumption, not measured. Updates are attributed only when their available changed values match;
+  some complex changes therefore show no name. A change the member made to themselves, or one Discord made, shows no name.
   A deleted message shows who deleted it when the audit log has a deletion of a message by the same author
   in the same channel, within the minute; a message its author deleted shows no name. The audit log does
   not say which message was deleted, so a moderator's deletion of another message by the same author in
@@ -71,7 +72,8 @@ modules:
   entry for the same channel and the same number of messages; Discord's documentation does not promise
   the channel in a bulk delete entry, so an entry without it shows no name. Reading the
   audit log needs the bot to view it: without that, entries are still posted, without who made the change,
-  and the failure is logged.
+  and the failure is logged. If the audit lookup does not finish within two seconds, the entry is
+  posted without who made the change.
 
 ## Files
 

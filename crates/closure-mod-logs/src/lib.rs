@@ -32,6 +32,8 @@ const JA: &str = include_str!("../locales/ja.ftl");
 /// Discord takes at most this many characters in one embed field value.
 const FIELD_LIMIT: usize = 1024;
 
+const AUDIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The module's section of a guild's configuration. One switch per kind of entry, as the
 /// configuration names them.
 #[allow(clippy::struct_excessive_bools)]
@@ -170,6 +172,17 @@ pub fn module() -> Result<SdkModule, CoreError> {
     builder()?.build()
 }
 
+async fn audit_within_deadline(
+    audit: impl std::future::Future<Output = Option<audit::AuditEntry>>,
+) -> Option<audit::AuditEntry> {
+    if let Ok(entry) = tokio::time::timeout(AUDIT_TIMEOUT, audit).await {
+        entry
+    } else {
+        tracing::warn!("audit lookup timed out; the entry is posted without who made the change");
+        None
+    }
+}
+
 async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     let config: Config = parse_module_config(&ctx)?;
     let Some(channel) = destination(&ctx, &config)? else {
@@ -187,7 +200,8 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             message_id,
             ..
         } if config.message_deletes => {
-            let audit = deletion_audit_of(&ctx, *channel_id, *message_id).await;
+            let audit =
+                audit_within_deadline(deletion_audit_of(&ctx, *channel_id, *message_id)).await;
             vec![add_audit(
                 &ctx,
                 deleted(&ctx, *channel_id, *message_id).await?,
@@ -199,7 +213,8 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             message_ids,
             ..
         } if config.message_deletes => {
-            let audit = bulk_audit_of(&ctx, *channel_id, message_ids.len()).await;
+            let audit =
+                audit_within_deadline(bulk_audit_of(&ctx, *channel_id, message_ids.len())).await;
             bulk_deleted(&ctx, *channel_id, message_ids)
                 .await?
                 .into_iter()
@@ -210,7 +225,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             vec![joined_entry(&ctx, member)?]
         }
         Event::MemberLeft { user, .. } if config.member_leaves => {
-            let kick = audit_of(&ctx, &config, &event).await;
+            let kick = audit_within_deadline(audit_of(&ctx, &config, &event)).await;
             let (title, color) = if kick.is_some() {
                 ("logs-kicked", Color::Error)
             } else {
@@ -223,7 +238,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             )]
         }
         Event::BanAdded { user, .. } if config.bans => {
-            let ban = audit_of(&ctx, &config, &event).await;
+            let ban = audit_within_deadline(audit_of(&ctx, &config, &event)).await;
             vec![add_audit(
                 &ctx,
                 member_entry(&ctx, "logs-banned", Color::Error, user)?,
@@ -231,7 +246,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             )]
         }
         Event::BanRemoved { user, .. } if config.bans => {
-            let unban = audit_of(&ctx, &config, &event).await;
+            let unban = audit_within_deadline(audit_of(&ctx, &config, &event)).await;
             vec![add_audit(
                 &ctx,
                 member_entry(&ctx, "logs-unbanned", Color::Success, user)?,
@@ -243,7 +258,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
                 let audit = if entries.is_empty() {
                     None
                 } else {
-                    change_audit_of(&ctx, &config, &event).await
+                    audit_within_deadline(change_audit_of(&ctx, &config, &event)).await
                 };
                 // The bot's own housekeeping (its restriction roles and the overwrites it sets) is not
                 // logged. Its moderation actions are, with the bot named as the one who made them.
@@ -530,7 +545,12 @@ async fn bulk_deleted(
             None => unkept += 1,
         }
     }
-    let count = u64::try_from(messages.len()).unwrap_or(u64::MAX);
+    let count = u64::try_from(entries.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(unkept);
+    if count == 0 {
+        return Ok(entries);
+    }
     let mut summary = card(
         ctx.t_in(ctx.locale, "logs-bulk", &Args::new().with("count", count)),
         Color::Error,
