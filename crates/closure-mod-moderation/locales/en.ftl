@@ -1,4 +1,45 @@
 module-description = Warn members, note about them, and look at and revoke the cases of a server.
+command-userinfo = userinfo
+    .description = Show a user's membership and case history
+option-userinfo-user = user
+    .description = User to inspect
+command-massban = massban
+    .description = Ban up to 50 users
+option-massban-users = users
+    .description = User IDs or mentions separated by spaces or commas
+option-massban-reason = reason
+    .description = Why
+option-massban-delete_days = delete_days
+    .description = Days of messages to delete, 0 to 7
+permission-moderation-userinfo = View user information and cases.
+permission-moderation-massban = Ban multiple users.
+userinfo-header = { $user } — account created { $created }
+userinfo-unknown = unknown
+userinfo-member =
+    Joined: { $joined }
+    Nickname: { $nick }
+    Roles: { $roles }
+userinfo-timeout =
+    Timeout until { $until }
+userinfo-role-mute =
+    Timeout role is present.
+userinfo-cases =
+    Cases: { $count }
+userinfo-ban =
+    An active ban case is recorded.
+massban-too-many = At most 50 distinct users are allowed.
+massban-missing = Give users and a reason.
+massban-summary = Banned: { $success }; failed: { $failed }; excluded: { $excluded }.
+massban-invalid = { $user }: invalid user ID or mention.
+massban-self = { $user }: cannot ban yourself.
+massban-owner = { $user }: server owner.
+massban-bot = { $user }: bot.
+massban-higher = { $user }: role is too high.
+massban-check-failed = { $user }: target check failed.
+massban-failed = { $user }: recording failed; the ban may have succeeded.
+massban-forbidden = { $user }: Discord refused permission or role hierarchy.
+massban-rate-limited = { $user }: Discord rate limit.
+massban-discord-failed = { $user }: Discord request failed.
 config-moderation-warn_expire_days = After how many days a warning expires.
 config-moderation-dm_on_action = Whether the warned member gets a direct message.
 config-moderation-require_reason = Whether a warning needs a reason.

@@ -27,6 +27,8 @@ Warn members, note about them, and look at and revoke the cases of a server.
 
 | Key | Default level | Description |
 |---|---|---|
+| `moderation.userinfo` | 50 | View user information and cases. |
+| `moderation.massban` | 100 | Ban multiple users. |
 | `moderation.warn` | 50 | Warn members |
 | `moderation.note` | 50 | Add notes about members |
 | `moderation.cases` | 50 | See the cases and warnings of members |
@@ -73,6 +75,30 @@ Show the active warnings of a member
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member |
+
+### `/userinfo`
+
+Show a user's membership and case history
+
+- Japanese name: `userinfo`
+- Japanese description: ユーザーの参加情報とケース履歴を表示
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `user` | user | user | yes | - | User to inspect |
+
+### `/massban`
+
+Ban up to 50 users
+
+- Japanese name: `massban`
+- Japanese description: 最大50人をBAN
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `users` | users | string | yes | - | User IDs or mentions separated by spaces or commas |
+| `reason` | reason | string | yes | max_length 512 | Why |
+| `delete_days` | delete_days | integer | no | min 0; max 7 | Days of messages to delete, 0 to 7 |
 
 ### `/clear`
 

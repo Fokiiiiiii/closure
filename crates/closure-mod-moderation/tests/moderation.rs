@@ -52,6 +52,178 @@ fn member(id: u64, roles: &[u64], bot: bool) -> Member {
     .unwrap()
 }
 
+fn massban(users: &str) -> Invocation {
+    Invocation::new("massban")
+        .option("users", CommandOptionValue::String(users.to_owned()))
+        .option("reason", CommandOptionValue::String("raid".to_owned()))
+        .user(MODERATOR)
+        .owner()
+}
+
+#[tokio::test]
+async fn massban_deduplicates_excludes_and_requires_owner() {
+    let harness = harness();
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(BOT, &[], true));
+    let denied = harness
+        .invoke(by_admin(
+            Invocation::new("massban")
+                .option("users", CommandOptionValue::String("7".into()))
+                .option("reason", CommandOptionValue::String("raid".into())),
+        ))
+        .await
+        .unwrap();
+    assert!(text(&denied).contains("level"), "{denied:?}");
+    let result = harness
+        .invoke(massban("7, <@7> invalid 8 100").text_command())
+        .await
+        .unwrap();
+    assert!(
+        text(&result).contains("Banned: 1; failed: 0; excluded: 3"),
+        "{result:?}"
+    );
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+    assert!(text(&result).contains("invalid user ID"));
+    assert!(text(&result).contains("bot"));
+    assert!(text(&result).contains("yourself"));
+}
+
+#[tokio::test]
+async fn massban_rejects_more_than_fifty_entries() {
+    let harness = harness();
+    let users = (1..=51)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let result = harness.invoke(massban(&users)).await.unwrap();
+    assert!(text(&result).contains("50"), "{result:?}");
+    assert!(sequence(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn massban_excludes_owner_and_higher_roles() {
+    let harness = harness();
+    harness.permissions(|permissions| {
+        permissions
+            .role_levels
+            .insert(Id::new(MODERATOR_ROLE), Level::OWNER);
+    });
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(ABOVE, &[ADMIN_ROLE], false));
+    let invocation = Invocation::new("massban")
+        .option(
+            "users",
+            CommandOptionValue::String(format!("{OWNER} {ABOVE}")),
+        )
+        .option("reason", CommandOptionValue::String("raid".into()))
+        .user(MODERATOR)
+        .roles([MODERATOR_ROLE]);
+    let result = harness.invoke(invocation).await.unwrap();
+    assert!(text(&result).contains("excluded: 2"), "{result:?}");
+    assert!(text(&result).contains("server owner"), "{result:?}");
+    assert!(text(&result).contains("role is too high"), "{result:?}");
+    assert!(sequence(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn massban_reports_a_partial_discord_failure() {
+    let mut found = false;
+    for call in 1..=24 {
+        let harness = harness();
+        harness.set_config(json!({"dm_on_action": false}));
+        harness
+            .api()
+            .fail_nth(call, DiscordError::Forbidden("test".into()));
+        if let Ok(result) = harness.invoke(massban("7,42")).await
+            && text(&result).contains("Banned: 1; failed: 1; excluded: 0")
+        {
+            assert!(
+                text(&result).contains("Discord refused permission"),
+                "{result:?}"
+            );
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "a failed ban must be reported alongside a successful ban"
+    );
+}
+
+#[tokio::test]
+async fn userinfo_shows_timeout_and_configured_mute_role() {
+    let harness = harness();
+    let mut target = member(MEMBER, &[TIMEOUT_ROLE], false);
+    target.communication_disabled_until =
+        Some(twilight_model::util::Timestamp::from_secs(4_000_000_000).unwrap());
+    harness.api().set_member(Id::new(GUILD), target);
+    harness.set_config(json!({"timeout_role": TIMEOUT_ROLE.to_string()}));
+    let result = harness
+        .invoke(by_moderator(
+            Invocation::new("userinfo").option("user", user(MEMBER)),
+        ))
+        .await
+        .unwrap();
+    assert!(text(&result).contains("Timeout until"), "{result:?}");
+    assert!(
+        text(&result).contains("Timeout role is present"),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn userinfo_reports_a_recorded_ban_and_requires_cases_level() {
+    let harness = harness();
+    harness
+        .invoke(ban(MEMBER, Some("raid"), None, None))
+        .await
+        .unwrap();
+    let denied = harness
+        .invoke(
+            Invocation::new("userinfo")
+                .option("user", user(MEMBER))
+                .user(UNPRIVILEGED),
+        )
+        .await
+        .unwrap();
+    assert!(text(&denied).contains("level"), "{denied:?}");
+    let result = harness
+        .invoke(by_moderator(
+            Invocation::new("userinfo").option("user", user(MEMBER)),
+        ))
+        .await
+        .unwrap();
+    assert!(text(&result).contains("active ban case"), "{result:?}");
+    assert!(text(&result).contains("ban: 1"), "{result:?}");
+}
+
+#[tokio::test]
+async fn userinfo_shows_member_and_case_history_in_text_commands() {
+    let harness = harness();
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(MEMBER, &[MODERATOR_ROLE], false));
+    harness.invoke(note(MEMBER, "record")).await.unwrap();
+    let invocation = by_moderator(Invocation::new("userinfo").option("user", user(MEMBER)));
+    let result = harness.invoke(invocation.text_command()).await.unwrap();
+    assert!(text(&result).contains("account created"), "{result:?}");
+    assert!(text(&result).contains("Roles:"), "{result:?}");
+    assert!(text(&result).contains("note: 1"), "{result:?}");
+    assert!(text(&result).contains("record"), "{result:?}");
+    harness.advance(Duration::from_secs(3));
+    let result = harness
+        .invoke(by_moderator(
+            Invocation::new("userinfo").option("user", user(FREE)),
+        ))
+        .await
+        .unwrap();
+    assert!(!text(&result).contains("Roles:"), "{result:?}");
+    assert!(text(&result).contains("Cases: 0"), "{result:?}");
+}
+
 fn role(id: u64, position: i64) -> Role {
     serde_json::from_value(json!({
         "id": id.to_string(),

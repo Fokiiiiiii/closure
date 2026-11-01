@@ -12,6 +12,7 @@ them, keeps notes, and records every one of these as a case. The code is in
 | `/warn user [reason]` | Warns a member. The warning expires after `warn_expire_days`, and may bring an [escalation](#escalation). | `moderation.warn` (moderator) |
 | `/note user text` | Notes something about a member. A note is not a warning and does not expire. | `moderation.note` (moderator) |
 | `/warnings user` | Lists the warnings of a member that still count. | `moderation.cases` (moderator) |
+| `/userinfo user` | Shows account creation, membership and case history. | `moderation.userinfo` (moderator) |
 | `/case view number` | Shows a case as the log shows it. | `moderation.cases` (moderator) |
 | `/case list user [before]` | Lists the cases of a member, newest first, 10 at a time. | `moderation.cases` (moderator) |
 | `/case revoke number [reason]` | Revokes a case, once. The log shows it grey. | `moderation.revoke` (moderator) |
@@ -19,12 +20,18 @@ them, keeps notes, and records every one of these as a case. The code is in
 | `/untimeout user [reason]` | Lifts the timeout of a member. | `moderation.timeout` (moderator) |
 | `/kick user [reason]` | Kicks a member from the server. | `moderation.kick` (moderator) |
 | `/ban user [reason] [duration] [delete_days]` | Bans a member, for good or for `duration`. `delete_days` (0 to 7) is how many days of their messages are deleted. | `moderation.ban` (admin) |
+| `/massban users reason [delete_days]` | Bans up to 50 IDs or mentions separated by spaces, newlines or commas. Duplicates are processed once; results include exclusions and failures. | `moderation.massban` (owner) |
 | `/unban user [reason]` | Lifts the ban of a member. | `moderation.ban` (admin) |
 | `/vcmute user [duration] [reason]` | Mutes a member in voice channels, for `duration` (or until a date and time) or until `/vcunmute`. | `moderation.voice` (moderator) |
 | `/vcunmute user [reason]` | Lifts the voice mute of a member. | `moderation.voice` (moderator) |
 | `/clear count` | Deletes the newest messages of the channel, from 1 to 100, whoever wrote them. A message older than 14 days cannot be deleted in bulk, so it is left, and the reply counts it. | `moderation.clear` (moderator) |
 
 A permission key can be changed per server with `permissions.keys` (see [configuration](configuration.md)).
+
+For a text command, quote a users list or reason containing spaces, for example
+`!massban "123 456" "raid accounts" 1`. User information shows recorded active ban cases,
+not a live Discord ban lookup; an automatically created timeout role is identified from the
+module's saved role ID.
 
 The moderator's reason is written to Discord's audit log as `name: reason`, cut to 512 characters.
 

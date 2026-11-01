@@ -25,10 +25,12 @@ use twilight_model::gateway::Intents;
 
 mod clear;
 mod history;
+mod massban;
 mod rejoin;
 mod restrict;
 mod templates;
 mod undo;
+mod userinfo;
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
@@ -1012,6 +1014,16 @@ fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
 fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
     Ok(builder
         .permission(PermissionSpec::new(
+            "moderation.userinfo",
+            Level::MODERATOR,
+            "permission-moderation-userinfo",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.massban",
+            Level::OWNER,
+            "permission-moderation-massban",
+        )?)
+        .permission(PermissionSpec::new(
             "moderation.warn",
             Level::MODERATOR,
             "permission-moderation-warn",
@@ -1103,6 +1115,18 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             Command::<Target>::new("warnings")
                 .requires("moderation.cases")
                 .handler(warnings),
+        )
+        .command(
+            Command::<Target>::new("userinfo")
+                .requires("moderation.userinfo")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(userinfo::userinfo),
+        )
+        .command(
+            Command::<massban::Massban>::new("massban")
+                .requires("moderation.massban")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(massban::massban),
         )
         .command(
             Command::<clear::Clear>::new("clear")

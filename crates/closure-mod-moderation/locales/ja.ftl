@@ -182,3 +182,44 @@ command-clear = 一括削除
 option-clear-count = 件数
     .description = 消すメッセージの数（1 から 100）
 config-moderation-dm_messages = 処罰の種類ごとに送信する DM のテンプレート。
+command-userinfo = userinfo
+    .description = ユーザーの参加情報とケース履歴を表示
+option-userinfo-user = user
+    .description = 確認するユーザー
+command-massban = massban
+    .description = 最大50人をBAN
+option-massban-users = users
+    .description = 空白またはカンマ区切りのIDまたはメンション
+option-massban-reason = reason
+    .description = 理由
+option-massban-delete_days = delete_days
+    .description = 削除するメッセージの日数（0から7）
+permission-moderation-userinfo = ユーザー情報とケースを表示。
+permission-moderation-massban = 複数のユーザーをBAN。
+userinfo-header = { $user } — アカウント作成 { $created }
+userinfo-unknown = 不明
+userinfo-member =
+    参加: { $joined }
+    ニックネーム: { $nick }
+    ロール: { $roles }
+userinfo-timeout =
+    タイムアウト期限: { $until }
+userinfo-role-mute =
+    タイムアウトロールがあります。
+userinfo-cases =
+    ケース: { $count }
+userinfo-ban =
+    有効なBANケースが記録されています。
+massban-too-many = 指定できるユーザーは重複を除き最大50人です。
+massban-missing = ユーザーと理由を指定してください。
+massban-summary = BAN成功: { $success }、失敗: { $failed }、除外: { $excluded }。
+massban-invalid = { $user }: IDまたはメンションが無効です。
+massban-self = { $user }: 自分自身はBANできません。
+massban-owner = { $user }: サーバー所有者です。
+massban-bot = { $user }: botです。
+massban-higher = { $user }: ロールが上位です。
+massban-check-failed = { $user }: 対象の確認に失敗しました。
+massban-failed = { $user }: 記録に失敗しました。BANは成功している可能性があります。
+massban-forbidden = { $user }: Discordが権限またはロール順位により拒否しました。
+massban-rate-limited = { $user }: Discordのレート制限です。
+massban-discord-failed = { $user }: Discordへのリクエストに失敗しました。
