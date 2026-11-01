@@ -240,9 +240,10 @@ remembered with the module's `Storage` capability; without it nothing is taken o
 
 Dedicated roles of the role method: `punish::ensure_role(ctx, RestrictionRole::Timeout | Voice, configured)`
 returns the role a restriction gives. A configured role that exists is used as it is and never touched.
-Otherwise the remembered or a same-named role (`Mute`, `VC mute`, or their Japanese names) is used when it is safe to hand
-out (no permissions, not managed, not @everyone, below the bot's top role); an unsafe one is ignored. A new
-role is created with no permissions. Calls for one guild and kind take turns within a process. A created
+Otherwise the role Closure created and remembered for this module is reused when safe to hand out
+(no permissions, not managed, not @everyone, below the bot's top role); if none is safe, a new role is
+created with no permissions. Existing roles are not adopted by name. Restriction roles used by any module
+are excluded from stripping and restoration. Calls for one guild and kind take turns within a process. A created
 role gets a deny overwrite in every channel by a job that `punish::jobs` registers (`restriction_sync`), which
 keeps the other overwrites of the channel. A module that wants the overwrites on new channels calls
 `punish::channel_created(ctx, channel)` on `Event::ChannelCreated`; it sets only the role in use. The role needs the capabilities

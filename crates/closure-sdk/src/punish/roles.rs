@@ -313,7 +313,15 @@ pub async fn ensure_role(
     };
     let result = {
         let _turn = gate.lock().await;
-        ensure_role_now(ctx, which, configured).await
+        match ensure_role_now(ctx, which, configured).await {
+            Ok(role) => ctx
+                .restrictions()
+                .set(&format!("restriction-role:{}", role.get()), &role.get())
+                .await
+                .map(|()| role)
+                .map_err(RoleError::from),
+            Err(error) => Err(error),
+        }
     };
     // Only the map and this call hold the gate when nobody waits for it: it is dropped then.
     let mut map = gates().lock().unwrap_or_else(PoisonError::into_inner);
@@ -723,7 +731,7 @@ async fn strip_now(
     let bot_top = bot_top_position(ctx, &guild_roles)
         .await
         .map_err(ModuleError::Discord)?;
-    let mut restricted = restriction_ids(ctx, configured)
+    let mut restricted = restriction_ids(ctx, configured, &member.roles)
         .await
         .map_err(|error| store_error(&error))?;
     restricted.push(dedicated);
@@ -818,7 +826,11 @@ async fn restore_now(
         Err(error) => return Err(store_error(&error)),
     };
     // A restriction role is never given back, whatever the lists say.
-    let restricted: Vec<u64> = restriction_ids(ctx, &[])
+    let candidates: Vec<RoleId> = stored
+        .iter()
+        .filter_map(|id| RoleId::new_checked(*id))
+        .collect();
+    let restricted: Vec<u64> = restriction_ids(ctx, &[], &candidates)
         .await
         .map_err(|error| store_error(&error))?
         .into_iter()
@@ -1096,13 +1108,23 @@ async fn bot_top_position(ctx: &EventContext, roles: &[Role]) -> Result<i64, Dis
     }
 }
 
-/// Every restriction role the module knows of: the configured ones and the remembered ones of all
-/// kinds. These are never taken off a member and never given back.
+/// Restriction roles are never taken off a member and never given back.
 async fn restriction_ids(
     ctx: &EventContext,
     configured: &[RoleId],
+    candidates: &[RoleId],
 ) -> Result<Vec<RoleId>, StorageError> {
     let mut ids = configured.to_vec();
+    for role in candidates {
+        if ctx
+            .restrictions()
+            .get::<u64>(&format!("restriction-role:{}", role.get()))
+            .await?
+            .is_some()
+        {
+            ids.push(*role);
+        }
+    }
     for which in RESTRICTIONS {
         if let Some(role) = remembered(ctx, which).await? {
             ids.push(role);

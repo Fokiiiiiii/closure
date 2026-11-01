@@ -79,6 +79,16 @@ async fn migrate(cx: CommandCx, (): ()) -> Result<(), UserError> {
     Ok(())
 }
 
+async fn register_explicit(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    punish::ensure_role(
+        cx.ctx(),
+        punish::RestrictionRole::Timeout,
+        Some(Id::new(TIMEOUT_ROLE)),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn migrate_voice(cx: CommandCx, (): ()) -> Result<(), UserError> {
     punish::ensure_role(cx.ctx(), punish::RestrictionRole::Voice, None).await?;
     Ok(())
@@ -108,6 +118,69 @@ async fn unvoice(cx: CommandCx, (): ()) -> Result<(), UserError> {
     Ok(())
 }
 
+async fn auto_settings(
+    cx: &CommandCx,
+    which: punish::RestrictionRole,
+) -> Result<Settings, UserError> {
+    let role = punish::ensure_role(cx.ctx(), which, None).await?;
+    let mut settings = settings();
+    settings.timeout_role = None;
+    settings.strip = Strip {
+        remove: RoleSelection::All,
+        restore: RoleSelection::All,
+    };
+    match which {
+        punish::RestrictionRole::Timeout => settings.timeout_role = Some(role),
+        punish::RestrictionRole::Voice => {
+            settings.voice = Method::Role;
+            settings.voice_role = Some(role);
+        }
+        punish::RestrictionRole::Quarantine => unreachable!(),
+    }
+    Ok(settings)
+}
+
+async fn auto_long(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let settings = auto_settings(&cx, punish::RestrictionRole::Timeout).await?;
+    Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings)
+        .timeout(Id::new(TARGET), Duration::from_secs(3600), None)
+        .await?;
+    Ok(())
+}
+
+async fn auto_short(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let settings = auto_settings(&cx, punish::RestrictionRole::Timeout).await?;
+    Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings)
+        .timeout(Id::new(TARGET), Duration::from_mins(30), None)
+        .await?;
+    Ok(())
+}
+
+async fn auto_lift(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let settings = auto_settings(&cx, punish::RestrictionRole::Timeout).await?;
+    Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings)
+        .lift_timeout(Id::new(TARGET), None)
+        .await?;
+    Ok(())
+}
+
+async fn auto_voice(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let settings = auto_settings(&cx, punish::RestrictionRole::Voice).await?;
+    Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings)
+        .voice_mute(Id::new(TARGET), Some(Duration::from_secs(3600)), None)
+        .await?;
+    Ok(())
+}
+
+async fn seed_shared_restore(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let role = cx.store().get::<u64>("test-role").await?.unwrap();
+    cx.ctx()
+        .restrictions()
+        .set("stripped:500", &vec![role])
+        .await?;
+    Ok(())
+}
+
 async fn lift(cx: CommandCx, (): ()) -> Result<(), UserError> {
     Punisher::new(cx.ctx(), Moderator::of(cx.user()), settings())
         .lift_timeout(Id::new(TARGET), None)
@@ -129,8 +202,12 @@ fn alpha() -> ModuleBuilder {
         .command(Command::<()>::new("strip").handler(strip))
         .command(Command::<()>::new("strip_legacy").handler(strip_legacy))
         .command(Command::<()>::new("migrate").handler(migrate))
+        .command(Command::<()>::new("register_explicit").handler(register_explicit))
         .command(Command::<()>::new("migrate_voice").handler(migrate_voice))
-        .command(Command::<()>::new("voice").handler(voice));
+        .command(Command::<()>::new("voice").handler(voice))
+        .command(Command::<()>::new("auto_long").handler(auto_long))
+        .command(Command::<()>::new("auto_lift").handler(auto_lift))
+        .command(Command::<()>::new("auto_voice").handler(auto_voice));
     punish::jobs(builder)
 }
 
@@ -146,7 +223,9 @@ fn beta() -> ModuleBuilder {
         .capability(Capability::Storage)
         .config(json!({ "type": "object", "properties": {} }), json!({}))
         .command(Command::<()>::new("lift").handler(lift))
-        .command(Command::<()>::new("unvoice").handler(unvoice));
+        .command(Command::<()>::new("unvoice").handler(unvoice))
+        .command(Command::<()>::new("auto_short").handler(auto_short))
+        .command(Command::<()>::new("seed_shared_restore").handler(seed_shared_restore));
     punish::jobs(builder)
 }
 
@@ -368,4 +447,161 @@ async fn a_timeout_by_one_module_is_lifted_by_another_and_gives_the_roles_back()
         back.contains(&STAFF) && back.contains(&HELPER),
         "the roles taken off by the other module are given back: {back:?}"
     );
+}
+
+fn cross_module_harness() -> (Harness, Harness) {
+    let first = Harness::new(alpha()).unwrap();
+    let second = first.sibling(beta()).unwrap();
+    first
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(BOT_ROLE, "Bot", 50)]);
+    first
+        .api()
+        .set_member(Id::new(GUILD), member(BOT, &[BOT_ROLE]));
+    first.api().set_member(Id::new(GUILD), member(TARGET, &[]));
+    (first, second)
+}
+
+fn removed(harness: &Harness, role: u64) -> usize {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter(|action| {
+            matches!(
+                action, Action::RemoveRole { user_id, role_id, .. }
+                    if user_id.get() == TARGET && role_id.get() == role
+            )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn cross_module_timeout_roles_are_not_stripped_or_restored_after_timers() {
+    let (moderation, automod) = cross_module_harness();
+    moderation
+        .invoke(Invocation::new("auto_long").user(MODERATOR))
+        .await
+        .unwrap();
+    let m = moderation
+        .store()
+        .get::<u64>("auto-role:timeout")
+        .await
+        .unwrap()
+        .unwrap();
+    moderation
+        .api()
+        .set_member(Id::new(GUILD), member(TARGET, &[m]));
+
+    automod
+        .invoke(Invocation::new("auto_short").user(MODERATOR))
+        .await
+        .unwrap();
+    let a = automod
+        .store()
+        .get::<u64>("auto-role:timeout")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(m, a);
+    assert_eq!(removed(&moderation, m), 0);
+
+    // The fake API records role changes but does not change the member.
+    moderation
+        .api()
+        .set_member(Id::new(GUILD), member(TARGET, &[m, a]));
+    moderation
+        .invoke(Invocation::new("auto_lift").user(MODERATOR))
+        .await
+        .unwrap();
+    assert_eq!(removed(&moderation, m), 1);
+    automod.advance(Duration::from_mins(30));
+    let results = automod.run_due_jobs().await;
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(removed(&automod, a), 0);
+    automod.advance(Duration::from_mins(30));
+    let results = automod.run_due_jobs().await;
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert!(removed(&automod, a) >= 1);
+    assert_eq!(given(&moderation).iter().filter(|&&id| id == m).count(), 1);
+}
+
+#[tokio::test]
+async fn cross_module_restriction_in_old_restore_list_is_not_given_back() {
+    let (moderation, automod) = cross_module_harness();
+    moderation
+        .invoke(Invocation::new("auto_long").user(MODERATOR))
+        .await
+        .unwrap();
+    let m = moderation
+        .store()
+        .get::<u64>("auto-role:timeout")
+        .await
+        .unwrap()
+        .unwrap();
+    automod
+        .invoke(Invocation::new("auto_short").user(MODERATOR))
+        .await
+        .unwrap();
+    automod.store().set("test-role", &m).await.unwrap();
+    automod
+        .invoke(Invocation::new("seed_shared_restore"))
+        .await
+        .unwrap();
+    moderation
+        .invoke(Invocation::new("auto_lift").user(MODERATOR))
+        .await
+        .unwrap();
+    automod.advance(Duration::from_mins(30));
+    assert!(automod.run_due_jobs().await.iter().all(Result::is_ok));
+    automod.advance(Duration::from_mins(30));
+    assert!(automod.run_due_jobs().await.iter().all(Result::is_ok));
+    assert_eq!(given(&moderation).iter().filter(|&&id| id == m).count(), 1);
+}
+
+#[tokio::test]
+async fn cross_module_voice_strip_keeps_automod_timeout_role() {
+    let (moderation, automod) = cross_module_harness();
+    automod
+        .invoke(Invocation::new("auto_short").user(MODERATOR))
+        .await
+        .unwrap();
+    let a = automod
+        .store()
+        .get::<u64>("auto-role:timeout")
+        .await
+        .unwrap()
+        .unwrap();
+    moderation
+        .api()
+        .set_member(Id::new(GUILD), member(TARGET, &[a]));
+    moderation
+        .invoke(Invocation::new("auto_voice").user(MODERATOR))
+        .await
+        .unwrap();
+    assert_eq!(removed(&moderation, a), 0);
+}
+
+#[tokio::test]
+async fn cross_module_explicit_restriction_role_is_not_stripped() {
+    let (moderation, automod) = cross_module_harness();
+    moderation.api().set_roles(
+        Id::new(GUILD),
+        vec![
+            role(BOT_ROLE, "Bot", 50),
+            role(TIMEOUT_ROLE, "Configured", 1),
+        ],
+    );
+    moderation
+        .invoke(Invocation::new("register_explicit"))
+        .await
+        .unwrap();
+    moderation
+        .api()
+        .set_member(Id::new(GUILD), member(TARGET, &[TIMEOUT_ROLE]));
+    automod
+        .invoke(Invocation::new("auto_short").user(MODERATOR))
+        .await
+        .unwrap();
+    assert_eq!(removed(&moderation, TIMEOUT_ROLE), 0);
 }

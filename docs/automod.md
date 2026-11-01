@@ -51,7 +51,7 @@ Start with `dry_run: true`, read the log for a while, then turn it off.
 | `warn_expire_days` | `30` | After how many days a `warn` action expires (1 to 365). |
 | `dm_on_action` | `true` | Whether the member is messaged about a punishment. |
 | `timeout_method` | `discord` | `discord`, or `role`: a role that a timer takes off again. |
-| `timeout_role` | none | The role id a `role` timeout gives. Left out, Closure creates a role named `Mute` in English or `ミュート` in Japanese (or uses a safe one of that name, see [moderation](moderation.md#timeouts-and-voice-mutes)), with no permissions, and sets it up in every channel as moderation does. |
+| `timeout_role` | none | The role id a `role` timeout gives. Left out, Closure reuses its remembered role or creates a dedicated `Mute` role (`ミュート` in Japanese) with no permissions, and sets it up in every channel as [moderation](moderation.md#timeouts-and-voice-mutes) does. It does not adopt an existing role by name. |
 | `remove_roles_on_mute` | `false` | With a `role` timeout: `false`, `true` (every role of the member that can be taken off), or role ids. The roles are taken off with the role and remembered. |
 | `restore_roles_on_mute` | `true` | Which of the taken-off roles come back when the timeout ends: the same forms. |
 | `counters` | `{}` | The counters, keyed by name, at most 10 (see [Counters](#counters)). |
@@ -59,9 +59,10 @@ Start with `dry_run: true`, read the log for a while, then turn it off.
 
 ### Role timeouts
 
-With `timeout_method: role`, a timeout gives the dedicated role of [moderation](moderation.md#timeouts-and-voice-mutes):
-the configured `timeout_role`, or the one Closure creates or finds under the name `Mute` (`ミュート` in Japanese), which moderation
-uses too, so the two modules share one role. The role denies speech in every channel (see moderation), and a
+With `timeout_method: role`, a timeout gives the configured `timeout_role`, or a dedicated role that Closure
+created and remembered for automod, as described in [moderation](moderation.md#timeouts-and-voice-mutes).
+The modules can use different roles; restriction roles used by any module are excluded from stripping and
+restoration. The role denies speech in every channel (see moderation), and a
 channel created later gets the same. The configuration change sets the role up before the first punishment.
 `remove_roles_on_mute` and `restore_roles_on_mute` work as in moderation. The bot needs **Manage Roles** and
 **Manage Channels**. The same known limit applies: an allow overwrite that another role gives in a channel wins

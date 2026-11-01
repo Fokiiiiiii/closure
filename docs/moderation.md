@@ -67,13 +67,12 @@ well, to show the replies of this module to the invoking user only or to everyon
   the first time it is needed, and reuses it afterwards:
 
   - The roles are named in the server's language: `Mute` and `VC mute` in English, `ミュート` and `VCミュート` in Japanese. They are red. A role the bot made under
-    the older names is renamed and made red the next time it is used. A role with that name (without regard to case)
-    that already exists is used instead, so two modules of one server share one role. Only a safe one
-    is used: no permissions at all, not managed by an integration, not @everyone, and below the bot's
-    highest role. A same-named role that is not safe is ignored, and the module creates its own.
+    the older names is renamed and made red the next time it is used. Each module reuses the safe role
+    it created and remembered, or creates its own; an existing role is never adopted by name. A safe
+    role has no permissions, is not managed, is not @everyone, and is below the bot's highest role.
   - The role has **no permissions at all**. It is not hoisted and not mentionable. It only denies.
-  - Two punishments at the same time in one process take turns on finding or creating the role, so
-    they share one. Several bot processes on one server are not covered.
+  - Two punishments at the same time in one process take turns on finding or creating the role.
+    Modules can use different roles. Several bot processes on one server are not covered.
   - In every channel, category and voice channel of the server (up to 500 channels), the role gets a
     deny overwrite. A timeout denies Send Messages, Send Messages in Threads, Create Public Threads,
     Create Private Threads, Add Reactions, Speak, Stream and Request to Speak. A voice mute denies
@@ -139,8 +138,8 @@ punishment ends.
   to 250 roles, until they come back. Roles beyond the 250 stay on the member, and the reply counts them.
   `restore_roles_on_mute` defaults to `true`, which gives back all of them; a list gives back only the
   listed ones, and the others are dropped.
-- A restriction role (the timeout and voice roles, configured or created) is never taken off and never
-  given back, so an expired timeout role does not come back with a voice mute's end.
+- Restriction roles used by any module, including legacy roles, are never taken off or given back, so
+  an expired timeout role does not come back with a voice mute's end.
 - Roles come back when the punishment is lifted by a command or by its timer, but only when no timeout
   and no voice mute of any module still stands for the member.
 - A role that Discord refuses to take off is skipped, and the reply says how many roles stayed on the
