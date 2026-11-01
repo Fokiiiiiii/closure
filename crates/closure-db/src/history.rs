@@ -645,16 +645,36 @@ mod tests {
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
         let history = history(&db, 1);
-        for message in [
-            saved(1, 5, 7, 100, "a"),
-            saved(2, 5, 7, 200, "b"),
-            saved(3, 5, 7, 300, "c"),
-        ] {
-            history.save(&message).await.unwrap();
-        }
-        assert_eq!(db.purge_before(200).await.unwrap(), 1);
-        assert_eq!(history.get(Id::new(5), Id::new(1)).await.unwrap(), None);
-        assert!(history.get(Id::new(5), Id::new(2)).await.unwrap().is_some());
+        sqlx::query(
+            "INSERT INTO saved_messages
+                (guild_id, message_id, channel_id, author_id, author_bot, content, embed_count,
+                 sticker_count, mentions_everyone, created_at)
+             SELECT 1, id, 5, 7, false, 'old', 0, 0, false, to_timestamp(100)
+             FROM generate_series(1, $1) AS id
+             UNION ALL
+             SELECT 1, $1 + 1, 5, 7, false, 'new', 0, 0, false, to_timestamp(200)",
+        )
+        .bind(i64::try_from(PURGE_BATCH + 1).unwrap())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(db.purge_before(200).await.unwrap(), PURGE_BATCH + 1);
+        let remaining_old: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM saved_messages WHERE guild_id = 1 AND message_id <= $1",
+        )
+        .bind(i64::try_from(PURGE_BATCH + 1).unwrap())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining_old, 0);
+        assert!(
+            history
+                .get(Id::new(5), Id::new(PURGE_BATCH + 2))
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(db.purge_before(200).await.unwrap(), 0);
     }
 

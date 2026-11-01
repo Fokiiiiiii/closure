@@ -958,8 +958,8 @@ async fn a_nickname_change_is_not_named_by_a_timeout_of_the_same_member() {
         new: Some("new".into()),
         old: None,
     }];
-    harness.api().add_audit_entry(timeout);
     harness.api().add_audit_entry(nickname);
+    harness.api().add_audit_entry(timeout);
 
     harness
         .emit(Event::NicknameChanged {
