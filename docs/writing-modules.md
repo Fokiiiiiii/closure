@@ -232,7 +232,9 @@ that punishes with timers, and do not register those names again.
 
 Declare the capabilities of what the module carries out: `Cases`, `SendMessages` (the log),
 `SendDirectMessages`, `KickMembers`, `BanMembers`, `TimeoutMembers`, `ManageRoles`, `MuteMembers` and
-`ReadGuild`. `punish::jobs` adds `Schedule`.
+`ReadGuild`. A module that uses timed bans also needs `Storage` and `ReadBans` for recovery;
+`punish::jobs` adds `Schedule`. It checks interrupted timed bans at guild startup and every five
+minutes, restoring their cases and timers or lifting them after expiry.
 
 `Settings::strip` (`punish::Strip`) takes the member's roles off when the dedicated role is given, and gives
 the ones taken off back when the punishment ends (`RoleSelection::{None, All, Some(ids)}`). Its roles are

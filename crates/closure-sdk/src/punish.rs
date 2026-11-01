@@ -10,6 +10,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
+use closure_core::action::{Action, Outcome};
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Embed;
 
@@ -505,6 +506,14 @@ impl<'a> Punisher<'a> {
         if delete_message_seconds > MAX_BAN_DELETE_SECONDS {
             return Err(UserError::sdk("punish-ban-delete-days-range"));
         }
+        let key = ban_intent_key(target);
+        match self.ctx.store().entry(&key).await {
+            Ok(Some(_)) => reconcile_ban(self.ctx, &key).await?,
+            Ok(None) | Err(closure_core::storage::StorageError::NotGranted)
+                if duration.is_none() => {}
+            Ok(None) => {}
+            Err(error) => return Err(error.into()),
+        }
         let note = match duration {
             Some(duration) => {
                 self.notify(
@@ -535,6 +544,12 @@ impl<'a> Punisher<'a> {
                 .await
             }
         };
+        let started_at = self.ctx.now();
+        let expires_at = duration.map(|duration| started_at.saturating_add(secs(duration)));
+        if let Some(expires_at) = expires_at {
+            self.remember_ban(target, reason.as_deref(), started_at, expires_at)
+                .await?;
+        }
         self.ctx
             .api
             .ban(
@@ -544,17 +559,24 @@ impl<'a> Punisher<'a> {
                 self.audit(reason.as_deref()),
             )
             .await?;
-        let expires_at = duration.map(|duration| self.ctx.now() + secs(duration));
         let recorded = self.record_ban(target, reason, expires_at).await;
         // A new ban replaces the timer of an earlier one, which would lift this ban too early.
         let _ = self.ctx.scheduler().cancel(&unban_key(target)).await;
         // The ban holds even when its case is not recorded, so its timer is set all the same.
         let timer = match duration {
-            Some(duration) => {
+            Some(_duration) => {
                 let case = recorded
                     .as_ref()
                     .map_or(UNRECORDED_CASE, |case| case.number);
-                match schedule_unban(self.ctx, target, case, duration).await {
+                let remaining = Duration::from_secs(
+                    u64::try_from(
+                        expires_at
+                            .unwrap_or(started_at)
+                            .saturating_sub(self.ctx.now()),
+                    )
+                    .unwrap_or_default(),
+                );
+                match schedule_unban(self.ctx, target, case, remaining).await {
                     Ok(()) => None,
                     Err(error) => {
                         tracing::error!(user = %target, ?error, "a timed ban has no unban timer");
@@ -564,12 +586,44 @@ impl<'a> Punisher<'a> {
             }
             None => None,
         };
+        if duration.is_some() && recorded.is_ok() && timer.is_none() {
+            self.ctx.store().delete(&key).await?;
+        }
         let case = recorded?;
         let _ = modlog::post(self.ctx, &case).await;
         Ok(Done {
             case,
             notes: [note, timer].into_iter().flatten().collect(),
         })
+    }
+
+    async fn remember_ban(
+        &self,
+        target: UserId,
+        reason: Option<&str>,
+        started_at: i64,
+        expires_at: i64,
+    ) -> Result<(), UserError> {
+        let case_before = match self.ctx.cases().for_target(target, None, 1).await {
+            Ok(cases) => Some(cases.first().map_or(0, |case| case.number)),
+            Err(CaseError::NotGranted) => None,
+            Err(error) => return Err(error.into()),
+        };
+        self.ctx
+            .store()
+            .set(
+                &ban_intent_key(target),
+                &BanIntent {
+                    target: target.get(),
+                    moderator: self.moderator.id.get(),
+                    reason: reason.map(str::to_owned),
+                    started_at,
+                    expires_at,
+                    case_before,
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     /// Lifts the ban of `target` and records an `unban` case, which revokes the newest ban that
@@ -583,6 +637,10 @@ impl<'a> Punisher<'a> {
             .api
             .unban(self.ctx.guild_id, target, self.audit(reason.as_deref()))
             .await?;
+        match self.ctx.store().delete(&ban_intent_key(target)).await {
+            Ok(_) | Err(closure_core::storage::StorageError::NotGranted) => {}
+            Err(error) => return Err(error.into()),
+        }
         let case = self.record("unban", target, reason, None).await?;
         // Best effort: the member is unbanned already.
         let _ = self.ctx.scheduler().cancel(&unban_key(target)).await;
@@ -965,7 +1023,7 @@ impl<'a> Punisher<'a> {
         reason: Option<String>,
         expires_at: Option<i64>,
     ) -> Result<Case, UserError> {
-        // shortcut: abort after Discord succeeds can still skip the case and timer; use durable reconciliation to close the gap.
+        // shortcut: interrupted punishments other than timed bans can lose cases; reconcile their intents too.
         Ok(self
             .ctx
             .cases()
@@ -1116,6 +1174,21 @@ impl<'a> Punisher<'a> {
 struct Unban {
     user: u64,
     case: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BanIntent {
+    target: u64,
+    moderator: u64,
+    reason: Option<String>,
+    started_at: i64,
+    expires_at: i64,
+    #[serde(default)]
+    case_before: Option<i64>,
+}
+
+fn ban_intent_key(user: UserId) -> String {
+    format!("ban-intent:{}", user.get())
 }
 
 /// The payload of an `untimeout` job: the member, the case of the timeout, and its role.
@@ -1318,12 +1391,149 @@ pub fn jobs(builder: ModuleBuilder) -> ModuleBuilder {
         .job("punish_reconcile", |cx| async move {
             modlog::retry_pending(cx.ctx(), RECONCILE_BATCH)
                 .await
-                .map_err(|error| ModuleError::other(format!("{error:?}")))
+                .map_err(|error| ModuleError::other(format!("{error:?}")))?;
+            reconcile_bans(cx.ctx()).await
         })
         .job("unban", lift_ban)
         .job("untimeout", end_timeout)
         .job("vc_unmute", end_voice_mute)
         .job("restriction_sync", roles::restriction_sync)
+}
+
+async fn reconcile_bans(ctx: &EventContext) -> Result<(), ModuleError> {
+    let store = ctx.store();
+    let cursor: Option<String> = store
+        .get("ban-reconcile-cursor")
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    let mut prefixes = Vec::new();
+    if let Some(digits) = cursor
+        .as_deref()
+        .and_then(|key| key.strip_prefix("ban-intent:"))
+        .filter(|digits| {
+            !digits.is_empty() && digits.len() <= 20 && digits.bytes().all(|b| b.is_ascii_digit())
+        })
+    {
+        for next in b'0'..=b'9' {
+            prefixes.push(format!("ban-intent:{digits}{}", char::from(next)));
+        }
+        for index in (0..digits.len()).rev() {
+            for next in digits.as_bytes()[index] + 1..=b'9' {
+                prefixes.push(format!(
+                    "ban-intent:{}{}",
+                    &digits[..index],
+                    char::from(next)
+                ));
+            }
+        }
+    }
+    prefixes.push("ban-intent:".to_owned());
+    let mut entries = Vec::new();
+    for prefix in prefixes {
+        entries = store
+            .list(&prefix, RECONCILE_BATCH)
+            .await
+            .map_err(|error| ModuleError::other(error.to_string()))?;
+        if !entries.is_empty() {
+            break;
+        }
+    }
+    let last = entries.last().map(|(key, _)| key.clone());
+    for (key, entry) in entries {
+        let result: Result<(), UserError> = async {
+            let intent: BanIntent = serde_json::from_value(entry.value)
+                .map_err(|error| ModuleError::other(error.to_string()))?;
+            let user = UserId::new_checked(intent.target)
+                .ok_or_else(|| ModuleError::other("invalid ban intent target"))?;
+            let _turn = member_turn(ctx, user).await;
+            reconcile_ban(ctx, &key).await
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(%key, ?error, "could not reconcile a ban intent");
+        }
+    }
+    if let Some(last) = last {
+        store
+            .set("ban-reconcile-cursor", &last)
+            .await
+            .map_err(|error| ModuleError::other(error.to_string()))?;
+    }
+    Ok(())
+}
+
+async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
+    let Some(intent) = ctx.store().get::<BanIntent>(key).await? else {
+        return Ok(());
+    };
+    let target = UserId::new_checked(intent.target)
+        .ok_or_else(|| ModuleError::other("invalid ban intent target"))?;
+    let moderator = UserId::new_checked(intent.moderator)
+        .ok_or_else(|| ModuleError::other("invalid ban intent moderator"))?;
+    let outcome = ctx
+        .api
+        .execute(Action::ListBans {
+            guild_id: ctx.guild_id,
+            after: UserId::new_checked(intent.target.saturating_sub(1)),
+            limit: 1,
+        })
+        .await?;
+    let Outcome::Bans(bans) = outcome else {
+        return Err(ModuleError::other("unexpected ban list outcome").into());
+    };
+    if !bans.iter().any(|ban| ban.user.id == target) {
+        ctx.store().delete(key).await?;
+        return Ok(());
+    }
+    let case_before = intent
+        .case_before
+        .ok_or_else(|| ModuleError::other("ban intent has no case boundary"))?;
+    let mut before = None;
+    let case = loop {
+        let cases = ctx.cases().for_target(target, before, 100).await?;
+        if let Some(case) = cases.iter().find(|case| {
+            case.module == ctx.module
+                && case.kind.as_str() == "ban"
+                && case.moderator == moderator
+                && case.reason == intent.reason
+                && case.expires_at == Some(intent.expires_at)
+                && case.number > case_before
+        }) {
+            break case.clone();
+        }
+        if cases.len() < 100 || cases.last().is_some_and(|case| case.number <= case_before) {
+            break ctx
+                .cases()
+                .create(NewCase {
+                    kind: CaseKind::new("ban")?,
+                    target,
+                    moderator,
+                    reason: intent.reason.clone(),
+                    expires_at: Some(intent.expires_at),
+                })
+                .await?;
+        }
+        before = cases.last().map(|case| case.number);
+    };
+    if intent.expires_at > ctx.now() {
+        let after = Duration::from_secs(
+            u64::try_from(intent.expires_at.saturating_sub(ctx.now())).unwrap_or_default(),
+        );
+        schedule_unban(ctx, target, case.number, after).await?;
+    } else if !another_stands(ctx, target, "ban", case.number).await? {
+        let reason = Reason::truncated(&ctx.t_core(
+            ctx.locale,
+            "reason-ban-of-case-ran-out",
+            &Args::new().with("case", case.number),
+        ));
+        match ctx.api.unban(ctx.guild_id, target, reason).await {
+            Ok(()) | Err(DiscordError::NotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    ctx.store().delete(key).await?;
+    let _ = modlog::post(ctx, &case).await;
+    Ok(())
 }
 
 /// Lifts a timed ban when its time is up. A member who was unbanned by hand is done already, so
@@ -1334,6 +1544,17 @@ async fn lift_ban(cx: JobCx) -> Result<(), ModuleError> {
         return Err(ModuleError::other("a ban job names no member"));
     };
     let _turn = member_turn(cx.ctx(), user).await;
+    let key = ban_intent_key(user);
+    match cx.ctx().store().entry(&key).await {
+        Ok(Some(_)) => {
+            reconcile_ban(cx.ctx(), &key)
+                .await
+                .map_err(|error| ModuleError::other(format!("{error:?}")))?;
+            return Ok(());
+        }
+        Ok(None) | Err(closure_core::storage::StorageError::NotGranted) => {}
+        Err(error) => return Err(ModuleError::other(error.to_string())),
+    }
     if another_stands(cx.ctx(), user, "ban", payload.case).await? {
         return Ok(());
     }

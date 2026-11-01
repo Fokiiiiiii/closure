@@ -1080,6 +1080,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .capability(Capability::SendDirectMessages)
         .capability(Capability::KickMembers)
         .capability(Capability::BanMembers)
+        .capability(Capability::ReadBans)
         .capability(Capability::TimeoutMembers)
         .capability(Capability::ManageRoles)
         .capability(Capability::ManageMessages)

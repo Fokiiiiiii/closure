@@ -375,8 +375,10 @@ even when the end is a date.
 ## Timed bans
 
 A ban with a duration sets a timer in the bot's scheduler. When the time is up, the ban is lifted
-and no case is posted for it. If the timer cannot be set, the ban still holds and the reply says so;
-lift it with `/unban` or ban it again with a duration.
+and no case is posted for it. Before a timed ban, the bot records its intent so that, after an
+interruption, it can check Discord and recover its case and timer. Recovery runs when the guild
+becomes available and every five minutes; if the ban has expired, it is lifted. A failed check is
+retried. If the timer cannot be set, the ban still holds and the reply says so; recovery retries it.
 
 ## What the bot needs from Discord
 

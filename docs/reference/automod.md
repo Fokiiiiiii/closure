@@ -10,6 +10,7 @@ Automatic moderation: rules that check every message, and act on the first one t
 - `send_messages`
 - `manage_messages`
 - `read_guild`
+- `read_bans`
 - `kick_members`
 - `ban_members`
 - `timeout_members`

@@ -303,6 +303,7 @@ fn module_without_cases() -> ModuleBuilder {
     let builder = ModuleBuilder::new("no_cases", "No cases", "0.1.0")
         .unwrap()
         .capability(Capability::BanMembers)
+        .capability(Capability::Storage)
         .capability(Capability::Schedule)
         .config(json!({ "type": "object", "properties": {} }), json!({}))
         .command(Command::<Ban>::new("ban").handler(ban));
