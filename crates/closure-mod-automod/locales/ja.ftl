@@ -165,6 +165,10 @@ action-add-roles = ロールを付与
 action-remove-roles = ロールを外す
 action-set-nickname = ニックネームを設定
 action-slowmode = 低速モード
+action-change-permissions = 権限の変更
+permission-restore-reason = 自動モデレーションの一時的な権限変更を復元
+problem-permissions = 権限変更には重複しない許可対象の権限、有効な対象、1秒から6時間の期間が必要です。
+problem-permissions-channel = チャンネルのないイベントで権限を変更するには、チャンネルを指定してください。
 action-add-to-counter = カウンターに加算
 action-set-counter = カウンターを設定
 

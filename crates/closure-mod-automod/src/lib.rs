@@ -15,6 +15,7 @@ mod context;
 mod counter;
 mod engine;
 mod memory;
+mod permissions;
 mod schema;
 mod spam;
 mod status;
@@ -170,6 +171,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             }
         })
         .job(actions::CLEANUP_JOB, actions::cleanup)
+        .job(permissions::RESTORE_JOB, permissions::restore)
         .job(antiraid::EXPIRE_JOB, {
             let state = Arc::clone(&state);
             move |cx| {

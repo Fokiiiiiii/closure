@@ -548,6 +548,18 @@ fn action() -> Value {
             &["duration"],
         ),
         action_tagged(
+            "change_permissions",
+            json!({
+                "channel": { "type": "string", "pattern": SNOWFLAKE },
+                "target": { "type": "string", "pattern": SNOWFLAKE },
+                "deny": { "type": "array", "uniqueItems": true, "items": { "enum": crate::permissions::NAMES } },
+                "allow": { "type": "array", "uniqueItems": true, "items": { "enum": crate::permissions::NAMES } },
+                "clear": { "type": "array", "uniqueItems": true, "items": { "enum": crate::permissions::NAMES } },
+                "duration": { "type": "string", "pattern": DURATION }
+            }),
+            &["duration"],
+        ),
+        action_tagged(
             "add_to_counter",
             json!({
                 "counter": { "type": "string", "pattern": COUNTER_NAME },

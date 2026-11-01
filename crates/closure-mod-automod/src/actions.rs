@@ -217,6 +217,29 @@ async fn run(
         Action::Slowmode { duration, channels } => {
             slowmode(deps, rule, hit, context, *duration, channels).await
         }
+        Action::ChangePermissions {
+            channel,
+            target,
+            deny,
+            allow,
+            clear,
+            duration,
+        } => {
+            let Some(channel) = channel.or(context.channel) else {
+                return Ok(skipped());
+            };
+            let reason = reason_for(ctx, rule, hit, context, targets.first().copied(), None);
+            crate::permissions::change(
+                ctx,
+                channel,
+                target.as_deref(),
+                (deny, allow, clear),
+                *duration,
+                &reason,
+            )
+            .await?;
+            Ok(other())
+        }
         Action::AddToCounter { counter, amount } => {
             change_counter(deps, context, counter, Op::Add(*amount)).await
         }

@@ -584,6 +584,21 @@ pub enum Action {
         #[serde(default, deserialize_with = "snowflake_list")]
         channels: Vec<ChannelId>,
     },
+    /// Temporarily changes one channel overwrite.
+    ChangePermissions {
+        #[serde(default, deserialize_with = "optional_channel")]
+        channel: Option<ChannelId>,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        deny: Vec<crate::permissions::Permission>,
+        #[serde(default)]
+        allow: Vec<crate::permissions::Permission>,
+        #[serde(default)]
+        clear: Vec<crate::permissions::Permission>,
+        #[serde(deserialize_with = "readable")]
+        duration: Duration,
+    },
     AddToCounter {
         counter: String,
         amount: i64,
@@ -774,6 +789,23 @@ fn read(id: &str, value: Value, counters: &[CounterDef]) -> Result<Rule, Problem
     }
     for action in &rule.actions {
         action.validate(counters)?;
+        if matches!(action, Action::ChangePermissions { channel: None, .. })
+            && rule.triggers.iter().any(|trigger| {
+                matches!(
+                    trigger,
+                    Trigger::MemberJoin(_)
+                        | Trigger::MemberJoinSpam(_)
+                        | Trigger::MemberLeave(_)
+                        | Trigger::RoleAdded(_)
+                        | Trigger::RoleRemoved(_)
+                        | Trigger::Case(_)
+                        | Trigger::Counter(_)
+                        | Trigger::AntiraidLevel(_)
+                )
+            })
+        {
+            return Err(Problem::Key("problem-permissions-channel"));
+        }
     }
     if rule
         .cooldown
@@ -1055,6 +1087,14 @@ impl Action {
                     Ok(())
                 }
             }
+            Self::ChangePermissions {
+                target,
+                deny,
+                allow,
+                clear,
+                duration,
+                ..
+            } => check_permissions(target.as_deref(), deny, allow, clear, *duration),
             Self::AddToCounter { counter, amount } => {
                 if !counter_known(counters, counter) {
                     return Err(Problem::Key("problem-counter-unknown"));
@@ -1124,6 +1164,27 @@ impl Action {
     }
 }
 
+fn check_permissions(
+    target: Option<&str>,
+    deny: &[crate::permissions::Permission],
+    allow: &[crate::permissions::Permission],
+    clear: &[crate::permissions::Permission],
+    duration: Duration,
+) -> Result<(), Problem> {
+    let all = deny.iter().chain(allow).chain(clear).collect::<Vec<_>>();
+    if duration.is_zero()
+        || duration > MAX_SLOWMODE
+        || target
+            .is_some_and(|id| snowflake::<twilight_model::id::marker::RoleMarker>(id).is_none())
+        || all.is_empty()
+        || all.iter().enumerate().any(|(i, p)| all[..i].contains(p))
+    {
+        Err(Problem::Key("problem-permissions"))
+    } else {
+        Ok(())
+    }
+}
+
 fn counter_known(counters: &[CounterDef], name: &str) -> bool {
     counters.iter().any(|def| def.name == name)
 }
@@ -1181,6 +1242,17 @@ fn snowflake<T>(text: &str) -> Option<Id<T>> {
 fn snowflake_field<'de, D: Deserializer<'de>, T>(deserializer: D) -> Result<Id<T>, D::Error> {
     let text = String::deserialize(deserializer)?;
     snowflake(&text).ok_or_else(|| D::Error::custom(format!("{text:?} is not a Discord id")))
+}
+
+fn optional_channel<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ChannelId>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|text| {
+            snowflake(&text)
+                .ok_or_else(|| D::Error::custom(format!("{text:?} is not a Discord id")))
+        })
+        .transpose()
 }
 
 fn snowflake_list<'de, D: Deserializer<'de>, T>(deserializer: D) -> Result<Vec<Id<T>>, D::Error> {
@@ -1242,6 +1314,7 @@ pub fn action_key(action: &Action) -> &'static str {
         Action::RemoveRoles { .. } => "action-remove-roles",
         Action::SetNickname { .. } => "action-set-nickname",
         Action::Slowmode { .. } => "action-slowmode",
+        Action::ChangePermissions { .. } => "action-change-permissions",
         Action::AddToCounter { .. } => "action-add-to-counter",
         Action::SetCounter { .. } => "action-set-counter",
         Action::SetAntiraidLevel { .. } => "action-set-antiraid-level",

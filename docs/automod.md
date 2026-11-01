@@ -15,7 +15,7 @@ leave, a dry run, and `/automod status`. The code is in
   measures that count them, still work.
 - Permissions: **Manage Messages** (to delete), **Kick Members**, **Ban Members**,
   **Moderate Members** (timeouts), **Manage Roles** (for the `role` timeout method and the
-  `add_roles` and `remove_roles` actions), **Manage Nicknames** (`set_nickname`), **Manage
+  `add_roles`, `remove_roles` and `change_permissions` actions), **Manage Nicknames** (`set_nickname`), **Manage
   Channels** (`slowmode`), and **Send Messages** in the log channel and in any `alert` or `reply`
   channel.
 - The **Server Members Intent** (privileged, under *Bot* → *Privileged Gateway Intents*) is what
@@ -321,6 +321,7 @@ fails. At most 30 days.
 | `{ do: remove_roles, roles: ["…"] }` | Takes the roles away from the member, as above. |
 | `{ do: set_nickname, name: "{username} (checked)" }` | Sets the member's nickname from a template (at most 100 characters of template). |
 | `{ do: slowmode, duration: 30s, channels: ["…"] }` | Sets the slowmode of the channels given, or of the channel of the event when none are given. `0s` turns it off. At most six hours. The same value is not set again within ten minutes: Discord limits how often a channel is edited. |
+| `{ do: change_permissions, deny: [send_messages], duration: 10m }` | Temporarily edits a channel overwrite and restores its original value after `duration`. |
 | `{ do: add_to_counter, counter: strikes, amount: 1 }` | Adds to a counter, for the member and the channel of the event, as the counter is kept (see [Counters](#counters)). |
 | `{ do: set_counter, counter: strikes, value: 0 }` | Sets a counter, as above. |
 | `{ do: set_antiraid_level, level: high, duration: 30m }` | Raises (or lowers) the antiraid level. With a `duration` the calm level comes back after it. Does nothing when the server is at that level already. See [Antiraid](#antiraid). |
@@ -332,6 +333,25 @@ When no action punished the member (only deletions, replies or alerts), the hit 
 
 Durations read like `30s`, `10m`, `1h 30m`, `7d`. A `purge` looks at the history: when the history
 cannot be read, that action is skipped with an error in the log, and the rest still run.
+
+`change_permissions` accepts `channel` (the event channel by default), `target` (a role or member ID;
+`@everyone` by default), and `deny`, `allow`, and `clear` lists. At least one permission is required;
+a permission may appear only once. `clear` returns an overwrite to neutral. The required `duration`
+is 1 second to 6 hours. The permitted names are `send_messages`, `send_messages_in_threads`,
+`add_reactions`, `attach_files`, `embed_links`, `create_public_threads`, `create_private_threads`,
+`speak`, `connect`, `use_external_emojis`, `mention_everyone`, and `send_tts_messages`.
+`view_channel` and management permissions are excluded. An explicit `channel` is required if any
+trigger can lack one, including counter triggers. Roles must be below the bot's highest role, except
+for `@everyone`. The same channel and target are edited once until restoration; later hits extend the
+deadline without changing the original. Discord's permission precedence still applies, so another
+role's allow can override an `@everyone` deny. Restoration replaces the entire saved overwrite;
+manual edits to it during the interval are also replaced. Failed restoration jobs are retried by the
+scheduler and retained after its retry limit.
+The event channel of a message in a thread is the thread; specify its parent channel explicitly
+when changing channel overwrites. Concurrent changes are serialized within one bot process; running
+multiple bot processes for the same server does not provide this guarantee.
+If the initial Discord request fails or the process stops after saving but before sending it, the
+record remains until restoration and later hits only extend its deadline.
 
 ### Which action works with which event
 
@@ -347,6 +367,7 @@ run. The table says what each action needs.
 | `alert` | nothing | every event (the text may name the member, the rule and what was found) |
 | `add_roles`, `remove_roles`, `set_nickname` | a member | every event with a member |
 | `slowmode` | a channel: its `channels`, or the channel of the event | the message triggers, thread events, counter triggers that have a channel |
+| `change_permissions` | a channel: its `channel`, or the channel of the event | all triggers with an explicit `channel`; message and thread triggers without one |
 | `add_to_counter`, `set_counter` | the member and the channel the counter is kept for | every event; a missing one is an error in the log |
 | `set_antiraid_level` | nothing; it changes the server, not a member | every event; a level change it makes runs the `antiraid_level` triggers |
 

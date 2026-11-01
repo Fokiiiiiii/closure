@@ -165,6 +165,10 @@ action-add-roles = add roles
 action-remove-roles = remove roles
 action-set-nickname = set nickname
 action-slowmode = slowmode
+action-change-permissions = change permissions
+permission-restore-reason = Restore temporary automod permissions
+problem-permissions = Permission changes need distinct allowed permissions, a valid target, and a duration from 1 second to 6 hours.
+problem-permissions-channel = Permission changes on events without a channel need an explicit channel.
 action-add-to-counter = add to counter
 action-set-counter = set counter
 

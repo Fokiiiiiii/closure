@@ -60,6 +60,7 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | `counter_trigger` | `counter` (a trigger of a counter fired, or its reverse) |
 | `antiraid_level` | `antiraid_level` (the level changed, to or from the levels named). Its context carries `{level}` and `{old}` |
 | 19 actions | `delete`, `purge`, `warn`, `timeout`, `kick`, `ban`, `reply` (with `auto_delete`), `alert`, `addRoles` (`add_roles`), `removeRoles` (`remove_roles`), `changeNickname` (`set_nickname`), `setSlowmode` (`slowmode`), `addToCounter` (`add_to_counter`), `setCounter` (`set_counter`), `setAntiraidLevel` (`set_antiraid_level`). Templates with `{user}`, `{rule}`, `{detail}` and more |
+| `changePerms` | `change_permissions`: a fixed non-administrative permission list, a required duration of at most six hours, role hierarchy checks, and restoration of the original channel overwrite. `view_channel` and management permissions are excluded. |
 | antiraid levels: `antiraid_levels` (none, low, medium, high, lockdown) with their slowmode, invite pause and quarantine | the module's `antiraid` section: named levels (the first is calm), per-level `slowmode` (restored when the level goes down), `pause_invites` (only when antiraid paused them), `quarantine` (new members of that level; the role is created as `Quarantine` when none is given, and it is never released automatically: `/automod antiraid release` or `release-all`), `notify_channel`; `/automod antiraid view\|set\|clear\|release\|release-all`. A timed level goes back to calm |
 | counters | the module's `counters`: per member, per channel or overall, lazy decay, triggers and reverses, changed by actions and by `/automod counter`. The reference bot's counter commands are `/automod counters view\|set\|add\|reset` here |
 | message history for spam, `clean`, logs | available as the `message_history` capability: messages kept for `--message-history-days` (7 by default), with edits and deletions (see [writing modules](writing-modules.md#message-history)) |
@@ -111,7 +112,6 @@ closure does without them.
 These are in the reference bot and are left out on purpose, for now:
 
 - `presets`: a rule is written out in full; a preset would be a second source of truth.
-- `changePerms`: channel permission edits are a moderator's decision, not a rule's.
 - `startThread` and `archiveThread`: threads are for the members, not for automod.
 - `pauseInvites` as a rule action: the invites are paused by antiraid levels only (see the antiraid
   row); a rule cannot switch them off.
