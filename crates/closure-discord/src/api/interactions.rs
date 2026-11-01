@@ -283,9 +283,12 @@ impl TwilightApi {
                     .components(Some(&reply.components));
                 run(request).await
             }
-            // Nothing sent yet, a deferral, or a private reply, which is sent again rather than edited.
-            other => {
-                let ephemeral = other.is_some_and(|(_, ephemeral)| ephemeral) || reply.ephemeral;
+            None => Err(DiscordError::Invalid(
+                "text command reply is no longer editable".into(),
+            )),
+            // A deferral or a private reply, which is sent again rather than edited.
+            Some((_, private)) => {
+                let ephemeral = private || reply.ephemeral;
                 let sent = self
                     .send_text_reply_as(channel, invoker, reply, ephemeral)
                     .await?;

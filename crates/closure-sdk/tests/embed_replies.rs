@@ -217,6 +217,14 @@ async fn without_the_setting_each_reply_keeps_its_own_visibility() {
 }
 
 #[tokio::test]
+async fn private_deferral_marks_a_later_public_reply_private() {
+    let harness = Harness::new(module()).unwrap();
+    let replies = harness.invoke(Invocation::new("defer-true")).await.unwrap();
+    assert_eq!(replies[1].kind, ReplyKind::Edit);
+    assert!(replies[1].ephemeral, "{replies:?}");
+}
+
+#[tokio::test]
 async fn the_setting_decides_the_visibility_of_a_deferral() {
     let private = harness_with(json!({ "replies": "private" }));
     let replies = private

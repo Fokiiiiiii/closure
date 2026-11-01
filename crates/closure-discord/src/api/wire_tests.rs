@@ -1092,6 +1092,76 @@ async fn a_deferred_text_command_is_sent_by_its_first_edit_and_edited_after_that
 }
 
 #[tokio::test]
+async fn an_evicted_text_deferral_is_rejected_before_network_access() {
+    let http = Client::builder()
+        .token("test-token".to_owned())
+        .proxy("127.0.0.1:1".to_owned(), true)
+        .ratelimiter(None)
+        .timeout(Duration::from_secs(1))
+        .build();
+    let api = TwilightApi::new(Arc::new(http), Id::new(1)).with_retry(RetryPolicy {
+        max_retries: 0,
+        base_delay: Duration::from_millis(1),
+    });
+    api.execute(Action::Respond {
+        interaction_id: Id::new(44),
+        token: text_token(),
+        response: InteractionResponse::Defer { ephemeral: true },
+    })
+    .await
+    .unwrap();
+    for id in 100..1124 {
+        api.execute(Action::Respond {
+            interaction_id: Id::new(id),
+            token: InteractionToken::for_text_command(Id::new(1), Id::new(id)),
+            response: InteractionResponse::Defer { ephemeral: false },
+        })
+        .await
+        .unwrap();
+    }
+    let result = api
+        .execute(Action::EditResponse {
+            token: text_token(),
+            reply: text_reply("secret"),
+        })
+        .await;
+    assert!(
+        matches!(result, Err(DiscordError::Invalid(_))),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_evicted_private_deferral_cannot_become_a_public_reply() {
+    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON)]).await;
+    let api = discord.api();
+    api.execute(Action::Respond {
+        interaction_id: Id::new(44),
+        token: text_token(),
+        response: InteractionResponse::Defer { ephemeral: true },
+    })
+    .await
+    .unwrap();
+    for id in 100..1124 {
+        api.execute(Action::Respond {
+            interaction_id: Id::new(id),
+            token: InteractionToken::for_text_command(Id::new(1), Id::new(id)),
+            response: InteractionResponse::Defer { ephemeral: false },
+        })
+        .await
+        .unwrap();
+    }
+    let result = api
+        .execute(Action::EditResponse {
+            token: text_token(),
+            reply: text_reply("secret"),
+        })
+        .await;
+    assert!(result.is_err());
+    assert!(discord.requests().is_empty());
+}
+
+#[tokio::test]
 async fn an_ephemeral_text_command_reply_goes_to_the_invoker_and_not_to_the_channel() {
     let discord = FakeDiscord::start(vec![
         (200, MESSAGE_JSON),

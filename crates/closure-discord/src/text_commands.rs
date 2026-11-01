@@ -538,7 +538,7 @@ impl TextCommandApi {
             self.delete_after(deletions.channel, deletions.command, after, reason.clone());
         }
         if let (Some(after), Outcome::Message(reply)) = (deletions.reply_after, outcome) {
-            self.delete_after(deletions.channel, reply.id, after, reason.clone());
+            self.delete_after(reply.channel_id, reply.id, after, reason.clone());
         }
     }
 
@@ -652,7 +652,12 @@ impl DiscordApi for TextCommandApi {
                     // Discord refuses a direct message to someone who does not accept them. The answer
                     // cannot reach the invoker, so they are told in the channel instead.
                     Err(error) => match answered_in_private {
-                        Some(token) if matches!(error, DiscordError::Forbidden(_)) => {
+                        Some(token)
+                            if matches!(
+                                error,
+                                DiscordError::Forbidden(_) | DiscordError::DirectMessagesClosed
+                            ) =>
+                        {
                             let content = self.translator.translate(
                                 self.locale_of(&token),
                                 CORE_NAMESPACE,

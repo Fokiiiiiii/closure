@@ -2475,6 +2475,44 @@ async fn a_refused_text_command_is_explained_in_the_guilds_language() {
 }
 
 #[tokio::test]
+async fn closed_direct_messages_get_a_safe_text_command_notice() {
+    let inner = Arc::new(MockApi::default());
+    inner.fail_nth(1, DiscordError::DirectMessagesClosed);
+    let interactions = Arc::new(InteractionGuilds::default());
+    let token = InteractionToken::for_text_command(Id::new(3), Id::new(44));
+    assert!(interactions.register(&token, Id::new(GUILD)).is_recorded());
+    let api = crate::text_commands::TextCommandApi::new(
+        Arc::clone(&inner) as Arc<dyn DiscordApi>,
+        interactions,
+        Arc::new(StaticSettings::new([])),
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+    );
+    let result = api
+        .execute(Action::Respond {
+            interaction_id: Id::new(44),
+            token,
+            response: InteractionResponse::Message {
+                reply: InteractionReply {
+                    content: Some("secret".into()),
+                    ephemeral: true,
+                    ..InteractionReply::default()
+                },
+            },
+        })
+        .await;
+    assert!(result.is_ok(), "{result:?}");
+    let actions = inner.actions();
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    let (text, private) = reply_text(&actions[0]);
+    assert_eq!(
+        text,
+        "I couldn't send that reply privately. Allow direct messages from this server, or use the slash command instead."
+    );
+    assert!(!private);
+    assert!(!text.contains("secret"));
+}
+
+#[tokio::test]
 async fn a_form_asked_for_by_a_text_command_becomes_a_notice_in_the_guilds_language() {
     let module = warn_module(Behavior::AskForForm);
     let h = text_harness(&[(&module, true)], Some("!"), Locale::Ja).await;

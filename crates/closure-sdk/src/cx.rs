@@ -502,7 +502,16 @@ impl<I: InteractionRef + 'static> Cx<I> {
             Phase::DeferredUpdate if reply.ephemeral => {
                 self.ctx.api.followup(&*self.interaction, reply).await
             }
-            Phase::Deferred { .. } | Phase::DeferredUpdate => self.edit_original(reply).await,
+            Phase::Deferred { private: true } => {
+                self.edit_original(InteractionReply {
+                    ephemeral: true,
+                    ..reply
+                })
+                .await
+            }
+            Phase::Deferred { private: false } | Phase::DeferredUpdate => {
+                self.edit_original(reply).await
+            }
             Phase::Replied => self.ctx.api.followup(&*self.interaction, reply).await,
         };
         self.answers

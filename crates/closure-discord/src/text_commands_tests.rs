@@ -15,6 +15,48 @@ use super::*;
 
 const PREFIX: &str = "!";
 
+#[tokio::test(start_paused = true)]
+async fn private_reply_deletion_uses_the_reply_channel() {
+    use closure_core::testing::{MockApi, StaticSettings};
+
+    let inner = Arc::new(MockApi::default());
+    let api = TextCommandApi::new(
+        Arc::clone(&inner) as Arc<dyn DiscordApi>,
+        Arc::new(InteractionGuilds::default()),
+        Arc::new(StaticSettings::new([])),
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+    );
+    let reply = inner
+        .execute(Action::GetMessage {
+            channel_id: Id::new(300),
+            message_id: Id::new(55),
+        })
+        .await
+        .unwrap();
+    let deletions = Deletions {
+        channel: Id::new(3),
+        command: Id::new(44),
+        command_after: Some(Duration::from_secs(1)),
+        reply_after: Some(Duration::from_secs(1)),
+    };
+    api.schedule_deletions(&deletions, &Reason::new("cleanup").unwrap(), &reply);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let deleted: Vec<_> = inner
+        .actions()
+        .into_iter()
+        .filter_map(|action| match action {
+            Action::DeleteMessage {
+                channel_id,
+                message_id,
+                ..
+            } => Some((channel_id.get(), message_id.get())),
+            _ => None,
+        })
+        .collect();
+    assert!(deleted.contains(&(3, 44)), "{deleted:?}");
+    assert!(deleted.contains(&(300, 55)), "{deleted:?}");
+}
+
 fn opt(name: &str, kind: OptionKind) -> OptionSpec {
     OptionSpec::new(name, kind)
 }
