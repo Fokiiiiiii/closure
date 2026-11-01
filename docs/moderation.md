@@ -25,6 +25,12 @@ them, keeps notes, and records every one of these as a case. The code is in
 | `/vcmute user [duration] [reason]` | Mutes a member in voice channels, for `duration` (or until a date and time) or until `/vcunmute`. | `moderation.voice` (moderator) |
 | `/vcunmute user [reason]` | Lifts the voice mute of a member. | `moderation.voice` (moderator) |
 | `/clear count` | Deletes the newest messages of the channel, from 1 to 100, whoever wrote them. A message older than 14 days cannot be deleted in bulk, so it is left, and the reply counts it. | `moderation.clear` (moderator) |
+| `/slowmode seconds [channel] [duration]` | Sets slowmode to 0–21600 seconds; an optional duration restores the previous value. | `moderation.slowmode` (moderator) |
+| `/lock [channel] [duration] [reason]` | Denies @everyone sending messages, sending in threads and adding reactions; an optional duration restores the previous overwrite. | `moderation.lock` (moderator) |
+| `/unlock [channel]` | Restores the overwrite saved by lock. | `moderation.lock` (moderator) |
+
+Channel actions are not cases or moderation log entries. The lock implementation is independent of automod's `change_permissions` implementation.
+Text commands read options in order: supply the channel before a duration, and the duration before a lock reason.
 
 A permission key can be changed per server with `permissions.keys` (see [configuration](configuration.md)).
 

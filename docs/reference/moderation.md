@@ -39,8 +39,47 @@ Warn members, note about them, and look at and revoke the cases of a server.
 | `moderation.ban` | 75 | Ban and unban members |
 | `moderation.voice` | 50 | Mute members in voice channels and lift it |
 | `moderation.clear` | 50 | Delete the newest messages of a channel |
+| `moderation.slowmode` | 50 | Change channel slowmode. |
+| `moderation.lock` | 50 | Lock and unlock channels. |
 
 ## Commands
+
+### `/slowmode`
+
+Set channel slowmode
+
+- Japanese name: `slowmode`
+- Japanese description: チャンネルの低速モードを設定
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `seconds` | seconds | integer | yes | min 0; max 21600 | Seconds from 0 to 21600 |
+| `channel` | channel | channel | no | - | Channel to change |
+| `duration` | duration | string | no | - | Time before restoring the previous value |
+
+### `/lock`
+
+Lock a channel
+
+- Japanese name: `lock`
+- Japanese description: チャンネルをロック
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `channel` | channel | channel | no | - | Channel to lock |
+| `duration` | duration | string | no | - | Time before restoring the previous permissions |
+| `reason` | reason | string | no | max_length 512 | Why |
+
+### `/unlock`
+
+Restore a locked channel
+
+- Japanese name: `unlock`
+- Japanese description: チャンネルのロックを解除
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `channel` | channel | channel | no | - | Channel to unlock |
 
 ### `/warn`
 

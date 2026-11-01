@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::json;
 use twilight_model::gateway::Intents;
 
+mod channel_controls;
 mod clear;
 mod history;
 mod massban;
@@ -1067,6 +1068,16 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
             "moderation.clear",
             Level::MODERATOR,
             "permission-moderation-clear",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.slowmode",
+            Level::MODERATOR,
+            "permission-moderation-slowmode",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.lock",
+            Level::MODERATOR,
+            "permission-moderation-lock",
         )?))
 }
 
@@ -1101,6 +1112,29 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .config(schema, defaults)
         .component(templates::ROUTE, templates::pick)
         .component(undo::ROUTE, undo::press)
+        .job(
+            "channel_restore_slowmode",
+            channel_controls::restore_slowmode,
+        )
+        .job("channel_restore_lock", channel_controls::restore_lock)
+        .command(
+            Command::<channel_controls::Slowmode>::new("slowmode")
+                .requires("moderation.slowmode")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(channel_controls::slowmode),
+        )
+        .command(
+            Command::<channel_controls::Lock>::new("lock")
+                .requires("moderation.lock")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(channel_controls::lock),
+        )
+        .command(
+            Command::<channel_controls::Unlock>::new("unlock")
+                .requires("moderation.lock")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(channel_controls::unlock),
+        )
         .command(
             Command::<Warn>::new("warn")
                 .requires("moderation.warn")
