@@ -12,6 +12,7 @@ repository.workspace = true
 async-trait.workspace = true
 closure-core.workspace = true
 closure-i18n.workspace = true
+closure-sdk.workspace = true
 dashmap.workspace = true
 futures-util.workspace = true
 http-body-util.workspace = true
@@ -34,6 +35,7 @@ twilight-model.workspace = true
 twilight-util.workspace = true
 
 [dev-dependencies]
+closure-mod-moderation.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
 

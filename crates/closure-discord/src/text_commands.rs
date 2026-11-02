@@ -1,6 +1,6 @@
 //! Text commands: a message that starts with the guild's prefix runs the slash command of the same
 //! name, through the same handler and the same checks. The words after the command word fill the
-//! options in their declared order.
+//! options by their type.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -96,7 +96,7 @@ impl Reader<'_> {
         ))
     }
 
-    /// Reads the options from `words` in their declared order, or `None` when they do not fit.
+    /// Reads the options from `words`, or `None` when they do not fit.
     /// `line` is the text after the prefix: the words index into it.
     fn fill(
         message: &MessageInfo,
@@ -104,38 +104,62 @@ impl Reader<'_> {
         words: &[Word],
         line: &str,
     ) -> Option<Vec<CommandOption>> {
-        let mut values = Vec::new();
-        let mut at = 0;
+        let mut values = vec![None; options.len()];
         let mut files = message.attachments.iter();
         for (index, option) in options.iter().enumerate() {
-            // Files come with the message, not with the words.
             if option.kind == OptionKind::Attachment {
                 match files.next() {
-                    Some(file) => values.push(attachment(option, file)),
+                    Some(file) => values[index] = Some(attachment(option, file)),
                     None if option.required => return None,
                     None => {}
                 }
-                continue;
             }
-            let Some(word) = words.get(at) else {
-                if option.required {
+        }
+        let free = options.iter().enumerate().find_map(|(i, option)| {
+            (option.kind == OptionKind::String
+                && (option.name == "reason" || i + 1 == options.len()))
+            .then_some(i)
+        });
+        for word in words {
+            let found = options.iter().enumerate().find_map(|(i, option)| {
+                if values[i].is_some()
+                    || (Some(i) == free && option.name != "duration")
+                    || option.kind == OptionKind::Attachment
+                {
                     return None;
                 }
+                if option.kind == OptionKind::String
+                    && option.name == "duration"
+                    && closure_sdk::Span::parse(&word.text).is_err()
+                    && !(word.quoted && values[..i].iter().all(Option::is_some))
+                {
+                    return None;
+                }
+                convert(option, &word.text).map(|value| (i, value))
+            });
+            if let Some((i, value)) = found {
+                values[i] = Some(value);
                 continue;
-            };
-            // The last string option takes the rest of the line, verbatim, unless it is quoted.
-            let rest_of_line =
-                index + 1 == options.len() && option.kind == OptionKind::String && !word.quoted;
-            let raw = if rest_of_line {
-                at = words.len();
-                line[word.start..].trim_end()
+            }
+            let i = free.filter(|&i| values[i].is_none())?;
+            let raw = if word.quoted {
+                &word.text
             } else {
-                at += 1;
-                word.text.as_str()
+                line[word.start..].trim_end()
             };
-            values.push(convert(option, raw)?);
+            values[i] = Some(convert(&options[i], raw)?);
+            if !word.quoted {
+                break;
+            }
         }
-        (at == words.len()).then_some(values)
+        if options
+            .iter()
+            .zip(&values)
+            .any(|(option, value)| option.required && value.is_none())
+        {
+            return None;
+        }
+        Some(values.into_iter().flatten().collect())
     }
 
     fn usage(&self, message: &MessageInfo, spec: &CommandSpec, usage: String) -> Reading {

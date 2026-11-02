@@ -304,7 +304,7 @@ fn commands() -> Vec<CommandSpec> {
         name: name.into(),
         value: ChoiceValue::String(value.into()),
     };
-    vec![
+    let mut commands = vec![
         spec(
             "warn",
             vec![
@@ -379,6 +379,40 @@ fn commands() -> Vec<CommandSpec> {
                     vec![sub("add", vec![required("name", OptionKind::String)])],
                 ),
             ],
+        ),
+    ];
+    commands.extend(extra_commands());
+    commands
+}
+
+fn extra_commands() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "ban",
+            vec![
+                required("user", OptionKind::User),
+                opt("reason", OptionKind::String),
+                opt("duration", OptionKind::String),
+                opt("delete_days", OptionKind::Integer),
+            ],
+            vec![],
+        ),
+        spec(
+            "lock",
+            vec![
+                opt("channel", OptionKind::Channel),
+                opt("duration", OptionKind::String),
+                opt("reason", OptionKind::String),
+            ],
+            vec![],
+        ),
+        spec(
+            "pair",
+            vec![
+                required("first", OptionKind::User),
+                required("second", OptionKind::User),
+            ],
+            vec![],
         ),
     ]
 }
@@ -779,13 +813,173 @@ fn channels_roles_and_mentionables_are_read_in_their_mention_forms() {
         ]
     );
     assert_eq!(
-        usage("!target <@5>"),
-        "Usage: !target [channel] [role] [who]"
+        values("!target <@5>"),
+        [CommandOptionValue::Mentionable(Mentionable::User(Id::new(
+            5
+        )))]
     );
     assert_eq!(
         usage("!target <#7> <#8>"),
         "Usage: !target [channel] [role] [who]"
     );
+}
+
+#[test]
+fn typed_options_can_be_reordered_before_the_reason() {
+    assert_eq!(
+        values("!ban 7d <@5> spam"),
+        [
+            CommandOptionValue::User(Id::new(5)),
+            text("spam"),
+            text("7d")
+        ]
+    );
+    assert_eq!(
+        values("!timeout 7d <@5> spam"),
+        [
+            CommandOptionValue::User(Id::new(5)),
+            text("7d"),
+            text("spam")
+        ]
+    );
+    assert_eq!(
+        values("!lock 10m <#7> reason"),
+        [
+            CommandOptionValue::Channel(Id::new(7)),
+            text("10m"),
+            text("reason")
+        ]
+    );
+    assert_eq!(
+        values("!lock <#7> 10m reason"),
+        values("!lock 10m <#7> reason")
+    );
+    assert_eq!(
+        values("!ban <@5> spam 7d"),
+        [CommandOptionValue::User(Id::new(5)), text("spam 7d")]
+    );
+    assert_eq!(
+        values("!ban <@5> 7d 10m  spam"),
+        [
+            CommandOptionValue::User(Id::new(5)),
+            text("10m  spam"),
+            text("7d")
+        ]
+    );
+    assert!(matches!(read("!ban 7d spam"), Reading::Usage { .. }));
+    assert_eq!(
+        values("!pair <@5> <@6>"),
+        [
+            CommandOptionValue::User(Id::new(5)),
+            CommandOptionValue::User(Id::new(6))
+        ]
+    );
+    assert!(matches!(
+        read("!pair <@5> <@6> <@7>"),
+        Reading::Usage { .. }
+    ));
+}
+
+#[test]
+fn quoted_reason_allows_following_typed_options() {
+    assert_eq!(
+        values("!ban <@5> \"being rude\" 7d"),
+        [
+            CommandOptionValue::User(Id::new(5)),
+            text("being rude"),
+            text("7d")
+        ]
+    );
+    assert_eq!(
+        values("!ban <@5> \"being rude\" 7d 3"),
+        [
+            CommandOptionValue::User(Id::new(5)),
+            text("being rude"),
+            text("7d"),
+            CommandOptionValue::Integer(3)
+        ]
+    );
+    assert!(matches!(
+        read("!ban <@5> \"being rude\" invalid"),
+        Reading::Usage { .. }
+    ));
+    assert_eq!(
+        values("!ban <@5> spam 7d"),
+        [CommandOptionValue::User(Id::new(5)), text("spam 7d")]
+    );
+}
+
+#[test]
+fn real_moderation_commands_accept_reordered_options() {
+    use closure_core::module::Module;
+    let module = closure_mod_moderation::module().unwrap();
+    let commands: Vec<_> = module.manifest().commands.iter().collect();
+    let translator = TranslatorBuilder::new().unwrap().build();
+    let reader = Reader {
+        prefix: PREFIX,
+        application: Id::new(60),
+        locale: Locale::En,
+        commands: &commands,
+        translator: &translator,
+    };
+    for (input, expected) in [
+        (
+            "!ban <@5> \"being rude\" 7d",
+            vec![
+                ("user", CommandOptionValue::User(Id::new(5))),
+                ("reason", text("being rude")),
+                ("duration", text("7d")),
+            ],
+        ),
+        (
+            "!ban <@5> \"being rude\" 7d 3",
+            vec![
+                ("user", CommandOptionValue::User(Id::new(5))),
+                ("reason", text("being rude")),
+                ("duration", text("7d")),
+                ("delete_days", CommandOptionValue::Integer(3)),
+            ],
+        ),
+        (
+            "!ban 7d <@5> spam",
+            vec![
+                ("user", CommandOptionValue::User(Id::new(5))),
+                ("reason", text("spam")),
+                ("duration", text("7d")),
+            ],
+        ),
+        (
+            "!timeout 7d <@5> spam",
+            vec![
+                ("user", CommandOptionValue::User(Id::new(5))),
+                ("duration", text("7d")),
+                ("reason", text("spam")),
+            ],
+        ),
+        (
+            "!lock 10m <#7> reason",
+            vec![
+                ("channel", CommandOptionValue::Channel(Id::new(7))),
+                ("duration", text("10m")),
+                ("reason", text("reason")),
+            ],
+        ),
+    ] {
+        let Reading::Run(invocation) = reader.read(&message(input), |_| Permissions::empty())
+        else {
+            panic!("{input}")
+        };
+        assert_eq!(
+            invocation.options,
+            expected
+                .into_iter()
+                .map(|(name, value)| CommandOption {
+                    name: name.into(),
+                    value
+                })
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
