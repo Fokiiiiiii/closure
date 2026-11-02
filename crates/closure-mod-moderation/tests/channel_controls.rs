@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use closure_core::action::Action;
+use closure_core::action::{Action, MentionPolicy};
 use closure_core::event::CommandOptionValue;
 use closure_mod_moderation::builder;
 use closure_sdk::testing::{Harness, Invocation};
@@ -21,6 +21,12 @@ fn harness(overwrite: bool) -> Harness {
     }))
     .unwrap();
     harness.api().set_channels(Id::new(1), vec![channel]);
+    let member = serde_json::from_value(json!({
+        "user": {"id":"100", "username":"tester", "discriminator":"0", "avatar":null},
+        "nick":"Mod @everyone", "roles":[], "joined_at":null, "deaf":false, "mute":false, "flags":0
+    }))
+    .unwrap();
+    harness.api().set_member(Id::new(1), member);
     harness
 }
 
@@ -185,4 +191,144 @@ async fn timed_lock_deletes_an_overwrite_that_did_not_exist() {
             .iter()
             .any(|a| matches!(a, Action::DeletePermissionOverwrite { .. }))
     );
+}
+
+#[tokio::test]
+async fn channel_audit_and_log() {
+    let h = harness(false);
+    h.set_log_channel(77);
+    h.invoke(
+        invocation("slowmode")
+            .option("seconds", CommandOptionValue::Integer(30))
+            .option("duration", CommandOptionValue::String("10s".into())),
+    )
+    .await
+    .unwrap();
+    h.invoke(
+        invocation("lock")
+            .option(
+                "reason",
+                CommandOptionValue::String("@everyone <@123>".into()),
+            )
+            .option("duration", CommandOptionValue::String("10s".into())),
+    )
+    .await
+    .unwrap();
+    h.invoke(invocation("unlock")).await.unwrap();
+    let actions = h.api().actions();
+    let reasons: Vec<_> = actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::EditChannel { reason, .. }
+            | Action::SetPermissionOverwrite { reason, .. }
+            | Action::DeletePermissionOverwrite { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasons.len(), 3);
+    assert!(
+        reasons
+            .iter()
+            .all(|reason| reason.contains("100") && reason.contains("Mod @everyone"))
+    );
+    assert!(reasons[1].contains("@everyone <@123>"));
+    let logs: Vec<_> = actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::SendMessage {
+                channel_id,
+                content: Some(content),
+                mentions,
+                ..
+            } if channel_id.get() == 77 => Some((content, mentions)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(logs.len(), 3);
+    assert!(
+        logs.iter()
+            .all(|(content, mentions)| content.contains("Mod @")
+                && content.contains("<#5>")
+                && !content.contains('\n')
+                && matches!(mentions, MentionPolicy::None))
+    );
+    assert!(logs[0].0.contains("30") && logs[0].0.contains("<t:"));
+    assert!(logs[1].0.contains("Locked") && logs[1].0.contains("<t:"));
+    assert!(logs[2].0.contains("Unlocked"));
+    h.advance(Duration::from_secs(10));
+    assert!(h.run_due_jobs().await.into_iter().all(|r| r.is_ok()));
+    assert!(h.api().actions().iter().any(|a| matches!(a, Action::SendMessage { content: Some(content), mentions: MentionPolicy::None, .. } if content.contains("System") && content.contains("42"))));
+}
+
+#[tokio::test]
+async fn automatic_unlock_is_logged() {
+    let h = harness(false);
+    h.set_log_channel(77);
+    h.invoke(invocation("lock").option("duration", CommandOptionValue::String("10s".into())))
+        .await
+        .unwrap();
+    h.advance(Duration::from_secs(10));
+    assert!(h.run_due_jobs().await.into_iter().all(|r| r.is_ok()));
+    assert!(h.api().actions().iter().any(|a| matches!(a, Action::SendMessage { content: Some(content), mentions: MentionPolicy::None, .. } if content.contains("System") && content.contains("Unlocked"))));
+}
+
+#[tokio::test]
+async fn channel_commands_succeed_without_log_or_when_post_fails() {
+    for name in ["slowmode", "lock", "unlock"] {
+        for fail in [false, true] {
+            let h = harness(false);
+            if fail {
+                h.set_log_channel(77);
+            }
+            if name == "unlock" {
+                h.invoke(invocation("lock")).await.unwrap();
+            }
+            let make_invocation = || {
+                let command = invocation(name);
+                if name == "slowmode" {
+                    command.option("seconds", CommandOptionValue::Integer(10))
+                } else {
+                    command
+                }
+            };
+            if fail {
+                // Defer, channel lookup when needed, change, then log.
+                let nth = if name == "unlock" { 4 } else { 5 };
+                h.api()
+                    .fail_nth(nth, closure_sdk::DiscordError::Fatal("offline".into()));
+            }
+            let before = h.api().actions().len();
+            let replies = h.invoke(make_invocation()).await.unwrap();
+            assert!(
+                replies.last().unwrap().content.contains(match name {
+                    "slowmode" => "Slowmode",
+                    "lock" => "Locked",
+                    _ => "Restored",
+                }),
+                "{name} {fail}: {replies:?}"
+            );
+            assert!(!h.api().actions()[before..].iter().any(
+                |a| matches!(a, Action::SendMessage { channel_id, .. } if channel_id.get() == 77)
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn audit_reason_preserves_actor_with_long_reason() {
+    let h = harness(false);
+    h.invoke(invocation("lock").option("reason", CommandOptionValue::String("界".repeat(512))))
+        .await
+        .unwrap();
+    let actions = h.api().actions();
+    let reason = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::SetPermissionOverwrite { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(reason.contains("100") && reason.contains("Mod @everyone"));
+    assert_eq!(reason.chars().count(), 512);
+    assert!(reason.ends_with('…'));
 }

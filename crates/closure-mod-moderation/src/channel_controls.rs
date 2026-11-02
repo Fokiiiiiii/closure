@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use closure_core::action::{Action, ChannelPatch, Outcome, OverwriteSpec, OverwriteTarget};
+use closure_sdk::duration::{TimeStyle, timestamp};
 use closure_sdk::{
     Args, ChannelId, CommandArgs, CommandCx, EventContext, GuildId, JobCx, ModuleError, Reason,
     Span, Tone, UserError,
 };
+use closure_sdk::{embed, modlog};
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::permission_overwrite::PermissionOverwriteType;
 use twilight_model::guild::Permissions;
@@ -97,7 +99,63 @@ async fn schedule(
         .await
         .map_err(failure)
 }
-async fn edit(ctx: &EventContext, channel: ChannelId, seconds: u16) -> Result<(), ModuleError> {
+async fn display_name(cx: &CommandCx) -> String {
+    cx.api()
+        .get_member(cx.guild_id(), cx.user().id)
+        .await
+        .ok()
+        .map_or_else(
+            || cx.user().name.clone(),
+            |member| {
+                member
+                    .nick
+                    .or(member.user.global_name)
+                    .unwrap_or(member.user.name)
+            },
+        )
+        .replace(['\n', '\r'], " ")
+}
+
+fn audit_reason(cx: &CommandCx, name: &str, reason: Option<&str>) -> Reason {
+    let user = cx.user();
+    let text = cx.ctx().t_args(
+        "channel-audit-reason",
+        &Args::new()
+            .with("id", user.id.get().to_string())
+            .with("name", name.to_owned())
+            .with("reason", reason.unwrap_or("")),
+    );
+    Reason::truncated(&text)
+}
+
+async fn log(ctx: &EventContext, actor: &str, id: ChannelId, action: &str, until: Option<i64>) {
+    let expiry = until.map_or_else(String::new, |time| {
+        ctx.t_args(
+            "channel-log-until",
+            &Args::new().with("until", timestamp(time, TimeStyle::LongDateTime)),
+        )
+    });
+    let message = ctx.t_args(
+        "channel-log",
+        &Args::new()
+            .with("actor", actor.to_owned())
+            .with("channel", id.get().to_string())
+            .with("action", action.to_owned())
+            .with("expiry", expiry),
+    );
+    let _ = modlog::post_text(ctx, message).await;
+}
+
+fn actor(cx: &CommandCx, name: &str) -> String {
+    format!("{} ({})", embed::escape(name), cx.user().id)
+}
+
+async fn edit(
+    ctx: &EventContext,
+    channel: ChannelId,
+    seconds: u16,
+    reason: Reason,
+) -> Result<(), ModuleError> {
     ctx.api
         .execute(Action::EditChannel {
             channel_id: channel,
@@ -105,7 +163,7 @@ async fn edit(ctx: &EventContext, channel: ChannelId, seconds: u16) -> Result<()
                 slowmode_seconds: Some(seconds),
                 ..ChannelPatch::default()
             },
-            reason: Reason::truncated(&ctx.t("channel-action-reason")),
+            reason,
         })
         .await?;
     Ok(())
@@ -119,12 +177,19 @@ pub(crate) async fn slowmode(cx: CommandCx, args: Slowmode) -> Result<(), UserEr
     let duration = args.duration.map(|span| span.resolve(&cx)).transpose()?;
     let id = args.channel.unwrap_or(cx.invocation().channel_id);
     cx.defer(true).await?;
+    let name = display_name(&cx).await;
     let gate = gate(cx.guild_id());
     let _guard = gate.lock().await;
     let info = channel(cx.ctx(), id).await?;
     let key = key("slowmode", id);
-    if let Some(duration) = duration {
-        let until = cx.now() + i64::try_from(duration.as_secs()).map_err(failure)?;
+    let until = duration
+        .map(|duration| {
+            i64::try_from(duration.as_secs())
+                .map(|seconds| cx.now() + seconds)
+                .map_err(failure)
+        })
+        .transpose()?;
+    if let Some(until) = until {
         let saved = cx.store().get::<SavedSlowmode>(&key).await?;
         let original = match saved {
             Some(saved) => saved.original,
@@ -137,13 +202,24 @@ pub(crate) async fn slowmode(cx: CommandCx, args: Slowmode) -> Result<(), UserEr
             .set(&key, &SavedSlowmode { original, until })
             .await?;
     } else {
-        edit(cx.ctx(), id, seconds).await?;
+        edit(cx.ctx(), id, seconds, audit_reason(&cx, &name, None)).await?;
         cx.scheduler().cancel(&key).await?;
         cx.store().delete(&key).await?;
     }
     if duration.is_some() {
-        edit(cx.ctx(), id, seconds).await?;
+        edit(cx.ctx(), id, seconds, audit_reason(&cx, &name, None)).await?;
     }
+    log(
+        cx.ctx(),
+        &actor(&cx, &name),
+        id,
+        &cx.ctx().t_args(
+            "channel-log-slowmode",
+            &Args::new().with("seconds", i64::from(seconds)),
+        ),
+        until,
+    )
+    .await;
     cx.say_t(
         Tone::Success,
         "slowmode-done",
@@ -158,6 +234,7 @@ pub(crate) async fn lock(cx: CommandCx, args: Lock) -> Result<(), UserError> {
     let duration = args.duration.map(|span| span.resolve(&cx)).transpose()?;
     let id = args.channel.unwrap_or(cx.invocation().channel_id);
     cx.defer(true).await?;
+    let name = display_name(&cx).await;
     let gate = gate(cx.guild_id());
     let _guard = gate.lock().await;
     let key = key("lock", id);
@@ -205,9 +282,17 @@ pub(crate) async fn lock(cx: CommandCx, args: Lock) -> Result<(), UserError> {
         .execute(Action::SetPermissionOverwrite {
             channel_id: id,
             overwrite,
-            reason: Reason::truncated(&cx.t("channel-action-reason", &Args::new())),
+            reason: audit_reason(&cx, &name, args.reason.as_deref()),
         })
         .await?;
+    log(
+        cx.ctx(),
+        &actor(&cx, &name),
+        id,
+        &cx.ctx().t("channel-log-lock"),
+        until,
+    )
+    .await;
     let reason = args
         .reason
         .filter(|s| !s.trim().is_empty())
@@ -226,8 +311,8 @@ async fn restore_overwrite(
     ctx: &EventContext,
     id: ChannelId,
     saved: SavedLock,
+    reason: Reason,
 ) -> Result<(), ModuleError> {
-    let reason = Reason::truncated(&ctx.t("channel-action-reason"));
     let action = match saved.original {
         Some(overwrite) => Action::SetPermissionOverwrite {
             channel_id: id,
@@ -251,14 +336,23 @@ async fn restore_overwrite(
 pub(crate) async fn unlock(cx: CommandCx, args: Unlock) -> Result<(), UserError> {
     let id = args.channel.unwrap_or(cx.invocation().channel_id);
     cx.defer(true).await?;
+    let name = display_name(&cx).await;
     let gate = gate(cx.guild_id());
     let _guard = gate.lock().await;
     let key = key("lock", id);
     let Some(saved) = cx.store().get::<SavedLock>(&key).await? else {
         return Err(UserError::message("lock-not-found"));
     };
-    restore_overwrite(cx.ctx(), id, saved).await?;
+    restore_overwrite(cx.ctx(), id, saved, audit_reason(&cx, &name, None)).await?;
     cx.scheduler().cancel(&key).await?;
+    log(
+        cx.ctx(),
+        &actor(&cx, &name),
+        id,
+        &cx.ctx().t("channel-log-unlock"),
+        None,
+    )
+    .await;
     cx.say_t(
         Tone::Success,
         "unlock-done",
@@ -281,8 +375,25 @@ pub(crate) async fn restore_slowmode(cx: JobCx) -> Result<(), ModuleError> {
         if saved.until > cx.now() {
             return schedule(cx.ctx(), "channel_restore_slowmode", &key, id, saved.until).await;
         }
-        edit(cx.ctx(), id, saved.original).await?;
+        edit(
+            cx.ctx(),
+            id,
+            saved.original,
+            Reason::truncated(&cx.ctx().t("channel-action-reason")),
+        )
+        .await?;
         cx.store().delete(&key).await.map_err(failure)?;
+        log(
+            cx.ctx(),
+            &cx.ctx().t("channel-log-system"),
+            id,
+            &cx.ctx().t_args(
+                "channel-log-slowmode",
+                &Args::new().with("seconds", i64::from(saved.original)),
+            ),
+            None,
+        )
+        .await;
     }
     Ok(())
 }
@@ -298,7 +409,21 @@ pub(crate) async fn restore_lock(cx: JobCx) -> Result<(), ModuleError> {
         if until > cx.now() {
             return schedule(cx.ctx(), "channel_restore_lock", &key, id, until).await;
         }
-        restore_overwrite(cx.ctx(), id, saved).await?;
+        restore_overwrite(
+            cx.ctx(),
+            id,
+            saved,
+            Reason::truncated(&cx.ctx().t("channel-action-reason")),
+        )
+        .await?;
+        log(
+            cx.ctx(),
+            &cx.ctx().t("channel-log-system"),
+            id,
+            &cx.ctx().t("channel-log-unlock"),
+            None,
+        )
+        .await;
     }
     Ok(())
 }

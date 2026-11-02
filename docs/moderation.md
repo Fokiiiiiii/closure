@@ -29,7 +29,7 @@ them, keeps notes, and records every one of these as a case. The code is in
 | `/lock [channel] [duration] [reason]` | Denies @everyone sending messages, sending in threads and adding reactions; an optional duration restores the previous overwrite. | `moderation.lock` (moderator) |
 | `/unlock [channel]` | Restores the overwrite saved by lock. | `moderation.lock` (moderator) |
 
-Channel actions are not cases or moderation log entries. The lock implementation is independent of automod's `change_permissions` implementation.
+Channel actions are not cases. Their Discord audit reasons identify the moderator and include the lock reason, truncated to 512 characters. When a moderation log channel is configured, channel changes and timed restorations are also posted there without mentions; a failed post does not fail the action and is not retried. The lock implementation is independent of automod's `change_permissions` implementation.
 Text commands read options in order: supply the channel before a duration, and the duration before a lock reason.
 
 A permission key can be changed per server with `permissions.keys` (see [configuration](configuration.md)).

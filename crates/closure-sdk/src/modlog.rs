@@ -28,6 +28,22 @@ const KNOWN_KINDS: [&str; 9] = [
 /// Grey, for a case that was revoked whatever its kind.
 const REVOKED_COLOR: Color = Color::Rgb(0x0095_A5A6);
 
+/// Sends a case-free log message, or does nothing when no log channel is configured.
+pub async fn post_text(ctx: &EventContext, content: String) -> Result<(), UserError> {
+    if let Some(channel_id) = ctx.policy().log_channel {
+        ctx.api
+            .execute(Action::SendMessage {
+                channel_id,
+                content: Some(content),
+                embeds: Vec::new(),
+                reply_to: None,
+                mentions: MentionPolicy::None,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
 /// Posts `case` to the log channel of the guild and returns the id of the message. Returns
 /// `None` and sends nothing when the guild has no log channel. Needs the capability
 /// `SendMessages` as well as `cases`.
