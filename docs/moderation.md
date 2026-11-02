@@ -386,6 +386,11 @@ interruption, it can check Discord and recover its case and timer. Recovery runs
 becomes available and every five minutes; if the ban has expired, it is lifted. A failed check is
 retried. If the timer cannot be set, the ban still holds and the reply says so; recovery retries it.
 
+Timed timeouts and voice mutes also record an intent before the Discord action. Recovery checks the
+member, records the case and restores any required timer, or lifts an expired restriction. Discord's
+member state does not identify why a role, timeout or mute is present, so an existing identical
+restriction from another cause can be attributed to the interrupted action.
+
 ## What the bot needs from Discord
 
 - Permissions: **Kick Members**, **Ban Members**, **Moderate Members** (for timeouts), **Mute Members**

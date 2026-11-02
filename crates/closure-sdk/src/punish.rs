@@ -366,8 +366,26 @@ impl<'a> Punisher<'a> {
         reason: Option<String>,
     ) -> Result<Done, UserError> {
         let _turn = member_turn(self.ctx, target).await;
-        let now = self.ctx.now();
         let reason_text = dm_reason(self.ctx, reason.as_deref());
+        let key = restriction_intent_key("timeout", target);
+        reconcile_restriction(self.ctx, &key).await?;
+        let now = self.ctx.now();
+        let role = match self.settings.timeout {
+            Method::Role => Some(self.timeout_role()?),
+            Method::Discord => {
+                timeout_seconds(duration)?;
+                None
+            }
+        };
+        self.remember_restriction(
+            "timeout",
+            target,
+            role,
+            now,
+            now.saturating_add(secs(duration)),
+            reason.as_deref(),
+        )
+        .await?;
         let role = self
             .give_timeout(target, duration, reason.as_deref())
             .await?;
@@ -390,6 +408,9 @@ impl<'a> Punisher<'a> {
                 .then_some(Note::NoTimeoutTimer),
             None => None,
         };
+        if recorded.is_ok() && timer.is_none() {
+            self.ctx.store().delete(&key).await?;
+        }
         let case = recorded?;
         let _ = modlog::post(self.ctx, &case).await;
         let stripped = self
@@ -427,6 +448,7 @@ impl<'a> Punisher<'a> {
         reason: Option<String>,
     ) -> Result<Case, UserError> {
         let _turn = member_turn(self.ctx, target).await;
+        reconcile_restriction(self.ctx, &restriction_intent_key("timeout", target)).await?;
         if let Some(undone) = self.superseded(target, "timeout").await? {
             return Ok(undone);
         }
@@ -626,6 +648,40 @@ impl<'a> Punisher<'a> {
         Ok(())
     }
 
+    async fn remember_restriction(
+        &self,
+        kind: &str,
+        target: UserId,
+        role: Option<RoleId>,
+        started_at: i64,
+        expires_at: i64,
+        reason: Option<&str>,
+    ) -> Result<(), UserError> {
+        let cases = self.ctx.cases().for_target(target, None, 1).await?;
+        let intent = RestrictionIntent {
+            kind: kind.to_owned(),
+            target: target.get(),
+            moderator: self.moderator.id.get(),
+            reason: reason.map(str::to_owned),
+            started_at,
+            expires_at,
+            case_before: cases.first().map_or(0, |case| case.number),
+            method: if kind == "timeout" {
+                self.settings.timeout
+            } else {
+                self.settings.voice
+            },
+            role: role.map(RoleId::get),
+            restore: self.settings.strip.restore.clone(),
+            lifting: false,
+        };
+        self.ctx
+            .store()
+            .set(&restriction_intent_key(kind, target), &intent)
+            .await?;
+        Ok(())
+    }
+
     /// Lifts the ban of `target` and records an `unban` case, which revokes the newest ban that
     /// still stands.
     pub async fn unban(&self, target: UserId, reason: Option<String>) -> Result<Case, UserError> {
@@ -666,8 +722,25 @@ impl<'a> Punisher<'a> {
         reason: Option<String>,
     ) -> Result<Done, UserError> {
         let _turn = member_turn(self.ctx, target).await;
-        let now = self.ctx.now();
         let reason_text = dm_reason(self.ctx, reason.as_deref());
+        let key = restriction_intent_key("vcmute", target);
+        reconcile_restriction(self.ctx, &key).await?;
+        let now = self.ctx.now();
+        if let Some(duration) = duration {
+            let role = match self.settings.voice {
+                Method::Role => Some(self.voice_role()?),
+                Method::Discord => None,
+            };
+            self.remember_restriction(
+                "vcmute",
+                target,
+                role,
+                now,
+                now.saturating_add(secs(duration)),
+                reason.as_deref(),
+            )
+            .await?;
+        }
         let role = self.mute_in_voice(target, reason.as_deref()).await?;
         let stripped = self.strip_for(target, role, RestrictionRole::Voice).await?;
         let expires_at = duration.map(|duration| now + secs(duration));
@@ -690,6 +763,9 @@ impl<'a> Punisher<'a> {
                 .then_some(Note::NoVoiceTimer),
             None => None,
         };
+        if duration.is_some() && recorded.is_ok() && timer.is_none() {
+            self.ctx.store().delete(&key).await?;
+        }
         let case = recorded?;
         let _ = modlog::post(self.ctx, &case).await;
         let note = match duration {
@@ -736,6 +812,7 @@ impl<'a> Punisher<'a> {
         reason: Option<String>,
     ) -> Result<Case, UserError> {
         let _turn = member_turn(self.ctx, target).await;
+        reconcile_restriction(self.ctx, &restriction_intent_key("vcmute", target)).await?;
         if let Some(undone) = self.superseded(target, "vcmute").await? {
             return Ok(undone);
         }
@@ -1023,7 +1100,7 @@ impl<'a> Punisher<'a> {
         reason: Option<String>,
         expires_at: Option<i64>,
     ) -> Result<Case, UserError> {
-        // shortcut: interrupted punishments other than timed bans can lose cases; reconcile their intents too.
+        // shortcut: interrupted permanent punishments can lose cases; add intents if recovery is needed.
         Ok(self
             .ctx
             .cases()
@@ -1185,6 +1262,26 @@ struct BanIntent {
     expires_at: i64,
     #[serde(default)]
     case_before: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RestrictionIntent {
+    kind: String,
+    target: u64,
+    moderator: u64,
+    reason: Option<String>,
+    started_at: i64,
+    expires_at: i64,
+    case_before: i64,
+    method: Method,
+    role: Option<u64>,
+    restore: RoleSelection,
+    #[serde(default)]
+    lifting: bool,
+}
+
+fn restriction_intent_key(kind: &str, user: UserId) -> String {
+    format!("{kind}-intent:{}", user.get())
 }
 
 fn ban_intent_key(user: UserId) -> String {
@@ -1392,7 +1489,7 @@ pub fn jobs(builder: ModuleBuilder) -> ModuleBuilder {
             modlog::retry_pending(cx.ctx(), RECONCILE_BATCH)
                 .await
                 .map_err(|error| ModuleError::other(format!("{error:?}")))?;
-            reconcile_bans(cx.ctx()).await
+            reconcile_intents(cx.ctx()).await
         })
         .job("unban", lift_ban)
         .job("untimeout", end_timeout)
@@ -1400,38 +1497,62 @@ pub fn jobs(builder: ModuleBuilder) -> ModuleBuilder {
         .job("restriction_sync", roles::restriction_sync)
 }
 
-async fn reconcile_bans(ctx: &EventContext) -> Result<(), ModuleError> {
+async fn reconcile_intents(ctx: &EventContext) -> Result<(), ModuleError> {
     let store = ctx.store();
+    let start: usize = store
+        .get("punish-reconcile-kind")
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?
+        .unwrap_or(0);
+    let kinds = ["ban", "timeout", "vcmute"];
+    let mut remaining = RECONCILE_BATCH;
+    for offset in 0..kinds.len() {
+        if remaining == 0 {
+            break;
+        }
+        remaining -= reconcile_batch(ctx, kinds[(start + offset) % kinds.len()], remaining).await?;
+    }
+    store
+        .set("punish-reconcile-kind", &((start + 1) % kinds.len()))
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    Ok(())
+}
+
+async fn reconcile_batch(
+    ctx: &EventContext,
+    kind: &str,
+    limit: usize,
+) -> Result<usize, ModuleError> {
+    let store = ctx.store();
+    let cursor_key = format!("{kind}-reconcile-cursor");
+    let base = format!("{kind}-intent:");
     let cursor: Option<String> = store
-        .get("ban-reconcile-cursor")
+        .get(&cursor_key)
         .await
         .map_err(|error| ModuleError::other(error.to_string()))?;
     let mut prefixes = Vec::new();
     if let Some(digits) = cursor
         .as_deref()
-        .and_then(|key| key.strip_prefix("ban-intent:"))
+        .and_then(|key| key.strip_prefix(&base))
         .filter(|digits| {
             !digits.is_empty() && digits.len() <= 20 && digits.bytes().all(|b| b.is_ascii_digit())
         })
     {
         for next in b'0'..=b'9' {
-            prefixes.push(format!("ban-intent:{digits}{}", char::from(next)));
+            prefixes.push(format!("{base}{digits}{}", char::from(next)));
         }
         for index in (0..digits.len()).rev() {
             for next in digits.as_bytes()[index] + 1..=b'9' {
-                prefixes.push(format!(
-                    "ban-intent:{}{}",
-                    &digits[..index],
-                    char::from(next)
-                ));
+                prefixes.push(format!("{base}{}{}", &digits[..index], char::from(next)));
             }
         }
     }
-    prefixes.push("ban-intent:".to_owned());
+    prefixes.push(base);
     let mut entries = Vec::new();
     for prefix in prefixes {
         entries = store
-            .list(&prefix, RECONCILE_BATCH)
+            .list(&prefix, limit)
             .await
             .map_err(|error| ModuleError::other(error.to_string()))?;
         if !entries.is_empty() {
@@ -1439,27 +1560,33 @@ async fn reconcile_bans(ctx: &EventContext) -> Result<(), ModuleError> {
         }
     }
     let last = entries.last().map(|(key, _)| key.clone());
+    let count = entries.len();
     for (key, entry) in entries {
         let result: Result<(), UserError> = async {
-            let intent: BanIntent = serde_json::from_value(entry.value)
-                .map_err(|error| ModuleError::other(error.to_string()))?;
-            let user = UserId::new_checked(intent.target)
-                .ok_or_else(|| ModuleError::other("invalid ban intent target"))?;
+            let target: u64 =
+                serde_json::from_value(entry.value.get("target").cloned().unwrap_or_default())
+                    .map_err(|error| ModuleError::other(error.to_string()))?;
+            let user = UserId::new_checked(target)
+                .ok_or_else(|| ModuleError::other("invalid intent target"))?;
             let _turn = member_turn(ctx, user).await;
-            reconcile_ban(ctx, &key).await
+            if kind == "ban" {
+                reconcile_ban(ctx, &key).await
+            } else {
+                reconcile_restriction(ctx, &key).await
+            }
         }
         .await;
         if let Err(error) = result {
-            tracing::warn!(%key, ?error, "could not reconcile a ban intent");
+            tracing::warn!(%key, ?error, "could not reconcile a punishment intent");
         }
     }
     if let Some(last) = last {
         store
-            .set("ban-reconcile-cursor", &last)
+            .set(&cursor_key, &last)
             .await
             .map_err(|error| ModuleError::other(error.to_string()))?;
     }
-    Ok(())
+    Ok(count)
 }
 
 async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
@@ -1536,6 +1663,186 @@ async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
     Ok(())
 }
 
+async fn reconcile_restriction(ctx: &EventContext, key: &str) -> Result<(), UserError> {
+    let mut intent = match ctx.store().get::<RestrictionIntent>(key).await {
+        Ok(Some(intent)) => intent,
+        Ok(None) | Err(closure_core::storage::StorageError::NotGranted) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let target = UserId::new_checked(intent.target)
+        .ok_or_else(|| ModuleError::other("invalid restriction intent target"))?;
+    let moderator = UserId::new_checked(intent.moderator)
+        .ok_or_else(|| ModuleError::other("invalid restriction intent moderator"))?;
+    if !["timeout", "vcmute"].contains(&intent.kind.as_str()) {
+        return Err(ModuleError::other("invalid restriction intent kind").into());
+    }
+    let role = match intent.method {
+        Method::Role => Some(
+            intent
+                .role
+                .and_then(RoleId::new_checked)
+                .ok_or_else(|| ModuleError::other("invalid restriction intent role"))?,
+        ),
+        Method::Discord => None,
+    };
+    let member = match ctx
+        .api
+        .execute(Action::GetMember {
+            guild_id: ctx.guild_id,
+            user_id: target,
+        })
+        .await
+    {
+        Ok(Outcome::Member(member)) => member,
+        Err(DiscordError::NotFound) => {
+            ctx.store().delete(key).await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err(ModuleError::other("the member was not read").into()),
+    };
+    let present = match (intent.kind.as_str(), intent.method, role) {
+        (_, Method::Role, Some(role)) => member.roles.contains(&role),
+        ("timeout", Method::Discord, _) => member
+            .communication_disabled_until
+            .is_some_and(|until| until.as_secs() > ctx.now()),
+        ("vcmute", Method::Discord, _) => member.mute,
+        _ => false,
+    };
+    if !present {
+        if intent.lifting
+            && let Some(role) = role
+        {
+            let which = if intent.kind == "timeout" {
+                RestrictionRole::Timeout
+            } else {
+                RestrictionRole::Voice
+            };
+            let reason =
+                Reason::truncated(&ctx.t_core(ctx.locale, "punish-reason-none", &Args::new()));
+            remove_legacy(ctx, which, target, role, reason).await?;
+            restore_when_free(ctx, target, which, 0, &intent.restore).await?;
+        }
+        ctx.store().delete(key).await?;
+        return Ok(());
+    }
+    let mut before = None;
+    let case = loop {
+        let cases = ctx.cases().for_target(target, before, 100).await?;
+        if let Some(case) = cases
+            .iter()
+            .find(|case| case.kind.as_str() == intent.kind && case.number > intent.case_before)
+        {
+            break case.clone();
+        }
+        if cases.len() < 100
+            || cases
+                .last()
+                .is_some_and(|case| case.number <= intent.case_before)
+        {
+            break ctx
+                .cases()
+                .create(NewCase {
+                    kind: CaseKind::new(&intent.kind)?,
+                    target,
+                    moderator,
+                    reason: intent.reason.clone(),
+                    expires_at: Some(intent.expires_at),
+                })
+                .await?;
+        }
+        before = cases.last().map(|case| case.number);
+    };
+    finish_restriction(ctx, key, &mut intent, target, role, &case).await?;
+    ctx.store().delete(key).await?;
+    let _ = modlog::post(ctx, &case).await;
+    Ok(())
+}
+
+async fn finish_restriction(
+    ctx: &EventContext,
+    key: &str,
+    intent: &mut RestrictionIntent,
+    target: UserId,
+    role: Option<RoleId>,
+    case: &Case,
+) -> Result<(), UserError> {
+    let settings = Settings {
+        voice: intent.method,
+        strip: Strip {
+            restore: intent.restore.clone(),
+            ..Strip::default()
+        },
+        ..Settings::default()
+    };
+    let punisher = Punisher::new(
+        ctx,
+        Moderator {
+            id: case.moderator,
+            name: String::new(),
+        },
+        settings,
+    );
+    let mut due = intent.expires_at;
+    if due <= ctx.now() {
+        match held_by_others(ctx, target, &intent.kind, case.number).await? {
+            Hold::Forever => return Ok(()),
+            Hold::Until(at) => due = at,
+            Hold::Free => {
+                if role.is_some() {
+                    intent.lifting = true;
+                    ctx.store().set(key, &*intent).await?;
+                }
+                let reason =
+                    Reason::truncated(&ctx.t_core(ctx.locale, "punish-reason-none", &Args::new()));
+                let result = match (intent.kind.as_str(), role) {
+                    (_, Some(role)) => {
+                        ctx.api
+                            .remove_role(ctx.guild_id, target, role, reason.clone())
+                            .await
+                    }
+                    ("vcmute", None) => {
+                        ctx.api
+                            .set_voice_mute(ctx.guild_id, target, false, reason.clone())
+                            .await
+                    }
+                    (_, None) => {
+                        ctx.api
+                            .timeout(ctx.guild_id, target, None, reason.clone())
+                            .await
+                    }
+                };
+                match result {
+                    Ok(()) | Err(DiscordError::NotFound) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                if let Some(role) = role {
+                    let which = if intent.kind == "timeout" {
+                        RestrictionRole::Timeout
+                    } else {
+                        RestrictionRole::Voice
+                    };
+                    remove_legacy(ctx, which, target, role, reason).await?;
+                    restore_when_free(ctx, target, which, 0, &intent.restore).await?;
+                }
+                return Ok(());
+            }
+        }
+    }
+    let after =
+        Duration::from_secs(u64::try_from(due.saturating_sub(ctx.now())).unwrap_or_default());
+    if intent.kind == "vcmute" {
+        punisher
+            .schedule_voice_lift(target, case.number, role, after)
+            .await?;
+    } else if let Some(role) = role {
+        punisher
+            .schedule_timeout_lift(target, case.number, role, after)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Lifts a timed ban when its time is up. A member who was unbanned by hand is done already, so
 /// the job may run twice.
 async fn lift_ban(cx: JobCx) -> Result<(), ModuleError> {
@@ -1584,6 +1891,16 @@ async fn end_timeout(cx: JobCx) -> Result<(), ModuleError> {
         return Err(ModuleError::other("a timeout job names no member or role"));
     };
     let _turn = member_turn(cx.ctx(), user).await;
+    let key = restriction_intent_key("timeout", user);
+    match cx.ctx().store().entry(&key).await {
+        Ok(Some(_)) => {
+            return reconcile_restriction(cx.ctx(), &key)
+                .await
+                .map_err(|error| ModuleError::other(format!("{error:?}")));
+        }
+        Ok(None) | Err(closure_core::storage::StorageError::NotGranted) => {}
+        Err(error) => return Err(ModuleError::other(error.to_string())),
+    }
     match held_by_others(cx.ctx(), user, "timeout", payload.case).await? {
         Hold::Free => {}
         Hold::Forever => return Ok(()),
@@ -1628,6 +1945,16 @@ async fn end_voice_mute(cx: JobCx) -> Result<(), ModuleError> {
         return Err(ModuleError::other("a voice mute job names no member"));
     };
     let _turn = member_turn(cx.ctx(), user).await;
+    let key = restriction_intent_key("vcmute", user);
+    match cx.ctx().store().entry(&key).await {
+        Ok(Some(_)) => {
+            return reconcile_restriction(cx.ctx(), &key)
+                .await
+                .map_err(|error| ModuleError::other(format!("{error:?}")));
+        }
+        Ok(None) | Err(closure_core::storage::StorageError::NotGranted) => {}
+        Err(error) => return Err(ModuleError::other(error.to_string())),
+    }
     // Nothing else lifts a Discord mute later, so the lift waits for the others as a role does.
     match held_by_others(cx.ctx(), user, "vcmute", payload.case).await? {
         Hold::Free => {}

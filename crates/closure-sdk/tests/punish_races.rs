@@ -585,3 +585,410 @@ async fn timed_ban_recovery_precedes_an_older_unban_timer() {
     assert_eq!(harness.jobs(), 1);
     assert!(ctx.store().entry("ban-intent:7").await.unwrap().is_none());
 }
+
+#[derive(Clone, Copy)]
+enum RestrictionKind {
+    RoleTimeout,
+    DiscordTimeout,
+    RoleVoice,
+    DiscordVoice,
+}
+
+impl RestrictionKind {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::RoleTimeout | Self::DiscordTimeout => "timeout",
+            _ => "vcmute",
+        }
+    }
+    fn role(self) -> bool {
+        matches!(self, Self::RoleTimeout | Self::RoleVoice)
+    }
+}
+
+struct RestrictionApi {
+    inner: Arc<MockApi>,
+    mode: RestrictionKind,
+    present: AtomicBool,
+    pause: AtomicBool,
+    failure: AtomicUsize,
+    entered: Notify,
+}
+
+#[async_trait]
+impl DiscordApi for RestrictionApi {
+    async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
+        if matches!(&action, Action::AddRole { role_id, .. } if role_id.get() == 99)
+            && self.failure.load(Ordering::SeqCst) == 3
+        {
+            return Err(DiscordError::Fatal("offline".into()));
+        }
+        if matches!(action, Action::GetMember { .. }) {
+            match self.failure.load(Ordering::SeqCst) {
+                1 => return Err(DiscordError::Fatal("offline".into())),
+                2 => return Err(DiscordError::NotFound),
+                _ => {}
+            }
+            let present = self.present.load(Ordering::SeqCst);
+            let member = serde_json::from_value(json!({
+                "deaf": false, "mute": present && matches!(self.mode, RestrictionKind::DiscordVoice),
+                "flags": 0, "roles": if present && self.mode.role() { vec!["30"] } else { vec![] },
+                "communication_disabled_until": if present && matches!(self.mode, RestrictionKind::DiscordTimeout) { Some("2099-01-01T00:00:00.000000+00:00") } else { None },
+                "user": {"id":"7", "username":"target", "discriminator":"0", "avatar":null}
+            })).unwrap();
+            return Ok(Outcome::Member(Box::new(member)));
+        }
+        let give = matches!(&action, Action::AddRole { role_id, .. } if role_id.get() == 30)
+            || matches!(
+                action,
+                Action::Timeout {
+                    duration_seconds: Some(_),
+                    ..
+                } | Action::SetVoiceMute { mute: true, .. }
+            );
+        let lift = matches!(&action, Action::RemoveRole { role_id, .. } if role_id.get() == 30)
+            || matches!(
+                action,
+                Action::Timeout {
+                    duration_seconds: None,
+                    ..
+                } | Action::SetVoiceMute { mute: false, .. }
+            );
+        let result = self.inner.execute(action).await;
+        if result.is_ok() && (give || lift) {
+            self.present.store(give, Ordering::SeqCst);
+            if give && self.pause.load(Ordering::SeqCst) {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+        }
+        result
+    }
+
+    async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
+        self.inner.channel_guild(channel).await
+    }
+}
+
+async fn restriction_fixture(
+    mode: RestrictionKind,
+) -> (Harness, EventContext, Arc<RestrictionApi>) {
+    let (harness, mut ctx, _) = ban_recovery_fixture().await;
+    let api = Arc::new(RestrictionApi {
+        inner: Arc::clone(harness.api()),
+        mode,
+        present: AtomicBool::new(false),
+        pause: AtomicBool::new(false),
+        failure: AtomicUsize::new(0),
+        entered: Notify::new(),
+    });
+    ctx.api = ApiClient::new(api.clone(), CapabilitySet::all(), ctx.module.clone())
+        .scoped_to(ctx.guild_id);
+    (harness, ctx, api)
+}
+
+async fn put_restriction_intent(ctx: &EventContext, mode: RestrictionKind, expires_at: i64) {
+    ctx.store().set(&format!("{}-intent:7", mode.kind()), &json!({
+        "kind": mode.kind(), "target": 7, "moderator": ctx.bot().unwrap().get(), "reason": null,
+        "started_at": ctx.now(), "expires_at": expires_at, "case_before": 0,
+        "method": if mode.role() { "role" } else { "discord" },
+        "role": if mode.role() { Some(30) } else { None }, "restore": "All"
+    })).await.unwrap();
+}
+
+const RESTRICTIONS: [RestrictionKind; 4] = [
+    RestrictionKind::RoleTimeout,
+    RestrictionKind::DiscordTimeout,
+    RestrictionKind::RoleVoice,
+    RestrictionKind::DiscordVoice,
+];
+
+#[tokio::test]
+async fn restriction_recovery_after_abort_restores_case_and_timer() {
+    let _guard = TEST_LOCK.lock().await;
+    for mode in RESTRICTIONS {
+        let (harness, ctx, api) = restriction_fixture(mode).await;
+        api.pause.store(true, Ordering::SeqCst);
+        let task_ctx = ctx.clone();
+        let task = tokio::spawn(async move {
+            let settings = Settings {
+                dm: false,
+                timeout: if mode.role() {
+                    Method::Role
+                } else {
+                    Method::Discord
+                },
+                voice: if mode.role() {
+                    Method::Role
+                } else {
+                    Method::Discord
+                },
+                timeout_role: Some(Id::new(30)),
+                voice_role: Some(Id::new(30)),
+                ..Settings::default()
+            };
+            let punisher = Punisher::new(
+                &task_ctx,
+                Moderator::bot(&task_ctx, "test").unwrap(),
+                settings,
+            );
+            if mode.kind() == "timeout" {
+                punisher
+                    .timeout(Id::new(7), Duration::from_secs(3600), None)
+                    .await
+                    .unwrap();
+            } else {
+                punisher
+                    .voice_mute(Id::new(7), Some(Duration::from_secs(3600)), None)
+                    .await
+                    .unwrap();
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), api.entered.notified())
+            .await
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(ctx.cases().get(1).await.unwrap().is_none());
+        run_ban_recovery(&ctx).await;
+        assert_eq!(
+            ctx.cases().get(1).await.unwrap().unwrap().kind.as_str(),
+            mode.kind()
+        );
+        assert_eq!(
+            harness.jobs(),
+            usize::from(!matches!(mode, RestrictionKind::DiscordTimeout))
+        );
+        assert!(
+            ctx.store()
+                .entry(&format!("{}-intent:7", mode.kind()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn restriction_recovery_handles_absent_duplicate_expired_and_lookup_errors() {
+    let _guard = TEST_LOCK.lock().await;
+    for mode in RESTRICTIONS {
+        let (harness, ctx, api) = restriction_fixture(mode).await;
+        let key = format!("{}-intent:7", mode.kind());
+        put_restriction_intent(&ctx, mode, ctx.now() + 3600).await;
+        api.failure.store(1, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(ctx.store().entry(&key).await.unwrap().is_some());
+        api.failure.store(2, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(ctx.store().entry(&key).await.unwrap().is_none());
+        api.failure.store(0, Ordering::SeqCst);
+        put_restriction_intent(&ctx, mode, ctx.now() + 3600).await;
+        run_ban_recovery(&ctx).await;
+        assert!(ctx.store().entry(&key).await.unwrap().is_none());
+        assert!(ctx.cases().get(1).await.unwrap().is_none());
+        let expires = ctx.now() + 3600;
+        put_restriction_intent(&ctx, mode, expires).await;
+        api.present.store(true, Ordering::SeqCst);
+        ctx.cases()
+            .create(closure_sdk::NewCase {
+                kind: closure_sdk::CaseKind::new(mode.kind()).unwrap(),
+                target: Id::new(7),
+                moderator: Id::new(8),
+                reason: Some("another reason".into()),
+                expires_at: Some(expires + 1),
+            })
+            .await
+            .unwrap();
+        run_ban_recovery(&ctx).await;
+        assert!(ctx.cases().get(2).await.unwrap().is_none());
+        assert_eq!(
+            harness.jobs(),
+            usize::from(!matches!(mode, RestrictionKind::DiscordTimeout))
+        );
+        let (harness, ctx, api) = restriction_fixture(mode).await;
+        put_restriction_intent(&ctx, mode, ctx.now() - 1).await;
+        api.present.store(true, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(!api.present.load(Ordering::SeqCst));
+        assert!(ctx.cases().get(1).await.unwrap().is_some());
+        assert_eq!(harness.jobs(), 0);
+        assert!(ctx.store().entry(&key).await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn restriction_recovery_moves_past_a_batch_of_lookup_failures() {
+    let _guard = TEST_LOCK.lock().await;
+    for mode in [RestrictionKind::RoleTimeout, RestrictionKind::RoleVoice] {
+        let (_, ctx, api) = restriction_fixture(mode).await;
+        for user in 100..=150 {
+            ctx.store().set(&format!("{}-intent:{user}", mode.kind()), &json!({
+                "kind": mode.kind(), "target": user, "moderator": ctx.bot().unwrap().get(), "reason": null,
+                "started_at": ctx.now(), "expires_at": ctx.now() + 3600, "case_before": 0,
+                "method": "role", "role": 30, "restore": "All"
+            })).await.unwrap();
+        }
+        api.failure.store(1, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        api.failure.store(2, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(
+            ctx.store()
+                .entry(&format!("{}-intent:150", mode.kind()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            ctx.store()
+                .entry(&format!("{}-intent:100", mode.kind()))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[tokio::test]
+async fn restriction_recovery_ignores_a_case_from_before_the_intent() {
+    let _guard = TEST_LOCK.lock().await;
+    for mode in RESTRICTIONS {
+        let (_, ctx, api) = restriction_fixture(mode).await;
+        let expires = ctx.now() + 3600;
+        ctx.cases()
+            .create(closure_sdk::NewCase {
+                kind: closure_sdk::CaseKind::new(mode.kind()).unwrap(),
+                target: Id::new(7),
+                moderator: ctx.bot().unwrap(),
+                reason: None,
+                expires_at: Some(expires),
+            })
+            .await
+            .unwrap();
+        put_restriction_intent(&ctx, mode, expires).await;
+        let key = format!("{}-intent:7", mode.kind());
+        let mut intent: serde_json::Value = ctx.store().get(&key).await.unwrap().unwrap();
+        intent["case_before"] = json!(1);
+        ctx.store().set(&key, &intent).await.unwrap();
+        api.present.store(true, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(ctx.cases().get(2).await.unwrap().is_some());
+    }
+}
+
+#[tokio::test]
+async fn restriction_recovery_restores_stripped_roles_on_expiry() {
+    let _guard = TEST_LOCK.lock().await;
+    for mode in [RestrictionKind::RoleTimeout, RestrictionKind::RoleVoice] {
+        let (harness, ctx, api) = restriction_fixture(mode).await;
+        ctx.restrictions()
+            .set("stripped:7", &vec![99_u64])
+            .await
+            .unwrap();
+        put_restriction_intent(&ctx, mode, ctx.now() - 1).await;
+        api.present.store(true, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(harness.api().actions().iter().any(
+            |action| matches!(action, Action::AddRole { role_id, .. } if role_id.get() == 99)
+        ));
+        assert!(
+            ctx.restrictions()
+                .get::<Vec<u64>>("stripped:7")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn restriction_recovery_retries_restore_after_role_was_removed() {
+    let _guard = TEST_LOCK.lock().await;
+    for mode in [RestrictionKind::RoleTimeout, RestrictionKind::RoleVoice] {
+        let (harness, ctx, api) = restriction_fixture(mode).await;
+        ctx.restrictions()
+            .set("stripped:7", &vec![99_u64])
+            .await
+            .unwrap();
+        put_restriction_intent(&ctx, mode, ctx.now() - 1).await;
+        api.present.store(true, Ordering::SeqCst);
+        api.failure.store(3, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(!api.present.load(Ordering::SeqCst));
+        assert!(
+            ctx.store()
+                .entry(&format!("{}-intent:7", mode.kind()))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        api.failure.store(0, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(harness.api().actions().iter().any(
+            |action| matches!(action, Action::AddRole { role_id, .. } if role_id.get() == 99)
+        ));
+        assert!(
+            ctx.restrictions()
+                .get::<Vec<u64>>("stripped:7")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(ctx.cases().get(2).await.unwrap().is_none());
+        assert!(
+            ctx.store()
+                .entry(&format!("{}-intent:7", mode.kind()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn restriction_recovery_precedes_an_older_lift_timer() {
+    let _guard = TEST_LOCK.lock().await;
+    for mode in [
+        RestrictionKind::RoleTimeout,
+        RestrictionKind::RoleVoice,
+        RestrictionKind::DiscordVoice,
+    ] {
+        let (harness, ctx, api) = restriction_fixture(mode).await;
+        put_restriction_intent(&ctx, mode, ctx.now() + 3600).await;
+        api.present.store(true, Ordering::SeqCst);
+        let (name, payload) = if mode.kind() == "timeout" {
+            ("untimeout", json!({"user": 7, "case": 0, "role": 30}))
+        } else {
+            (
+                "vc_unmute",
+                json!({"user": 7, "case": 0, "via": if mode.role() { "role" } else { "discord" }, "role": if mode.role() { Some(30) } else { None }, "due": ctx.now()}),
+            )
+        };
+        let module = punish::jobs(ModuleBuilder::new("race", "Race", "1.0.0").unwrap())
+            .build()
+            .unwrap();
+        let job = ScheduledJob {
+            id: 1,
+            guild_id: ctx.guild_id,
+            module: ctx.module.clone(),
+            name: name.into(),
+            payload,
+            attempt: 1,
+            token: 1,
+        };
+        module
+            .on_event_flow(&ctx, &closure_core::event::Event::Scheduled(job))
+            .await
+            .unwrap();
+        assert!(api.present.load(Ordering::SeqCst));
+        assert_eq!(harness.jobs(), 1);
+        assert!(
+            ctx.store()
+                .entry(&format!("{}-intent:7", mode.kind()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
