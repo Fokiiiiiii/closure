@@ -1,16 +1,18 @@
 //! Posts a moderation case to the log channel of its server, as an embed in the server's
 //! language: the log is read by the moderators, not by whoever ran the command.
 
-use closure_core::action::{Action, MentionPolicy, Outcome};
+use closure_core::action::Outcome;
 use closure_core::cases::Case;
 use closure_core::error::DiscordError;
 use closure_core::event::MessageId;
 use closure_core::locale::Args;
 use closure_core::module::EventContext;
+use serde::{Deserialize, Serialize};
 
 use crate::UserError;
 use crate::duration::{TimeStyle, timestamp};
 use crate::embed::{Color, EmbedBuilder, FIELD_VALUE_LIMIT, escape, truncate};
+use crate::files::{self, Destination};
 
 /// The kinds the catalog names (`modlog-kind-<kind>`). Any other kind is shown as it is.
 const KNOWN_KINDS: [&str; 9] = [
@@ -28,46 +30,59 @@ const KNOWN_KINDS: [&str; 9] = [
 /// Grey, for a case that was revoked whatever its kind.
 const REVOKED_COLOR: Color = Color::Rgb(0x0095_A5A6);
 
-/// Sends a case-free log message, or does nothing when no log channel is configured.
+/// Sends a case-free log message, or does nothing when no log destination is configured.
 pub async fn post_text(ctx: &EventContext, content: String) -> Result<(), UserError> {
-    if let Some(channel_id) = ctx.policy().log_channel {
-        ctx.api
-            .execute(Action::SendMessage {
-                channel_id,
-                content: Some(content),
-                embeds: Vec::new(),
-                reply_to: None,
-                mentions: MentionPolicy::None,
-            })
-            .await?;
+    if let Some(destination) = Destination::from_policy(ctx.policy()) {
+        files::send(ctx, &destination, Some(content), Vec::new(), None).await?;
     }
     Ok(())
 }
 
-/// Posts `case` to the log channel of the guild and returns the id of the message. Returns
-/// `None` and sends nothing when the guild has no log channel. Needs the capability
+/// Posts `case` to the guild's log destination and returns the id of the message. Returns
+/// `None` and sends nothing when the guild has no log destination. Needs the capability
 /// `SendMessages` as well as `cases`.
 pub async fn post(ctx: &EventContext, case: &Case) -> Result<Option<MessageId>, UserError> {
-    let Some(channel) = ctx.policy().log_channel else {
+    let Some(destination) = Destination::from_policy(ctx.policy()) else {
         return Ok(None);
     };
+    post_to(ctx, case, &destination).await
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Pending {
+    Legacy(i64),
+    Destination {
+        number: i64,
+        destination: Destination,
+    },
+}
+
+async fn post_to(
+    ctx: &EventContext,
+    case: &Case,
+    destination: &Destination,
+) -> Result<Option<MessageId>, UserError> {
     let key = format!("modlog-pending:{}", case.number);
-    let durable = match ctx.store().set(&key, &case.number).await {
+    let pending = Pending::Destination {
+        number: case.number,
+        destination: destination.clone(),
+    };
+    let durable = match ctx.store().set(&key, &pending).await {
         Ok(()) => true,
         Err(closure_core::storage::StorageError::NotGranted) => false,
         Err(error) => return Err(error.into()),
     };
     let message = embed(ctx, case).build()?;
-    let outcome = ctx
-        .api
-        .execute(Action::SendMessage {
-            channel_id: channel,
-            content: None,
-            embeds: vec![message],
-            reply_to: None,
-            mentions: MentionPolicy::None,
-        })
-        .await?;
+    let outcome = match files::send(ctx, destination, None, vec![message], None).await {
+        Err(error @ (DiscordError::WebhookNotRegistered | DiscordError::WebhookGone)) => {
+            if durable {
+                ctx.store().delete(&key).await?;
+            }
+            return Err(error.into());
+        }
+        other => other?,
+    };
     match outcome {
         Outcome::Message(message) => {
             if durable {
@@ -82,11 +97,18 @@ pub async fn post(ctx: &EventContext, case: &Case) -> Result<Option<MessageId>, 
 pub(crate) async fn retry_pending(ctx: &EventContext, limit: usize) -> Result<(), UserError> {
     for (key, entry) in ctx.store().list("modlog-pending:", limit).await? {
         let result: Result<(), UserError> = async {
-            let number: i64 = serde_json::from_value(entry.value)
+            let pending: Pending = serde_json::from_value(entry.value)
                 .map_err(|error| closure_core::storage::StorageError::Value(error.to_string()))?;
+            let (number, destination) = match pending {
+                Pending::Legacy(number) => (number, Destination::from_policy(ctx.policy())),
+                Pending::Destination {
+                    number,
+                    destination,
+                } => (number, Some(destination)),
+            };
             if let Some(case) = ctx.cases().get(number).await? {
-                if ctx.policy().log_channel.is_some() {
-                    post(ctx, &case).await?;
+                if let Some(destination) = destination {
+                    post_to(ctx, &case, &destination).await?;
                 }
             } else {
                 ctx.store().delete(&key).await?;

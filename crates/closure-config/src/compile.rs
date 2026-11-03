@@ -214,13 +214,7 @@ fn compile_with(
     limits.validate(&mut issues);
 
     let moderator_roles = overrides.moderator_roles.clone().unwrap_or_default();
-    if moderator_roles.len() > MAX_MODERATOR_ROLES {
-        issues.push(Issue::new(
-            "moderator_roles",
-            "too_many",
-            format!("at most {MAX_MODERATOR_ROLES} roles are allowed"),
-        ));
-    }
+    check_moderator_roles(&moderator_roles, &mut issues);
 
     let PolicyText {
         timezone,
@@ -267,6 +261,7 @@ fn compile_with(
 
     let policy = Arc::new(GuildPolicy {
         log_channel: overrides.log_channel,
+        log_webhook: overrides.log_webhook.clone(),
         moderator_roles: moderator_roles.clone(),
         timezone,
         prefix: prefix.clone(),
@@ -281,6 +276,7 @@ fn compile_with(
             preset,
             language: overrides.language.unwrap_or_default(),
             log_channel: overrides.log_channel,
+            log_webhook: overrides.log_webhook.clone(),
             moderator_roles,
             timezone: timezone.map(Timezone::label),
             prefix,
@@ -296,6 +292,16 @@ fn compile_with(
         policy,
         permissions: Arc::new(permissions),
     })
+}
+
+fn check_moderator_roles(roles: &[closure_core::event::RoleId], issues: &mut Vec<Issue>) {
+    if roles.len() > MAX_MODERATOR_ROLES {
+        issues.push(Issue::new(
+            "moderator_roles",
+            "too_many",
+            format!("at most {MAX_MODERATOR_ROLES} roles are allowed"),
+        ));
+    }
 }
 
 /// The guild-wide text settings the policy carries, each checked.
@@ -737,13 +743,27 @@ const NUL_REFUSED: &str = "text must not contain the NUL character (U+0000)";
 fn stored_text_issues(overrides: &GuildOverrides) -> Vec<Issue> {
     // Cannot fail: the same serialization succeeded for the size check in compile_with.
     let document = serde_json::to_value(overrides).unwrap_or(Value::Null);
-    document
+    let mut issues: Vec<Issue> = document
         .as_object()
         .into_iter()
         .flatten()
         .filter(|(field, value)| field.as_str() != "modules" && contains_nul(value))
         .map(|(field, _)| Issue::new(field, "invalid", NUL_REFUSED))
-        .collect()
+        .collect();
+    if let Some(name) = &overrides.log_webhook
+        && (name.is_empty()
+            || name.len() > 32
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'))
+    {
+        issues.push(Issue::new(
+            "log_webhook",
+            "invalid",
+            "expected 1 to 32 ASCII letters, digits, underscores or hyphens",
+        ));
+    }
+    issues
 }
 
 fn contains_nul(value: &Value) -> bool {
@@ -860,6 +880,24 @@ error_emoji: ''
         assert_eq!(policy.success_emoji, "👍");
         assert_eq!(policy.error_emoji, "");
         assert_eq!(settings.effective.timezone.as_deref(), Some("UTC+09:00"));
+    }
+
+    #[test]
+    fn webhook_name_is_validated_and_carried_to_policy() {
+        let settings = compiled("log_webhook: audit_1-2").unwrap();
+        assert_eq!(settings.policy.log_webhook.as_deref(), Some("audit_1-2"));
+        assert_eq!(settings.effective.log_webhook.as_deref(), Some("audit_1-2"));
+        for name in [
+            "''",
+            "'bad name'",
+            "'a.b'",
+            "'abcdefghijklmnopqrstuvwxyz1234567'",
+        ] {
+            assert_eq!(
+                issues_of(&format!("log_webhook: {name}")),
+                [("log_webhook".to_owned(), "invalid")]
+            );
+        }
     }
 
     #[test]

@@ -184,9 +184,13 @@ impl MockApi {
                 }
                 Ok(Outcome::None)
             }
-            Action::SendMessage { channel_id, .. } => Ok(self.sent(*channel_id)),
-            // The channel of a direct message is not known to the mock; any id will do.
-            Action::SendDirectMessage { .. } => Ok(self.sent(ChannelId::new(1))),
+            Action::SendMessage { channel_id, .. } | Action::SendFile { channel_id, .. } => {
+                Ok(self.sent(*channel_id))
+            }
+            // The channel of a direct message or webhook is not known to the mock.
+            Action::SendViaWebhook { .. } | Action::SendDirectMessage { .. } => {
+                Ok(self.sent(ChannelId::new(1)))
+            }
             Action::GetMessage {
                 channel_id,
                 message_id,

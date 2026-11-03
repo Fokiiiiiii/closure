@@ -4,12 +4,87 @@
 
 use std::fmt;
 
-use closure_core::action::{Action, FileUpload, MAX_EMBEDS, MentionPolicy};
-use closure_core::error::ModuleError;
+use closure_core::action::{Action, FileUpload, MAX_EMBEDS, MentionPolicy, Outcome};
+use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{AttachmentInfo, ChannelId, MessageId};
 use closure_core::module::EventContext;
+use closure_core::settings::GuildPolicy;
+use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Embed;
 use twilight_model::channel::message::embed::EmbedImage;
+
+/// Where a log is delivered, with a bot channel to use if the webhook is unavailable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Destination {
+    Channel(ChannelId),
+    Webhook {
+        name: String,
+        fallback: Option<ChannelId>,
+    },
+}
+
+impl Destination {
+    #[must_use]
+    pub fn from_policy(policy: &GuildPolicy) -> Option<Self> {
+        match &policy.log_webhook {
+            Some(name) => Some(Self::Webhook {
+                name: name.clone(),
+                fallback: policy.log_channel,
+            }),
+            None => policy.log_channel.map(Self::Channel),
+        }
+    }
+}
+
+/// Sends a log message, falling back only when a named webhook is unavailable.
+pub async fn send(
+    ctx: &EventContext,
+    destination: &Destination,
+    content: Option<String>,
+    embeds: Vec<Embed>,
+    file: Option<FileUpload>,
+) -> Result<Outcome, DiscordError> {
+    let channel_action = |channel_id| match file.clone() {
+        Some(file) => Action::SendFile {
+            channel_id,
+            content: content.clone(),
+            embeds: embeds.clone(),
+            file,
+        },
+        None => Action::SendMessage {
+            channel_id,
+            content: content.clone(),
+            embeds: embeds.clone(),
+            reply_to: None,
+            mentions: MentionPolicy::None,
+        },
+    };
+    match destination {
+        Destination::Channel(channel) => ctx.api.execute(channel_action(*channel)).await,
+        Destination::Webhook { name, fallback } => {
+            let result = ctx
+                .api
+                .execute(Action::SendViaWebhook {
+                    guild_id: ctx.guild_id,
+                    name: name.clone(),
+                    content: content.clone(),
+                    embeds: embeds.clone(),
+                    file: file.clone(),
+                })
+                .await;
+            match (result, fallback) {
+                (
+                    Err(DiscordError::WebhookNotRegistered | DiscordError::WebhookGone),
+                    Some(channel),
+                ) => {
+                    tracing::warn!("webhook unavailable; posting log to fallback channel");
+                    ctx.api.execute(channel_action(*channel)).await
+                }
+                (other, _) => other,
+            }
+        }
+    }
+}
 
 /// The most characters Discord takes in the embeds of one message, all of them together.
 const MAX_EMBED_CHARS: usize = 6000;
@@ -118,12 +193,12 @@ pub struct LogEntry {
     pub files: Vec<FileUpload>,
 }
 
-/// Posts the entries to `channel`, in order. Entries without files share messages, as many embeds to a
+/// Posts the entries to the destination, in order. Entries without files share messages, as many embeds to a
 /// message as Discord takes and as many characters as `MAX_EMBED_CHARS` allows; a file goes in a
 /// message of its own, with the embed of its entry, which shows a picture inside it.
 pub async fn post(
     ctx: &EventContext,
-    channel: ChannelId,
+    destination: &Destination,
     entries: Vec<LogEntry>,
 ) -> Result<(), ModuleError> {
     let mut pending: Vec<Embed> = Vec::new();
@@ -131,30 +206,21 @@ pub async fn post(
         if entry.files.is_empty() {
             let chars = embed_chars(&entry.embed);
             if pending.iter().map(embed_chars).sum::<usize>() + chars > MAX_EMBED_CHARS {
-                flush(ctx, channel, &mut pending).await?;
+                flush(ctx, destination, &mut pending).await?;
             }
             pending.push(entry.embed);
             if pending.len() == MAX_EMBEDS {
-                flush(ctx, channel, &mut pending).await?;
+                flush(ctx, destination, &mut pending).await?;
             }
             continue;
         }
-        flush(ctx, channel, &mut pending).await?;
+        flush(ctx, destination, &mut pending).await?;
         for file in entry.files {
             let embeds = vec![embed_with_file(&entry.embed, &file)];
-            send(
-                ctx,
-                Action::SendFile {
-                    channel_id: channel,
-                    content: None,
-                    embeds,
-                    file,
-                },
-            )
-            .await?;
+            send(ctx, destination, None, embeds, Some(file)).await?;
         }
     }
-    flush(ctx, channel, &mut pending).await
+    flush(ctx, destination, &mut pending).await
 }
 
 /// The extensions of the files that an embed shows as a picture.
@@ -185,29 +251,12 @@ fn is_picture(filename: &str) -> bool {
 
 async fn flush(
     ctx: &EventContext,
-    channel: ChannelId,
+    destination: &Destination,
     pending: &mut Vec<Embed>,
 ) -> Result<(), ModuleError> {
     if pending.is_empty() {
         return Ok(());
     }
-    send(
-        ctx,
-        Action::SendMessage {
-            channel_id: channel,
-            content: None,
-            embeds: std::mem::take(pending),
-            reply_to: None,
-            mentions: MentionPolicy::None,
-        },
-    )
-    .await
-}
-
-async fn send(ctx: &EventContext, action: Action) -> Result<(), ModuleError> {
-    ctx.api
-        .execute(action)
-        .await
-        .map(|_| ())
-        .map_err(ModuleError::from)
+    send(ctx, destination, None, std::mem::take(pending), None).await?;
+    Ok(())
 }

@@ -44,6 +44,12 @@ fn optional_timezone_schema(_: &mut schemars::SchemaGenerator) -> schemars::Sche
     })
 }
 
+fn optional_webhook_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [{ "type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$" }, { "type": "null" }]
+    })
+}
+
 fn optional_prefix_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "anyOf": [{
@@ -305,6 +311,10 @@ pub struct GuildOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "optional_snowflake_schema")]
     pub log_channel: Option<ChannelId>,
+    /// Named webhook for logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_webhook_schema")]
+    pub log_webhook: Option<String>,
     /// Roles whose members may use moderation commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "optional_snowflakes_schema")]
@@ -352,6 +362,7 @@ pub struct EffectiveConfig {
     pub preset: Preset,
     pub language: Language,
     pub log_channel: Option<ChannelId>,
+    pub log_webhook: Option<String>,
     pub moderator_roles: Vec<RoleId>,
     /// The zone as a label such as `UTC+09:00`.
     pub timezone: Option<String>,

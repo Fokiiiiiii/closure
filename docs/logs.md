@@ -12,7 +12,8 @@ modules:
   logs:
     enabled: true
     config:
-      channel: 123456789012345678   # optional; left out, the guild's log channel
+      channel: 123456789012345678   # optional; cannot be combined with webhook
+      # webhook: audit              # optional name from the host webhook file
       message_edits: true
       message_deletes: true
       member_joins: true
@@ -30,6 +31,10 @@ modules:
       stage_instances: true         # stage started, changed and ended
       keep_attachments: false       # see Files below
 ```
+
+The module's `channel` selects bot posting; `webhook` selects a named webhook. Set at most one.
+With neither, `log_webhook` wins over `log_channel`. An unregistered or unavailable webhook falls
+back to `log_channel` when configured; otherwise the error is returned without retrying it.
 
 ## What an entry shows
 
@@ -77,7 +82,7 @@ modules:
 
 ## Failed posts
 
-When a post returns an error other than a permission refusal, the logs module schedules up to
+When a post returns an error other than a permission refusal or an unavailable webhook, the logs module schedules up to
 three retries, starting after five seconds and using the scheduler's increasing retry delay. The
 job is persistent across restarts and is discarded when next run after ten minutes. Its serialized
 payload is limited to 16 KiB, including files, and the scheduler allows at most 10,000 pending jobs

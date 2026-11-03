@@ -35,11 +35,12 @@ impl View {
 
 /// The guild-wide keys of the simple view. `version` is the format stamp, not a setting: it is
 /// accepted in both views so that a document read in one can be written back in the other.
-pub const BASIC_KEYS: [&str; 9] = [
+pub const BASIC_KEYS: [&str; 10] = [
     "version",
     "preset",
     "language",
     "log_channel",
+    "log_webhook",
     "moderator_roles",
     "timezone",
     "prefix",
@@ -603,7 +604,7 @@ mod tests {
 
     #[test]
     fn a_basic_merge_reads_each_scalar_as_the_full_document_does() {
-        let yaml = "version: \"1\"\nlog_channel: \"123456789012345678\"\nmoderator_roles: [\"1\", 2]\n\
+        let yaml = "version: \"1\"\nlog_channel: \"123456789012345678\"\nlog_webhook: audit\nmoderator_roles: [\"1\", 2]\n\
                     modules:\n  warn:\n    enabled: \"yes\"\n    config: { limit: 4 }\n";
         let basic = merge_basic(&GuildOverrides::default(), yaml, &registry()).unwrap();
         let full = crate::yaml::parse_overrides(yaml).unwrap();

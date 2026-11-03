@@ -41,6 +41,9 @@ module's saved role ID.
 
 The moderator's reason is written to Discord's audit log as `name: reason`, cut to 512 characters.
 
+Case logs use `log_webhook` when set, otherwise `log_channel`; an unavailable webhook falls back
+to `log_channel` if present. With neither, no log is posted.
+
 When posting a case log fails, the module retries pending posts after the server becomes available
 and periodically thereafter. If Discord accepted a post but its response was lost, a retry can
 produce a duplicate. Modules need storage to retain pending posts across restarts.

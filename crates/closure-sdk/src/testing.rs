@@ -665,6 +665,14 @@ impl Harness {
             .log_channel = Some(Id::new(channel));
     }
 
+    /// Sets the named webhook for logs.
+    pub fn set_log_webhook(&self, name: &str) {
+        self.policy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .log_webhook = Some(name.to_owned());
+    }
+
     /// Replaces the guild's policy (its log channel, moderator roles, time zone, prefix and emojis).
     pub fn set_policy(&self, policy: GuildPolicy) {
         *self.policy.lock().unwrap_or_else(PoisonError::into_inner) = policy;
@@ -828,7 +836,9 @@ impl Harness {
             .actions()
             .into_iter()
             .filter_map(|action| match action {
-                Action::SendMessage { embeds, .. } => Some(embeds),
+                Action::SendMessage { embeds, .. } | Action::SendViaWebhook { embeds, .. } => {
+                    Some(embeds)
+                }
                 _ => None,
             })
             .flatten()

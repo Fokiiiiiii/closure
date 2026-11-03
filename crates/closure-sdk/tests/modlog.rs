@@ -132,6 +132,45 @@ fn sent_to(harness: &Harness) -> Vec<u64> {
 }
 
 #[tokio::test]
+async fn webhook_case_text_and_fallback() {
+    let harness = Harness::new(module().command(Command::<()>::new("text").handler(
+        |cx, ()| async move {
+            closure_sdk::modlog::post_text(cx.ctx(), "hello".into()).await?;
+            cx.reply("done").await
+        },
+    )))
+    .unwrap();
+    harness.set_log_channel(77);
+    harness.set_log_webhook("audit");
+    let replies = harness.invoke(record("log", "warn")).await.unwrap();
+    assert_eq!(texts(&replies), ["posted"]);
+    harness.invoke(Invocation::new("text")).await.unwrap();
+    assert_eq!(harness.sent_embeds().len(), 1);
+    let actions = harness.actions();
+    assert!(actions.iter().any(|a| matches!(a, Action::SendViaWebhook { guild_id, name, content: None, embeds, .. } if guild_id.get() == 1 && name == "audit" && embeds.len() == 1)));
+    assert!(actions.iter().any(|a| matches!(a, Action::SendViaWebhook { guild_id, name, content: Some(content), .. } if guild_id.get() == 1 && name == "audit" && content == "hello")));
+    for error in [
+        closure_sdk::DiscordError::WebhookNotRegistered,
+        closure_sdk::DiscordError::WebhookGone,
+    ] {
+        let fallback = Harness::new(module()).unwrap();
+        fallback.set_log_channel(77);
+        fallback.set_log_webhook("audit");
+        fallback.api().fail_nth(1, error.clone());
+        assert_eq!(
+            texts(&fallback.invoke(record("log", "warn")).await.unwrap()),
+            ["posted"]
+        );
+        assert_eq!(sent_to(&fallback), [77]);
+        let no_fallback = Harness::new(module()).unwrap();
+        no_fallback.set_log_webhook("audit");
+        no_fallback.api().fail_nth(1, error);
+        assert!(no_fallback.invoke(record("log", "warn")).await.is_err());
+        assert!(sent_to(&no_fallback).is_empty());
+    }
+}
+
+#[tokio::test]
 async fn a_case_is_posted_to_the_log_channel() {
     let harness = Harness::new(module()).unwrap();
     harness.set_log_channel(77);
@@ -339,6 +378,41 @@ async fn a_module_without_send_messages_is_refused_the_log() {
 }
 
 #[tokio::test]
+async fn pending_case_keeps_its_webhook_after_policy_changes() {
+    let harness = Harness::new(closure_sdk::punish::jobs(
+        module().capability(Capability::Storage),
+    ))
+    .unwrap();
+    harness.set_log_webhook("original");
+    harness
+        .api()
+        .fail_nth(1, closure_sdk::DiscordError::Transient("offline".into()));
+    assert!(harness.invoke(record("log", "warn")).await.is_err());
+    harness.set_log_webhook("changed");
+    harness
+        .emit(closure_core::event::Event::GuildAvailable {
+            guild_id: Id::new(1),
+            name: "test".into(),
+            preferred_locale: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        harness
+            .run_due_jobs()
+            .await
+            .into_iter()
+            .all(|result| result.is_ok())
+    );
+    assert!(
+        harness
+            .actions()
+            .iter()
+            .any(|a| matches!(a, Action::SendViaWebhook { name, .. } if name == "original"))
+    );
+}
+
+#[tokio::test]
 async fn failed_case_log_is_retried_after_guild_startup() {
     let harness = Harness::new(closure_sdk::punish::jobs(
         module().capability(Capability::Storage),
@@ -352,12 +426,25 @@ async fn failed_case_log_is_retried_after_guild_startup() {
     assert!(
         harness
             .store()
-            .get::<i64>("modlog-pending:1")
+            .get::<serde_json::Value>("modlog-pending:1")
             .await
             .unwrap()
             .is_some()
     );
 
+    let saved = harness
+        .store()
+        .get::<serde_json::Value>("modlog-pending:1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved["number"], 1);
+    assert_eq!(saved["destination"]["Channel"], "77");
+    harness
+        .store()
+        .set("modlog-pending:1", &1_i64)
+        .await
+        .unwrap();
     harness
         .emit(closure_core::event::Event::GuildAvailable {
             guild_id: Id::new(1),
@@ -379,7 +466,7 @@ async fn failed_case_log_is_retried_after_guild_startup() {
     assert!(
         harness
             .store()
-            .get::<i64>("modlog-pending:1")
+            .get::<serde_json::Value>("modlog-pending:1")
             .await
             .unwrap()
             .is_some()
@@ -396,7 +483,7 @@ async fn failed_case_log_is_retried_after_guild_startup() {
     assert!(
         harness
             .store()
-            .get::<i64>("modlog-pending:1")
+            .get::<serde_json::Value>("modlog-pending:1")
             .await
             .unwrap()
             .is_none()

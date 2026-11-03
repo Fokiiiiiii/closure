@@ -22,6 +22,8 @@ pub struct ModuleSettings {
 pub struct GuildPolicy {
     /// Where moderation logs go, if the guild chose a channel.
     pub log_channel: Option<ChannelId>,
+    /// The named webhook for logs, when configured.
+    pub log_webhook: Option<String>,
     /// Roles whose members may use moderation features.
     pub moderator_roles: Vec<RoleId>,
     /// The zone of a date typed without one; `None` keeps the language's default.
@@ -42,6 +44,7 @@ impl Default for GuildPolicy {
     fn default() -> Self {
         Self {
             log_channel: None,
+            log_webhook: None,
             moderator_roles: Vec::new(),
             timezone: None,
             prefix: None,

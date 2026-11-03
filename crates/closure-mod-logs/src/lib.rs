@@ -14,7 +14,7 @@ use closure_core::locale::Locale;
 use closure_core::module::EventContext;
 use closure_core::schedule::{ScheduleError, Scheduler};
 use closure_core::subscription::{Flow, Subscription};
-use closure_sdk::files::{self, Kept, LogEntry};
+use closure_sdk::files::{self, Destination, Kept, LogEntry};
 use closure_sdk::{
     Args, Color, EmbedBuilder, Intents, JobCx, ModuleBuilder, SdkModule, TimeStyle, duration,
     parse_module_config,
@@ -47,7 +47,10 @@ struct RetryEntry {
 
 #[derive(Serialize, Deserialize)]
 struct RetryPost {
-    channel: ChannelId,
+    #[serde(default)]
+    channel: Option<ChannelId>,
+    #[serde(default)]
+    webhook: Option<String>,
     expires_at: i64,
     entries: Vec<RetryEntry>,
 }
@@ -56,6 +59,7 @@ fn retryable(error: &ModuleError) -> bool {
     matches!(error, ModuleError::Discord(error) if !matches!(
         error,
         DiscordError::Forbidden(_) | DiscordError::CapabilityDenied(_)
+            | DiscordError::WebhookNotRegistered | DiscordError::WebhookGone
     ))
 }
 
@@ -65,11 +69,16 @@ async fn schedule_retry(scheduler: &Scheduler, post: &RetryPost) -> Result<(), S
 
 async fn post_or_retry(
     ctx: &EventContext,
-    channel: ChannelId,
+    destination: Destination,
     entries: Vec<LogEntry>,
 ) -> Result<(), ModuleError> {
+    let (channel, webhook) = match &destination {
+        Destination::Channel(channel) => (Some(*channel), None),
+        Destination::Webhook { name, fallback } => (*fallback, Some(name.clone())),
+    };
     let retry = RetryPost {
         channel,
+        webhook,
         expires_at: ctx.now().saturating_add(RETRY_LIFETIME),
         entries: entries
             .iter()
@@ -79,7 +88,7 @@ async fn post_or_retry(
             })
             .collect(),
     };
-    if let Err(error) = files::post(ctx, channel, entries).await {
+    if let Err(error) = files::post(ctx, &destination, entries).await {
         if retryable(&error)
             && let Err(error) = schedule_retry(ctx.scheduler(), &retry).await
         {
@@ -104,7 +113,15 @@ async fn retry_post(cx: JobCx) -> Result<(), ModuleError> {
             files: entry.files,
         })
         .collect();
-    match files::post(cx.ctx(), post.channel, entries).await {
+    let destination = match (post.channel, post.webhook) {
+        (channel, Some(name)) => Destination::Webhook {
+            name,
+            fallback: channel,
+        },
+        (Some(channel), None) => Destination::Channel(channel),
+        (None, None) => return Err(ModuleError::Config("log retry has no destination".into())),
+    };
+    match files::post(cx.ctx(), &destination, entries).await {
         Err(error) if retryable(&error) && cx.attempt() < RETRY_ATTEMPTS => Err(error),
         Err(error) => {
             tracing::warn!(?error, "discarding failed log retry");
@@ -121,6 +138,7 @@ async fn retry_post(cx: JobCx) -> Result<(), ModuleError> {
 struct Config {
     /// The channel the entries are posted to; `None` takes the guild's log channel.
     channel: Option<String>,
+    webhook: Option<String>,
     message_edits: bool,
     message_deletes: bool,
     member_joins: bool,
@@ -145,6 +163,10 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "channel": {
                 "anyOf": [{ "type": "string", "pattern": "^[1-9][0-9]*$" }, { "type": "null" }],
                 "description": "config-logs-channel",
+                "x-ui": { "level": "basic" }
+            },
+            "webhook": {
+                "anyOf": [{ "type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$" }, { "type": "null" }],
                 "x-ui": { "level": "basic" }
             },
             "message_edits": { "type": "boolean", "description": "config-logs-message_edits" },
@@ -172,10 +194,12 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                 "x-ui": { "level": "basic" }
             }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "not": { "required": ["channel", "webhook"], "properties": { "channel": { "type": "string" }, "webhook": { "type": "string" } } }
     });
     let defaults = json!({
         "channel": null,
+        "webhook": null,
         "message_edits": true,
         "message_deletes": true,
         "member_joins": true,
@@ -572,15 +596,26 @@ fn change_entries(
 
 /// The channel the entries go to: the one the module is configured with, else the guild's log channel.
 /// A configured value that is not a channel is an error, so the entries never go to another channel.
-fn destination(ctx: &EventContext, config: &Config) -> Result<Option<ChannelId>, ModuleError> {
-    let Some(text) = config.channel.as_deref() else {
-        return Ok(ctx.policy().log_channel);
-    };
-    text.parse::<u64>()
-        .ok()
-        .and_then(Id::new_checked)
-        .map(Some)
-        .ok_or_else(|| ModuleError::Config(format!("`{text}` is not a channel id")))
+fn destination(ctx: &EventContext, config: &Config) -> Result<Option<Destination>, ModuleError> {
+    if config.channel.is_some() && config.webhook.is_some() {
+        return Err(ModuleError::Config("set either channel or webhook".into()));
+    }
+    if let Some(text) = config.channel.as_deref() {
+        return text
+            .parse::<u64>()
+            .ok()
+            .and_then(Id::new_checked)
+            .map(Destination::Channel)
+            .map(Some)
+            .ok_or_else(|| ModuleError::Config(format!("`{text}` is not a channel id")));
+    }
+    if let Some(name) = &config.webhook {
+        return Ok(Some(Destination::Webhook {
+            name: name.clone(),
+            fallback: ctx.policy().log_channel,
+        }));
+    }
+    Ok(Destination::from_policy(ctx.policy()))
 }
 
 async fn deleted(

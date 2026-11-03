@@ -370,6 +370,39 @@ async fn deletions_are_not_logged_when_their_setting_is_off() {
 }
 
 #[tokio::test]
+async fn webhook_destination_priority_and_old_retry_payload() {
+    let legacy: RetryPost =
+        serde_json::from_value(json!({"channel": "77", "expires_at": 100, "entries": []})).unwrap();
+    assert_eq!(legacy.channel, Some(Id::new(LOG)));
+    assert_eq!(legacy.webhook, None);
+    let harness = harness();
+    harness.set_log_webhook("policy");
+    harness.emit(deleted(140)).await.unwrap();
+    assert!(harness.actions().iter().any(|a| matches!(a, Action::SendViaWebhook { guild_id, name, .. } if guild_id.get() == GUILD && name == "policy")));
+    let mut cfg = config(None, true);
+    cfg["webhook"] = json!("module");
+    harness.set_config(cfg.clone());
+    harness.emit(deleted(141)).await.unwrap();
+    assert!(
+        harness
+            .actions()
+            .iter()
+            .any(|a| matches!(a, Action::SendViaWebhook { name, .. } if name == "module"))
+    );
+    cfg["channel"] = json!("88");
+    harness.set_config(cfg);
+    assert!(matches!(
+        harness.emit(deleted(142)).await,
+        Err(ModuleError::Config(_))
+    ));
+    harness.set_log_channel(OTHER_LOG);
+    harness.set_log_channel(LOG);
+    harness.set_config(config(Some("88"), true));
+    harness.emit(deleted(143)).await.unwrap();
+    assert!(sent(&harness).iter().any(|post| post.channel == OTHER_LOG));
+}
+
+#[tokio::test]
 async fn the_entries_go_to_the_configured_channel_and_not_the_log_channel() {
     let harness = harness();
     // The harness knows only the channels it was given: register the other one, then put the
@@ -383,6 +416,15 @@ async fn the_entries_go_to_the_configured_channel_and_not_the_log_channel() {
     let posted = sent(&harness);
     assert_eq!(posted.len(), 1, "{:?}", posted.len());
     assert_eq!(posted[0].channel, OTHER_LOG);
+    assert!(
+        harness
+            .actions()
+            .iter()
+            .any(|action| matches!(action, Action::SendMessage {
+        channel_id, content: None, embeds, reply_to: None,
+        mentions: closure_core::action::MentionPolicy::None,
+    } if channel_id.get() == OTHER_LOG && embeds.len() == 1))
+    );
 }
 
 #[tokio::test]
@@ -440,6 +482,73 @@ async fn failed_log_posts_are_retried_and_bounded() {
 }
 
 #[tokio::test]
+async fn unavailable_webhooks_fall_back_or_fail_without_retry() {
+    for error in [
+        DiscordError::WebhookNotRegistered,
+        DiscordError::WebhookGone,
+    ] {
+        for fallback in [false, true] {
+            let harness = Harness::new(builder().unwrap()).unwrap();
+            if fallback {
+                harness.set_log_channel(LOG);
+            }
+            harness.set_log_webhook("audit");
+            harness.api().fail_nth(1, error.clone());
+            let member = MemberInfo {
+                guild_id: Id::new(GUILD),
+                user: UserInfo {
+                    id: Id::new(40),
+                    name: "tester".into(),
+                    bot: false,
+                },
+                roles: Vec::new(),
+                nick: None,
+                joined_at: None,
+                timed_out_until: None,
+            };
+            assert_eq!(
+                harness.emit(Event::MemberJoined(member)).await.is_ok(),
+                fallback
+            );
+            assert_eq!(sent(&harness).len(), usize::from(fallback));
+            assert_eq!(harness.jobs(), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn webhook_retry_keeps_destination_after_policy_changes() {
+    let harness = harness();
+    harness.set_log_webhook("original");
+    harness
+        .api()
+        .fail_nth(1, DiscordError::Transient("offline".into()));
+    let member = MemberInfo {
+        guild_id: Id::new(GUILD),
+        user: UserInfo {
+            id: Id::new(40),
+            name: "tester".into(),
+            bot: false,
+        },
+        roles: Vec::new(),
+        nick: None,
+        joined_at: None,
+        timed_out_until: None,
+    };
+    assert!(harness.emit(Event::MemberJoined(member)).await.is_err());
+    assert_eq!(harness.jobs(), 1);
+    harness.set_log_webhook("changed");
+    harness.advance(RETRY_DELAY);
+    assert!(harness.run_due_jobs().await[0].is_ok());
+    assert!(
+        harness
+            .actions()
+            .iter()
+            .any(|a| matches!(a, Action::SendViaWebhook { name, .. } if name == "original"))
+    );
+}
+
+#[tokio::test]
 async fn failed_log_post_is_sent_after_retry() {
     let harness = harness();
     harness
@@ -483,7 +592,8 @@ async fn expired_log_retry_is_discarded_without_posting() {
 async fn oversized_log_retry_is_not_scheduled() {
     let harness = harness();
     let post = RetryPost {
-        channel: Id::new(LOG),
+        channel: Some(Id::new(LOG)),
+        webhook: None,
         expires_at: i64::MAX,
         entries: vec![RetryEntry {
             embed: EmbedBuilder::new().title("test").build().unwrap(),
@@ -624,6 +734,22 @@ async fn showcase_an_edit_that_removes_a_picture_shows_the_picture() {
         "{}",
         posted[0].embeds
     );
+}
+
+#[tokio::test]
+async fn webhook_attaches_a_kept_picture() {
+    let harness = harness();
+    harness.set_log_webhook("audit");
+    harness
+        .seed_message(saved(30, "picture", vec![picture(7)]))
+        .await
+        .unwrap();
+    harness
+        .seed_file(CHANNEL, 30, picture(7), Some(PICTURE_BYTES.to_vec()))
+        .await
+        .unwrap();
+    harness.emit(deleted(30)).await.unwrap();
+    assert!(harness.actions().iter().any(|a| matches!(a, Action::SendViaWebhook { name, file: Some(file), embeds, .. } if name == "audit" && file.data == PICTURE_BYTES && embeds[0].image.as_ref().is_some_and(|i| i.url == "attachment://photo.png"))));
 }
 
 #[tokio::test]

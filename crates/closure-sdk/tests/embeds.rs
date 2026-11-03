@@ -73,7 +73,7 @@ fn posting_module() -> ModuleBuilder {
                     files: Vec::new(),
                 })
                 .collect();
-            files::post(cx.ctx(), Id::new(77), entries).await?;
+            files::post(cx.ctx(), &files::Destination::Channel(Id::new(77)), entries).await?;
             cx.reply("posted").await
         }))
 }

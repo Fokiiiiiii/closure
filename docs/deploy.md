@@ -81,5 +81,5 @@ Set `WEBHOOK_FILE` or `--webhook-file` to the path of a file containing one
 `NAME=URL` per line. The default is `webhooks.env`; a missing file is allowed.
 See `webhooks.env.example` for the format. Restrict the file to its owner, for
 example with `chmod 600 webhooks.env`. Webhook tokens stay in this file and are
-not stored in server configuration or the database. This provides the host-side
-foundation; selecting webhooks for logs is not yet available.
+not stored in server configuration or the database. Set `log_webhook` or the logs module's
+`webhook` to a registered name to use it for log delivery.

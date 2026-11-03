@@ -47,6 +47,7 @@ Set under `modules.logs.config` in a server's configuration; see [configuration]
 | `texts` | any | - | - | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 | `threads` | boolean | `true` | - |  |
 | `voice` | boolean | `false` | - |  |
+| `webhook` | any | `null` | - |  |
 
 Default configuration:
 
@@ -68,6 +69,7 @@ Default configuration:
   "stage_instances": true,
   "stickers": true,
   "threads": true,
-  "voice": false
+  "voice": false,
+  "webhook": null
 }
 ```

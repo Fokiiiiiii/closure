@@ -16,6 +16,7 @@ version: 1                 # schema version; omit for the current one
 preset: large              # small | medium | large   (default: medium)
 language: ja               # auto | en | ja           (default: auto)
 log_channel: 123456789012345678
+log_webhook: audit          # optional named webhook; log_channel remains the fallback
 moderator_roles: [111111111111111111, 222222222222222222]
 timezone: Asia/Tokyo       # the zone of a date typed without one
 prefix: "!"                # text commands; unset, they are off
@@ -43,7 +44,8 @@ modules:
 | `version` | Schema version. A document written by a newer closure is refused rather than misread. |
 | `preset` | Sizes the limits below for a small, medium or large server. |
 | `language` | The language of the bot's messages. `auto` follows the community language the server chose in Discord. |
-| `log_channel` | Where modules post moderation logs. |
+| `log_channel` | Bot log channel and fallback when a named webhook is unavailable. |
+| `log_webhook` | Named webhook for logs; 1–32 ASCII letters, digits, underscores or hyphens. |
 | `moderator_roles` | Roles whose members may use moderation features (at most 100). |
 | `timezone` | The zone of a date and time typed in a command without one; see [time zone, prefix and emojis](#time-zone-prefix-and-emojis). |
 | `prefix` | The prefix of text commands, 1 to 10 characters without spaces. Unset, text commands are off. |

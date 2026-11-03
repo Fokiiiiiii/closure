@@ -494,6 +494,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn logs_rejects_two_destinations_at_configuration_time() {
+        let registry = Arc::new(ModuleRegistry::new(modules().unwrap()).unwrap());
+        let compiler = ConfigCompiler::new(registry).unwrap();
+        let document = closure_config::parse_overrides(
+            "modules:\n  logs:\n    config:\n      channel: '77'\n      webhook: audit\n",
+        )
+        .unwrap();
+        assert!(compiler.compile(&document).is_err());
+    }
+
+    #[test]
     fn the_shipped_modules_form_a_valid_registry_and_configuration() {
         let registry = Arc::new(ModuleRegistry::new(modules().unwrap()).unwrap());
         let mut catalogs = TranslatorBuilder::new().unwrap();
