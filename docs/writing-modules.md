@@ -688,4 +688,5 @@ registered for it: a module needs no extra code.
 
 A Lua or WebAssembly module would supply the same manifest from a file and exchange the same
 serialisable events and actions. Scripts start with no capabilities until a server administrator
-grants them. See [architecture.md](architecture.md#extending-lua-and-webassembly).
+grants them. See [architecture.md](architecture.md#extending-lua-and-webassembly) and the plan in
+[scripting.md](scripting.md).

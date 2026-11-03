@@ -149,7 +149,8 @@ Only native modules exist today, but the contract was shaped for more:
   capabilities and receives only what a server administrator grants, never more than it declares.
 
 A script host would implement `Module` by serialising the event into the script and turning its
-returned actions into `ApiClient::execute` calls. Nothing else in the system would change.
+returned actions into `ApiClient::execute` calls. Nothing else in the system would change. The
+plan, with the limits and the order of work, is in [scripting](scripting.md).
 
 ## Decisions worth knowing
 
