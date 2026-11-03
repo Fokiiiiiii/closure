@@ -23,6 +23,7 @@ closure-mod-automod.workspace = true
 closure-mod-diagnostics.workspace = true
 closure-mod-logs.workspace = true
 closure-mod-moderation.workspace = true
+closure-mod-tags.workspace = true
 closure-mod-welcome.workspace = true
 dotenvy.workspace = true
 futures-util.workspace = true

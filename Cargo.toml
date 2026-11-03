@@ -24,6 +24,7 @@ closure-mod-automod = { path = "crates/closure-mod-automod" }
 closure-mod-diagnostics = { path = "crates/closure-mod-diagnostics" }
 closure-mod-logs = { path = "crates/closure-mod-logs" }
 closure-mod-moderation = { path = "crates/closure-mod-moderation" }
+closure-mod-tags = { path = "crates/closure-mod-tags" }
 closure-mod-welcome = { path = "crates/closure-mod-welcome" }
 
 anyhow = "1"

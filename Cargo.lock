@@ -431,6 +431,7 @@ dependencies = [
  "closure-mod-diagnostics",
  "closure-mod-logs",
  "closure-mod-moderation",
+ "closure-mod-tags",
  "closure-mod-welcome",
  "dotenvy",
  "futures-util",
@@ -620,6 +621,15 @@ dependencies = [
  "serde_json",
  "tokio",
  "twilight-model",
+]
+
+[[package]]
+name = "closure-mod-tags"
+version = "0.1.0"
+dependencies = [
+ "closure-i18n",
+ "closure-sdk",
+ "tokio",
 ]
 
 [[package]]
