@@ -11,10 +11,12 @@
 
 mod auth;
 mod config;
+mod directory;
 mod error;
 mod ops;
 mod server;
 
+pub use directory::{Channel, Directory, Guild, GuildDirectory, Role};
 pub use server::{ServerLimits, serve};
 
 use std::fmt;
@@ -63,6 +65,7 @@ pub(crate) struct Inner {
     pub(crate) settings: Arc<SettingsStore>,
     pub(crate) db: Db,
     pub(crate) readiness: Arc<dyn Readiness>,
+    pub(crate) directory: Arc<dyn GuildDirectory>,
     pub(crate) render_metrics: Box<dyn Fn() -> String + Send + Sync>,
     pub(crate) token_digest: [u8; 32],
     pub(crate) failures: auth::FailureLimiter,
@@ -85,6 +88,7 @@ impl ApiState {
         settings: Arc<SettingsStore>,
         db: Db,
         readiness: Arc<dyn Readiness>,
+        directory: Arc<dyn GuildDirectory>,
         render_metrics: impl Fn() -> String + Send + Sync + 'static,
         admin_token: &SecretString,
     ) -> Result<Self, SetupError> {
@@ -97,6 +101,7 @@ impl ApiState {
                 settings,
                 db,
                 readiness,
+                directory,
                 render_metrics: Box::new(render_metrics),
                 token_digest: auth::digest(token),
                 failures: auth::FailureLimiter::default(),
@@ -110,6 +115,8 @@ pub fn router(state: ApiState) -> Router {
     let protected = Router::new()
         .route("/metrics", get(ops::metrics))
         .route("/v1/schema", get(ops::schema))
+        .route("/v1/guilds", get(directory::guilds))
+        .route("/v1/guilds/{guild_id}/directory", get(directory::directory))
         .route(
             "/v1/guilds/{guild_id}/config",
             get(config::get_config).put(config::put_config),

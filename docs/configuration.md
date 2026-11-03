@@ -236,6 +236,18 @@ curl -i -X PUT -H "Authorization: Bearer $API_ADMIN_TOKEN" \
   current revision; reload and merge.
 - Invalid documents are refused (`422`) and nothing is stored.
 - Only servers the bot is currently in can be configured (`404` otherwise).
+- `GET /v1/guilds` lists joined servers as objects with string `id`, `name`, and nullable `icon`.
+  `GET /v1/guilds/{id}/directory` returns cached `channels` and `roles` for pickers; IDs and
+  channel `parent_id` are strings. Channels include `kind` and `position`; roles include `color`,
+  `position`, and `managed`. Threads are excluded. A server the bot has left returns `404`. The API
+  returns `503` until the gateway is ready or when the requested server is not in cache; missing
+  cached channels and roles are omitted. The guild list omits joined servers whose names are not
+  available in the cache.
+- Both write views accept the optional `X-Closure-Actor` header, a positive decimal Discord user ID
+  that fits in 63 bits. Invalid values return `400`. The trusted client is responsible for the
+  identity it supplies; the API's bearer token does not authenticate that identity. The actor is
+  recorded in history and the audit trail, and omitted headers leave it unset. History returns
+  `actor` as a decimal string or `null`.
 - A successful write takes effect at once in the running bot (the lane count is the one exception
   noted above) and is recorded in the history
   (`GET /v1/guilds/{id}/config/history`) and the audit trail.
@@ -296,5 +308,5 @@ Two decisions of this design:
 
 - The format stamp `version` is accepted in both views, since a YAML document read in one view
   carries it. It is not a setting.
-- A basic write is recorded in the history and the audit trail like any other write. The API has
-  no user identity of its own (one admin token), so the actor is not recorded, as for a full write.
+- A basic write is recorded in the history and the audit trail like any other write, including an
+  actor supplied by the trusted client.

@@ -30,6 +30,7 @@ use secrecy::SecretString;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use twilight_http::Client;
+use twilight_model::channel::ChannelType;
 use twilight_model::id::Id;
 use twilight_model::id::marker::ApplicationMarker;
 
@@ -44,6 +45,83 @@ const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const ATTACHMENT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct GatewayReadiness(Arc<GatewayHealth>);
+
+struct CachedDirectory {
+    cache: InMemoryCacheView,
+    health: Arc<GatewayHealth>,
+}
+
+impl closure_api::GuildDirectory for CachedDirectory {
+    fn guild(&self, id: GuildId) -> Option<closure_api::Guild> {
+        if self.health.total() == 0 || self.health.ready() != self.health.total() {
+            return None;
+        }
+        let guild = self.cache.0.guild(id)?;
+        if guild.unavailable() == Some(true) {
+            return None;
+        }
+        Some(closure_api::Guild {
+            id: id.to_string(),
+            name: guild.name().to_owned(),
+            icon: guild.icon().map(ToString::to_string),
+        })
+    }
+
+    fn directory(&self, id: GuildId) -> Option<closure_api::Directory> {
+        self.guild(id)?;
+        let cache = &self.cache.0;
+        let channel_ids = cache
+            .guild_channels(id)
+            .map(|channels| channels.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let role_ids = cache
+            .guild_roles(id)
+            .map(|roles| roles.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut channels = Vec::new();
+        for channel_id in channel_ids {
+            let Some(channel) = cache.channel(channel_id) else {
+                continue;
+            };
+            let kind = match channel.kind {
+                ChannelType::GuildText => "text",
+                ChannelType::GuildVoice => "voice",
+                ChannelType::GuildCategory => "category",
+                ChannelType::GuildAnnouncement => "announcement",
+                ChannelType::GuildForum => "forum",
+                ChannelType::GuildStageVoice => "stage",
+                _ => continue,
+            };
+            let Some(name) = channel.name.clone() else {
+                continue;
+            };
+            let Some(position) = channel.position else {
+                continue;
+            };
+            channels.push(closure_api::Channel {
+                id: channel.id.to_string(),
+                name,
+                kind,
+                parent_id: channel.parent_id.map(|id| id.to_string()),
+                position: i64::from(position),
+            });
+        }
+        let mut roles = Vec::new();
+        for role_id in role_ids {
+            let Some(role) = cache.role(role_id) else {
+                continue;
+            };
+            roles.push(closure_api::Role {
+                id: role.id.to_string(),
+                name: role.name.clone(),
+                color: role.colors.primary_color,
+                position: role.position,
+                managed: role.managed,
+            });
+        }
+        Some(closure_api::Directory { channels, roles })
+    }
+}
 
 impl Readiness for GatewayReadiness {
     fn gateway(&self) -> GatewayStatus {
@@ -170,6 +248,7 @@ async fn start_api(
     core: &Core,
     db: &Db,
     health: Arc<GatewayHealth>,
+    cache: InMemoryCacheView,
     metrics: PrometheusHandle,
     shutdown: &CancellationToken,
 ) -> Result<Option<JoinHandle<()>>> {
@@ -183,7 +262,8 @@ async fn start_api(
     let state = ApiState::new(
         Arc::clone(&core.store),
         db.clone(),
-        Arc::new(GatewayReadiness(health)),
+        Arc::new(GatewayReadiness(Arc::clone(&health))),
+        Arc::new(CachedDirectory { cache, health }),
         move || metrics.render(),
         &SecretString::from(token.clone()),
     )?;
@@ -333,7 +413,7 @@ async fn serve(
                 intents: gateway_intents(&core.registry),
                 latency,
             },
-            cache,
+            Arc::clone(&cache),
             dispatcher,
             hooks,
             shutdown.clone(),
@@ -346,6 +426,7 @@ async fn serve(
         core,
         db,
         Arc::clone(gateway.health()),
+        InMemoryCacheView(cache),
         metrics,
         shutdown,
     )

@@ -14,6 +14,7 @@ pub(crate) enum ApiError {
     },
     BadRequest(String),
     NotFound(String),
+    Unavailable,
     /// A write that must say which revision it edits (`If-Match`) did not.
     PreconditionRequired,
     /// The configuration changed since the client read it.
@@ -109,6 +110,10 @@ impl IntoResponse for ApiError {
                 respond(StatusCode::BAD_REQUEST, body("bad_request", message))
             }
             Self::NotFound(message) => respond(StatusCode::NOT_FOUND, body("not_found", message)),
+            Self::Unavailable => respond(
+                StatusCode::SERVICE_UNAVAILABLE,
+                body("unavailable", "gateway cache is not ready"),
+            ),
             Self::PreconditionRequired => respond(
                 StatusCode::PRECONDITION_REQUIRED,
                 body(

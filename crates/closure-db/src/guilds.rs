@@ -2,9 +2,17 @@ use closure_core::event::GuildId;
 
 use crate::Db;
 use crate::error::DbError;
-use crate::ids::to_db;
+use crate::ids::{from_db, to_db};
 
 impl Db {
+    /// Guilds currently recorded as joined.
+    pub async fn active_guilds(&self) -> Result<Vec<GuildId>, DbError> {
+        let ids: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM guilds WHERE left_at IS NULL ORDER BY id")
+                .fetch_all(&self.pool)
+                .await?;
+        ids.into_iter().map(from_db).collect()
+    }
     /// Records that the bot is in `guild`. Safe to call repeatedly, including when the bot
     /// rejoins a guild it left earlier.
     pub async fn register_guild(&self, guild: GuildId) -> Result<(), DbError> {

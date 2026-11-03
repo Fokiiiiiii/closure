@@ -28,6 +28,35 @@ impl Readiness for FixedReadiness {
     }
 }
 
+struct FakeDirectory;
+impl GuildDirectory for FakeDirectory {
+    fn guild(&self, id: closure_core::event::GuildId) -> Option<Guild> {
+        (id.get() == GUILD).then(|| Guild {
+            id: id.to_string(),
+            name: "Test".into(),
+            icon: None,
+        })
+    }
+    fn directory(&self, id: closure_core::event::GuildId) -> Option<Directory> {
+        self.guild(id).map(|_| Directory {
+            channels: vec![Channel {
+                id: "5".into(),
+                name: "general".into(),
+                kind: "text",
+                parent_id: None,
+                position: 0,
+            }],
+            roles: vec![Role {
+                id: "6".into(),
+                name: "member".into(),
+                color: 42,
+                position: 1,
+                managed: false,
+            }],
+        })
+    }
+}
+
 struct App {
     router: Router,
     db: Db,
@@ -68,6 +97,7 @@ fn app_with(pool: PgPool, gateway: GatewayStatus) -> App {
         Arc::clone(&store),
         db.clone(),
         Arc::new(FixedReadiness(gateway)),
+        Arc::new(FakeDirectory),
         || "closure_up 1\n".to_owned(),
         &SecretString::from(TOKEN),
     )
@@ -163,6 +193,149 @@ fn put(guild: u64, if_match: &str, body: &str) -> Call {
 }
 
 const GUILD: u64 = 42;
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+
+async fn dashboard_guilds_and_directory(pool: PgPool) {
+    let app = app(pool).await;
+    for uri in ["/v1/guilds", "/v1/guilds/42/directory"] {
+        assert_eq!(
+            send(&app.router, call(Method::GET, uri).token(None))
+                .await
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        send(&app.router, call(Method::GET, "/v1/guilds"))
+            .await
+            .json(),
+        json!([{ "id": "42", "name": "Test", "icon": null }])
+    );
+    let directory = send(&app.router, call(Method::GET, "/v1/guilds/42/directory")).await;
+    assert_eq!(directory.status, StatusCode::OK);
+    assert_eq!(
+        directory.json(),
+        json!({ "channels": [{ "id": "5", "name": "general", "kind": "text", "parent_id": null, "position": 0 }], "roles": [{ "id": "6", "name": "member", "color": 42, "position": 1, "managed": false }] })
+    );
+    assert_eq!(
+        send(&app.router, call(Method::GET, "/v1/guilds/43/directory"))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    app.db.register_guild(Id::new(43)).await.unwrap();
+    assert_eq!(
+        send(&app.router, call(Method::GET, "/v1/guilds/43/directory"))
+            .await
+            .status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        send(&app.router, call(Method::GET, "/v1/guilds"))
+            .await
+            .json(),
+        json!([{ "id": "42", "name": "Test", "icon": null }])
+    );
+    app.db.mark_guild_left(Id::new(43)).await.unwrap();
+    assert_eq!(
+        send(&app.router, call(Method::GET, "/v1/guilds"))
+            .await
+            .json()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+
+async fn dashboard_guilds_waits_for_gateway_even_when_database_is_empty(pool: PgPool) {
+    let app = app_with(pool, GatewayStatus { ready: 0, total: 1 });
+    for uri in ["/v1/guilds", "/v1/guilds/42/directory"] {
+        assert_eq!(
+            send(&app.router, call(Method::GET, uri)).await.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{uri}"
+        );
+    }
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn dashboard_actor_is_recorded_for_both_views(pool: PgPool) {
+    let app = app(pool).await;
+    for invalid in [
+        "0",
+        "-1",
+        "+1",
+        "abc",
+        "9223372036854775808",
+        "18446744073709551616",
+        "",
+    ] {
+        let response = send(
+            &app.router,
+            put(GUILD, "\"0\"", "preset: small").header("x-closure-actor", invalid),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{invalid:?}");
+    }
+    assert_eq!(
+        send(
+            &app.router,
+            put(GUILD, "\"0\"", "preset: small")
+                .header("x-closure-actor", "123")
+                .header("x-closure-actor", "456"),
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    let unauth = send(
+        &app.router,
+        put(GUILD, "\"0\"", "preset: small")
+            .header("x-closure-actor", "bad")
+            .token(None),
+    )
+    .await;
+    assert_eq!(unauth.status, StatusCode::UNAUTHORIZED);
+    let advanced = send(
+        &app.router,
+        put(GUILD, "\"0\"", "preset: small").header("x-closure-actor", "9223372036854775807"),
+    )
+    .await;
+    assert_eq!(advanced.status, StatusCode::OK, "{}", advanced.text);
+    let basic = send(
+        &app.router,
+        basic_put("\"1\"", "preset: large").header("x-closure-actor", "123"),
+    )
+    .await;
+    assert_eq!(basic.status, StatusCode::OK, "{}", basic.text);
+    assert_eq!(
+        send(&app.router, put(GUILD, "\"2\"", "preset: medium"))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let history = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/config/history"),
+    )
+    .await
+    .json();
+    assert_eq!(history[0]["actor"], Value::Null);
+    assert_eq!(history[1]["actor"], json!("123"));
+    assert_eq!(history[2]["actor"], json!("9223372036854775807"));
+    let audit = app.db.recent_audit(Id::new(GUILD), 10).await.unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .map(|e| e.actor.map(Id::get))
+            .collect::<Vec<_>>(),
+        [None, Some(123), Some(9_223_372_036_854_775_807)]
+    );
+}
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn probes_need_no_token_but_everything_else_does(pool: PgPool) {
@@ -279,6 +452,7 @@ async fn weak_admin_tokens_are_refused_at_setup(pool: PgPool) {
         store,
         Db::from_pool(pool),
         Arc::new(FixedReadiness(GatewayStatus { ready: 0, total: 0 })),
+        Arc::new(FakeDirectory),
         String::new,
         &SecretString::from("short"),
     );

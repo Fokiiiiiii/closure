@@ -7,7 +7,7 @@ use closure_config::{
     GuildOverrides, View, basic_view, effective_to_yaml, merge_basic, overrides_to_yaml,
     parse_overrides,
 };
-use closure_core::event::GuildId;
+use closure_core::event::{GuildId, UserId};
 use closure_db::AuditEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -19,13 +19,33 @@ use crate::error::ApiError;
 const YAML: &str = "application/yaml";
 
 /// Discord snowflakes are positive and fit in 63 bits.
-fn guild_id(raw: u64) -> Result<GuildId, ApiError> {
+pub(crate) fn guild_id(raw: u64) -> Result<GuildId, ApiError> {
     if raw == 0 || i64::try_from(raw).is_err() {
         return Err(ApiError::BadRequest(
             "the guild id must be a positive snowflake".into(),
         ));
     }
     Ok(Id::new(raw))
+}
+
+fn actor(headers: &HeaderMap) -> Result<Option<UserId>, ApiError> {
+    let mut values = headers.get_all("x-closure-actor").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    let raw = value
+        .to_str()
+        .ok()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|id| i64::try_from(*id).is_ok())
+        .and_then(Id::new_checked);
+    if values.next().is_some() || raw.is_none() {
+        return Err(ApiError::BadRequest(
+            "X-Closure-Actor must be a nonzero decimal user id".into(),
+        ));
+    }
+    Ok(raw)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +175,7 @@ pub(crate) async fn put_config(
 ) -> Result<Response, ApiError> {
     let guild = guild_id(guild)?;
     let view = view_of(&query)?;
+    let actor = actor(&headers)?;
     let expected = expected_revision(&headers)?;
     let overrides = match view {
         View::Advanced => parse_body(&body)?,
@@ -171,7 +192,7 @@ pub(crate) async fn put_config(
             )?
         }
     };
-    save(&state, guild, expected, overrides).await
+    save(&state, guild, expected, overrides, actor).await
 }
 
 /// The write both views share: validate, check the server, store, install and audit.
@@ -180,6 +201,7 @@ async fn save(
     guild: GuildId,
     expected: Option<i64>,
     overrides: GuildOverrides,
+    actor: Option<UserId>,
 ) -> Result<Response, ApiError> {
     // Validate before touching the database: an invalid document must never be stored.
     let settings = state.inner.settings.compiler().compile(&overrides)?;
@@ -191,7 +213,7 @@ async fn save(
     let revision = state
         .inner
         .db
-        .save_config(guild, expected, &overrides, None)
+        .save_config(guild, expected, &overrides, actor)
         .await?;
     if !state.inner.settings.install(guild, revision, settings) {
         // A concurrent edit with a higher revision is already live; that is the one to keep.
@@ -200,7 +222,7 @@ async fn save(
 
     let audit = AuditEvent {
         guild_id: guild,
-        actor: None,
+        actor,
         action: "config.update".into(),
         payload: json!({ "revision": revision }),
     };
@@ -271,7 +293,7 @@ pub(crate) struct HistoryQuery {
 struct HistoryEntry {
     revision: i64,
     created_at_unix: i64,
-    actor: Option<u64>,
+    actor: Option<String>,
     document: GuildOverrides,
 }
 
@@ -291,7 +313,7 @@ pub(crate) async fn history(
         .map(|entry| HistoryEntry {
             revision: entry.revision,
             created_at_unix: entry.created_at.unix_timestamp(),
-            actor: entry.actor.map(Id::get),
+            actor: entry.actor.map(|id| id.to_string()),
             document: entry.overrides,
         })
         .collect();
