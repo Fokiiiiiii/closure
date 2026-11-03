@@ -117,14 +117,16 @@ impl Reader<'_> {
         }
         let free = options.iter().enumerate().find_map(|(i, option)| {
             (option.kind == OptionKind::String
-                && (option.name == "reason" || i + 1 == options.len()))
-            .then_some(i)
+                && (option.name == "reason"
+                    || (i + 1 == options.len() && option.name != "duration")))
+                .then_some(i)
         });
         for word in words {
             let found = options.iter().enumerate().find_map(|(i, option)| {
                 if values[i].is_some()
                     || (Some(i) == free && option.name != "duration")
                     || option.kind == OptionKind::Attachment
+                    || (word.quoted && (Some(i) != free || option.name == "duration"))
                 {
                     return None;
                 }

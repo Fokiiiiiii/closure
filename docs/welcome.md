@@ -16,7 +16,7 @@ modules:
 ```
 
 - `channel`: Discord channel snowflake as a string. If absent, no greeting is sent.
-- `message`: optional template. Without one, the module uses the server language's catalog default.
+- `message`: optional template. Without one, the module uses the server language's catalog default. The rendered greeting is cut to 2,000 characters after variables are filled.
 - `delete_after`: optional duration from 5 seconds through 7 days.
 - `include_bots`: defaults to `false`.
 

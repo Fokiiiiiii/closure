@@ -620,17 +620,14 @@ fn the_permissions_are_computed_only_for_a_command_that_runs() {
 }
 
 #[test]
-fn mentions_of_a_user_are_read_in_every_form() {
+fn only_unquoted_mentions_fill_user_options() {
     assert_eq!(values("!warn <@5>"), [CommandOptionValue::User(Id::new(5))]);
     assert_eq!(
         values("!warn <@!5>"),
         [CommandOptionValue::User(Id::new(5))]
     );
     assert_eq!(values("!warn 5"), [CommandOptionValue::User(Id::new(5))]);
-    assert_eq!(
-        values("!warn \"<@5>\""),
-        [CommandOptionValue::User(Id::new(5))]
-    );
+    assert_eq!(usage("!warn \"<@5>\""), "Usage: !warn <user> [reason]");
 }
 
 #[test]
@@ -667,18 +664,14 @@ fn a_quoted_word_is_one_value_and_keeps_its_spaces() {
 }
 
 #[test]
-fn a_quoted_word_that_is_not_the_last_one_leaves_the_rest_to_the_next_option() {
+fn a_quoted_duration_is_not_assigned_to_the_typed_option() {
     assert_eq!(
         usage("!warn <@5> \"being\" rude"),
         "Usage: !warn <user> [reason]"
     );
     assert_eq!(
-        values("!timeout <@5> \"2 hours\" being rude"),
-        [
-            CommandOptionValue::User(Id::new(5)),
-            text("2 hours"),
-            text("being rude"),
-        ]
+        usage("!timeout <@5> \"2 hours\""),
+        "Usage: !timeout <user> <duration> [reason]"
     );
 }
 
@@ -906,6 +899,19 @@ fn quoted_reason_allows_following_typed_options() {
     assert_eq!(
         values("!ban <@5> spam 7d"),
         [CommandOptionValue::User(Id::new(5)), text("spam 7d")]
+    );
+}
+
+#[test]
+fn a_quoted_number_is_a_reason_not_a_typed_ban_option() {
+    assert_eq!(
+        values("!ban <@5> \"7\" 1d 0"),
+        [
+            CommandOptionValue::User(Id::new(5)),
+            text("7"),
+            text("1d"),
+            CommandOptionValue::Integer(0),
+        ]
     );
 }
 

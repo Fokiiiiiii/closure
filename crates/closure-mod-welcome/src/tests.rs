@@ -73,6 +73,37 @@ async fn welcome_sends_a_localized_template_and_only_allows_the_member_mention()
     )));
 }
 
+#[tokio::test]
+async fn welcome_truncates_expanded_content_at_the_character_limit() {
+    let harness = harness();
+    harness
+        .api()
+        .add_channel(ChannelId::new(42), Some(GuildId::new(1)));
+    harness
+        .api()
+        .set_guild_name(GuildId::new(1), &"あ".repeat(20));
+    harness.set_config(serde_json::json!({
+        "channel": "42",
+        "message": format!("{}{{user}}{{server}}", "あ".repeat(1_979))
+    }));
+
+    harness
+        .emit(join(123_456_789_012_345_678, false))
+        .await
+        .unwrap();
+
+    let content = harness
+        .actions()
+        .into_iter()
+        .find_map(|action| match action {
+            Action::SendMessage { content, .. } => content,
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(content.chars().count(), 2_000);
+    assert!(content.ends_with('>'));
+}
+
 #[test]
 fn welcome_templates_and_delete_durations_are_validated() {
     assert!(validate_template("Welcome {username}").is_ok());
@@ -134,6 +165,34 @@ async fn welcome_delete_after_schedules_and_runs_a_delete_job() {
         Action::DeleteMessage { channel_id, message_id, .. }
             if channel_id.get() == 42 && message_id.get() > 0
     )));
+}
+
+#[tokio::test]
+async fn welcome_delete_only_retries_transient_failures() {
+    use closure_core::error::DiscordError;
+
+    for (error, retry) in [
+        (DiscordError::Transient("temporary".into()), true),
+        (DiscordError::RateLimited { retry_after: None }, true),
+        (DiscordError::NotFound, false),
+        (DiscordError::Forbidden("denied".into()), false),
+    ] {
+        let harness = harness();
+        harness
+            .api()
+            .add_channel(ChannelId::new(42), Some(GuildId::new(1)));
+        harness.set_config(serde_json::json!({
+            "channel": "42",
+            "message": "hello",
+            "delete_after": "5s"
+        }));
+        harness.emit(join(7, false)).await.unwrap();
+        harness.api().fail_with(error);
+        harness.advance(Duration::from_secs(5));
+
+        let results = harness.run_due_jobs().await;
+        assert_eq!(results.iter().all(Result::is_ok), !retry);
+    }
 }
 
 #[tokio::test]

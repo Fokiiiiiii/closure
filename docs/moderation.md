@@ -32,6 +32,8 @@ them, keeps notes, and records every one of these as a case. The code is in
 Channel actions are not cases. Their Discord audit reasons identify the moderator and include the lock reason, truncated to 512 characters. When a moderation log channel is configured, channel changes and timed restorations are also posted there without mentions; a failed post does not fail the action and is not retried. The lock implementation is independent of automod's `change_permissions` implementation.
 Text commands match mentions, IDs, and unit-based durations to available options regardless of order. Once a reason begins, the rest of the line is the reason, including anything that looks like a duration. Bare IDs can match more than one type, so ambiguous values fill options in declaration order. Quote a reason containing spaces to preserve its existing quoted-word behavior.
 
+A quoted word is treated as text and cannot fill a typed option such as duration or delete_days.
+
 A permission key can be changed per server with `permissions.keys` (see [configuration](configuration.md)).
 
 For a text command, quote a users list or reason containing spaces, for example

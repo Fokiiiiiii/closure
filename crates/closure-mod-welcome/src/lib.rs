@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use closure_core::action::{Action, MentionPolicy, Outcome, Reason};
 use closure_core::capability::Capability;
-use closure_core::error::ModuleError;
+use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{Event, EventKind};
 use closure_core::module::EventContext;
 use closure_core::subscription::Flow;
@@ -195,7 +195,11 @@ async fn send_welcome(
             }
         }
     }
-    let content = template.render(&Values::from_json(values).unwrap_or_default());
+    let content: String = template
+        .render(&Values::from_json(values).unwrap_or_default())
+        .chars()
+        .take(2_000)
+        .collect();
     let message = match ctx
         .api
         .execute(Action::SendMessage {
@@ -243,9 +247,10 @@ async fn delete_welcome(cx: JobCx) -> Result<(), ModuleError> {
         })
         .await;
     match result {
-        Ok(_) => Ok(()),
+        Ok(_) | Err(DiscordError::NotFound) => Ok(()),
+        Err(error) if error.is_retryable() => Err(error.into()),
         Err(error) => {
-            tracing::debug!(?error, "could not delete expired welcome message");
+            tracing::warn!(?error, "could not delete expired welcome message");
             Ok(())
         }
     }
