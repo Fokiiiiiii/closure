@@ -1561,6 +1561,35 @@ fn named_api(discord: &FakeDiscord) -> TwilightApi {
 }
 
 #[tokio::test]
+async fn named_webhook_channel_refreshes_only_after_five_minutes() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    const MOVED: &str = r#"{"id":"8","type":1,"guild_id":"10","channel_id":"2","name":"bridge","token":"tok-secret","avatar":null}"#;
+    let discord = FakeDiscord::start(vec![(200, WEBHOOK_JSON), (200, MOVED)]).await;
+    let now = Arc::new(AtomicI64::new(1_700_000_000));
+    let clock = Arc::clone(&now);
+    let api = named_api(&discord).with_clock(move || clock.load(Ordering::SeqCst));
+    assert_eq!(
+        api.webhook_channel(Id::new(10), "logs").await.unwrap(),
+        Id::new(1)
+    );
+    assert_eq!(
+        api.webhook_channel(Id::new(10), "logs").await.unwrap(),
+        Id::new(1)
+    );
+    assert_eq!(discord.requests().len(), 1);
+    now.fetch_add(300, Ordering::SeqCst);
+    assert_eq!(
+        api.webhook_channel(Id::new(10), "logs").await.unwrap(),
+        Id::new(2)
+    );
+    assert_eq!(discord.requests().len(), 2);
+    assert!(matches!(
+        api.webhook_channel(Id::new(11), "logs").await,
+        Err(DiscordError::Forbidden(_))
+    ));
+}
+
+#[tokio::test]
 async fn named_webhook_sends_embeds_and_files_and_caches_guild() {
     let discord = FakeDiscord::start(vec![
         (200, WEBHOOK_JSON),
@@ -1609,7 +1638,7 @@ async fn named_webhook_rejects_wrong_guild_and_unknown_name() {
 }
 
 #[tokio::test]
-async fn named_webhook_gone_clears_cached_guild() {
+async fn named_webhook_gone_cools_down_and_recovers() {
     let discord = FakeDiscord::start(vec![
         (200, WEBHOOK_JSON),
         (200, MESSAGE_JSON),
@@ -1618,12 +1647,23 @@ async fn named_webhook_gone_clears_cached_guild() {
         (200, MESSAGE_JSON),
     ])
     .await;
-    let api = named_api(&discord);
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(1_700_000_000));
+    let clock = Arc::clone(&now);
+    let api =
+        named_api(&discord).with_clock(move || clock.load(std::sync::atomic::Ordering::SeqCst));
     assert!(api.execute(named_webhook(false, 10)).await.is_ok());
     assert_eq!(
         api.execute(named_webhook(false, 10)).await,
         Err(DiscordError::WebhookGone)
     );
+    assert_eq!(
+        api.execute(named_webhook(false, 10)).await,
+        Err(DiscordError::WebhookGone)
+    );
+    assert_eq!(discord.requests().len(), 3);
+    now.fetch_add(600, std::sync::atomic::Ordering::SeqCst);
+    assert!(api.execute(named_webhook(false, 10)).await.is_ok());
+    now.fetch_sub(600, std::sync::atomic::Ordering::SeqCst);
     assert!(api.execute(named_webhook(false, 10)).await.is_ok());
     let requests = discord.requests();
     assert_eq!(
@@ -1631,7 +1671,7 @@ async fn named_webhook_gone_clears_cached_guild() {
             .iter()
             .map(|r| r.method.as_str())
             .collect::<Vec<_>>(),
-        ["GET", "POST", "POST", "GET", "POST"]
+        ["GET", "POST", "POST", "GET", "POST", "POST"]
     );
 }
 

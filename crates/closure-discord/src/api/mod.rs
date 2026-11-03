@@ -77,8 +77,14 @@ pub struct TwilightApi {
     /// cannot go stale; the map is emptied when it reaches [`KNOWN_CHANNELS`].
     known_channels: Mutex<HashMap<ChannelId, GuildId>>,
     webhooks: WebhookRegistry,
-    webhook_guilds:
-        Mutex<HashMap<twilight_model::id::Id<twilight_model::id::marker::WebhookMarker>, GuildId>>,
+    webhook_guilds: Mutex<
+        HashMap<
+            twilight_model::id::Id<twilight_model::id::marker::WebhookMarker>,
+            (GuildId, ChannelId, i64),
+        >,
+    >,
+    webhook_gone: Mutex<HashMap<String, i64>>,
+    webhook_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Lookups of a channel's guild that are under way, so concurrent first lookups of one
     /// channel make one request.
     lookups: Mutex<HashMap<ChannelId, LookupCell>>,
@@ -110,6 +116,8 @@ impl TwilightApi {
             known_channels: Mutex::new(HashMap::new()),
             webhooks: WebhookRegistry::new(),
             webhook_guilds: Mutex::new(HashMap::new()),
+            webhook_gone: Mutex::new(HashMap::new()),
+            webhook_locks: Mutex::new(HashMap::new()),
             lookups: Mutex::new(HashMap::new()),
             text: interactions::TextReplies::default(),
         }
@@ -235,6 +243,11 @@ fn error_label(error: &DiscordError) -> &'static str {
 
 #[async_trait]
 impl DiscordApi for TwilightApi {
+    async fn webhook_channel(&self, guild: GuildId, name: &str) -> Result<ChannelId, DiscordError> {
+        let lock = self.webhook_lock(name);
+        let _guard = lock.lock().await;
+        self.resolve_webhook(guild, name, true).await
+    }
     async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
         let name = action.name();
         let started = Instant::now();

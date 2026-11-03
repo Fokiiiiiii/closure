@@ -652,6 +652,7 @@ pub struct EventContext {
     cases: Cases,
     history: MessageHistory,
     config: Arc<serde_json::Value>,
+    other_settings: Option<Arc<dyn crate::settings::SettingsProvider>>,
     translator: Arc<dyn Translator>,
     texts: Arc<HashMap<String, String>>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
@@ -694,6 +695,7 @@ impl EventContext {
             policy,
             permissions: Arc::default(),
             config,
+            other_settings: None,
             translator,
             texts: Arc::new(texts),
             clock: Arc::new(system_unix_now),
@@ -830,6 +832,25 @@ impl EventContext {
     #[must_use]
     pub fn config(&self) -> &serde_json::Value {
         &self.config
+    }
+
+    /// Provides read-only access to effective settings of other modules in this guild.
+    #[must_use]
+    pub fn with_settings_provider(
+        mut self,
+        settings: Arc<dyn crate::settings::SettingsProvider>,
+    ) -> Self {
+        self.other_settings = Some(settings);
+        self
+    }
+
+    /// Effective configuration of another module, when present.
+    #[must_use]
+    pub fn module_config(&self, module: &ModuleId) -> Option<Arc<serde_json::Value>> {
+        self.other_settings
+            .as_ref()?
+            .module(self.guild_id, module)
+            .map(|settings| settings.config)
     }
 
     /// Deserialises the module's configuration into its own typed struct.

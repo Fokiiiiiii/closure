@@ -503,6 +503,7 @@ pub struct Harness {
     interactions: Arc<InteractionGuilds>,
     permissions: Mutex<GuildPermissions>,
     config: Mutex<serde_json::Value>,
+    other_config: Mutex<Option<serde_json::Value>>,
     storage: Arc<MemoryStorage>,
     scheduler: Arc<MemoryScheduler>,
     cases: Arc<MemoryCases>,
@@ -579,6 +580,7 @@ impl Harness {
             interactions: Arc::new(InteractionGuilds::default()),
             permissions: Mutex::new(permissions),
             config: Mutex::new(manifest.default_config.clone()),
+            other_config: Mutex::new(None),
             storage,
             scheduler,
             cases,
@@ -626,6 +628,7 @@ impl Harness {
             interactions: Arc::clone(&self.interactions),
             permissions: Mutex::new(permissions),
             config: Mutex::new(manifest.default_config.clone()),
+            other_config: Mutex::new(None),
             storage: Arc::clone(&self.storage),
             scheduler: Arc::clone(&self.scheduler),
             cases: Arc::clone(&self.cases),
@@ -654,6 +657,14 @@ impl Harness {
     /// Sets the module's configuration in the guild.
     pub fn set_config(&self, config: serde_json::Value) {
         *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config;
+    }
+
+    /// Sets the effective configuration of the logs module.
+    pub fn set_logs_config(&self, config: serde_json::Value) {
+        *self
+            .other_config
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(config);
     }
 
     /// Sets the guild's log channel. The channel exists in the guild, as Discord would have it.
@@ -865,6 +876,23 @@ impl Harness {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        let logs = self
+            .other_config
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let modules = logs.into_iter().filter_map(|config| {
+            closure_core::module::ModuleId::new("logs").ok().map(|id| {
+                (
+                    id,
+                    closure_core::settings::ModuleSettings {
+                        enabled: true,
+                        config: Arc::new(config),
+                        granted: closure_core::capability::CapabilitySet::default(),
+                    },
+                )
+            })
+        });
         let context = EventContext::new(
             manifest.id.clone(),
             guild,
@@ -879,6 +907,9 @@ impl Harness {
             Arc::new(config),
             Arc::clone(&self.translator),
         )
+        .with_settings_provider(Arc::new(closure_core::testing::StaticSettings::new(
+            modules,
+        )))
         .with_permissions(Arc::new(permissions))
         .with_gateway_latency(Arc::clone(&self.gateway))
         .with_scheduler(Scheduler::new(

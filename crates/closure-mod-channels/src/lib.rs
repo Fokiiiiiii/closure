@@ -7,6 +7,8 @@ use closure_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 use twilight_model::id::Id;
 
@@ -33,6 +35,21 @@ struct ReactRule {
     skip_bots: bool,
 }
 const fn yes() -> bool {
+    true
+}
+
+const PROTECTED_WARNING_LIMIT: usize = 10_000;
+static PROTECTED_WARNINGS: LazyLock<Mutex<HashSet<(u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn first_protected_warning(guild: u64, channel: u64) -> bool {
+    let mut warnings = PROTECTED_WARNINGS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if warnings.contains(&(guild, channel)) || warnings.len() >= PROTECTED_WARNING_LIMIT {
+        return false;
+    }
+    warnings.insert((guild, channel));
     true
 }
 
@@ -152,6 +169,43 @@ fn emoji(text: &str) -> Result<Emoji, ModuleError> {
     Ok(Emoji::Unicode { value: text.into() })
 }
 
+async fn protected(ctx: &EventContext, channel: closure_core::event::ChannelId) -> bool {
+    let mut channels = Vec::new();
+    channels.extend(ctx.policy().log_channel);
+    let logs = match closure_core::module::ModuleId::new("logs") {
+        Ok(id) => ctx.module_config(&id),
+        Err(_) => return true,
+    };
+    let mut names = Vec::new();
+    if let Some(name) = ctx.policy().log_webhook.as_deref() {
+        names.push(name.to_owned());
+    }
+    if let Some(config) = logs {
+        for (key, webhook) in [("channel", false), ("webhook", true)] {
+            match config.get(key) {
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::String(value)) if webhook && !value.is_empty() => {
+                    names.push(value.clone());
+                }
+                Some(serde_json::Value::String(value)) if !webhook => {
+                    let Some(id) = value.parse::<u64>().ok().and_then(Id::new_checked) else {
+                        return true;
+                    };
+                    channels.push(id);
+                }
+                _ => return true,
+            }
+        }
+    }
+    for name in names {
+        match ctx.api.webhook_channel(&name).await {
+            Ok(id) => channels.push(id),
+            Err(_) => return true,
+        }
+    }
+    channels.contains(&channel)
+}
+
 async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     let Event::MessageCreated(message) = event else {
         return Ok(Flow::Continue);
@@ -159,6 +213,19 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     let config: Config = parse_module_config(&ctx)?;
     config.validate()?;
     let channel = message.channel_id.to_string();
+    let has_rule = config
+        .auto_delete
+        .iter()
+        .any(|rule| rule.channel == channel)
+        || config.auto_react.iter().any(|rule| rule.channel == channel);
+    if has_rule && protected(&ctx, message.channel_id).await {
+        if first_protected_warning(ctx.guild_id.get(), message.channel_id.get()) {
+            tracing::warn!("ignoring channel rule for protected or unresolved log destination");
+        } else {
+            tracing::debug!("ignoring channel rule for protected or unresolved log destination");
+        }
+        return Ok(Flow::Continue);
+    }
     let mut deletes = config
         .auto_delete
         .iter()
@@ -167,26 +234,21 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
         if deletes.next().is_some() {
             tracing::warn!("duplicate auto_delete channel; using first rule");
         }
-        if ctx.policy().log_channel == Some(message.channel_id) {
-            tracing::warn!("ignoring auto_delete for log channel");
-        } else {
-            let delay =
-                duration::parse(&rule.after).map_err(|e| ModuleError::Config(e.to_string()))?;
-            ctx.scheduler()
-                .job(
-                    "delete",
-                    &DeleteJob {
-                        channel: message.channel_id.get(),
-                        message: message.id.get(),
-                        skip_pinned: rule.skip_pinned,
-                    },
-                )
-                .map_err(|e| ModuleError::other(e.to_string()))?
-                .key(&format!("message:{}", message.id))
-                .after(delay)
-                .await
-                .map_err(|e| ModuleError::other(e.to_string()))?;
-        }
+        let delay = duration::parse(&rule.after).map_err(|e| ModuleError::Config(e.to_string()))?;
+        ctx.scheduler()
+            .job(
+                "delete",
+                &DeleteJob {
+                    channel: message.channel_id.get(),
+                    message: message.id.get(),
+                    skip_pinned: rule.skip_pinned,
+                },
+            )
+            .map_err(|e| ModuleError::other(e.to_string()))?
+            .key(&format!("message:{}", message.id))
+            .after(delay)
+            .await
+            .map_err(|e| ModuleError::other(e.to_string()))?;
     }
     let mut reactions = config
         .auto_react
@@ -219,8 +281,12 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
 async fn delete(cx: JobCx) -> Result<(), ModuleError> {
     let job: DeleteJob = cx.payload()?;
     let channel = Id::new(job.channel);
-    if cx.ctx().policy().log_channel == Some(channel) {
-        tracing::warn!("ignoring auto_delete for log channel");
+    if protected(cx.ctx(), channel).await {
+        if first_protected_warning(cx.ctx().guild_id.get(), channel.get()) {
+            tracing::warn!("ignoring auto_delete for protected or unresolved log destination");
+        } else {
+            tracing::debug!("ignoring auto_delete for protected or unresolved log destination");
+        }
         return Ok(());
     }
     let message = match cx.api().get_message(channel, Id::new(job.message)).await {
@@ -263,5 +329,12 @@ mod tests {
         assert!(!super::should_delete(true, true));
         assert!(super::should_delete(false, true));
         assert!(super::should_delete(true, false));
+    }
+
+    #[test]
+    fn protected_channel_warning_is_emitted_once_per_guild_and_channel() {
+        assert!(super::first_protected_warning(u64::MAX, u64::MAX));
+        assert!(!super::first_protected_warning(u64::MAX, u64::MAX));
+        assert!(super::first_protected_warning(u64::MAX - 1, u64::MAX));
     }
 }

@@ -22,6 +22,70 @@ fn same_guild(found: Option<GuildId>, guild: GuildId) -> Result<(), DiscordError
 }
 
 impl TwilightApi {
+    pub(super) fn webhook_lock(&self, name: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.webhook_locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(name.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    pub(super) async fn resolve_webhook(
+        &self,
+        guild: GuildId,
+        name: &str,
+        refresh: bool,
+    ) -> Result<ChannelId, DiscordError> {
+        let (id, token) = self
+            .webhooks
+            .get(name)
+            .ok_or(DiscordError::WebhookNotRegistered)?;
+        let gone_until = self
+            .webhook_gone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .copied();
+        if gone_until.is_some_and(|until| (self.clock)() < until) {
+            return Err(DiscordError::WebhookGone);
+        }
+        let known = self
+            .webhook_guilds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .copied()
+            .filter(|_| gone_until.is_none());
+        if let Some((found, channel, checked_at)) = known {
+            same_guild(Some(found), guild)?;
+            if !refresh || (self.clock)() < checked_at.saturating_add(300) {
+                return Ok(channel);
+            }
+        }
+        let response = self
+            .http
+            .webhook(*id)
+            .token(token.expose())
+            .await
+            .map_err(|e| self.webhook_error(name, *id, &e))?;
+        let hook = response
+            .model()
+            .await
+            .map_err(|_| DiscordError::Fatal("could not read webhook response".into()))?;
+        same_guild(hook.guild_id, guild)?;
+        let channel = hook.channel_id;
+        self.webhook_gone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(name);
+        self.webhook_guilds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(*id, (guild, channel, (self.clock)()));
+        Ok(channel)
+    }
+
     pub(super) async fn send_via_webhook(
         &self,
         guild: GuildId,
@@ -34,31 +98,9 @@ impl TwilightApi {
             .webhooks
             .get(name)
             .ok_or(DiscordError::WebhookNotRegistered)?;
-        let known = self
-            .webhook_guilds
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(id)
-            .copied();
-        if let Some(found) = known {
-            same_guild(Some(found), guild)?;
-        } else {
-            let response = self
-                .http
-                .webhook(*id)
-                .token(token.expose())
-                .await
-                .map_err(|e| self.webhook_error(*id, &e))?;
-            let hook = response
-                .model()
-                .await
-                .map_err(|_| DiscordError::Fatal("could not read webhook response".into()))?;
-            same_guild(hook.guild_id, guild)?;
-            self.webhook_guilds
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(*id, guild);
-        }
+        let lock = self.webhook_lock(name);
+        let _guard = lock.lock().await;
+        self.resolve_webhook(guild, name, false).await?;
         let allowed = allowed_mentions(&MentionPolicy::None);
         let attachments = file.map(|file| {
             [twilight_model::http::attachment::Attachment::from_bytes(
@@ -83,7 +125,7 @@ impl TwilightApi {
         let response = request
             .wait()
             .await
-            .map_err(|e| self.webhook_error(*id, &e))?;
+            .map_err(|e| self.webhook_error(name, *id, &e))?;
         response
             .model()
             .await
@@ -91,11 +133,20 @@ impl TwilightApi {
             .map_err(|_| DiscordError::Fatal("could not read webhook message".into()))
     }
 
-    fn webhook_error(&self, id: Id<WebhookMarker>, error: &twilight_http::Error) -> DiscordError {
+    fn webhook_error(
+        &self,
+        name: &str,
+        id: Id<WebhookMarker>,
+        error: &twilight_http::Error,
+    ) -> DiscordError {
         use twilight_http::error::ErrorType;
         let gone = matches!(error.kind(), ErrorType::Unauthorized)
             || matches!(error.kind(), ErrorType::Response { status, .. } if matches!(status.get(), 401 | 404));
         if gone {
+            self.webhook_gone
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(name.to_owned(), (self.clock)().saturating_add(600));
             self.webhook_guilds
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

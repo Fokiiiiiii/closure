@@ -1196,6 +1196,7 @@ fn context_for(
         Arc::clone(&settings.config),
         Arc::clone(&shared.translator),
     )
+    .with_settings_provider(Arc::clone(&shared.settings))
     .with_permissions(shared.settings.permissions(guild))
     .with_scheduler(Scheduler::new(
         Arc::clone(&shared.scheduler),

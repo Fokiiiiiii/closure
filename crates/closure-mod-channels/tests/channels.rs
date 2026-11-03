@@ -22,6 +22,66 @@ fn delete_config() -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn unresolved_log_webhook_blocks_deletion() {
+    let h = harness(delete_config());
+    h.set_log_webhook("missing");
+    h.message(Message::new(7, 5)).await.unwrap();
+    assert_eq!(h.jobs(), 0);
+}
+
+#[tokio::test]
+async fn log_destinations_are_protected_before_and_after_scheduling() {
+    for destination in ["channel", "fallback", "webhook", "logs_webhook"] {
+        for change_after_schedule in [false, true] {
+            let h = harness(delete_config());
+            if change_after_schedule {
+                h.message(Message::new(7, 5)).await.unwrap();
+                assert_eq!(h.jobs(), 1);
+            }
+            match destination {
+                "channel" => h.set_logs_config(json!({"channel":"5"})),
+                "fallback" => {
+                    h.set_log_channel(5);
+                    h.set_log_webhook("audit");
+                    h.api().add_named_webhook(Id::new(1), "audit", Id::new(6));
+                }
+                "webhook" => {
+                    h.set_log_webhook("audit");
+                    h.api().add_named_webhook(Id::new(1), "audit", Id::new(5));
+                }
+                _ => {
+                    h.set_logs_config(json!({"webhook":"audit"}));
+                    h.api().add_named_webhook(Id::new(1), "audit", Id::new(5));
+                }
+            }
+            if change_after_schedule {
+                h.advance(Duration::from_secs(5));
+                assert!(h.run_due_jobs().await[0].is_ok(), "{destination}");
+                assert!(
+                    !h.actions()
+                        .iter()
+                        .any(|a| matches!(a, Action::DeleteMessage { .. })),
+                    "{destination}"
+                );
+            } else {
+                h.message(Message::new(7, 5)).await.unwrap();
+                assert_eq!(h.jobs(), 0, "{destination}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn unresolved_webhook_blocks_already_scheduled_deletion() {
+    let h = harness(delete_config());
+    h.message(Message::new(7, 5)).await.unwrap();
+    h.set_log_webhook("missing");
+    h.advance(Duration::from_secs(5));
+    assert!(h.run_due_jobs().await[0].is_ok());
+    assert!(h.actions().is_empty());
+}
+
+#[tokio::test]
 async fn schedules_and_deletes_after_delay() {
     let h = harness(delete_config());
     h.message(Message::new(7, 5)).await.unwrap();
@@ -57,6 +117,28 @@ async fn missing_and_log_channel_are_protected() {
     assert!(h.actions().is_empty());
     h.message(Message::new(7, 5)).await.unwrap();
     assert_eq!(h.jobs(), 0);
+}
+
+#[tokio::test]
+async fn reactions_do_not_touch_log_channel() {
+    let h = harness(json!({"auto_react":[{"channel":"5","emojis":["👍"],"skip_bots":false}]}));
+    h.set_log_channel(5);
+    h.message(Message::new(7, 5)).await.unwrap();
+    assert!(h.actions().is_empty());
+}
+
+#[tokio::test]
+async fn reactions_do_not_touch_logs_override_or_unresolved_webhook() {
+    for unresolved in [false, true] {
+        let h = harness(json!({"auto_react":[{"channel":"5","emojis":["👍"],"skip_bots":false}]}));
+        if unresolved {
+            h.set_log_webhook("missing");
+        } else {
+            h.set_logs_config(json!({"channel":"5"}));
+        }
+        h.message(Message::new(7, 5)).await.unwrap();
+        assert!(h.actions().is_empty());
+    }
 }
 
 #[tokio::test]

@@ -100,6 +100,7 @@ impl Module for StubModule {
 /// A [`DiscordApi`] that records every action and answers with a scripted result.
 #[derive(Debug, Default)]
 pub struct MockApi {
+    webhook_channels: Mutex<HashMap<(GuildId, String), ChannelId>>,
     actions: Mutex<Vec<Action>>,
     failure: Mutex<Option<DiscordError>>,
     /// The call that fails once, counted from the moment it was set (1 is the next call).
@@ -124,6 +125,10 @@ pub struct MockApi {
 }
 
 impl MockApi {
+    /// Registers a named webhook in the pretend Discord.
+    pub fn add_named_webhook(&self, guild: GuildId, name: &str, channel: ChannelId) {
+        lock(&self.webhook_channels).insert((guild, name.to_owned()), channel);
+    }
     /// What the pretend Discord answers an action with: what was declared for the members and
     /// roles it asks about, nothing for everything else.
     fn answer(&self, action: &Action) -> Result<Outcome, DiscordError> {
@@ -372,6 +377,12 @@ impl MockApi {
 
 #[async_trait]
 impl DiscordApi for MockApi {
+    async fn webhook_channel(&self, guild: GuildId, name: &str) -> Result<ChannelId, DiscordError> {
+        lock(&self.webhook_channels)
+            .get(&(guild, name.to_owned()))
+            .copied()
+            .ok_or(DiscordError::WebhookNotRegistered)
+    }
     async fn execute(&self, action: Action) -> Result<Outcome, DiscordError> {
         // A real request waits for Discord, so other tasks may run between two calls.
         yield_now().await;

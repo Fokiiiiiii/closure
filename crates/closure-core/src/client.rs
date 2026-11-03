@@ -43,6 +43,15 @@ pub trait DiscordApi: Send + Sync {
     async fn guild_owner(&self, _guild: GuildId) -> Result<Option<UserId>, DiscordError> {
         Ok(None)
     }
+
+    /// Resolve a registered webhook in the specified guild.
+    async fn webhook_channel(
+        &self,
+        _guild: GuildId,
+        _name: &str,
+    ) -> Result<ChannelId, DiscordError> {
+        Err(DiscordError::WebhookNotRegistered)
+    }
 }
 
 /// What a module holds instead of a raw HTTP client.
@@ -73,6 +82,13 @@ fn unexpected(action: &'static str) -> DiscordError {
 }
 
 impl ApiClient {
+    /// Resolve a named webhook only within this client's guild.
+    pub async fn webhook_channel(&self, name: &str) -> Result<ChannelId, DiscordError> {
+        let guild = self
+            .guild
+            .ok_or_else(|| DiscordError::Forbidden("client is not bound to a guild".into()))?;
+        self.api.webhook_channel(guild, name).await
+    }
     #[must_use]
     pub fn new(api: Arc<dyn DiscordApi>, granted: CapabilitySet, module: ModuleId) -> Self {
         Self {

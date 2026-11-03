@@ -730,6 +730,10 @@ impl DiscordApi for TextCommandApi {
     async fn guild_owner(&self, guild: GuildId) -> Result<Option<UserId>, DiscordError> {
         self.inner.guild_owner(guild).await
     }
+
+    async fn webhook_channel(&self, guild: GuildId, name: &str) -> Result<ChannelId, DiscordError> {
+        self.inner.webhook_channel(guild, name).await
+    }
 }
 
 #[cfg(test)]
