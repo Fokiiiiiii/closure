@@ -25,6 +25,7 @@ closure-mod-diagnostics = { path = "crates/closure-mod-diagnostics" }
 closure-mod-dashboard = { path = "crates/closure-mod-dashboard" }
 closure-mod-logs = { path = "crates/closure-mod-logs" }
 closure-mod-moderation = { path = "crates/closure-mod-moderation" }
+closure-mod-remind = { path = "crates/closure-mod-remind" }
 closure-mod-tags = { path = "crates/closure-mod-tags" }
 closure-mod-welcome = { path = "crates/closure-mod-welcome" }
 
