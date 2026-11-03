@@ -11,6 +11,7 @@ use closure_core::event::{GuildId, UserId};
 use closure_db::AuditEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeSet;
 use twilight_model::id::Id;
 
 use crate::ApiState;
@@ -193,15 +194,86 @@ pub(crate) async fn put_config(
             state.inner.settings.compiler().registry(),
         )?,
     };
-    if let Some(user) = actor
-        && privileged_changed(&current, &overrides)
-        && !crate::access::is_owner_level(&state, guild, user, &current).await?
-    {
-        return Err(ApiError::Forbidden(
-            "changing permissions or moderator_roles requires owner level".into(),
-        ));
+    if let Some(user) = actor {
+        let level = crate::access::actor_level(&state, guild, user, &current).await?;
+        if level < 100 {
+            if privileged_changed(&current, &overrides) {
+                return Err(ApiError::Forbidden(
+                    "changing permissions or moderator_roles requires owner level".into(),
+                ));
+            }
+            let settings = state.inner.settings.compiler().compile(&current)?;
+            if stronger_role_added(&current, &overrides, level, settings.permissions())? {
+                return Err(ApiError::Forbidden(
+                    "adding a stronger role reference requires owner level".into(),
+                ));
+            }
+        }
     }
     save(&state, guild, expected, overrides, actor).await
+}
+
+fn stronger_role_added(
+    current: &GuildOverrides,
+    next: &GuildOverrides,
+    level: u8,
+    permissions: &closure_core::permission::GuildPermissions,
+) -> Result<bool, ApiError> {
+    fn references(document: &GuildOverrides) -> Result<BTreeSet<u64>, ApiError> {
+        fn visit(value: &serde_json::Value, ids: &mut BTreeSet<u64>) {
+            match value {
+                serde_json::Value::String(s) => {
+                    if let Ok(id) = s.parse::<u64>() {
+                        ids.insert(id);
+                    }
+                }
+                serde_json::Value::Number(n) => {
+                    if let Some(id) = n.as_u64() {
+                        ids.insert(id);
+                    }
+                }
+                serde_json::Value::Array(values) => values.iter().for_each(|v| visit(v, ids)),
+                serde_json::Value::Object(values) => {
+                    for (key, value) in values {
+                        if let Ok(id) = key.parse::<u64>() {
+                            ids.insert(id);
+                        }
+                        visit(value, ids);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut value =
+            serde_json::to_value(document).map_err(|e| ApiError::Internal(e.to_string()))?;
+        if let Some(object) = value.as_object_mut() {
+            for field in PRIVILEGED_FIELDS {
+                object.remove(field);
+            }
+        }
+        let mut ids = BTreeSet::new();
+        visit(&value, &mut ids);
+        Ok(ids)
+    }
+    let before = references(current)?;
+    let after = references(next)?;
+    let Some(saved) = &current.permissions else {
+        return Ok(false);
+    };
+    Ok(after.difference(&before).any(|id| {
+        saved.roles.keys().any(|role| {
+            role.parse::<u64>().ok() == Some(*id)
+                && permissions
+                    .role_levels
+                    .iter()
+                    .any(|(role, role_level)| role.get() == *id && role_level.get() > level)
+        }) || saved.keys.values().any(|rule| {
+            rule.allow
+                .as_ref()
+                .and_then(|allow| allow.roles.as_ref())
+                .is_some_and(|roles| roles.iter().any(|role| role.get() == *id))
+        })
+    }))
 }
 
 fn privileged_changed(current: &GuildOverrides, next: &GuildOverrides) -> bool {

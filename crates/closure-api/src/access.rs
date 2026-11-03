@@ -21,7 +21,7 @@ pub trait MemberAccess: Send + Sync {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct Access {
-    level: u8,
+    pub(crate) level: u8,
     level_name: &'static str,
     allowed: bool,
     reason: &'static str,
@@ -95,15 +95,14 @@ pub(crate) async fn get_access(
     ))
 }
 
-pub(crate) async fn is_owner_level(
+pub(crate) async fn actor_level(
     state: &ApiState,
     guild: GuildId,
     user: UserId,
     current: &closure_config::GuildOverrides,
-) -> Result<bool, ApiError> {
+) -> Result<u8, ApiError> {
     let settings = state.inner.settings.compiler().compile(current)?;
     Ok(evaluate(state, guild, user, settings.permissions())
         .await?
-        .level
-        == Level::OWNER.get())
+        .level)
 }

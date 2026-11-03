@@ -29,7 +29,7 @@ impl Readiness for FixedReadiness {
 }
 
 struct FakeDirectory;
-struct FakeAccess;
+struct FakeAccess(bool);
 impl MemberAccess for FakeAccess {
     fn member(
         &self,
@@ -43,6 +43,9 @@ impl MemberAccess for FakeAccess {
         >,
     > {
         Box::pin(async move {
+            if !self.0 {
+                return Err(());
+            }
             Ok(
                 (user.get() != 999).then(|| closure_core::permission::Actor {
                     user,
@@ -118,7 +121,18 @@ fn layered_module() -> Arc<dyn Module> {
     Arc::new(StubModule(manifest))
 }
 
+fn automod_module() -> Arc<dyn Module> {
+    let mut manifest = ModuleManifest::new(ModuleId::new("automod").unwrap(), "automod", "0.1.0");
+    manifest.config_schema = json!({ "type": "object" });
+    manifest.default_config = json!({});
+    Arc::new(StubModule(manifest))
+}
+
 fn app_with(pool: PgPool, gateway: GatewayStatus) -> App {
+    app_with_access(pool, gateway, true)
+}
+
+fn app_with_access(pool: PgPool, gateway: GatewayStatus, available: bool) -> App {
     let mut dashboard =
         ModuleManifest::new(ModuleId::new("dashboard").unwrap(), "dashboard", "0.1.0");
     dashboard = dashboard.permission(
@@ -133,6 +147,7 @@ fn app_with(pool: PgPool, gateway: GatewayStatus) -> App {
         ModuleRegistry::new(vec![
             warn_module(),
             layered_module(),
+            automod_module(),
             Arc::new(StubModule(dashboard)),
         ])
         .unwrap(),
@@ -144,7 +159,7 @@ fn app_with(pool: PgPool, gateway: GatewayStatus) -> App {
         db.clone(),
         Arc::new(FixedReadiness(gateway)),
         Arc::new(FakeDirectory),
-        Arc::new(FakeAccess),
+        Arc::new(FakeAccess(available)),
         || "closure_up 1\n".to_owned(),
         &SecretString::from(TOKEN),
     )
@@ -240,6 +255,86 @@ fn put(guild: u64, if_match: &str, body: &str) -> Call {
 }
 
 const GUILD: u64 = 42;
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn unavailable_member_access_blocks_reads_and_actor_saves(pool: PgPool) {
+    let app = app_with_access(pool, GatewayStatus { ready: 0, total: 1 }, false);
+    app.db.register_guild(Id::new(GUILD)).await.unwrap();
+    assert_eq!(
+        send(&app.router, call(Method::GET, "/v1/guilds/42/access/1"))
+            .await
+            .status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "0", "permissions: { roles: { '6': owner } }").header("x-closure-actor", "1")
+        )
+        .await
+        .status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn dashboard_rejects_new_stronger_role_references(pool: PgPool) {
+    let app = app(pool).await;
+    let permissions = "permissions: { roles: { '5': admin, '6': owner, '7': trusted }, keys: { dashboard.edit: { allow: { roles: [8] } } } }\n";
+    let document = |roles: &str| {
+        format!(
+            "{permissions}modules:\n  automod:\n    config:\n      rules:\n        example:\n          triggers: [{{ type: words, words: [spam] }}]\n          actions: [{{ do: add_roles, roles: [{roles}] }}]\n"
+        )
+    };
+    assert_eq!(
+        send(&app.router, put(42, "0", permissions)).await.status,
+        StatusCode::OK
+    );
+    for role in ["6", "8"] {
+        let response = send(
+            &app.router,
+            put(42, "1", &document(role)).header("x-closure-actor", "2"),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::FORBIDDEN,
+            "role {role}: {}",
+            response.text
+        );
+    }
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "1", &document("7")).header("x-closure-actor", "2")
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "2", &document("6")).header("x-closure-actor", "1")
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "3", &document("'6'")).header("x-closure-actor", "2")
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app.router, put(42, "4", &document("8"))).await.status,
+        StatusCode::OK
+    );
+}
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 async fn dashboard_access_respects_rules_and_membership(pool: PgPool) {
@@ -645,7 +740,7 @@ async fn weak_admin_tokens_are_refused_at_setup(pool: PgPool) {
         Db::from_pool(pool),
         Arc::new(FixedReadiness(GatewayStatus { ready: 0, total: 0 })),
         Arc::new(FakeDirectory),
-        Arc::new(FakeAccess),
+        Arc::new(FakeAccess(true)),
         String::new,
         &SecretString::from("short"),
     );

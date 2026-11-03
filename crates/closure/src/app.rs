@@ -59,6 +59,7 @@ struct CachedDirectory {
 struct CachedAccess {
     cache: InMemoryCacheView,
     api: Arc<TwilightApi>,
+    health: Arc<dyn Readiness>,
 }
 
 impl closure_api::MemberAccess for CachedAccess {
@@ -69,6 +70,7 @@ impl closure_api::MemberAccess for CachedAccess {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Actor>, ()>> + Send + '_>>
     {
         Box::pin(async move {
+            self.ensure_ready(guild)?;
             let roles = if let Some(roles) = self.cache.member_roles(guild, user) {
                 roles
             } else {
@@ -81,7 +83,10 @@ impl closure_api::MemberAccess for CachedAccess {
                     .await
                 {
                     Ok(Outcome::Member(member)) => member.roles,
-                    Err(DiscordError::NotFound) => return Ok(None),
+                    Err(DiscordError::NotFound) => {
+                        self.ensure_ready(guild)?;
+                        return Ok(None);
+                    }
                     _ => return Err(()),
                 }
             };
@@ -96,6 +101,7 @@ impl closure_api::MemberAccess for CachedAccess {
             for role in &roles {
                 permissions |= self.cache.0.role(*role).ok_or(())?.permissions;
             }
+            self.ensure_ready(guild)?;
             Ok(Some(Actor {
                 user,
                 roles,
@@ -103,6 +109,23 @@ impl closure_api::MemberAccess for CachedAccess {
                 owner,
             }))
         })
+    }
+}
+
+impl CachedAccess {
+    fn ensure_ready(&self, guild: GuildId) -> Result<(), ()> {
+        let status = self.health.gateway();
+        if status.total == 0
+            || status.ready != status.total
+            || self
+                .cache
+                .0
+                .guild(guild)
+                .is_none_or(|guild| guild.unavailable() == Some(true))
+        {
+            return Err(());
+        }
+        Ok(())
     }
 }
 
@@ -488,6 +511,7 @@ async fn serve(
         CachedAccess {
             cache: InMemoryCacheView(cache),
             api,
+            health: Arc::new(GatewayReadiness(Arc::clone(gateway.health()))),
         },
         metrics,
         shutdown,
@@ -635,6 +659,67 @@ pub async fn run(args: Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use closure_api::MemberAccess;
+
+    struct TestReadiness(GatewayStatus);
+    impl Readiness for TestReadiness {
+        fn gateway(&self) -> GatewayStatus {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_access_refuses_disconnected_gateway() {
+        use twilight_model::gateway::{
+            event::Event,
+            payload::incoming::{GuildCreate, MemberAdd},
+        };
+        let cache = new_cache();
+        let guild: twilight_model::guild::Guild = serde_json::from_value(serde_json::json!({
+            "id":"10", "name":"g", "owner_id":"7", "roles":[{"id":"10","name":"everyone","permissions":"0","position":0,"color":0,"colors":{"primary_color":0},"flags":0,"hoist":false,"managed":false,"mentionable":false}],
+            "emojis":[], "features":[], "stickers":[], "afk_timeout":300,
+            "default_message_notifications":0, "explicit_content_filter":0, "mfa_level":0,
+            "nsfw_level":0, "premium_tier":0, "system_channel_flags":0, "verification_level":0,
+            "preferred_locale":"en-US", "premium_progress_bar_enabled":false,
+            "joined_at":"2026-10-24T00:00:00.000000+00:00", "large":false,
+            "member_count":1, "members":[], "channels":[], "threads":[], "presences":[], "voice_states":[], "stage_instances":[], "guild_scheduled_events":[]
+        })).unwrap();
+        cache.update(&Event::GuildCreate(Box::new(GuildCreate::Available(guild))));
+        let member: MemberAdd = serde_json::from_value(serde_json::json!({
+            "guild_id":"10", "user":{"id":"7","username":"alice","discriminator":"0","avatar":null,"bot":false},
+            "roles":[], "pending":false, "joined_at":"2026-10-24T00:00:00.000000+00:00", "deaf":false, "mute":false, "flags":0
+        })).unwrap();
+        cache.update(&Event::MemberAdd(Box::new(member)));
+        let api = Arc::new(TwilightApi::new(
+            Arc::new(Client::new("test".into())),
+            Id::new(1),
+        ));
+        let access = |ready, total| CachedAccess {
+            cache: InMemoryCacheView(Arc::clone(&cache)),
+            api: Arc::clone(&api),
+            health: Arc::new(TestReadiness(GatewayStatus { ready, total })),
+        };
+        assert!(
+            access(1, 1)
+                .member(Id::new(10), Id::new(7))
+                .await
+                .unwrap()
+                .unwrap()
+                .owner
+        );
+        for (ready, total) in [(0, 0), (0, 1), (1, 2)] {
+            assert!(
+                access(ready, total)
+                    .member(Id::new(10), Id::new(7))
+                    .await
+                    .is_err()
+            );
+        }
+        let unavailable: GuildCreate =
+            serde_json::from_value(serde_json::json!({ "id":"10", "unavailable":true })).unwrap();
+        cache.update(&Event::GuildCreate(Box::new(unavailable)));
+        assert!(access(1, 1).member(Id::new(10), Id::new(7)).await.is_err());
+    }
 
     #[test]
     fn logs_rejects_two_destinations_at_configuration_time() {
@@ -645,6 +730,14 @@ mod tests {
         )
         .unwrap();
         assert!(compiler.compile(&document).is_err());
+    }
+
+    #[test]
+    fn automod_add_roles_example_is_valid() {
+        let registry = Arc::new(ModuleRegistry::new(modules().unwrap()).unwrap());
+        let compiler = ConfigCompiler::new(registry).unwrap();
+        let document = parse_overrides("modules: { automod: { config: { rules: { example: { triggers: [{ type: words, words: [spam] }], actions: [{ do: add_roles, roles: ['6'] }] } } } } }").unwrap();
+        assert!(compiler.compile(&document).is_ok());
     }
 
     #[test]

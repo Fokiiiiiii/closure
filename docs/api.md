@@ -24,11 +24,18 @@ Configuration responses carry `ETag` with the revision. Supply it as `If-Match` 
 `"0"` creates the first revision. JSON is the default; use `Accept: application/yaml` for YAML.
 The optional `X-Closure-Actor` contains the decimal Discord user ID and is recorded in history.
 When this header is present, changes to `permissions` or `moderator_roles` require level 100.
+An actor below level 100 also cannot introduce a new reference anywhere else in the document to a
+role assigned a higher level in the saved `permissions`, or allowed by a saved permission key.
+Numeric strings and numbers are treated as potential role IDs; existing references remain allowed.
+Discord Administrator permissions on roles are not known from the bot configuration and are not
+covered by this check.
 Without it, a trusted operator using the admin token directly may change them.
 
 Access returns `level`, `level_name`, `allowed` and `reason`; a non-member returns level 0 and is
 denied. A BFF must also check access before every privileged operation, supply the authenticated
 user's ID as `X-Closure-Actor`, and never trust a browser-provided actor ID.
+Access checks and actor-attributed saves return 503 when the gateway is not ready or the guild is
+unavailable.
 
 Errors are JSON objects with an `error` containing a `code` and `message`. Common status codes:
 400 malformed request, 401 authentication required, 403 forbidden, 404 server not joined,
