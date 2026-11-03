@@ -21,6 +21,7 @@ pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
         Arc::new(closure_mod_moderation::module()?),
         Arc::new(closure_mod_tags::module()?),
         Arc::new(closure_mod_automod::module()?),
+        Arc::new(closure_mod_channels::module()?),
         Arc::new(closure_mod_welcome::module()?),
         Arc::new(closure_mod_remind::module()?),
     ])

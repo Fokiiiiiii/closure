@@ -1,0 +1,99 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use closure_core::action::{Action, Emoji};
+use closure_sdk::{
+    DiscordError,
+    testing::{Harness, Message},
+};
+use serde_json::json;
+use std::time::Duration;
+use twilight_model::id::Id;
+
+fn harness(config: serde_json::Value) -> Harness {
+    let h = Harness::new(closure_mod_channels::builder().unwrap()).unwrap();
+    h.api().add_channel(Id::new(5), Some(Id::new(1)));
+    h.api().add_channel(Id::new(6), Some(Id::new(1)));
+    h.set_config(config);
+    h
+}
+
+fn delete_config() -> serde_json::Value {
+    json!({"auto_delete": [{"channel": "5", "after": "5s"}]})
+}
+
+#[tokio::test]
+async fn schedules_and_deletes_after_delay() {
+    let h = harness(delete_config());
+    h.message(Message::new(7, 5)).await.unwrap();
+    assert_eq!(h.jobs(), 1);
+    h.advance(Duration::from_secs(4));
+    assert!(h.run_due_jobs().await.is_empty());
+    h.advance(Duration::from_secs(1));
+    assert!(h.run_due_jobs().await[0].is_ok());
+    assert!(
+        h.actions()
+            .iter()
+            .any(|a| matches!(a, Action::DeleteMessage { .. }))
+    );
+}
+
+#[tokio::test]
+async fn missing_and_log_channel_are_protected() {
+    let h = harness(delete_config());
+    h.message(Message::new(7, 5)).await.unwrap();
+    h.api().fail_nth(1, DiscordError::NotFound);
+    h.advance(Duration::from_secs(5));
+    assert!(h.run_due_jobs().await[0].is_ok());
+    assert!(
+        !h.actions()
+            .iter()
+            .any(|a| matches!(a, Action::DeleteMessage { .. }))
+    );
+    let h = harness(delete_config());
+    h.message(Message::new(7, 5)).await.unwrap();
+    h.set_log_channel(5);
+    h.advance(Duration::from_secs(5));
+    assert!(h.run_due_jobs().await[0].is_ok());
+    assert!(h.actions().is_empty());
+    h.message(Message::new(7, 5)).await.unwrap();
+    assert_eq!(h.jobs(), 0);
+}
+
+#[tokio::test]
+async fn reactions_are_ordered_skip_bots_and_continue_after_failure() {
+    let h = harness(json!({"auto_react":[{"channel":"5","emojis":["👍","❤️","🎉"]}]}));
+    h.api().fail_nth(2, DiscordError::Forbidden("test".into()));
+    h.message(Message::new(7, 5)).await.unwrap();
+    let emojis: Vec<_> = h
+        .actions()
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::AddReaction {
+                emoji: Emoji::Unicode { value },
+                ..
+            } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(emojis, ["👍", "🎉"]);
+    h.message(Message::new(7, 5).bot()).await.unwrap();
+    h.message(Message::new(7, 6)).await.unwrap();
+    assert_eq!(h.actions().len(), 2);
+}
+
+#[tokio::test]
+async fn invalid_limits_and_duplicate_first_rule() {
+    for after in ["4s", "8d", "bad"] {
+        let h = harness(json!({"auto_delete":[{"channel":"5","after":after}]}));
+        assert!(h.message(Message::new(7, 5)).await.is_err());
+    }
+    let h = harness(json!({"auto_react":[{"channel":"5","emojis":[]}]}));
+    assert!(h.message(Message::new(7, 5)).await.is_err());
+    let h = harness(json!({"auto_delete": vec![json!({"channel":"5","after":"5s"}); 26]}));
+    assert!(h.message(Message::new(7, 5)).await.is_err());
+    let h =
+        harness(json!({"auto_delete":[{"channel":"5","after":"5s"},{"channel":"5","after":"1h"}]}));
+    h.message(Message::new(7, 5)).await.unwrap();
+    h.advance(Duration::from_secs(5));
+    assert_eq!(h.run_due_jobs().await.len(), 1);
+}

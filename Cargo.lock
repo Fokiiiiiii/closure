@@ -428,6 +428,7 @@ dependencies = [
  "closure-discord",
  "closure-i18n",
  "closure-mod-automod",
+ "closure-mod-channels",
  "closure-mod-dashboard",
  "closure-mod-diagnostics",
  "closure-mod-logs",
@@ -581,6 +582,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "twilight-model",
+]
+
+[[package]]
+name = "closure-mod-channels"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
  "twilight-model",
 ]
 
