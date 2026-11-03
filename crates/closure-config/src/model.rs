@@ -387,6 +387,11 @@ pub struct GuildSettings {
 
 impl GuildSettings {
     #[must_use]
+    pub fn permissions(&self) -> &GuildPermissions {
+        &self.permissions
+    }
+
+    #[must_use]
     pub fn module(&self, id: &ModuleId) -> Option<&ModuleSettings> {
         self.modules.get(id)
     }

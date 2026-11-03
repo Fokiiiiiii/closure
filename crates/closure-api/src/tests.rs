@@ -29,6 +29,35 @@ impl Readiness for FixedReadiness {
 }
 
 struct FakeDirectory;
+struct FakeAccess;
+impl MemberAccess for FakeAccess {
+    fn member(
+        &self,
+        _guild: closure_core::event::GuildId,
+        user: closure_core::event::UserId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<closure_core::permission::Actor>, ()>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(
+                (user.get() != 999).then(|| closure_core::permission::Actor {
+                    user,
+                    roles: if user.get() == 2 {
+                        vec![Id::new(5)]
+                    } else {
+                        vec![]
+                    },
+                    administrator: false,
+                    owner: user.get() == 1,
+                }),
+            )
+        })
+    }
+}
 impl GuildDirectory for FakeDirectory {
     fn guild(&self, id: closure_core::event::GuildId) -> Option<Guild> {
         (id.get() == GUILD).then(|| Guild {
@@ -90,7 +119,24 @@ fn layered_module() -> Arc<dyn Module> {
 }
 
 fn app_with(pool: PgPool, gateway: GatewayStatus) -> App {
-    let registry = Arc::new(ModuleRegistry::new(vec![warn_module(), layered_module()]).unwrap());
+    let mut dashboard =
+        ModuleManifest::new(ModuleId::new("dashboard").unwrap(), "dashboard", "0.1.0");
+    dashboard = dashboard.permission(
+        closure_core::permission::PermissionSpec::new(
+            "dashboard.edit",
+            closure_core::permission::Level::ADMIN,
+            "edit",
+        )
+        .unwrap(),
+    );
+    let registry = Arc::new(
+        ModuleRegistry::new(vec![
+            warn_module(),
+            layered_module(),
+            Arc::new(StubModule(dashboard)),
+        ])
+        .unwrap(),
+    );
     let store = Arc::new(SettingsStore::new(ConfigCompiler::new(registry).unwrap()));
     let db = Db::from_pool(pool);
     let state = ApiState::new(
@@ -98,6 +144,7 @@ fn app_with(pool: PgPool, gateway: GatewayStatus) -> App {
         db.clone(),
         Arc::new(FixedReadiness(gateway)),
         Arc::new(FakeDirectory),
+        Arc::new(FakeAccess),
         || "closure_up 1\n".to_owned(),
         &SecretString::from(TOKEN),
     )
@@ -193,6 +240,151 @@ fn put(guild: u64, if_match: &str, body: &str) -> Call {
 }
 
 const GUILD: u64 = 42;
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn dashboard_access_respects_rules_and_membership(pool: PgPool) {
+    let app = app(pool).await;
+    let document = "modules: { dashboard: { enabled: false } }\npermissions:\n  keys:\n    dashboard.edit:\n      allow: { roles: [5] }\n      deny: { users: [3] }\n";
+    assert_eq!(
+        send(&app.router, put(42, "0", document)).await.status,
+        StatusCode::OK
+    );
+    for (user, level, allowed, reason) in [
+        (1, 100, true, "owner"),
+        (2, 1, true, "allowed_role"),
+        (3, 1, false, "denied_user"),
+        (4, 1, false, "level"),
+        (999, 0, false, "not_member"),
+    ] {
+        let response = send(
+            &app.router,
+            call(Method::GET, &format!("/v1/guilds/42/access/{user}")),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.json()["level"], level);
+        assert_eq!(response.json()["allowed"], allowed);
+        assert_eq!(response.json()["reason"], reason);
+    }
+    assert_eq!(
+        send(&app.router, call(Method::GET, "/v1/guilds/43/access/1"))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        send(
+            &app.router,
+            call(Method::GET, "/v1/guilds/42/access/1").token(None)
+        )
+        .await
+        .status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn dashboard_privileged_changes_require_owner_level(pool: PgPool) {
+    let app = app(pool).await;
+    let document = "permissions: { roles: { '5': admin, '6': trusted } }\nmoderator_roles: [7]\n";
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "0", document).header("x-closure-actor", "2")
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    assert!(app.db.load_config(Id::new(GUILD)).await.unwrap().is_none());
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "0", document).header("x-closure-actor", "1")
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let reordered = "moderator_roles: [7]\npermissions: { roles: { '6': trusted, '5': admin } }\n";
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "1", reordered).header("x-closure-actor", "2")
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let basic = |actor: Option<&str>, revision: &str| {
+        let mut request = call(Method::PUT, "/v1/guilds/42/config?view=basic")
+            .header("if-match", revision)
+            .body("moderator_roles: [8]\n");
+        if let Some(actor) = actor {
+            request = request.header("x-closure-actor", actor);
+        }
+        request
+    };
+    assert_eq!(
+        send(&app.router, basic(Some("2"), "2")).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        send(&app.router, basic(Some("1"), "2")).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app.router, basic(Some("2"), "3")).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app.router, put(42, "4", "{}")).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app.router, basic(None, "5")).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "6", "permissions: { roles: { '5': owner } }")
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app.router, basic(Some("2"), "7")).await.status,
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn dashboard_uses_the_saved_permissions_when_the_runtime_store_is_stale(pool: PgPool) {
+    let app = app(pool).await;
+    let elevated = "permissions: { users: { '2': owner } }";
+    assert_eq!(
+        send(&app.router, put(42, "0", elevated)).await.status,
+        StatusCode::OK
+    );
+    let empty = closure_config::parse_overrides("{}").unwrap();
+    app.db
+        .save_config(Id::new(42), Some(1), &empty, None)
+        .await
+        .unwrap();
+    let access = send(&app.router, call(Method::GET, "/v1/guilds/42/access/2")).await;
+    assert_eq!(access.json()["level"], 1);
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "2", elevated).header("x-closure-actor", "2")
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+}
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
 
@@ -453,6 +645,7 @@ async fn weak_admin_tokens_are_refused_at_setup(pool: PgPool) {
         Db::from_pool(pool),
         Arc::new(FixedReadiness(GatewayStatus { ready: 0, total: 0 })),
         Arc::new(FakeDirectory),
+        Arc::new(FakeAccess),
         String::new,
         &SecretString::from("short"),
     );

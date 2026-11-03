@@ -9,6 +9,7 @@
 //! Everything but the two probes needs the admin bearer token. Discord `OAuth2` logins for
 //! server administrators belong to the dashboard and are not part of this crate yet.
 
+mod access;
 mod auth;
 mod config;
 mod directory;
@@ -16,6 +17,7 @@ mod error;
 mod ops;
 mod server;
 
+pub use access::MemberAccess;
 pub use directory::{Channel, Directory, Guild, GuildDirectory, Role};
 pub use server::{ServerLimits, serve};
 
@@ -66,6 +68,7 @@ pub(crate) struct Inner {
     pub(crate) db: Db,
     pub(crate) readiness: Arc<dyn Readiness>,
     pub(crate) directory: Arc<dyn GuildDirectory>,
+    pub(crate) access: Arc<dyn MemberAccess>,
     pub(crate) render_metrics: Box<dyn Fn() -> String + Send + Sync>,
     pub(crate) token_digest: [u8; 32],
     pub(crate) failures: auth::FailureLimiter,
@@ -89,6 +92,7 @@ impl ApiState {
         db: Db,
         readiness: Arc<dyn Readiness>,
         directory: Arc<dyn GuildDirectory>,
+        access: Arc<dyn MemberAccess>,
         render_metrics: impl Fn() -> String + Send + Sync + 'static,
         admin_token: &SecretString,
     ) -> Result<Self, SetupError> {
@@ -102,6 +106,7 @@ impl ApiState {
                 db,
                 readiness,
                 directory,
+                access,
                 render_metrics: Box::new(render_metrics),
                 token_digest: auth::digest(token),
                 failures: auth::FailureLimiter::default(),
@@ -117,6 +122,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/schema", get(ops::schema))
         .route("/v1/guilds", get(directory::guilds))
         .route("/v1/guilds/{guild_id}/directory", get(directory::directory))
+        .route(
+            "/v1/guilds/{guild_id}/access/{user_id}",
+            get(access::get_access),
+        )
         .route(
             "/v1/guilds/{guild_id}/config",
             get(config::get_config).put(config::put_config),

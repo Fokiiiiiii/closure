@@ -8,17 +8,21 @@ use closure::message_history::{retention_cutoff, unix_now};
 use closure::modules;
 use closure_api::{ApiState, GatewayStatus, Readiness, ServerLimits, router};
 use closure_config::{ConfigCompiler, SettingsStore, parse_overrides};
+use closure_core::action::{Action, Outcome};
 use closure_core::cases::CaseBackend;
-use closure_core::event::{Event as ModuleEvent, GuildId};
+use closure_core::client::DiscordApi;
+use closure_core::error::DiscordError;
+use closure_core::event::{Event as ModuleEvent, GuildId, UserId};
 use closure_core::history::HistoryBackend;
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Translator;
+use closure_core::permission::Actor;
 use closure_core::registry::ModuleRegistry;
 use closure_core::schedule::SchedulerBackend;
 use closure_core::settings::SettingsProvider;
 use closure_core::storage::StorageBackend;
 use closure_db::{Db, DbOptions};
-use closure_discord::hierarchy::InMemoryCacheView;
+use closure_discord::hierarchy::{CacheView, InMemoryCacheView};
 use closure_discord::{
     CommandScope, Dispatcher, DispatcherConfig, GatewayConfig, GatewayHandle, GatewayHealth,
     TwilightApi, build_commands, gateway_intents, joined_guilds, new_cache, register_commands,
@@ -31,6 +35,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use twilight_http::Client;
 use twilight_model::channel::ChannelType;
+use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 use twilight_model::id::marker::ApplicationMarker;
 
@@ -49,6 +54,56 @@ struct GatewayReadiness(Arc<GatewayHealth>);
 struct CachedDirectory {
     cache: InMemoryCacheView,
     health: Arc<GatewayHealth>,
+}
+
+struct CachedAccess {
+    cache: InMemoryCacheView,
+    api: Arc<TwilightApi>,
+}
+
+impl closure_api::MemberAccess for CachedAccess {
+    fn member(
+        &self,
+        guild: GuildId,
+        user: UserId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Actor>, ()>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let roles = if let Some(roles) = self.cache.member_roles(guild, user) {
+                roles
+            } else {
+                match self
+                    .api
+                    .execute(Action::GetMember {
+                        guild_id: guild,
+                        user_id: user,
+                    })
+                    .await
+                {
+                    Ok(Outcome::Member(member)) => member.roles,
+                    Err(DiscordError::NotFound) => return Ok(None),
+                    _ => return Err(()),
+                }
+            };
+            let owner = self.cache.guild_owner(guild).ok_or(())? == user;
+            let everyone = self
+                .cache
+                .0
+                .role(Id::new(guild.get()))
+                .ok_or(())?
+                .permissions;
+            let mut permissions = everyone;
+            for role in &roles {
+                permissions |= self.cache.0.role(*role).ok_or(())?.permissions;
+            }
+            Ok(Some(Actor {
+                user,
+                roles,
+                administrator: permissions.contains(Permissions::ADMINISTRATOR),
+                owner,
+            }))
+        })
+    }
 }
 
 impl closure_api::GuildDirectory for CachedDirectory {
@@ -248,7 +303,7 @@ async fn start_api(
     core: &Core,
     db: &Db,
     health: Arc<GatewayHealth>,
-    cache: InMemoryCacheView,
+    access: CachedAccess,
     metrics: PrometheusHandle,
     shutdown: &CancellationToken,
 ) -> Result<Option<JoinHandle<()>>> {
@@ -263,7 +318,11 @@ async fn start_api(
         Arc::clone(&core.store),
         db.clone(),
         Arc::new(GatewayReadiness(Arc::clone(&health))),
-        Arc::new(CachedDirectory { cache, health }),
+        Arc::new(CachedDirectory {
+            cache: access.cache.clone(),
+            health,
+        }),
+        Arc::new(access),
         move || metrics.render(),
         &SecretString::from(token.clone()),
     )?;
@@ -359,7 +418,7 @@ async fn serve(
             Dispatcher::start_with_services(
                 Arc::clone(&core.registry),
                 Arc::clone(&core.store) as Arc<dyn SettingsProvider>,
-                api,
+                Arc::clone(&api) as Arc<dyn DiscordApi>,
                 Arc::clone(&core.translator),
                 // A bot's user id is its application id.
                 DispatcherConfig {
@@ -426,7 +485,10 @@ async fn serve(
         core,
         db,
         Arc::clone(gateway.health()),
-        InMemoryCacheView(cache),
+        CachedAccess {
+            cache: InMemoryCacheView(cache),
+            api,
+        },
         metrics,
         shutdown,
     )

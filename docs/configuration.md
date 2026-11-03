@@ -216,6 +216,9 @@ Syntax errors carry the 1-based `line` and `column`.
 
 ## Using the HTTP API
 
+See the [HTTP API reference](api.md) for all endpoints, dashboard access checks, and actor
+protection for permission changes.
+
 All of these need `Authorization: Bearer $API_ADMIN_TOKEN`. Make the token long and random, for
 example `openssl rand -hex 24`; only its length (at least 24 characters) is checked.
 

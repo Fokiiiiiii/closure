@@ -13,6 +13,7 @@ pub(crate) enum ApiError {
         retry_after_secs: u64,
     },
     BadRequest(String),
+    Forbidden(String),
     NotFound(String),
     Unavailable,
     /// A write that must say which revision it edits (`If-Match`) did not.
@@ -109,6 +110,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(message) => {
                 respond(StatusCode::BAD_REQUEST, body("bad_request", message))
             }
+            Self::Forbidden(message) => respond(StatusCode::FORBIDDEN, body("forbidden", message)),
             Self::NotFound(message) => respond(StatusCode::NOT_FOUND, body("not_found", message)),
             Self::Unavailable => respond(
                 StatusCode::SERVICE_UNAVAILABLE,

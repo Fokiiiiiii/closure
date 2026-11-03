@@ -428,6 +428,7 @@ dependencies = [
  "closure-discord",
  "closure-i18n",
  "closure-mod-automod",
+ "closure-mod-dashboard",
  "closure-mod-diagnostics",
  "closure-mod-logs",
  "closure-mod-moderation",
@@ -580,6 +581,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "twilight-model",
+]
+
+[[package]]
+name = "closure-mod-dashboard"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-sdk",
 ]
 
 [[package]]

@@ -17,6 +17,7 @@ use crate::ApiState;
 use crate::error::ApiError;
 
 const YAML: &str = "application/yaml";
+const PRIVILEGED_FIELDS: [&str; 2] = ["permissions", "moderator_roles"];
 
 /// Discord snowflakes are positive and fit in 63 bits.
 pub(crate) fn guild_id(raw: u64) -> Result<GuildId, ApiError> {
@@ -139,7 +140,10 @@ fn parse_body(body: &Bytes) -> Result<GuildOverrides, ApiError> {
 }
 
 /// The stored document and its revision; a guild without one is the empty document at revision 0.
-async fn stored(state: &ApiState, guild: GuildId) -> Result<(i64, GuildOverrides), ApiError> {
+pub(crate) async fn stored(
+    state: &ApiState,
+    guild: GuildId,
+) -> Result<(i64, GuildOverrides), ApiError> {
     Ok(match state.inner.db.load_config(guild).await? {
         Some(stored) => (stored.revision, stored.overrides),
         None => (0, GuildOverrides::default()),
@@ -177,22 +181,35 @@ pub(crate) async fn put_config(
     let view = view_of(&query)?;
     let actor = actor(&headers)?;
     let expected = expected_revision(&headers)?;
+    let (revision, current) = stored(&state, guild).await?;
+    if revision != expected.unwrap_or(0) {
+        return Err(ApiError::PreconditionFailed { current: revision });
+    }
     let overrides = match view {
         View::Advanced => parse_body(&body)?,
-        View::Basic => {
-            // The patch applies to the revision the client edited, or it is a stale edit.
-            let (revision, current) = stored(&state, guild).await?;
-            if revision != expected.unwrap_or(0) {
-                return Err(ApiError::PreconditionFailed { current: revision });
-            }
-            merge_basic(
-                &current,
-                body_text(&body)?,
-                state.inner.settings.compiler().registry(),
-            )?
-        }
+        View::Basic => merge_basic(
+            &current,
+            body_text(&body)?,
+            state.inner.settings.compiler().registry(),
+        )?,
     };
+    if let Some(user) = actor
+        && privileged_changed(&current, &overrides)
+        && !crate::access::is_owner_level(&state, guild, user, &current).await?
+    {
+        return Err(ApiError::Forbidden(
+            "changing permissions or moderator_roles requires owner level".into(),
+        ));
+    }
     save(&state, guild, expected, overrides, actor).await
+}
+
+fn privileged_changed(current: &GuildOverrides, next: &GuildOverrides) -> bool {
+    PRIVILEGED_FIELDS.iter().any(|field| match *field {
+        "permissions" => current.permissions != next.permissions,
+        "moderator_roles" => current.moderator_roles != next.moderator_roles,
+        _ => false,
+    })
 }
 
 /// The write both views share: validate, check the server, store, install and audit.

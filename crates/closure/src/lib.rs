@@ -15,6 +15,7 @@ mod message_files_tests;
 /// Every module this build ships. Adding a module means adding it here.
 pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
     Ok(vec![
+        Arc::new(closure_mod_dashboard::module()?),
         Arc::new(closure_mod_diagnostics::module()?),
         Arc::new(closure_mod_logs::module()?),
         Arc::new(closure_mod_moderation::module()?),
