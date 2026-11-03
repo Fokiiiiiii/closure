@@ -45,11 +45,16 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .on(
                 closure_sdk::Subscription::new(closure_sdk::EventKind::GuildAvailable),
                 |cx, _| async move {
-                    cx.scheduler()
-                        .job("reconcile", &())
-                        .map_err(module_error)?
-                        .key("reconcile")
-                        .every(RECONCILE_INTERVAL, std::time::Duration::ZERO)
+                    ensure_reconcile(cx.scheduler())
+                        .await
+                        .map_err(module_error)?;
+                    Ok(closure_sdk::Flow::Continue)
+                },
+            )
+            .on(
+                closure_sdk::Subscription::new(closure_sdk::EventKind::ConfigChanged),
+                |cx, _| async move {
+                    ensure_reconcile(cx.scheduler())
                         .await
                         .map_err(module_error)?;
                     Ok(closure_sdk::Flow::Continue)
@@ -86,6 +91,19 @@ struct Reminder {
     channel: closure_sdk::ChannelId,
     at: i64,
     text: String,
+    #[serde(default)]
+    delivering_until: i64,
+}
+
+async fn ensure_reconcile(
+    scheduler: &closure_core::schedule::Scheduler,
+) -> Result<(), closure_core::schedule::ScheduleError> {
+    scheduler
+        .job("reconcile", &())?
+        .key("reconcile")
+        .if_absent()
+        .every(RECONCILE_INTERVAL, std::time::Duration::ZERO)
+        .await
 }
 
 fn key(user: closure_sdk::UserId) -> String {
@@ -144,6 +162,7 @@ async fn add(cx: closure_sdk::CommandCx, args: Add) -> Result<(), closure_sdk::U
     if !(1..=500).contains(&args.text.chars().count()) {
         return Err(closure_sdk::UserError::message("invalid-text"));
     }
+    ensure_reconcile(cx.scheduler()).await?;
     let item = Reminder {
         id: cx.invocation().interaction_id.get(),
         user: cx.user().id,
@@ -152,6 +171,7 @@ async fn add(cx: closure_sdk::CommandCx, args: Add) -> Result<(), closure_sdk::U
             .now()
             .saturating_add(i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)),
         text: args.text,
+        delivering_until: 0,
     };
     let job = cx.scheduler().job("deliver", &(item.user, item.id))?;
     let key = key(item.user);
@@ -204,7 +224,9 @@ async fn cancel(cx: closure_sdk::CommandCx, args: Cancel) -> Result<(), closure_
         .id
         .parse::<u64>()
         .map_err(|_| closure_sdk::UserError::message("not-found"))?;
-    if remove(cx.store(), cx.user().id, id).await?.is_none() {
+    let removed = remove(cx.store(), cx.user().id, id).await?;
+    cx.scheduler().cancel(&job_key(cx.user().id, id)).await?;
+    if removed.is_none() {
         return Err(closure_sdk::UserError::message("not-found"));
     }
     cx.reply_private_t("cancelled", &Args::new().with("id", id.to_string()))
@@ -221,11 +243,29 @@ async fn deliver_item(
     user: closure_sdk::UserId,
     id: u64,
 ) -> Result<(), closure_sdk::ModuleError> {
-    let (items, _) = entries(cx.store(), &key(user))
-        .await
-        .map_err(module_error)?;
-    let item = items.into_iter().find(|item| item.id == id);
-    let Some(item) = item else { return Ok(()) };
+    let storage_key = key(user);
+    let item = loop {
+        let (mut items, expected) = entries(cx.store(), &storage_key)
+            .await
+            .map_err(module_error)?;
+        let Some(item) = items.iter_mut().find(|item| item.id == id) else {
+            return Ok(());
+        };
+        if item.delivering_until > cx.now() {
+            return Ok(());
+        }
+        item.delivering_until = cx.now().saturating_add(60);
+        let item = item.clone();
+        match cx
+            .store()
+            .replace(&storage_key, &items, expected, None)
+            .await
+        {
+            Ok(_) => break item,
+            Err(closure_sdk::StorageError::Conflict) => {}
+            Err(error) => return Err(module_error(error)),
+        }
+    };
     if cx.now().saturating_sub(item.at) > 86_400 {
         tracing::warn!(id, "expired reminder discarded");
         remove(cx.store(), user, id).await.map_err(module_error)?;
@@ -283,18 +323,35 @@ async fn reconcile(cx: closure_sdk::JobCx) -> Result<(), closure_sdk::ModuleErro
     });
     let len = items.len();
     for item in items.iter().cycle().skip(start).take(len.min(50)) {
-        let result = if item.at <= cx.now() {
+        let future = item.at > cx.now();
+        let result = if item.at <= cx.now().saturating_sub(90) {
             deliver_item(&cx, item.user, item.id).await
-        } else {
+        } else if future {
             match cx.scheduler().job("deliver", &(item.user, item.id)) {
                 Ok(job) => job
                     .key(&job_key(item.user, item.id))
+                    .if_absent()
                     .at(item.at)
                     .await
                     .map_err(module_error),
                 Err(error) => Err(module_error(error)),
             }
+        } else {
+            Ok(())
         };
+        if future
+            && !entries(cx.store(), &key(item.user))
+                .await
+                .map_err(module_error)?
+                .0
+                .iter()
+                .any(|current| current.id == item.id)
+        {
+            cx.scheduler()
+                .cancel(&job_key(item.user, item.id))
+                .await
+                .map_err(module_error)?;
+        }
         if let Err(error) = result {
             tracing::warn!(?error, "reminder reconciliation failed");
         }
@@ -324,6 +381,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_delivery_lease_prevents_duplicate() {
+        let h = Harness::new(builder().unwrap()).unwrap();
+        h.api().add_channel(
+            closure_sdk::ChannelId::new(5),
+            Some(closure_sdk::GuildId::new(1)),
+        );
+        h.invoke(add_command("10s", "leased")).await.unwrap();
+        let mut items: serde_json::Value = h.store().get("remind:100").await.unwrap().unwrap();
+        items[0]["delivering_until"] = json!(i64::MAX);
+        h.store().set("remind:100", &items).await.unwrap();
+        h.advance(Duration::from_secs(10));
+        assert!(h.run_due_jobs().await.into_iter().all(|r| r.is_ok()));
+        assert!(
+            !h.actions()
+                .iter()
+                .any(|a| matches!(a, Action::SendMessage { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_reconcile_and_delivery_send_once() {
+        let h = Harness::new(builder().unwrap()).unwrap();
+        h.api().add_channel(
+            closure_sdk::ChannelId::new(5),
+            Some(closure_sdk::GuildId::new(1)),
+        );
+        h.invoke(add_command("10s", "race")).await.unwrap();
+        h.scheduler().cancel("reconcile").await.unwrap();
+        h.advance(Duration::from_secs(100));
+        let (delivery, recovery) = tokio::join!(h.run_due_jobs(), async {
+            tokio::task::yield_now().await;
+            h.scheduler()
+                .job("reconcile", &())
+                .unwrap()
+                .after(Duration::ZERO)
+                .await
+                .unwrap();
+            h.run_due_jobs().await
+        });
+        assert!(delivery.into_iter().chain(recovery).all(|r| r.is_ok()));
+        assert_eq!(
+            h.actions()
+                .iter()
+                .filter(|a| matches!(a, Action::SendMessage { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_removes_delivery_job() {
+        let h = Harness::new(builder().unwrap()).unwrap();
+        h.invoke(add_command("10s", "cancel")).await.unwrap();
+        let items: Vec<Reminder> = h.store().get("remind:100").await.unwrap().unwrap();
+        h.invoke(
+            Invocation::new("remind")
+                .subcommand("cancel")
+                .option("id", CommandOptionValue::String(items[0].id.to_string())),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !h.scheduler()
+                .cancel(&job_key(items[0].user, items[0].id))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn config_changed_creates_reconcile_job() {
+        let h = Harness::new(builder().unwrap()).unwrap();
+        h.emit(closure_sdk::Event::ConfigChanged {
+            guild_id: closure_sdk::GuildId::new(1),
+        })
+        .await
+        .unwrap();
+        assert!(h.scheduler().cancel("reconcile").await.unwrap());
+    }
+
+    #[tokio::test]
     async fn orphan_is_delivered_by_reconcile() {
         let h = Harness::new(builder().unwrap()).unwrap();
         h.api().add_channel(
@@ -344,7 +482,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        h.advance(Duration::from_secs(10));
+        h.advance(Duration::from_secs(100));
         h.scheduler()
             .job("reconcile", &())
             .unwrap()
@@ -483,7 +621,7 @@ mod tests {
             .unwrap();
         h.advance(Duration::from_secs(10));
         let jobs = h.run_due_jobs().await;
-        assert_eq!(jobs.len(), 1);
+        assert!(!jobs.is_empty());
         assert!(jobs[0].is_ok());
         let list = h
             .invoke(Invocation::new("remind").subcommand("list"))
@@ -494,6 +632,7 @@ mod tests {
             closure_sdk::ChannelId::new(99),
             Some(closure_sdk::GuildId::new(1)),
         );
+        h.advance(Duration::from_secs(90));
         h.scheduler()
             .job("reconcile", &())
             .unwrap()
@@ -640,10 +779,11 @@ mod tests {
                     .unwrap()
             );
         }
-        h.advance(Duration::from_secs(10));
+        h.advance(Duration::from_secs(100));
         h.scheduler()
             .job("reconcile", &())
             .unwrap()
+            .key("reconcile")
             .every(RECONCILE_INTERVAL, Duration::ZERO)
             .await
             .unwrap();

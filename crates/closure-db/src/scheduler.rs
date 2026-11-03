@@ -43,7 +43,7 @@ fn job_of(
 
 #[async_trait]
 impl SchedulerBackend for Db {
-    async fn schedule(&self, job: NewJob) -> Result<i64, ScheduleError> {
+    async fn schedule(&self, job: NewJob, if_absent: bool) -> Result<i64, ScheduleError> {
         let guild = guild_id(job.guild)?;
         let (after, at) = match job.run_at {
             RunAt::After(delay) => (Some(seconds(delay)), None),
@@ -79,6 +79,10 @@ impl SchedulerBackend for Db {
             None => None,
         };
         let id = if let Some(id) = existing {
+            if if_absent {
+                tx.commit().await.map_err(backend)?;
+                return Ok(id);
+            }
             sqlx::query(
                 "UPDATE scheduled_jobs
                  SET name = $2, payload = $3, every_seconds = $4, attempts = 0,
@@ -343,6 +347,32 @@ mod tests {
             .fetch_one(&db.pool)
             .await
             .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn if_absent_preserves_running_claim(pool: PgPool) {
+        let db = database(pool).await;
+        let scheduler = scheduler(&db, "warn", 1);
+        scheduler
+            .job("x", &())
+            .unwrap()
+            .key("x")
+            .every(Duration::from_secs(30), Duration::ZERO)
+            .await
+            .unwrap();
+        let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
+        scheduler
+            .job("x", &())
+            .unwrap()
+            .key("x")
+            .if_absent()
+            .every(Duration::from_secs(30), Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(db.claim_due(1, LEASE).await.unwrap().is_empty());
+        db.complete(job.id, job.token).await.unwrap();
+        age(&db, 31).await;
+        assert_eq!(db.claim_due(1, LEASE).await.unwrap().len(), 1);
     }
 
     #[sqlx::test]

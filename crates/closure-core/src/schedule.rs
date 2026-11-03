@@ -95,7 +95,7 @@ pub struct ScheduledJob {
 /// Where jobs are kept and handed out.
 #[async_trait]
 pub trait SchedulerBackend: Send + Sync {
-    async fn schedule(&self, job: NewJob) -> Result<i64, ScheduleError>;
+    async fn schedule(&self, job: NewJob, if_absent: bool) -> Result<i64, ScheduleError>;
 
     /// Removes the job with `key`; whether there was one.
     async fn cancel(
@@ -165,7 +165,7 @@ struct NoScheduler;
 
 #[async_trait]
 impl SchedulerBackend for NoScheduler {
-    async fn schedule(&self, _: NewJob) -> Result<i64, ScheduleError> {
+    async fn schedule(&self, _: NewJob, _: bool) -> Result<i64, ScheduleError> {
         Err(ScheduleError::Unavailable)
     }
 
@@ -254,6 +254,7 @@ impl Scheduler {
             name: name.to_owned(),
             payload,
             key: None,
+            if_absent: false,
         })
     }
 
@@ -276,9 +277,16 @@ pub struct JobBuilder<'a> {
     name: String,
     payload: serde_json::Value,
     key: Option<String>,
+    if_absent: bool,
 }
 
 impl JobBuilder<'_> {
+    /// Keep an existing keyed job unchanged, including its active claim.
+    #[must_use]
+    pub fn if_absent(mut self) -> Self {
+        self.if_absent = true;
+        self
+    }
     /// Gives the job a key: scheduling again with the same key replaces it, and
     /// [`Scheduler::cancel`] finds it.
     #[must_use]
@@ -320,15 +328,18 @@ impl JobBuilder<'_> {
         }
         self.scheduler
             .backend
-            .schedule(NewJob {
-                module: self.scheduler.module.clone(),
-                guild: self.scheduler.guild,
-                name: self.name,
-                payload: self.payload,
-                run_at,
-                every,
-                key: self.key,
-            })
+            .schedule(
+                NewJob {
+                    module: self.scheduler.module.clone(),
+                    guild: self.scheduler.guild,
+                    name: self.name,
+                    payload: self.payload,
+                    run_at,
+                    every,
+                    key: self.key,
+                },
+                self.if_absent,
+            )
             .await
             .map(drop)
     }
@@ -447,7 +458,7 @@ fn seconds(duration: Duration) -> i64 {
 
 #[async_trait]
 impl SchedulerBackend for MemoryScheduler {
-    async fn schedule(&self, job: NewJob) -> Result<i64, ScheduleError> {
+    async fn schedule(&self, job: NewJob, if_absent: bool) -> Result<i64, ScheduleError> {
         let now = (self.clock)();
         let due = match job.run_at {
             RunAt::After(delay) => now.saturating_add(seconds(delay)),
@@ -474,7 +485,9 @@ impl SchedulerBackend for MemoryScheduler {
             failed: false,
         };
         if let Some(id) = existing {
-            jobs.by_id.insert(id, fresh);
+            if !if_absent {
+                jobs.by_id.insert(id, fresh);
+            }
             return Ok(id);
         }
         let waiting = jobs
@@ -687,6 +700,32 @@ mod tests {
         assert_eq!(backoff(3), Duration::from_secs(20));
         assert_eq!(backoff(30), Duration::from_secs(3600));
         assert_eq!(backoff(0), Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn if_absent_preserves_running_claim() {
+        let f = fixture();
+        let scheduler = f.scheduler("warn", 1);
+        scheduler
+            .job("x", &())
+            .unwrap()
+            .key("x")
+            .every(Duration::from_secs(30), Duration::ZERO)
+            .await
+            .unwrap();
+        let job = f.due().await.remove(0);
+        scheduler
+            .job("x", &())
+            .unwrap()
+            .key("x")
+            .if_absent()
+            .every(Duration::from_secs(30), Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(f.due().await.is_empty());
+        f.backend.complete(job.id, job.token).await.unwrap();
+        f.advance(30);
+        assert_eq!(f.due().await.len(), 1);
     }
 
     #[tokio::test]
