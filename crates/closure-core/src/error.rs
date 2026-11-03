@@ -96,6 +96,10 @@ pub enum DiscordError {
     HierarchyViolation(String),
     #[error("not found")]
     NotFound,
+    #[error("webhook name is not registered")]
+    WebhookNotRegistered,
+    #[error("webhook is unavailable")]
+    WebhookGone,
     /// The user does not accept direct messages from the bot (Discord's error 50007). Retrying
     /// cannot change that, and it is no fault of the module.
     #[error("the user does not accept direct messages from this bot")]

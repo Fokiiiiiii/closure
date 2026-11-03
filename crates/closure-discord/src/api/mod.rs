@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use closure_core::action::{Action, Outcome};
+use closure_core::action::{Action, Outcome, WebhookRegistry};
 use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
 use closure_core::event::{ApplicationId, ChannelId, GuildId, UserId};
@@ -76,6 +76,9 @@ pub struct TwilightApi {
     /// Guilds of channels learned from Discord. A channel never changes guild, so an entry
     /// cannot go stale; the map is emptied when it reaches [`KNOWN_CHANNELS`].
     known_channels: Mutex<HashMap<ChannelId, GuildId>>,
+    webhooks: WebhookRegistry,
+    webhook_guilds:
+        Mutex<HashMap<twilight_model::id::Id<twilight_model::id::marker::WebhookMarker>, GuildId>>,
     /// Lookups of a channel's guild that are under way, so concurrent first lookups of one
     /// channel make one request.
     lookups: Mutex<HashMap<ChannelId, LookupCell>>,
@@ -105,6 +108,8 @@ impl TwilightApi {
             retry: RetryPolicy::default(),
             clock: Arc::new(system_clock),
             known_channels: Mutex::new(HashMap::new()),
+            webhooks: WebhookRegistry::new(),
+            webhook_guilds: Mutex::new(HashMap::new()),
             lookups: Mutex::new(HashMap::new()),
             text: interactions::TextReplies::default(),
         }
@@ -114,6 +119,12 @@ impl TwilightApi {
     #[must_use]
     pub fn with_cache(mut self, cache: Arc<dyn CacheView>) -> Self {
         self.cache = Some(cache);
+        self
+    }
+
+    #[must_use]
+    pub fn with_webhooks(mut self, webhooks: WebhookRegistry) -> Self {
+        self.webhooks = webhooks;
         self
     }
 
@@ -212,6 +223,8 @@ fn error_label(error: &DiscordError) -> &'static str {
         DiscordError::Forbidden(_) => "forbidden",
         DiscordError::HierarchyViolation(_) => "hierarchy",
         DiscordError::NotFound => "not_found",
+        DiscordError::WebhookNotRegistered => "webhook_not_registered",
+        DiscordError::WebhookGone => "webhook_gone",
         DiscordError::DirectMessagesClosed => "direct_messages_closed",
         DiscordError::NotInVoice => "not_in_voice",
         DiscordError::RateLimited { .. } => "rate_limited",
@@ -412,6 +425,16 @@ impl TwilightApi {
     #[allow(clippy::too_many_lines)]
     async fn perform(&self, action: &Action) -> Result<Outcome, DiscordError> {
         match action {
+            Action::SendViaWebhook {
+                guild_id,
+                name,
+                content,
+                embeds,
+                file,
+            } => {
+                self.send_via_webhook(*guild_id, name, content.as_deref(), embeds, file.as_ref())
+                    .await
+            }
             Action::ListScheduledEvents {
                 guild_id,
                 with_user_count,

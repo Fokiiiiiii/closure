@@ -9,6 +9,7 @@ mod args;
 mod changes;
 mod hooks;
 mod sync;
+mod webhooks;
 
 use std::process::ExitCode;
 

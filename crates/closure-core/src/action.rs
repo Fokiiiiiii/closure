@@ -259,6 +259,9 @@ impl fmt::Debug for WebhookToken {
     }
 }
 
+/// Credentials loaded by the host, indexed by their configured names.
+pub type WebhookRegistry = std::collections::HashMap<String, (Id<WebhookMarker>, WebhookToken)>;
+
 /// Whether a thread started on its own is open to everyone or only to the members added to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -411,6 +414,13 @@ pub const MAX_FILENAME_CHARS: usize = 255;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
+    SendViaWebhook {
+        guild_id: GuildId,
+        name: String,
+        content: Option<String>,
+        embeds: Vec<Embed>,
+        file: Option<FileUpload>,
+    },
     /// A message with one file attached: the bytes the host kept of it (see `file`).
     SendFile {
         channel_id: ChannelId,
@@ -825,6 +835,38 @@ pub enum Action {
         token: InteractionToken,
         reply: InteractionReply,
     },
+}
+
+#[cfg(test)]
+mod named_webhook_tests {
+    use super::*;
+
+    #[test]
+    fn validates_named_webhook_message_and_file() {
+        let make =
+            |name: &str, content: Option<&str>, file: Option<FileUpload>| Action::SendViaWebhook {
+                guild_id: Id::new(1),
+                name: name.into(),
+                content: content.map(str::to_owned),
+                embeds: vec![],
+                file,
+            };
+        assert!(make("logs", Some("hello"), None).validate().is_ok());
+        assert!(make("bad name", Some("hello"), None).validate().is_err());
+        assert!(make("logs", None, None).validate().is_err());
+        assert!(
+            make(
+                "logs",
+                Some("hello"),
+                Some(FileUpload {
+                    filename: String::new(),
+                    data: vec![]
+                })
+            )
+            .validate()
+            .is_err()
+        );
+    }
 }
 
 /// The result of a successful [`Action`].
@@ -1343,6 +1385,7 @@ impl Action {
             | Self::RemoveAllReactions { .. } => Capability::ManageMessages,
             Self::SendMessage { .. }
             | Self::SendFile { .. }
+            | Self::SendViaWebhook { .. }
             | Self::EditMessage { .. }
             | Self::JoinThread { .. }
             | Self::LeaveThread { .. }
@@ -1448,6 +1491,7 @@ impl Action {
             | Self::CreateDirectMessageChannel { guild_id, .. }
             | Self::DeleteWebhook { guild_id, .. }
             | Self::ExecuteWebhook { guild_id, .. }
+            | Self::SendViaWebhook { guild_id, .. }
             | Self::DeleteInvite { guild_id, .. }
             | Self::SetVoiceDeafen { guild_id, .. }
             | Self::MoveMember { guild_id, .. }
@@ -1579,6 +1623,7 @@ impl Action {
             | Self::DeleteInvite { .. }
             | Self::DeleteWebhook { .. }
             | Self::ExecuteWebhook { .. }
+            | Self::SendViaWebhook { .. }
             | Self::SearchMembers { .. }
             | Self::ListMembers { .. }
             | Self::PruneCount { .. }
@@ -1657,6 +1702,7 @@ impl Action {
             | Self::ListWebhooks { .. }
             | Self::DeleteWebhook { .. }
             | Self::ExecuteWebhook { .. }
+            | Self::SendViaWebhook { .. }
             | Self::CreateInvite { .. }
             | Self::ListInvites { .. }
             | Self::DeleteInvite { .. }
@@ -1705,6 +1751,7 @@ impl Action {
             Self::ListWebhooks { .. } => "list_webhooks",
             Self::DeleteWebhook { .. } => "delete_webhook",
             Self::ExecuteWebhook { .. } => "execute_webhook",
+            Self::SendViaWebhook { .. } => "send_via_webhook",
             Self::CreateInvite { .. } => "create_invite",
             Self::ListInvites { .. } => "list_invites",
             Self::DeleteInvite { .. } => "delete_invite",
@@ -1771,6 +1818,34 @@ impl Action {
     #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), DiscordError> {
         match self {
+            Self::SendViaWebhook {
+                name,
+                content,
+                embeds,
+                file,
+                ..
+            } => {
+                ensure(
+                    !name.is_empty()
+                        && name.len() <= 32
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+                    || "invalid webhook name".into(),
+                )?;
+                check_new_message(content.as_deref(), embeds)?;
+                if let Some(file) = file {
+                    ensure(
+                        !file.filename.is_empty()
+                            && file.filename.chars().count() <= MAX_FILENAME_CHARS,
+                        || format!("a file name is 1 to {MAX_FILENAME_CHARS} characters"),
+                    )?;
+                    ensure(file.data.len() <= MAX_UPLOAD_BYTES, || {
+                        format!("a file is at most {MAX_UPLOAD_BYTES} bytes")
+                    })?;
+                }
+                Ok(())
+            }
             Self::GetMessages { .. }
             | Self::GetReactionUsers { .. }
             | Self::RemoveReaction { .. }

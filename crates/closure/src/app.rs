@@ -270,6 +270,7 @@ async fn serve(
     let latency = Arc::new(GatewayLatency::default());
     let api = Arc::new(
         TwilightApi::new(Arc::clone(&http), application_id)
+            .with_webhooks(crate::webhooks::load(&args.webhook_file)?)
             .with_cache(Arc::new(InMemoryCacheView(Arc::clone(&cache)))),
     );
     let dispatcher = started

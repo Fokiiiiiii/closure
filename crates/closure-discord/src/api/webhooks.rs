@@ -1,6 +1,7 @@
-use closure_core::action::{MentionPolicy, Outcome, Reason, WebhookToken};
+use closure_core::action::{FileUpload, MentionPolicy, Outcome, Reason, WebhookToken};
 use closure_core::error::DiscordError;
 use closure_core::event::{ChannelId, GuildId};
+use std::sync::PoisonError;
 use twilight_http::request::AuditLogReason;
 use twilight_model::channel::message::Embed;
 use twilight_model::id::Id;
@@ -21,6 +22,94 @@ fn same_guild(found: Option<GuildId>, guild: GuildId) -> Result<(), DiscordError
 }
 
 impl TwilightApi {
+    pub(super) async fn send_via_webhook(
+        &self,
+        guild: GuildId,
+        name: &str,
+        content: Option<&str>,
+        embeds: &[Embed],
+        file: Option<&FileUpload>,
+    ) -> Result<Outcome, DiscordError> {
+        let (id, token) = self
+            .webhooks
+            .get(name)
+            .ok_or(DiscordError::WebhookNotRegistered)?;
+        let known = self
+            .webhook_guilds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .copied();
+        if let Some(found) = known {
+            same_guild(Some(found), guild)?;
+        } else {
+            let response = self
+                .http
+                .webhook(*id)
+                .token(token.expose())
+                .await
+                .map_err(|e| self.webhook_error(*id, &e))?;
+            let hook = response
+                .model()
+                .await
+                .map_err(|_| DiscordError::Fatal("could not read webhook response".into()))?;
+            same_guild(hook.guild_id, guild)?;
+            self.webhook_guilds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(*id, guild);
+        }
+        let allowed = allowed_mentions(&MentionPolicy::None);
+        let attachments = file.map(|file| {
+            [twilight_model::http::attachment::Attachment::from_bytes(
+                file.filename.clone(),
+                file.data.clone(),
+                0,
+            )]
+        });
+        let mut request = self
+            .http
+            .execute_webhook(*id, token.expose())
+            .allowed_mentions(Some(&allowed));
+        if let Some(content) = content {
+            request = request.content(content);
+        }
+        if !embeds.is_empty() {
+            request = request.embeds(embeds);
+        }
+        if let Some(attachments) = &attachments {
+            request = request.attachments(attachments);
+        }
+        let response = request
+            .wait()
+            .await
+            .map_err(|e| self.webhook_error(*id, &e))?;
+        response
+            .model()
+            .await
+            .map(|message| Outcome::Message(Box::new(message)))
+            .map_err(|_| DiscordError::Fatal("could not read webhook message".into()))
+    }
+
+    fn webhook_error(&self, id: Id<WebhookMarker>, error: &twilight_http::Error) -> DiscordError {
+        use twilight_http::error::ErrorType;
+        let gone = matches!(error.kind(), ErrorType::Unauthorized)
+            || matches!(error.kind(), ErrorType::Response { status, .. } if matches!(status.get(), 401 | 404));
+        if gone {
+            self.webhook_guilds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+            return DiscordError::WebhookGone;
+        }
+        match super::map_http_error(error) {
+            DiscordError::RateLimited { retry_after } => DiscordError::RateLimited { retry_after },
+            DiscordError::Transient(_) => DiscordError::Transient("webhook request failed".into()),
+            DiscordError::Forbidden(_) => DiscordError::Forbidden("webhook request failed".into()),
+            DiscordError::Invalid(_) => DiscordError::Invalid("webhook request failed".into()),
+            _ => DiscordError::Fatal("webhook request failed".into()),
+        }
+    }
     pub(super) async fn create_webhook(
         &self,
         channel: ChannelId,

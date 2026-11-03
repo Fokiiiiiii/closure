@@ -74,3 +74,12 @@ Only publish the admin API port to a trusted network or put it behind a reverse 
 - The dev profile already drops incremental caches and debug information of dependencies. If
   `target/` still grows, `cargo clean` is always safe: everything in it is rebuilt on demand.
 - Release builds are never needed locally; use the downloads above.
+
+## Named webhooks
+
+Set `WEBHOOK_FILE` or `--webhook-file` to the path of a file containing one
+`NAME=URL` per line. The default is `webhooks.env`; a missing file is allowed.
+See `webhooks.env.example` for the format. Restrict the file to its owner, for
+example with `chmod 600 webhooks.env`. Webhook tokens stay in this file and are
+not stored in server configuration or the database. This provides the host-side
+foundation; selecting webhooks for logs is not yet available.

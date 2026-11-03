@@ -1539,6 +1539,111 @@ async fn an_invite_of_another_guild_is_never_deleted() {
 /// A webhook as Discord sends it back. Its token is what a post authorises.
 const WEBHOOK_JSON: &str = r#"{"id":"8","type":1,"guild_id":"10","channel_id":"1","name":"bridge","token":"tok-secret","avatar":null}"#;
 
+fn named_webhook(file: bool, guild: u64) -> Action {
+    Action::SendViaWebhook {
+        guild_id: Id::new(guild),
+        name: "logs".into(),
+        content: None,
+        embeds: vec![serde_json::from_str(r#"{"description":"hello","type":"rich"}"#).unwrap()],
+        file: file.then(|| closure_core::action::FileUpload {
+            filename: "log.txt".into(),
+            data: b"file contents".to_vec(),
+        }),
+    }
+}
+
+fn named_api(discord: &FakeDiscord) -> TwilightApi {
+    discord.api().with_webhooks(
+        [("logs".into(), (Id::new(8), WebhookToken::new("tok-secret")))]
+            .into_iter()
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn named_webhook_sends_embeds_and_files_and_caches_guild() {
+    let discord = FakeDiscord::start(vec![
+        (200, WEBHOOK_JSON),
+        (200, MESSAGE_JSON),
+        (200, MESSAGE_JSON),
+    ])
+    .await;
+    let api = named_api(&discord);
+    assert!(matches!(
+        api.execute(named_webhook(false, 10)).await,
+        Ok(Outcome::Message(_))
+    ));
+    assert!(matches!(
+        api.execute(named_webhook(true, 10)).await,
+        Ok(Outcome::Message(_))
+    ));
+    let requests = discord.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[1].method, "POST");
+    assert!(requests[1].path.contains("wait=true"));
+    assert!(requests[1].body.contains("hello"));
+    assert!(requests[1].body.contains("allowed_mentions"));
+    let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
+    assert!(requests[2].body.contains("file contents"));
+}
+
+#[tokio::test]
+async fn named_webhook_rejects_wrong_guild_and_unknown_name() {
+    let discord = FakeDiscord::start(vec![(200, WEBHOOK_JSON)]).await;
+    let api = named_api(&discord);
+    assert!(matches!(
+        api.execute(named_webhook(false, 99)).await,
+        Err(DiscordError::Forbidden(_))
+    ));
+    let mut unknown = named_webhook(false, 10);
+    if let Action::SendViaWebhook { name, .. } = &mut unknown {
+        *name = "missing".into();
+    }
+    assert_eq!(
+        api.execute(unknown).await,
+        Err(DiscordError::WebhookNotRegistered)
+    );
+    assert_eq!(discord.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn named_webhook_gone_clears_cached_guild() {
+    let discord = FakeDiscord::start(vec![
+        (200, WEBHOOK_JSON),
+        (200, MESSAGE_JSON),
+        (404, NOT_FOUND),
+        (200, WEBHOOK_JSON),
+        (200, MESSAGE_JSON),
+    ])
+    .await;
+    let api = named_api(&discord);
+    assert!(api.execute(named_webhook(false, 10)).await.is_ok());
+    assert_eq!(
+        api.execute(named_webhook(false, 10)).await,
+        Err(DiscordError::WebhookGone)
+    );
+    assert!(api.execute(named_webhook(false, 10)).await.is_ok());
+    let requests = discord.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r.method.as_str())
+            .collect::<Vec<_>>(),
+        ["GET", "POST", "POST", "GET", "POST"]
+    );
+}
+
+#[tokio::test]
+async fn named_webhook_unauthorized_is_gone() {
+    let discord = FakeDiscord::start(vec![(200, WEBHOOK_JSON), (401, NOT_FOUND)]).await;
+    assert_eq!(
+        named_api(&discord).execute(named_webhook(false, 10)).await,
+        Err(DiscordError::WebhookGone)
+    );
+}
+
 #[tokio::test]
 async fn webhooks_are_created_listed_and_deleted_after_their_guild_is_checked() {
     let discord = FakeDiscord::start(vec![

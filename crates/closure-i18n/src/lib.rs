@@ -207,7 +207,9 @@ pub fn error_key(error: &DiscordError) -> &'static str {
         DiscordError::CapabilityDenied(_) => "error-capability-denied",
         DiscordError::Forbidden(_) => "error-forbidden",
         DiscordError::HierarchyViolation(_) => "error-hierarchy",
-        DiscordError::NotFound => "error-not-found",
+        DiscordError::NotFound | DiscordError::WebhookNotRegistered | DiscordError::WebhookGone => {
+            "error-not-found"
+        }
         DiscordError::DirectMessagesClosed => "error-dm-closed",
         DiscordError::NotInVoice => "error-not-in-voice",
         DiscordError::RateLimited { .. } => "error-rate-limited",
