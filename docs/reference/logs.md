@@ -30,24 +30,24 @@ Set under `modules.logs.config` in a server's configuration; see [configuration]
 |---|---|---|---|---|
 | `bans` | boolean | `true` | - | Post the bans and unbans of members. |
 | `channel` | any | `null` | - | The channel the entries are posted to. Left out, the guild's log channel. |
-| `channels` | boolean | `true` | - |  |
-| `emojis` | boolean | `true` | - |  |
+| `channels` | boolean | `true` | - | Post the creation, changes and removal of channels. |
+| `emojis` | boolean | `true` | - | Post the creation, changes and removal of emojis. |
 | `keep_attachments` | boolean | `false` | - | Keep the files of attachments as their messages arrive, not only when a message is deleted or edited. Uses storage: a server's files are capped and kept for the message history's retention. |
 | `member_joins` | boolean | `true` | - | Post the joins of members. |
 | `member_leaves` | boolean | `true` | - | Post the departures of members. |
-| `member_nicknames` | boolean | `true` | - |  |
-| `member_roles` | boolean | `true` | - |  |
-| `member_timeouts` | boolean | `true` | - |  |
+| `member_nicknames` | boolean | `true` | - | Post the nickname changes of members. |
+| `member_roles` | boolean | `true` | - | Post the role changes of members. |
+| `member_timeouts` | boolean | `true` | - | Post the start and end of member timeouts. |
 | `message_deletes` | boolean | `true` | - | Post the deletions of messages, with their text and files as the history kept them. |
 | `message_edits` | boolean | `true` | - | Post the edits of messages. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
-| `roles` | boolean | `true` | - |  |
-| `stage_instances` | boolean | `true` | - |  |
-| `stickers` | boolean | `true` | - |  |
+| `roles` | boolean | `true` | - | Post the creation, changes and removal of roles. |
+| `stage_instances` | boolean | `true` | - | Post the start, changes and end of stage instances. |
+| `stickers` | boolean | `true` | - | Post the creation, changes and removal of stickers. |
 | `texts` | any | - | - | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
-| `threads` | boolean | `true` | - |  |
-| `voice` | boolean | `false` | - |  |
-| `webhook` | any | `null` | - |  |
+| `threads` | boolean | `true` | - | Post the creation, changes and removal of threads. |
+| `voice` | boolean | `false` | - | Post members joining, leaving and moving between voice channels. |
+| `webhook` | any | `null` | - | The named webhook the entries are posted with. |
 
 Default configuration:
 

@@ -277,12 +277,14 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                         "type": ["string", "null"],
                         "maxLength": 2000,
                         "pattern": "^([^{}]|\\{\\{|\\}\\}|\\{(user|username|server|count)\\})*$",
-                        "description": "config-welcome-message"
+                        "description": "config-welcome-message",
+                        "x-ui": { "level": "basic" }
                     },
                     "delete_after": {
                         "type": ["string", "null"],
                         "pattern": "^(?:(?:[5-9]|[1-9][0-9]{1,4}|[1-5][0-9]{5}|60[0-3][0-9]{3}|604[0-7][0-9]{2}|604800)s|(?:[1-9]|[1-9][0-9]{1,3}|100[0-7][0-9]|10080)m|(?:[1-9]|[1-9][0-9]|1[0-5][0-9]|16[0-8])h|[1-7]d)$",
-                        "description": "config-welcome-delete-after"
+                        "description": "config-welcome-delete-after",
+                        "x-ui": { "level": "basic" }
                     },
                     "include_bots": {
                         "type": "boolean",
