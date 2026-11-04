@@ -726,6 +726,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wasmtime",
+ "wat",
 ]
 
 [[package]]

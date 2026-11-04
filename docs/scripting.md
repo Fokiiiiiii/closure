@@ -1,7 +1,6 @@
 # Scripting: Lua and WebAssembly modules
 
-Status: the runtime-independent bridge, loader, WebAssembly runtime and Lua runtime are implemented. It turns the sketch in
-[architecture](architecture.md#extending-lua-and-webassembly) into a plan.
+Status: the bridge, loader, WebAssembly and Lua runtimes and guest examples are implemented.
 
 ## Who installs scripts
 
@@ -77,7 +76,7 @@ stopped. For scripts that is not acceptable, so:
 - **concurrency**: a script runs at most N calls at once (default 4); the rest wait with a short
   queue and are dropped when it is full;
 - **circuit breaker**: a script that is aborted or fails five times in a minute is disabled until
-  restart, with one error log and a line in `/diagnostics`. The bot never retries a disabled script.
+  restart, with one error log. The bot never retries a disabled script; `/ping` does not display it.
 
 Every number is a ceiling the host owns; `limits` in the manifest can only lower them.
 
@@ -126,7 +125,7 @@ increases build time and binary size.
 
 ## Runtimes
 
-1. **WebAssembly (`wasmtime`)**, planned. No WASI by default, no imports except the host calls above,
+1. **WebAssembly (`wasmtime`)**, available. No WASI, no imports except the host calls above,
    fuel and epoch interruption on, memory and table limits set. Any language that compiles to it
    (Rust, AssemblyScript, JavaScript via a toolchain) can write a module.
 2. **Lua (`mlua`, vendored Lua 5.4)**, available for small scripts. The
@@ -190,7 +189,7 @@ calls between modules, scripts writing their own commands at run time, and a pac
 
 | Step | What |
 | --- | --- |
-| S1 | `ScriptModule` and the bridge, the limits, the circuit breaker, the fake runtime and its tests |
-| S2 | the WebAssembly runtime and the conformance suite (implemented) |
-| S3 | the Lua runtime against the same suite |
-| S4 | guest examples and a section in [writing modules](writing-modules.md) |
+| S1 | `ScriptModule`, bridge, limits, circuit breaker and fake runtime: complete |
+| S2 | WebAssembly runtime and conformance suite: complete |
+| S3 | Lua runtime against the same suite: complete |
+| S4 | guest examples and [writing modules](writing-modules.md): complete |

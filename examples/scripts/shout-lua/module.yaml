@@ -1,0 +1,31 @@
+id: shout-lua
+name: Shout
+version: '1'
+description: Uppercase a command argument
+runtime: lua
+entry: main.lua
+intents: 0
+events: []
+capabilities: [respond_to_interactions]
+dependencies: []
+commands:
+  - name: shout
+    options: [{ name: text, kind: string, required: true }]
+    subcommands: []
+    default_member_permissions: null
+config_schema: { type: object }
+default_config: {}
+default_enabled: true
+catalogs:
+  - locale: en
+    source: |
+      command-shout = shout
+          .description = Shout text
+      option-shout-text = text
+          .description = Text to shout
+  - locale: ja
+    source: |
+      command-shout = shout
+          .description = テキストを大文字にします
+      option-shout-text = text
+          .description = 変換するテキスト

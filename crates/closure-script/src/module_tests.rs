@@ -61,6 +61,92 @@ fn send(channel: u64, text: &str) -> Value {
     json!({"type":"send_message", "channel_id":channel.to_string(), "content":text, "embeds":[], "reply_to":null})
 }
 
+#[cfg(all(feature = "lua", feature = "wasm"))]
+#[tokio::test]
+async fn shipped_examples_execute() {
+    use crate::{BuiltinRuntimes, load_dir};
+    use closure_core::event::InteractionToken;
+    use closure_core::interaction::InteractionGuilds;
+
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/scripts");
+    let root = std::env::temp_dir().join(format!("closure-examples-{}", std::process::id()));
+    for id in ["shout-lua", "echo-wasm"] {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(
+            examples.join(id).join("module.yaml"),
+            dir.join("module.yaml"),
+        )
+        .unwrap();
+    }
+    std::fs::copy(
+        examples.join("shout-lua/main.lua"),
+        root.join("shout-lua/main.lua"),
+    )
+    .unwrap();
+    let wat = std::fs::read_to_string(examples.join("echo-wasm/main.wat")).unwrap();
+    std::fs::write(
+        root.join("echo-wasm/main.wasm"),
+        wat::parse_str(wat).unwrap(),
+    )
+    .unwrap();
+    let grants = Grants::from([
+        (
+            ModuleId::new("shout-lua").unwrap(),
+            vec![Capability::RespondToInteractions],
+        ),
+        (
+            ModuleId::new("echo-wasm").unwrap(),
+            vec![Capability::ReadGuild],
+        ),
+    ]);
+    let loaded = load_dir(&root, &grants, &BuiltinRuntimes);
+    assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+    assert_eq!(loaded.modules.len(), 2);
+    let guild = GuildId::new(1);
+    let api = Arc::new(MockApi::default());
+    let interactions = Arc::new(InteractionGuilds::default());
+    assert!(
+        interactions
+            .register(&InteractionToken::new("test"), guild)
+            .is_recorded()
+    );
+    for module in &loaded.modules {
+        let id = module.manifest().id.clone();
+        let client = ApiClient::new(api.clone(), CapabilitySet::all(), id.clone())
+            .with_interactions(Arc::clone(&interactions))
+            .scoped_to(guild);
+        let ctx = EventContext::new(
+            id.clone(),
+            guild,
+            client,
+            Locale::En,
+            Arc::new(GuildPolicy::default()),
+            Arc::new(json!({})),
+            Arc::new(KeyTranslator),
+        );
+        let event = if id.as_str() == "shout-lua" {
+            serde_json::from_value(json!({"type":"command", "data":{
+                "interaction_id":"10", "application_id":"11", "token":"test", "guild_id":"1",
+                "channel_id":"2", "user":{"id":"12", "name":"user", "bot":false}, "roles":[],
+                "invoker_permissions":"0", "locale":null, "command":"shout", "subcommand":null,
+                "options":[{"name":"text", "value":{"type":"string", "value":"hello"}}]}}))
+            .unwrap()
+        } else {
+            event()
+        };
+        module.on_event(&ctx, &event).await.unwrap();
+    }
+    let actions = api.actions();
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::GetGuild { guild_id } if *guild_id == guild))
+    );
+    assert!(actions.iter().any(|a| matches!(a, Action::Respond { response: closure_core::action::InteractionResponse::Message { reply }, .. } if reply.content.as_deref() == Some("HELLO"))));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(feature = "wasm")]
 #[tokio::test]
 async fn builtin_loader_executes_only_granted_actions() {
@@ -89,7 +175,14 @@ async fn builtin_loader_executes_only_granted_actions() {
         (func (export "alloc") (param i32) (result i32) i32.const 0)
         (func (export "call") (param i32 i32) (result i64) i64.const {packed}))"#
     );
-    std::fs::write(dir.join("main.wasm"), wat).unwrap();
+    let binary = wat::parse_str(&wat).unwrap();
+    for invalid in [wat.as_bytes(), &binary[..1], &binary[..binary.len() - 1]] {
+        std::fs::write(dir.join("main.wasm"), invalid).unwrap();
+        let loaded = load_dir(&root, &Grants::new(), &BuiltinRuntimes);
+        assert!(loaded.modules.is_empty());
+        assert_eq!(loaded.errors.len(), 1);
+    }
+    std::fs::write(dir.join("main.wasm"), binary).unwrap();
     let id = ModuleId::new("script").unwrap();
     for granted in [true, false] {
         let grants = if granted {

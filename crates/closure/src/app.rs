@@ -816,6 +816,63 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "script-lua")]
+    #[test]
+    fn startup_registers_valid_scripts_and_isolates_invalid_ones() {
+        use closure_core::module::{ModuleId, ModuleManifest, ModuleRuntime};
+        use serde_json::json;
+
+        let root =
+            std::env::temp_dir().join(format!("closure-startup-scripts-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for (id, dependency, source, bad_permission) in [
+            (
+                "a-dependent",
+                Some("z-base"),
+                "function on_event(e) return {} end",
+                false,
+            ),
+            ("z-base", None, "function on_event(e) return {} end", false),
+            ("tags", None, "function on_event(e) return {} end", false),
+            ("broken", None, "function (", false),
+            (
+                "bad-permission",
+                None,
+                "function on_event(e) return {} end",
+                true,
+            ),
+        ] {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut manifest = ModuleManifest::new(ModuleId::new(id).unwrap(), id, "1");
+            manifest.runtime = ModuleRuntime::Lua;
+            if let Some(dependency) = dependency {
+                manifest
+                    .dependencies
+                    .push(ModuleId::new(dependency).unwrap());
+            }
+            let mut spec = serde_json::to_value(manifest).unwrap();
+            spec["entry"] = json!("main.lua");
+            if bad_permission {
+                spec["permissions"] =
+                    json!([{"key":"other.test", "default_level":50, "description":"test"}]);
+            }
+            std::fs::write(dir.join("module.yaml"), serde_json::to_vec(&spec).unwrap()).unwrap();
+            std::fs::write(dir.join("main.lua"), source).unwrap();
+        }
+        let core = build_core(None, &root).unwrap();
+        let module = |id| core.registry.get(&ModuleId::new(id).unwrap());
+        assert!(module("a-dependent").is_some());
+        assert!(module("z-base").is_some());
+        assert!(module("broken").is_none());
+        assert!(module("bad-permission").is_none());
+        assert_eq!(
+            module("tags").unwrap().manifest().runtime,
+            ModuleRuntime::Native
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn the_bot_configuration_file_is_the_bottom_layer_of_every_server() {
         let write = |name: &str, text: &str| {

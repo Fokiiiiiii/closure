@@ -66,7 +66,7 @@ fn signature(ty: ExternType, params: &[ValType], results: &[ValType]) -> bool {
 impl WasmRuntime {
     pub fn load(entry: &[u8]) -> Result<Self, String> {
         let engine = engine()?;
-        let module = Module::new(&engine, entry).map_err(|e| e.to_string())?;
+        let module = Module::from_binary(&engine, entry).map_err(|e| e.to_string())?;
         for import in module.imports() {
             if import.module() != "closure"
                 || import.name() != "host"
@@ -305,7 +305,7 @@ mod tests {
                 ),
                 _ => return Err("unknown fixture".into()),
             };
-            BuiltinRuntimes.create(kind, wat.as_bytes())
+            BuiltinRuntimes.create(kind, &wat::parse_str(wat).map_err(|e| e.to_string())?)
         }
     }
 
@@ -321,7 +321,7 @@ mod tests {
             r#"(module (memory (export "memory") 1) (func (export "alloc") (result i32) i32.const 0) (func (export "call") (param i32 i32) (result i64) i64.const 0))"#,
             r#"(module (import "other" "host" (func)) (memory (export "memory") 1) (func (export "alloc") (param i32) (result i32) i32.const 0) (func (export "call") (param i32 i32) (result i64) i64.const 0))"#,
         ] {
-            assert!(WasmRuntime::load(wat.as_bytes()).is_err());
+            assert!(WasmRuntime::load(&wat::parse_str(wat).unwrap()).is_err());
         }
     }
 
@@ -376,7 +376,7 @@ mod tests {
             "[]",
             &imports,
         );
-        let runtime = WasmRuntime::load(wat.as_bytes()).unwrap();
+        let runtime = WasmRuntime::load(&wat::parse_str(wat).unwrap()).unwrap();
         let budget = Budget {
             cpu_ms: 20,
             memory_bytes: 1024 * 1024,
@@ -400,7 +400,7 @@ mod tests {
             (func (export "alloc") (param i32) (result i32) i32.const 0)
             (func (export "call") (param i32 i32) (result i64)
               i32.const 1 memory.grow drop i64.const 4398046511106))"#;
-        let runtime = WasmRuntime::load(wat.as_bytes()).unwrap();
+        let runtime = WasmRuntime::load(&wat::parse_str(wat).unwrap()).unwrap();
         let budget = Budget {
             cpu_ms: 100,
             memory_bytes: 65536,
@@ -422,7 +422,7 @@ mod tests {
             (func (export "call") (param i32 i32) (result i64)
               global.get $calls if unreachable end
               i32.const 1 global.set $calls i64.const 4398046511106))"#;
-        let runtime = WasmRuntime::load(wat.as_bytes()).unwrap();
+        let runtime = WasmRuntime::load(&wat::parse_str(wat).unwrap()).unwrap();
         let budget = Budget {
             cpu_ms: 100,
             memory_bytes: 65536,
@@ -443,7 +443,7 @@ mod tests {
         let wat = r#"(module (memory (export "memory") 1)
             (func (export "alloc") (param i32) (result i32) i32.const 0)
             (func (export "call") (param i32 i32) (result i64) i64.const -4294967295))"#;
-        let runtime = WasmRuntime::load(wat.as_bytes()).unwrap();
+        let runtime = WasmRuntime::load(&wat::parse_str(wat).unwrap()).unwrap();
         let budget = Budget {
             cpu_ms: 100,
             memory_bytes: 1024 * 1024,

@@ -684,9 +684,44 @@ registered for it: a module needs no extra code.
   its own overwrites, not its parent's. Text commands read the message content, which needs the
   `MESSAGE_CONTENT` intent; automod declares it, so it is requested whenever automod is loaded.
 
-## Later: scripts
+## Scripts
 
-A Lua or WebAssembly module would supply the same manifest from a file and exchange the same
-serialisable events and actions. Scripts start with no capabilities until a server administrator
-grants them. See [architecture.md](architecture.md#extending-lua-and-webassembly) and the plan in
-[scripting.md](scripting.md).
+The host owner installs Lua and WebAssembly modules in `scripts/`; each directory must match its
+module id. Copy the complete manifests and catalogs from [examples/scripts](../examples/scripts).
+A minimal `module.yaml` for a Lua module without commands is:
+
+```yaml
+id: my-script
+name: My script
+version: '1'
+description: Example script
+runtime: lua
+entry: main.lua
+intents: 0
+events: []
+capabilities: []
+dependencies: []
+commands: []
+config_schema: { type: object }
+default_config: {}
+default_enabled: true
+catalogs: []
+```
+
+Add commands and catalogs as in the shout example. Grant only the capabilities you approve in
+`scripts/grants.yaml`:
+
+```yaml
+shout-lua: [respond_to_interactions]
+echo-wasm: [read_guild]
+```
+
+Lua is convenient for small scripts; WebAssembly offers stronger interruption of long-running
+operations. Both have memory, execution and action limits, no filesystem or network access, and
+start with no granted capabilities. Build the WebAssembly example with
+`wat2wasm examples/scripts/echo-wasm/main.wat -o examples/scripts/echo-wasm/main.wasm` before
+copying it. Its fixed guild id `1` is an ABI demonstration, not a general-purpose echo.
+
+Invalid scripts and denied capabilities appear in startup logs. A script disabled after repeated
+failures is logged and remains disabled until restart; `/ping` does not show this state. See
+[scripting.md](scripting.md) for the full manifest, ABI, limits and Lua interruption caveat.

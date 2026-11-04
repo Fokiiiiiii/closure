@@ -26,6 +26,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+wat = "1.263.0"
 
 [lints]
 workspace = true

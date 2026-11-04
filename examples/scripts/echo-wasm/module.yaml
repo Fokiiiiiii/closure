@@ -1,0 +1,15 @@
+id: echo-wasm
+name: Echo Wasm
+version: '1'
+description: Minimal WebAssembly guest
+runtime: wasm
+entry: main.wasm
+intents: 0
+events: []
+capabilities: [read_guild]
+dependencies: []
+commands: []
+config_schema: { type: object }
+default_config: {}
+default_enabled: true
+catalogs: []
