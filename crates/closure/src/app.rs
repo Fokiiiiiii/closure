@@ -256,6 +256,7 @@ struct Core {
 
 fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
     let mut all = modules()?;
+    let mut unavailable = std::collections::HashSet::new();
     let grants = closure_script::load_grants(scripts_dir).unwrap_or_else(|error| {
         tracing::error!(%error, "could not load script grants");
         closure_script::Grants::new()
@@ -263,6 +264,12 @@ fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
     let loaded = closure_script::load_dir(scripts_dir, &grants, &closure_script::BuiltinRuntimes);
     for error in loaded.errors {
         tracing::error!(path = %error.path.display(), error = %error.message, "could not load script");
+        if error.path.parent() == Some(scripts_dir)
+            && let Some(id) = error.path.file_name().and_then(|name| name.to_str())
+            && let Ok(id) = closure_core::module::ModuleId::new(id)
+        {
+            unavailable.insert(id);
+        }
     }
     let mut pending: Vec<Arc<dyn closure_core::module::Module>> = loaded
         .modules
@@ -280,6 +287,7 @@ fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
                 let registry = Arc::new(ModuleRegistry::new(candidate.clone())?);
                 let mut catalogs = TranslatorBuilder::new()?;
                 catalogs.add_registry(&registry)?;
+                build_commands(&registry, &catalogs.build())?;
                 ConfigCompiler::new(registry)?;
                 Ok(())
             })();
@@ -294,6 +302,7 @@ fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
         if deferred.len() == previous {
             for (module, error) in deferred.iter().zip(errors) {
                 tracing::error!(module = %module.manifest().id, %error, "could not register script");
+                unavailable.insert(module.manifest().id.clone());
             }
             break;
         }
@@ -304,7 +313,8 @@ fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
     let mut catalogs = TranslatorBuilder::new()?;
     catalogs.add_registry(&registry)?;
     let mut compiler = ConfigCompiler::new(Arc::clone(&registry))
-        .context("a module's configuration schema is unusable")?;
+        .context("a module's configuration schema is unusable")?
+        .with_unavailable_modules(unavailable);
     if let Some(path) = bot_config {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read the bot configuration {}", path.display()))?;
@@ -869,6 +879,85 @@ mod tests {
         assert_eq!(
             module("tags").unwrap().manifest().runtime,
             ModuleRuntime::Native
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "script-lua")]
+    #[test]
+    fn script_grants_failed_scripts_and_translated_commands_are_isolated() {
+        use closure_core::capability::Capability;
+        use closure_core::module::ModuleId;
+
+        let root =
+            std::env::temp_dir().join(format!("closure-audit-startup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let examples =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/scripts/shout-lua");
+        for id in ["shout-lua", "bad-command"] {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut manifest = std::fs::read_to_string(examples.join("module.yaml")).unwrap();
+            if id == "bad-command" {
+                manifest = manifest
+                    .replace("shout-lua", id)
+                    .replace("shout", "brokencommand");
+                manifest = manifest.replace("Shout text", &"x".repeat(101));
+            }
+            std::fs::write(dir.join("module.yaml"), manifest).unwrap();
+            std::fs::copy(examples.join("main.lua"), dir.join("main.lua")).unwrap();
+        }
+        std::fs::create_dir_all(root.join("broken")).unwrap();
+        std::fs::write(root.join("broken/module.yaml"), "bad: [").unwrap();
+        std::fs::write(
+            root.join("grants.yaml"),
+            "shout-lua: [respond_to_interactions]\n",
+        )
+        .unwrap();
+        let config = root.join("bot.yaml");
+        std::fs::write(
+            &config,
+            "modules: { broken: { enabled: true }, bad-command: { enabled: true }, automod: { enabled: true } }",
+        )
+        .unwrap();
+        let core = build_core(Some(&config), &root).unwrap();
+        let settings = core.store.settings(Id::new(1));
+        assert!(
+            settings
+                .module(&ModuleId::new("shout-lua").unwrap())
+                .unwrap()
+                .granted
+                .contains(Capability::RespondToInteractions)
+        );
+        assert!(
+            settings
+                .module(&ModuleId::new("automod").unwrap())
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            core.registry
+                .get(&ModuleId::new("bad-command").unwrap())
+                .is_none()
+        );
+        assert!(build_commands(&core.registry, core.translator.as_ref()).is_ok());
+        let guild = core
+            .store
+            .set_guild_yaml(
+                Id::new(2),
+                "modules: { broken: { enabled: true }, automod: { enabled: true } }",
+            )
+            .unwrap();
+        assert!(
+            guild
+                .module(&ModuleId::new("automod").unwrap())
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            core.store
+                .set_guild_yaml(Id::new(3), "modules: { typo: { enabled: true } }")
+                .is_err()
         );
         std::fs::remove_dir_all(root).unwrap();
     }

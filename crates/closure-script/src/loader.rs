@@ -44,6 +44,9 @@ pub struct Loaded {
 }
 
 fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    if !fs::metadata(path).map_err(|e| e.to_string())?.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
     let file = File::open(path).map_err(|e| e.to_string())?;
     read_file_bounded(file, path, max)
 }
@@ -61,12 +64,15 @@ fn read_file_bounded(file: File, path: &Path, max: u64) -> Result<Vec<u8>, Strin
 
 pub fn load_grants(dir: &Path) -> Result<Grants, String> {
     let path = dir.join("grants.yaml");
-    let file = match File::open(&path) {
-        Ok(file) => file,
+    match fs::metadata(&path) {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Grants::new()),
         Err(error) => return Err(format!("{}: {error}", path.display())),
-    };
-    match read_file_bounded(file, &path, MANIFEST_MAX) {
+    }
+    match read_bounded(&path, MANIFEST_MAX) {
         Ok(bytes) => {
             let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
             parse_grants(text).map_err(|e| e.to_string())

@@ -113,9 +113,13 @@ async fn shipped_examples_execute() {
     );
     for module in &loaded.modules {
         let id = module.manifest().id.clone();
-        let client = ApiClient::new(api.clone(), CapabilitySet::all(), id.clone())
-            .with_interactions(Arc::clone(&interactions))
-            .scoped_to(guild);
+        let client = ApiClient::new(
+            api.clone(),
+            module.manifest().capabilities.clone(),
+            id.clone(),
+        )
+        .with_interactions(Arc::clone(&interactions))
+        .scoped_to(guild);
         let ctx = EventContext::new(
             id.clone(),
             guild,

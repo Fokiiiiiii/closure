@@ -27,8 +27,9 @@ scripts/
 
 - `runtime: wasm | lua` and `entry: main.wasm`;
 - `capabilities`: what the script asks for. The effective set is what it asks for **and** the owner
-  grants in `scripts/grants.yaml`, for example `my-feature: [storage]`. A missing file grants nothing. A script starts with
-  nothing; a request that is not granted is dropped and logged once at start-up;
+  grants in `scripts/grants.yaml`, for example `my-feature: [storage]`. A missing file grants nothing.
+  A request that is not granted is dropped and logged once at start-up. A module's configuration
+  may further narrow this set but cannot grant capabilities absent from `grants.yaml`;
 - `limits`: optional, tightening only (never above the host's ceilings, see below).
 
 The directory name must equal the module id. Unknown manifest fields, native runtimes, paths outside

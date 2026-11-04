@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use closure_core::capability::CapabilitySet;
-use closure_core::module::{ModuleId, ModuleManifest, ModuleRuntime};
+use closure_core::module::{ModuleId, ModuleManifest};
 use closure_core::permission::{GuildPermissions, KeyRule, Level, PermissionKey};
 use closure_core::registry::ModuleRegistry;
 use closure_core::settings::{GuildPolicy, ModuleSettings};
@@ -38,6 +37,7 @@ pub(crate) const MAX_DOCUMENT_BYTES: usize = 128 * 1024;
 pub struct ConfigCompiler {
     registry: Arc<ModuleRegistry>,
     validators: HashMap<ModuleId, Validator>,
+    unavailable_modules: HashSet<ModuleId>,
     /// What every guild starts from, in the form of a document: the operator's choices for the
     /// whole bot. A guild's own document is merged over it.
     bot_defaults: Option<Value>,
@@ -96,13 +96,21 @@ impl ConfigCompiler {
             &validators,
             &GuildOverrides::default(),
             None,
+            &HashSet::new(),
         )?);
         Ok(Self {
             registry,
             validators,
+            unavailable_modules: HashSet::new(),
             bot_defaults: None,
             defaults,
         })
+    }
+
+    #[must_use]
+    pub fn with_unavailable_modules(mut self, ids: HashSet<ModuleId>) -> Self {
+        self.unavailable_modules = ids;
+        self
     }
 
     /// Makes `defaults` the bottom layer of every guild's configuration: preset, then these
@@ -112,7 +120,13 @@ impl ConfigCompiler {
         self.bot_defaults = None;
         let mut value = serde_json::to_value(defaults)
             .map_err(|error| ConfigError::Serialize(error.to_string()))?;
-        compile_with(&self.registry, &self.validators, defaults, None)?;
+        compile_with(
+            &self.registry,
+            &self.validators,
+            defaults,
+            None,
+            &self.unavailable_modules,
+        )?;
         canonical_ids(&mut value);
         self.bot_defaults = Some(value);
         self.defaults = Arc::new(self.compile(&GuildOverrides::default())?);
@@ -132,7 +146,13 @@ impl ConfigCompiler {
 
     pub fn compile(&self, overrides: &GuildOverrides) -> Result<GuildSettings, ConfigError> {
         let Some(bot) = &self.bot_defaults else {
-            return compile_with(&self.registry, &self.validators, overrides, None);
+            return compile_with(
+                &self.registry,
+                &self.validators,
+                overrides,
+                None,
+                &self.unavailable_modules,
+            );
         };
         // What one document cannot be, it cannot be in the merge either: its own mistakes are
         // looked for before the merge makes them disappear.
@@ -154,6 +174,7 @@ impl ConfigCompiler {
                 bot,
                 own: overrides,
             }),
+            &self.unavailable_modules,
         )
     }
 }
@@ -188,6 +209,7 @@ fn compile_with(
     validators: &HashMap<ModuleId, Validator>,
     overrides: &GuildOverrides,
     layers: Option<Layers<'_>>,
+    unavailable_modules: &HashSet<ModuleId>,
 ) -> Result<GuildSettings, ConfigError> {
     if let Some(found) = overrides.version
         && found != CURRENT_VERSION
@@ -226,7 +248,7 @@ fn compile_with(
     } = compile_policy_text(overrides, &mut issues);
 
     let permissions = compile_permissions(registry, overrides, &mut issues);
-    check_known_modules(registry, overrides, &mut issues);
+    check_known_modules(registry, overrides, unavailable_modules, &mut issues);
 
     let mut effective_modules = BTreeMap::new();
     let mut module_settings = HashMap::new();
@@ -650,10 +672,12 @@ fn compile_key_rule(rule: &KeyOverride, path: &str, issues: &mut Vec<Issue>) -> 
 fn check_known_modules(
     registry: &ModuleRegistry,
     overrides: &GuildOverrides,
+    unavailable_modules: &HashSet<ModuleId>,
     issues: &mut Vec<Issue>,
 ) {
     for key in overrides.modules.keys() {
-        let known = ModuleId::new(key.as_str()).is_ok_and(|id| registry.get(&id).is_some());
+        let known = ModuleId::new(key.as_str())
+            .is_ok_and(|id| registry.get(&id).is_some() || unavailable_modules.contains(&id));
         if !known {
             let available: Vec<String> = registry
                 .iter()
@@ -681,8 +705,6 @@ fn compile_module(
         .and_then(|m| m.enabled)
         .unwrap_or(manifest.default_enabled);
 
-    // Native modules get what they declare; sandboxed runtimes start with nothing and need an
-    // explicit grant.
     let capabilities = match module_override.and_then(|m| m.capabilities.as_ref()) {
         Some(requested) => {
             for capability in requested.missing_from(&manifest.capabilities) {
@@ -694,8 +716,7 @@ fn compile_module(
             }
             requested.intersection(&manifest.capabilities)
         }
-        None if manifest.runtime == ModuleRuntime::Native => manifest.capabilities.clone(),
-        None => CapabilitySet::new(),
+        None => manifest.capabilities.clone(),
     };
 
     let config = configs
@@ -829,7 +850,7 @@ fn strip_nulls(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use closure_core::capability::Capability;
-    use closure_core::module::{Module, ModuleManifest};
+    use closure_core::module::{Module, ModuleManifest, ModuleRuntime};
     use closure_core::permission::{Actor, PermissionSpec, Reason};
     use closure_core::testing::StubModule;
     use proptest::prelude::*;
@@ -1365,7 +1386,7 @@ modules:
     }
 
     #[test]
-    fn sandboxed_runtimes_start_with_no_capabilities() {
+    fn sandboxed_runtimes_default_to_their_granted_manifest_capabilities() {
         let wasm = module("script", |mut manifest| {
             manifest.runtime = ModuleRuntime::Wasm;
             manifest.capabilities = [Capability::BanMembers].into_iter().collect();
@@ -1375,7 +1396,32 @@ modules:
             ConfigCompiler::new(Arc::new(ModuleRegistry::new(vec![wasm]).unwrap())).unwrap();
         let settings = compiler.compile(&GuildOverrides::default()).unwrap();
         let script = settings.module(&ModuleId::new("script").unwrap()).unwrap();
-        assert!(script.granted.is_empty());
+        assert!(script.granted.contains(Capability::BanMembers));
+    }
+
+    #[test]
+    fn unavailable_modules_are_ignored_until_they_return() {
+        let document = crate::yaml::parse_overrides(
+            "modules: { script: { enabled: true }, warn: { enabled: false } }",
+        )
+        .unwrap();
+        let id = ModuleId::new("script").unwrap();
+        let unavailable = compiler().with_unavailable_modules([id.clone()].into_iter().collect());
+        let settings = unavailable.compile(&document).unwrap();
+        assert!(settings.module(&id).is_none());
+        assert!(
+            !settings
+                .module(&ModuleId::new("warn").unwrap())
+                .unwrap()
+                .enabled
+        );
+        assert!(compiler().compile(&document).is_err());
+        let registry = ModuleRegistry::new(vec![warn_module(), module("script", |m| m)]).unwrap();
+        let restored = ConfigCompiler::new(Arc::new(registry))
+            .unwrap()
+            .compile(&document)
+            .unwrap();
+        assert!(restored.module(&id).unwrap().enabled);
     }
 
     #[test]

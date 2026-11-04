@@ -134,6 +134,63 @@ fn missing_runtime_is_an_isolated_error() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn special_files_are_rejected_before_opening() {
+    use std::process::{Command, Stdio};
+    let dir = root("fifo");
+    if Command::new("mkfifo")
+        .arg(dir.join("probe"))
+        .status()
+        .is_err()
+    {
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    std::fs::remove_file(dir.join("probe")).unwrap();
+    for kind in ["grants", "manifest", "entry"] {
+        let module = dir.join("script");
+        write(&dir, "script", &spec("script"));
+        let path = match kind {
+            "grants" => dir.join("grants.yaml"),
+            "manifest" => module.join("module.yaml"),
+            _ => module.join("main.wasm"),
+        };
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert!(
+            Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut writer = Command::new("sh")
+            .args(["-c", "printf '{}' > \"$1\"", "sh"])
+            .arg(&path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let error = if kind == "grants" {
+            load_grants(&dir).err().unwrap_or_default()
+        } else {
+            let loaded = load_dir(&dir, &Grants::new(), &Factory);
+            loaded
+                .errors
+                .first()
+                .map_or_else(String::new, |error| error.message.clone())
+        };
+        let _ = writer.kill();
+        let _ = writer.wait();
+        assert!(error.contains("regular file"), "{kind}: {error}");
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(module).unwrap();
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn size_symlink_permission_and_invalid_id_are_refused() {
     let dir = root("boundaries");
