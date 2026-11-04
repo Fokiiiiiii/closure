@@ -106,6 +106,7 @@ fn run_case(factory: &dyn RuntimeFactory, kind: ModuleRuntime, case: Conformance
     let budget = Budget {
         cpu_ms: 20,
         memory_bytes: 1024 * 1024,
+        output_bytes: crate::Limits::default().output_bytes,
         deadline: Instant::now() + Duration::from_millis(100),
     };
     if std::thread::Builder::new()
@@ -117,12 +118,9 @@ fn run_case(factory: &dyn RuntimeFactory, kind: ModuleRuntime, case: Conformance
                         .build()
                         .map_err(|e| e.to_string())?;
                     let pool = crate::runtime::Pool::new(1, 1)?;
-                    executor.block_on(pool.call(
-                        runtime,
-                        thread_host,
-                        input,
-                        crate::Limits::default(),
-                    ))
+                    executor
+                        .block_on(pool.call(runtime, thread_host, input, crate::Limits::default()))
+                        .map_err(|error| error.to_string())
                 } else {
                     runtime.call(input, thread_host, budget)
                 }

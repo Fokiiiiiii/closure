@@ -57,7 +57,9 @@ autocomplete as `autocomplete`, and due jobs as `scheduled` (including the compl
 The dispatcher routes commands and autocomplete to their command owner and scheduled jobs to their
 owning module, regardless of event subscriptions. Component, modal and context-command events
 likewise arrive in their existing `Event` form. An action rejected by the host is logged and later
-actions still run. Host KV list returns objects with `key`, `value`, and `revision`.
+actions still run, including after transient API errors; failed actions are not retried, so
+at-least-once delivery is not guaranteed. Scripts have no job registration API; scheduled events
+only arrive for existing jobs. Host KV list returns objects with `key`, `value`, and `revision`.
 
 A script gets no clock, no randomness, no network, no files and no environment beyond what the
 event carries. Every `execute` goes through the same `ApiClient` as native
@@ -75,7 +77,7 @@ stopped. For scripts that is not acceptable, so:
 - **memory**: 32 MiB for WebAssembly, 16 MiB for Lua, per instance;
 - **output**: at most 25 actions and 256 KiB of JSON per call; more is an error;
 - **concurrency**: a script runs at most N calls at once (default 4); the rest wait with a short
-  queue and are dropped when it is full;
+  queue and are dropped when it is full. A busy rejection does not count as a script failure;
 - **circuit breaker**: a script that is aborted or fails five times in a minute is disabled until
   restart, with one error log. The bot never retries a disabled script; `/ping` does not display it.
 
@@ -142,6 +144,7 @@ actions. JSON arrays carry an array metatable and JSON null is `closure.null`; u
 `closure.store_get(key)`, `closure.store_set(key, value)`, `closure.store_delete(key)` and
 `closure.store_list(prefix, limit)` raise Lua errors on host errors. An upper-limit failure still
 fails the invocation even if caught with `pcall`.
+Metatables containing `__gc` are rejected to prevent finalizers from bypassing the instruction hook.
 
 ```lua
 function on_event(event)

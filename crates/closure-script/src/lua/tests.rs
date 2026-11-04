@@ -32,8 +32,101 @@ fn budget() -> Budget {
     Budget {
         cpu_ms: 20,
         memory_bytes: 1024 * 1024,
+        output_bytes: crate::Limits::default().output_bytes,
         deadline: Instant::now() + Duration::from_millis(100),
     }
+}
+
+#[test]
+fn finalizers_are_rejected_but_regular_metatables_work() {
+    let source = b"function on_event() local t=setmetatable({}, {__index={x=7}}); assert(t.x==7); assert(not pcall(setmetatable, {}, {__gc=function() end})); assert(getmetatable(closure.array({})) == false); local mt=getmetatable(''); mt.__gc=function() end; assert(not pcall(setmetatable, {}, mt)); return {} end";
+    let start = Instant::now();
+    assert_eq!(
+        LuaRuntime::new(source)
+            .unwrap()
+            .call(json!({}), Arc::new(Host::default()), budget())
+            .unwrap(),
+        json!([])
+    );
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn expanding_json_is_rejected_at_all_lua_boundaries() {
+    for body in [
+        "return {t}",
+        "closure.execute(t); return {}",
+        "closure.store_set('x', t); return {}",
+    ] {
+        let source =
+            format!("function on_event() local t='x'; for i=1,12 do t={{t,t}} end; {body} end");
+        let error = LuaRuntime::new(source.as_bytes())
+            .unwrap()
+            .call(
+                json!({}),
+                Arc::new(Host::default()),
+                Budget {
+                    output_bytes: 128,
+                    ..budget()
+                },
+            )
+            .unwrap_err();
+        assert!(error.contains("output exceeds the limit"), "{error}");
+    }
+}
+
+#[test]
+fn json_conversion_stops_at_the_configured_limit() {
+    let runtime = LuaRuntime::new(
+        b"function on_event() local t='x'; for i=1,12 do t={t,t} end; return {t} end",
+    )
+    .unwrap();
+    let budget = Budget {
+        output_bytes: 128,
+        ..budget()
+    };
+    assert!(
+        runtime
+            .call(json!({}), Arc::new(Host::default()), budget)
+            .unwrap_err()
+            .contains("output exceeds the limit")
+    );
+    let runtime = LuaRuntime::new(b"function on_event() return { {a='ok'} } end").unwrap();
+    assert_eq!(
+        runtime
+            .call(json!({}), Arc::new(Host::default()), budget)
+            .unwrap(),
+        json!([{"a":"ok"}])
+    );
+}
+
+#[test]
+fn caught_host_conversion_limit_still_fails_invocation() {
+    for call in ["closure.execute(t)", "closure.store_set('x', t)"] {
+        let source = format!(
+            "function on_event() local t=string.rep('x', 256); pcall(function() {call} end); return {{}} end"
+        );
+        let result = LuaRuntime::new(source.as_bytes()).unwrap().call(
+            json!({}),
+            Arc::new(Host::default()),
+            Budget {
+                output_bytes: 128,
+                ..budget()
+            },
+        );
+        assert!(result.unwrap_err().contains("output exceeds the limit"));
+    }
+}
+
+#[test]
+fn sparse_arrays_match_existing_json_conversion() {
+    let (lua, _, _, _) = sandbox(budget()).unwrap();
+    let value: LuaValue = lua
+        .load("local t={'a','b','c'}; t[2]=nil; return t")
+        .eval()
+        .unwrap();
+    let expected: Value = lua.from_value(value.clone()).unwrap();
+    assert_eq!(bounded_json(&lua, value, 1024).unwrap(), expected);
 }
 
 struct Fixtures;
@@ -224,6 +317,7 @@ fn lua_host_wait_is_excluded_from_cpu_budget() {
     let budget = Budget {
         cpu_ms: 20,
         memory_bytes: 1024 * 1024,
+        output_bytes: crate::Limits::default().output_bytes,
         deadline: Instant::now() + Duration::from_millis(500),
     };
     assert_eq!(
