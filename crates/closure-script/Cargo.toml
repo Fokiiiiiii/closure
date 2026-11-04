@@ -1,0 +1,21 @@
+[package]
+name = "closure-script"
+description = "Runtime-independent scripting boundaries for closure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+closure-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

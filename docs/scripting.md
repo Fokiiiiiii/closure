@@ -1,6 +1,6 @@
 # Scripting: Lua and WebAssembly modules
 
-Status: design. Nothing here is built yet. It turns the sketch in
+Status: the runtime-independent bridge is implemented; loading and real runtimes remain a design. It turns the sketch in
 [architecture](architecture.md#extending-lua-and-webassembly) into a plan.
 
 ## Who installs scripts
@@ -41,14 +41,20 @@ Everything that crosses is JSON of types that already exist and are already `Ser
 
 | Direction | Call | Data |
 | --- | --- | --- |
-| host → script | `on_event(event)` | returns a list of actions |
-| host → script | `on_command(invocation)` | returns a list of actions |
-| host → script | `on_job(payload)` | returns a list of actions |
+| host → script | `call(event)` | returns a list of actions, including for commands and jobs |
 | script → host | `execute(action)` | returns the `Outcome` or an error |
 | script → host | `store_get/set/delete/list` | the module's own KV store, same quotas as native |
 
+The current bridge calls the runtime once with the serialized `Event`, using its `type` and `data`
+fields, and expects an array of serialized `Action` values. Commands arrive as `command`,
+autocomplete as `autocomplete`, and due jobs as `scheduled` (including the complete job payload).
+The dispatcher routes commands and autocomplete to their command owner and scheduled jobs to their
+owning module, regardless of event subscriptions. Component, modal and context-command events
+likewise arrive in their existing `Event` form. An action rejected by the host is logged and later
+actions still run. Host KV list returns objects with `key`, `value`, and `revision`.
+
 A script gets no clock, no randomness, no network, no files and no environment beyond what the
-event carries (`now` is in the event). Every `execute` goes through the same `ApiClient` as native
+event carries. Every `execute` goes through the same `ApiClient` as native
 modules: capability check, guild binding, validation. A script cannot do more than a native module
 holding the same capabilities.
 
