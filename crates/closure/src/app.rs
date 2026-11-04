@@ -254,25 +254,13 @@ struct Core {
     store: Arc<SettingsStore>,
 }
 
-struct NoRuntimes;
-
-impl closure_script::RuntimeFactory for NoRuntimes {
-    fn create(
-        &self,
-        _: closure_core::module::ModuleRuntime,
-        _: &[u8],
-    ) -> Result<Option<Arc<dyn closure_script::runtime::ScriptRuntime>>, String> {
-        Ok(None)
-    }
-}
-
 fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
     let mut all = modules()?;
     let grants = closure_script::load_grants(scripts_dir).unwrap_or_else(|error| {
         tracing::error!(%error, "could not load script grants");
         closure_script::Grants::new()
     });
-    let loaded = closure_script::load_dir(scripts_dir, &grants, &NoRuntimes);
+    let loaded = closure_script::load_dir(scripts_dir, &grants, &closure_script::BuiltinRuntimes);
     for error in loaded.errors {
         tracing::error!(path = %error.path.display(), error = %error.message, "could not load script");
     }

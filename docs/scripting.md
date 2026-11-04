@@ -1,6 +1,6 @@
 # Scripting: Lua and WebAssembly modules
 
-Status: the runtime-independent bridge and loader are implemented; real runtimes remain a design. It turns the sketch in
+Status: the runtime-independent bridge, loader, and WebAssembly runtime are implemented; Lua remains a design. It turns the sketch in
 [architecture](architecture.md#extending-lua-and-webassembly) into a plan.
 
 ## Who installs scripts
@@ -81,6 +81,44 @@ stopped. For scripts that is not acceptable, so:
 
 Every number is a ceiling the host owns; `limits` in the manifest can only lower them.
 
+## WebAssembly ABI
+
+The core WebAssembly module exports `memory`, `alloc(len: i32) -> i32` and
+`call(ptr: i32, len: i32) -> i64`. The host passes the JSON-encoded `Event` to
+`call`. Its result packs the output pointer in the upper 32 bits and the byte
+length in the lower 32 bits. The output is a JSON array of `Action`; a zero
+length or invalid memory range is an error.
+
+The only permitted import is `closure.host(ptr: i32, len: i32) -> i64`.
+The guest sends JSON and the host calls guest `alloc` for the JSON response,
+returning the same packed pointer and length. Requests are:
+
+- `{"op":"execute","action":{...}}`
+- `{"op":"get","key":"..."}`
+- `{"op":"set","key":"...","value":...}`
+- `{"op":"delete","key":"..."}`
+- `{"op":"list","prefix":"...","limit":10}`
+
+Responses are `{"ok": value}` or `{"err":"message"}`. Calls use a new store
+and instance each time; use KV for persistent data. WASI is unavailable.
+
+For example, this WAT module returns an empty action list:
+
+```wat
+(module
+  (memory (export "memory") 1)
+  (data (i32.const 1024) "[]")
+  (func (export "alloc") (param i32) (result i32) i32.const 0)
+  (func (export "call") (param i32 i32) (result i64)
+    i64.const 4398046511106))
+```
+
+Each invocation uses fuel, epoch interruption and `StoreLimits`. Epoch checks
+exclude time spent in host operations from the CPU budget while still enforcing
+the wall deadline. Memory growth failure traps. The `script-wasm` feature is
+enabled by default for `closure`; `--no-default-features` omits it. Wasmtime
+increases build time and binary size.
+
 ## Runtimes
 
 1. **WebAssembly (`wasmtime`)**, first. No WASI by default, no imports except the host calls above,
@@ -101,7 +139,7 @@ behind a Cargo feature so a build that does not want them does not pay for them.
 
 - Scripts are read once at start-up in directory-name order. Each invalid script is skipped and
   logged without preventing other scripts from loading. Ungranted capabilities are dropped with
-  one warning per module. This build has no runtime and reports each otherwise valid script as unavailable.
+  one warning per module. A build without the relevant runtime reports the script as unavailable.
 - A manifest is validated like a native one: unique names, command and option limits, schema.
 - Reloading while running is not in the first version. It needs the unload of a module's commands,
   jobs and subscriptions to be exact; it comes after the bridge is proven.
@@ -114,7 +152,7 @@ behind a Cargo feature so a build that does not want them does not pay for them.
   (must be aborted within the deadline), a memory hog, host execute and KV calls, a huge output and
   a trap. Adapters provide case fixtures to `closure_script::conformance::run_all`; a runtime must
   stop execution within its budget and reject excess memory; the host rejects excess output. The fake runtime demonstrates
-  the missing loop and memory enforcement; real guest fixtures and enforcement await the runtimes.
+  the missing loop and memory enforcement; WebAssembly fixtures exercise the real runtime.
   `run_all_for` selects Lua or WebAssembly. A runtime that never returns leaves its test worker
   running, so run untrusted adapters in a disposable process.
 
@@ -128,6 +166,6 @@ calls between modules, scripts writing their own commands at run time, and a pac
 | Step | What |
 | --- | --- |
 | S1 | `ScriptModule` and the bridge, the limits, the circuit breaker, the fake runtime and its tests |
-| S2 | the WebAssembly runtime and the conformance suite |
+| S2 | the WebAssembly runtime and the conformance suite (implemented) |
 | S3 | the Lua runtime against the same suite |
 | S4 | guest examples and a section in [writing modules](writing-modules.md) |

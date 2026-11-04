@@ -10,8 +10,10 @@ repository.workspace = true
 
 [features]
 conformance = []
+wasm = ["dep:wasmtime"]
 
 [dependencies]
+wasmtime = { version = "50.0.1", default-features = false, features = ["runtime", "cranelift", "std", "wat"], optional = true }
 async-trait.workspace = true
 closure-core.workspace = true
 serde.workspace = true

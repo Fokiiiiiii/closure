@@ -33,7 +33,7 @@ pub trait HostApi: Send + Sync {
 
 /// Implementations must interrupt their own execution when `budget` is exhausted.
 pub trait ScriptRuntime: Send + Sync + 'static {
-    fn call(&self, input: Value, host: &dyn HostApi, budget: Budget) -> Result<Value, String>;
+    fn call(&self, input: Value, host: Arc<dyn HostApi>, budget: Budget) -> Result<Value, String>;
 }
 
 type Callback = dyn Fn(Value, &dyn HostApi, Budget) -> Result<Value, String> + Send + Sync;
@@ -56,8 +56,8 @@ impl FakeRuntime {
 }
 
 impl ScriptRuntime for FakeRuntime {
-    fn call(&self, input: Value, host: &dyn HostApi, budget: Budget) -> Result<Value, String> {
-        (self.0)(input, host, budget)
+    fn call(&self, input: Value, host: Arc<dyn HostApi>, budget: Budget) -> Result<Value, String> {
+        (self.0)(input, host.as_ref(), budget)
     }
 }
 
@@ -216,7 +216,7 @@ impl Pool {
                     if Instant::now() >= budget.deadline {
                         return Err("script deadline exceeded".into());
                     }
-                    let result = runtime.call(input, host.as_ref(), budget);
+                    let result = runtime.call(input, Arc::clone(&host), budget);
                     match host.limit_failure() {
                         Some(error) => Err(error),
                         None => result,

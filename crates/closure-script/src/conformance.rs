@@ -124,7 +124,7 @@ fn run_case(factory: &dyn RuntimeFactory, kind: ModuleRuntime, case: Conformance
                         crate::Limits::default(),
                     ))
                 } else {
-                    runtime.call(input, &*thread_host, budget)
+                    runtime.call(input, thread_host, budget)
                 }
             }));
             let _ = tx.send(result);

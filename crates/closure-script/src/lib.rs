@@ -7,12 +7,16 @@ use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::module::ModuleId;
 use serde::Deserialize;
 
+mod builtin;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
 mod loader;
 mod module;
 pub mod runtime;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
+pub use builtin::BuiltinRuntimes;
 pub use loader::{LoadError, Loaded, RuntimeFactory, ScriptSpec, load_dir, load_grants};
 pub use module::ScriptModule;
 

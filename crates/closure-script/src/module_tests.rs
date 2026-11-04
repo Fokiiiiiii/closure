@@ -61,6 +61,55 @@ fn send(channel: u64, text: &str) -> Value {
     json!({"type":"send_message", "channel_id":channel.to_string(), "content":text, "embeds":[], "reply_to":null})
 }
 
+#[cfg(feature = "wasm")]
+#[tokio::test]
+async fn builtin_loader_executes_only_granted_actions() {
+    use crate::{BuiltinRuntimes, load_dir};
+    use closure_core::module::ModuleRuntime;
+    use std::fmt::Write;
+
+    let root = std::env::temp_dir().join(format!("closure-wasm-loader-{}", std::process::id()));
+    let dir = root.join("script");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut manifest = ModuleManifest::new(ModuleId::new("script").unwrap(), "script", "1")
+        .capabilities([Capability::SendMessages]);
+    manifest.runtime = ModuleRuntime::Wasm;
+    let mut spec = serde_json::to_value(manifest).unwrap();
+    spec["entry"] = json!("main.wasm");
+    std::fs::write(dir.join("module.yaml"), serde_json::to_vec(&spec).unwrap()).unwrap();
+    let output = serde_json::to_string(&json!([send(2, "hello")])).unwrap();
+    let encoded = output.bytes().fold(String::new(), |mut result, b| {
+        write!(result, "\\{b:02x}").unwrap();
+        result
+    });
+    let packed = (1024_u64 << 32) | output.len() as u64;
+    let wat = format!(
+        r#"(module (memory (export "memory") 1)
+        (data (i32.const 1024) "{encoded}")
+        (func (export "alloc") (param i32) (result i32) i32.const 0)
+        (func (export "call") (param i32 i32) (result i64) i64.const {packed}))"#
+    );
+    std::fs::write(dir.join("main.wasm"), wat).unwrap();
+    let id = ModuleId::new("script").unwrap();
+    for granted in [true, false] {
+        let grants = if granted {
+            Grants::from([(id.clone(), vec![Capability::SendMessages])])
+        } else {
+            Grants::new()
+        };
+        let loaded = load_dir(&root, &grants, &BuiltinRuntimes);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let (_, ctx, api) = setup(
+            Arc::new(FakeRuntime::new(|_, _, _| Ok(json!([])))),
+            vec![],
+            Limits::default(),
+        );
+        loaded.modules[0].on_event(&ctx, &event()).await.unwrap();
+        assert_eq!(api.actions().len(), usize::from(granted));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn denied_capabilities_emit_one_warning_per_module() {
     use std::io::Write;
