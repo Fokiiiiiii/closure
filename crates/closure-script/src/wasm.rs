@@ -116,6 +116,9 @@ fn host_call(mut caller: Caller<'_, State>, ptr: i32, len: i32) -> wasmtime::Res
         .ok_or_else(|| wasmtime::Error::msg("missing memory"))?;
     let ptr = usize::try_from(ptr).map_err(|_| wasmtime::Error::msg("invalid pointer"))?;
     let len = usize::try_from(len).map_err(|_| wasmtime::Error::msg("invalid length"))?;
+    if len > caller.data().budget.output_bytes {
+        return Err(wasmtime::Error::msg("script output exceeds the limit"));
+    }
     let bytes = memory
         .data(&caller)
         .get(
@@ -211,6 +214,9 @@ impl ScriptRuntime for WasmRuntime {
             }
             let ptr = usize::try_from(result >> 32)?;
             let len = usize::try_from(result & u64::from(u32::MAX))?;
+            if len > budget.output_bytes {
+                return Err(wasmtime::Error::msg("script output exceeds the limit"));
+            }
             if len == 0 {
                 return Err(wasmtime::Error::msg("empty output"));
             }
@@ -224,7 +230,7 @@ impl ScriptRuntime for WasmRuntime {
                 .ok_or_else(|| wasmtime::Error::msg("invalid range"))?;
             serde_json::from_slice(data).map_err(|e| wasmtime::Error::msg(e.to_string()))
         };
-        run().map_err(|e| e.to_string())
+        run().map_err(|e| format!("{e:#}"))
     }
 }
 
@@ -326,6 +332,38 @@ mod tests {
     }
 
     struct EmptyHost;
+
+    #[test]
+    fn oversized_json_is_rejected_before_parsing() {
+        let output = format!("{}[]", " ".repeat(crate::Limits::default().output_bytes));
+        let wat = guest("", &output, "");
+        let runtime = WasmRuntime::load(&wat::parse_str(wat).unwrap()).unwrap();
+        let budget = Budget {
+            cpu_ms: 100,
+            memory_bytes: 1024 * 1024,
+            output_bytes: crate::Limits::default().output_bytes,
+            deadline: Instant::now() + Duration::from_secs(1),
+        };
+        let error = runtime
+            .call(json!({}), Arc::new(EmptyHost), budget)
+            .unwrap_err();
+        assert!(error.contains("output exceeds the limit"), "{error}");
+        let request = " ".repeat(crate::Limits::default().output_bytes + 1);
+        let imports = format!(
+            "(import \"closure\" \"host\" (func $host (param i32 i32) (result i64))) (data (i32.const 2048) \"{}\")",
+            data(&request)
+        );
+        let wat = guest(
+            &format!("i32.const 2048 i32.const {} call $host drop", request.len()),
+            "[]",
+            &imports,
+        );
+        let runtime = WasmRuntime::load(&wat::parse_str(wat).unwrap()).unwrap();
+        let error = runtime
+            .call(json!({}), Arc::new(EmptyHost), budget)
+            .unwrap_err();
+        assert!(error.contains("output exceeds the limit"), "{error}");
+    }
     impl HostApi for EmptyHost {
         fn execute(&self, _: Value) -> Result<Value, String> {
             Ok(Value::Null)
@@ -380,6 +418,7 @@ mod tests {
         let budget = Budget {
             cpu_ms: 20,
             memory_bytes: 1024 * 1024,
+            output_bytes: crate::Limits::default().output_bytes,
             deadline: Instant::now() + Duration::from_secs(1),
         };
         assert_eq!(
@@ -404,6 +443,7 @@ mod tests {
         let budget = Budget {
             cpu_ms: 100,
             memory_bytes: 65536,
+            output_bytes: crate::Limits::default().output_bytes,
             deadline: Instant::now() + Duration::from_secs(1),
         };
         assert!(
@@ -426,6 +466,7 @@ mod tests {
         let budget = Budget {
             cpu_ms: 100,
             memory_bytes: 65536,
+            output_bytes: crate::Limits::default().output_bytes,
             deadline: Instant::now() + Duration::from_secs(1),
         };
         for _ in 0..2 {
@@ -447,6 +488,7 @@ mod tests {
         let budget = Budget {
             cpu_ms: 100,
             memory_bytes: 1024 * 1024,
+            output_bytes: crate::Limits::default().output_bytes,
             deadline: Instant::now() + Duration::from_secs(1),
         };
         assert!(

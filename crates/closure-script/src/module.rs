@@ -5,14 +5,14 @@ use std::time::Instant;
 use async_trait::async_trait;
 use closure_core::action::Action;
 use closure_core::capability::{Capability, CapabilitySet};
-use closure_core::error::ModuleError;
+use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::Event;
 use closure_core::module::{EventContext, Module, ModuleManifest};
 use closure_core::subscription::Flow;
 use serde_json::Value;
 use tokio::runtime::Handle;
 
-use crate::runtime::{Breaker, HostApi, Pool, ScriptRuntime};
+use crate::runtime::{Breaker, CallError, HostApi, Pool, ScriptRuntime};
 use crate::{Grants, Limits, effective_capabilities};
 
 /// A script with owner grants applied to its manifest.
@@ -104,18 +104,17 @@ impl Host {
 
     fn output(&self, value: Value) -> Result<Value, String> {
         self.check()?;
-        let size = serde_json::to_vec(&value)
-            .map_err(|error| error.to_string())?
-            .len();
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.output = state.output.saturating_add(size);
-        if state.output > self.output_limit {
+        let size =
+            crate::runtime::json_size(&value, self.output_limit.saturating_sub(state.output));
+        if size.is_err() {
             state.failure = Some("script output exceeds the limit".into());
             return Err("script output exceeds the limit".into());
         }
+        state.output += size?;
         Ok(value)
     }
 
@@ -264,7 +263,12 @@ impl Module for ScriptModule {
             .pool
             .call(Arc::clone(&self.runtime), host.clone(), input, self.limits)
             .await
-            .map_err(ModuleError::other)?;
+            .map_err(|error| match error {
+                CallError::Busy => {
+                    ModuleError::Discord(DiscordError::Transient("script queue is full".into()))
+                }
+                CallError::Failed(error) => ModuleError::other(error),
+            })?;
         if let Err(error) = host.output(result.clone()) {
             self.pool.record_failure();
             return Err(ModuleError::other(error));

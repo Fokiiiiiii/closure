@@ -16,7 +16,30 @@ use crate::Limits;
 pub struct Budget {
     pub cpu_ms: u64,
     pub memory_bytes: usize,
+    pub output_bytes: usize,
     pub deadline: Instant,
+}
+
+pub(crate) fn json_size(value: &Value, limit: usize) -> Result<usize, String> {
+    struct Counter {
+        size: usize,
+        limit: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.size = self.size.saturating_add(bytes.len());
+            if self.size > self.limit {
+                return Err(std::io::Error::other("script output exceeds the limit"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { size: 0, limit };
+    serde_json::to_writer(&mut counter, value).map_err(|e| e.to_string())?;
+    Ok(counter.size)
 }
 
 /// Synchronous access to the scoped host services.
@@ -62,6 +85,26 @@ impl ScriptRuntime for FakeRuntime {
 }
 
 type Job = Box<dyn FnOnce() + Send>;
+
+#[derive(Debug)]
+pub enum CallError {
+    Busy,
+    Failed(String),
+}
+
+impl fmt::Display for CallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy => f.write_str("script queue is full"),
+            Self::Failed(error) => f.write_str(error),
+        }
+    }
+}
+impl From<String> for CallError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
 
 /// A bounded pool owned by one script; it never uses Tokio's shared blocking pool.
 pub struct Pool {
@@ -185,12 +228,12 @@ impl Pool {
         host: Arc<dyn HostApi>,
         input: Value,
         limits: Limits,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CallError> {
         if self.status().disabled {
-            return Err("script is disabled".into());
+            return Err(CallError::Failed("script is disabled".into()));
         }
         let result = self.call_inner(runtime, host, input, limits).await;
-        if result.is_err() {
+        if matches!(result, Err(CallError::Failed(_))) {
             self.record_failure();
         }
         result
@@ -202,11 +245,12 @@ impl Pool {
         host: Arc<dyn HostApi>,
         input: Value,
         limits: Limits,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CallError> {
         let limits = limits.bounded(Limits::default()).map_err(str::to_owned)?;
         let budget = Budget {
             cpu_ms: limits.cpu_ms,
             memory_bytes: limits.memory_bytes,
+            output_bytes: limits.output_bytes,
             deadline: Instant::now() + limits.wall_time(),
         };
         let (send, receive) = oneshot::channel();
@@ -225,7 +269,12 @@ impl Pool {
                 .unwrap_or_else(|_| Err("script panicked".into()));
                 let _ = send.send(result);
             }))
-            .map_err(|_| "script queue is full or closed".to_owned())?;
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => CallError::Busy,
+                mpsc::TrySendError::Disconnected(_) => {
+                    CallError::Failed("script queue is closed".into())
+                }
+            })?;
         let result =
             tokio::time::timeout_at(tokio::time::Instant::from_std(budget.deadline), receive)
                 .await
@@ -234,13 +283,8 @@ impl Pool {
         let actions = result
             .as_array()
             .ok_or_else(|| "script output is not an array".to_owned())?;
-        if actions.len() > limits.actions
-            || serde_json::to_vec(&result)
-                .map_err(|error| error.to_string())?
-                .len()
-                > limits.output_bytes
-        {
-            return Err("script output exceeds the limit".into());
+        if actions.len() > limits.actions || json_size(&result, limits.output_bytes).is_err() {
+            return Err(CallError::Failed("script output exceeds the limit".into()));
         }
         Ok(result)
     }
@@ -329,6 +373,7 @@ mod tests {
                 .is_err()
         );
         assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(pool.status().recent_failures, 1);
     }
 
     #[test]
@@ -383,12 +428,34 @@ mod tests {
                 .is_ok()
         );
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(pool.queue.try_send(Box::new(|| {})).is_ok());
+        let (drained_tx, drained_rx) = mpsc::channel();
+        assert!(
+            pool.queue
+                .try_send(Box::new(move || {
+                    drained_tx.send(()).unwrap();
+                }))
+                .is_ok()
+        );
         let runtime = Arc::new(FakeRuntime::new(|_, _, _| Ok(serde_json::json!([]))));
-        let result = pool
-            .call(runtime, Arc::new(Host), Value::Null, Limits::default())
-            .await;
-        assert!(result.unwrap_err().contains("queue is full"));
+        for _ in 0..6 {
+            let result = pool
+                .call(
+                    runtime.clone(),
+                    Arc::new(Host),
+                    Value::Null,
+                    Limits::default(),
+                )
+                .await;
+            assert!(result.unwrap_err().to_string().contains("queue is full"));
+        }
+        assert!(!pool.status().disabled);
+        assert_eq!(pool.status().recent_failures, 0);
         release_tx.send(()).unwrap();
+        drained_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            pool.call(runtime, Arc::new(Host), Value::Null, Limits::default())
+                .await
+                .is_ok()
+        );
     }
 }

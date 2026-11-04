@@ -40,6 +40,7 @@ impl LuaRuntime {
     fn invoke(&self, input: &Value, host: &dyn HostApi, budget: Budget) -> mlua::Result<Value> {
         let (lua, waited, interrupted, started) = sandbox(budget)?;
         let globals = lua.globals();
+        let conversion_limit = Rc::new(Cell::new(false));
         lua.scope(|scope| {
             let api = lua.create_table()?;
             macro_rules! host_call {
@@ -48,8 +49,9 @@ impl LuaRuntime {
                     api.set($name, scope.create_function(move |$lua, $args: $ty| $body)?)?;
                 }};
             }
+            let execute_limit = Rc::clone(&conversion_limit);
             host_call!("execute", lua, waited, action, LuaValue, {
-                let action = lua.from_value(action)?;
+                let action = bounded_host_json(lua, action, budget.output_bytes, &execute_limit)?;
                 lua.to_value(&timed(&waited, || {
                     host.execute(action).map_err(mlua::Error::runtime)
                 })?)
@@ -59,6 +61,7 @@ impl LuaRuntime {
                     host.get(&key).map_err(mlua::Error::runtime)
                 })?)
             });
+            let store_limit = Rc::clone(&conversion_limit);
             host_call!(
                 "store_set",
                 lua,
@@ -66,7 +69,7 @@ impl LuaRuntime {
                 (key, value),
                 (String, LuaValue),
                 {
-                    let value = lua.from_value(value)?;
+                    let value = bounded_host_json(lua, value, budget.output_bytes, &store_limit)?;
                     timed(&waited, || {
                         host.set(&key, value).map_err(mlua::Error::runtime)
                     })
@@ -91,7 +94,11 @@ impl LuaRuntime {
             api.set(
                 "array",
                 lua.create_function(|lua, table: mlua::Table| {
-                    table.set_metatable(Some(lua.array_metatable()))?;
+                    let metatable = lua.array_metatable();
+                    if !matches!(metatable.raw_get::<LuaValue>("__gc")?, LuaValue::Nil) {
+                        return Err(mlua::Error::runtime("finalizers are not permitted"));
+                    }
+                    table.set_metatable(Some(metatable))?;
                     Ok(table)
                 })?,
             )?;
@@ -103,6 +110,9 @@ impl LuaRuntime {
             if interrupted.get() || Instant::now() >= budget.deadline {
                 return Err(mlua::Error::runtime("script budget exceeded"));
             }
+            if conversion_limit.get() {
+                return Err(mlua::Error::runtime("script output exceeds the limit"));
+            }
             if let Some(error) = host.limit_failure() {
                 return Err(mlua::Error::runtime(error));
             }
@@ -111,7 +121,7 @@ impl LuaRuntime {
                 LuaValue::Table(ref table) if table.is_empty() && table.metatable().is_none() => {
                     Ok(Value::Array(vec![]))
                 }
-                _ => lua.from_value(result),
+                _ => bounded_json(&lua, result, budget.output_bytes),
             }?;
             let now = Instant::now();
             if now >= budget.deadline
@@ -123,6 +133,102 @@ impl LuaRuntime {
             Ok(value)
         })
     }
+}
+
+fn bounded_host_json(
+    lua: &Lua,
+    value: LuaValue,
+    limit: usize,
+    exceeded: &Cell<bool>,
+) -> mlua::Result<Value> {
+    bounded_json(lua, value, limit).inspect_err(|error| {
+        if matches!(error, mlua::Error::RuntimeError(message) if message == "script output exceeds the limit") {
+            exceeded.set(true);
+        }
+    })
+}
+
+fn bounded_json(lua: &Lua, value: LuaValue, limit: usize) -> mlua::Result<Value> {
+    fn convert(
+        lua: &Lua,
+        value: LuaValue,
+        remaining: &mut usize,
+        nodes: &mut usize,
+        depth: usize,
+    ) -> mlua::Result<Value> {
+        if depth > 32 {
+            return Err(mlua::Error::runtime("script output exceeds the limit"));
+        }
+        charge_remaining(nodes, 1)?;
+        let mut charge = |size: usize| -> mlua::Result<()> {
+            *remaining = remaining
+                .checked_sub(size)
+                .ok_or_else(|| mlua::Error::runtime("script output exceeds the limit"))?;
+            Ok(())
+        };
+        match value {
+            LuaValue::Table(table) => {
+                charge(2)?;
+                if table.raw_len() > 0
+                    || table
+                        .metatable()
+                        .is_some_and(|mt| mt == lua.array_metatable())
+                {
+                    let mut values = Vec::new();
+                    for index in 1..=table.raw_len() {
+                        if !values.is_empty() {
+                            charge_remaining(remaining, 1)?;
+                        }
+                        values.push(convert(
+                            lua,
+                            table.raw_get(index)?,
+                            remaining,
+                            nodes,
+                            depth + 1,
+                        )?);
+                    }
+                    Ok(Value::Array(values))
+                } else {
+                    let mut values = serde_json::Map::new();
+                    for pair in table.pairs::<LuaValue, LuaValue>() {
+                        let (key, item) = pair?;
+                        let LuaValue::String(key) = key else {
+                            return Err(mlua::Error::runtime("invalid JSON object key"));
+                        };
+                        if key.as_bytes().len() > *remaining {
+                            return Err(mlua::Error::runtime("script output exceeds the limit"));
+                        }
+                        let key = key.to_str()?.to_owned();
+                        let size =
+                            crate::runtime::json_size(&Value::String(key.clone()), *remaining)
+                                .map_err(mlua::Error::runtime)?;
+                        charge_remaining(remaining, size + 1 + usize::from(!values.is_empty()))?;
+                        values.insert(key, convert(lua, item, remaining, nodes, depth + 1)?);
+                    }
+                    Ok(Value::Object(values))
+                }
+            }
+            other => {
+                if let LuaValue::String(ref s) = other
+                    && s.as_bytes().len() > *remaining
+                {
+                    return Err(mlua::Error::runtime("script output exceeds the limit"));
+                }
+                let value: Value = lua.from_value(other)?;
+                let size =
+                    crate::runtime::json_size(&value, *remaining).map_err(mlua::Error::runtime)?;
+                charge_remaining(remaining, size)?;
+                Ok(value)
+            }
+        }
+    }
+    fn charge_remaining(remaining: &mut usize, size: usize) -> mlua::Result<()> {
+        *remaining = remaining
+            .checked_sub(size)
+            .ok_or_else(|| mlua::Error::runtime("script output exceeds the limit"))?;
+        Ok(())
+    }
+    convert(lua, value, &mut limit.clone(), &mut limit.clone(), 0)
 }
 
 fn timed<T>(waited: &Cell<Duration>, f: impl FnOnce() -> mlua::Result<T>) -> mlua::Result<T> {
@@ -143,6 +249,7 @@ fn sandbox(budget: Budget) -> mlua::Result<Sandbox> {
         LuaOptions::default(),
     )?;
     lua.set_memory_limit(budget.memory_bytes.min(16 * 1024 * 1024))?;
+    lua.array_metatable().raw_set("__metatable", false)?;
     let globals = lua.globals();
     for name in [
         "dofile",
@@ -154,6 +261,7 @@ fn sandbox(budget: Budget) -> mlua::Result<Sandbox> {
     ] {
         globals.set(name, LuaValue::Nil)?;
     }
+    lua.load("local original, raw = setmetatable, rawget; setmetatable = function(t, mt) if mt ~= nil and raw(mt, '__gc') ~= nil then error('finalizers are not permitted', 2) end return original(t, mt) end").set_mode(ChunkMode::Text).exec()?;
     globals
         .get::<mlua::Table>("string")?
         .set("dump", LuaValue::Nil)?;
