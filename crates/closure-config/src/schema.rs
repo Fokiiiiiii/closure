@@ -96,6 +96,12 @@ pub fn document_schema_in(
     {
         properties.retain(|key, _| BASIC_KEYS.contains(&key.as_str()) || key == "modules");
     }
+    if view == View::Basic
+        && let Some(Value::Object(definitions)) = schema.pointer_mut("/$defs")
+    {
+        // shortcut: basic guild fields only reference Preset; revisit when adding another reference.
+        definitions.retain(|key, _| key == "Preset");
+    }
     // The whole document may be `null` too: an empty one.
     if let Value::Object(root) = &mut schema {
         root.insert("type".into(), json!(["object", "null"]));
@@ -124,6 +130,19 @@ fn module_entries(
     let mut module_properties = Map::new();
     for module in registry.iter() {
         let manifest = module.manifest();
+        let description = [locale, Locale::DEFAULT]
+            .into_iter()
+            .find_map(|wanted| {
+                manifest
+                    .catalogs
+                    .iter()
+                    .find(|catalog| catalog.locale == wanted)
+                    .and_then(|catalog| {
+                        closure_core::module::catalog_text(&catalog.source, "module-description")
+                    })
+            })
+            .or_else(|| core_lookup(locale)("module-description"))
+            .unwrap_or_else(|| manifest.description.clone());
         let mut config_schema = manifest.config_schema.clone();
         closure_core::module::localize_descriptions(
             &mut config_schema,
@@ -174,7 +193,7 @@ fn module_entries(
             // A module's entry may be `null` as well: it stands for no override at all.
             json!({
                 "type": ["object", "null"],
-                "description": manifest.description,
+                "description": description,
                 "additionalProperties": false,
                 "properties": properties
             }),
@@ -1979,5 +1998,31 @@ mod tests {
                 "Language of the bot's messages; `auto` follows the server's community locale."
             ))
         );
+    }
+
+    #[test]
+    fn module_description_uses_catalog_fallbacks() {
+        let module = ModuleManifest::new(ModuleId::new("sample").unwrap(), "Sample", "1")
+            .description("Original description.")
+            .catalog(Locale::En, "module-description = English description.")
+            .catalog(Locale::Ja, "module-description = 日本語の説明。");
+        let mut default_only = module.clone();
+        default_only
+            .catalogs
+            .retain(|catalog| catalog.locale == Locale::En);
+        let mut no_catalog = module.clone();
+        no_catalog.catalogs.clear();
+        for (manifest, expected) in [
+            (module, "日本語の説明。"),
+            (default_only, "English description."),
+            (no_catalog, "Original description."),
+        ] {
+            let registry = ModuleRegistry::new(vec![Arc::new(StubModule(manifest))]).unwrap();
+            let schema = document_schema_in(&registry, View::Basic, Locale::Ja).unwrap();
+            assert_eq!(
+                schema.pointer("/properties/modules/anyOf/0/properties/sample/description"),
+                Some(&json!(expected))
+            );
+        }
     }
 }

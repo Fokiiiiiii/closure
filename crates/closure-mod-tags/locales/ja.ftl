@@ -1,3 +1,4 @@
+module-description = 定型文を保存して投稿します。
 command-tag = tag
     .description = 定型文を管理します
 subcommand-tag-show = show

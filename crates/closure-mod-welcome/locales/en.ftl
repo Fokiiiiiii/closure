@@ -1,6 +1,11 @@
+module-description = Greet new members when they join.
 welcome-channel = Channel where new members are greeted
 welcome-message = Template for the greeting; available variables: {user}, {username}, {server}, {count}
 welcome-delete-after = Delete the greeting after a duration from 5 seconds to 7 days
 welcome-include-bots = Greet bot accounts too
+config-welcome-channel = Channel where new members are greeted.
+config-welcome-message = Greeting template; supports {"{"}user{"}"}, {"{"}username{"}"}, {"{"}server{"}"}, and {"{"}count{"}"}.
+config-welcome-delete-after = Delete greetings after 5 seconds to 7 days.
+config-welcome-include-bots = Whether to greet bot accounts too.
 welcome-default = Welcome {user} to {server}!
 welcome-delete-reason = Welcome message expired

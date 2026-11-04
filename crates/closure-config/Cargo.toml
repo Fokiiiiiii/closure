@@ -24,6 +24,15 @@ twilight-model.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 proptest.workspace = true
+closure-mod-automod.workspace = true
+closure-mod-channels.workspace = true
+closure-mod-dashboard.workspace = true
+closure-mod-diagnostics.workspace = true
+closure-mod-logs.workspace = true
+closure-mod-moderation.workspace = true
+closure-mod-remind.workspace = true
+closure-mod-tags.workspace = true
+closure-mod-welcome.workspace = true
 
 [lints]
 workspace = true

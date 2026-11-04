@@ -121,12 +121,32 @@ pub(crate) fn view_of(query: &ViewQuery) -> Result<View, ApiError> {
 }
 
 /// The language of the descriptions a read shows; English unless asked for another one that exists.
-pub(crate) fn locale_of(query: &ViewQuery) -> Result<closure_core::locale::Locale, ApiError> {
-    match query.locale.as_deref() {
-        None => Ok(closure_core::locale::Locale::DEFAULT),
-        Some(tag) => tag.parse().map_err(|_| {
-            ApiError::BadRequest("locale must be a language tag the bot speaks".into())
-        }),
+pub(crate) fn locale_of(query: &ViewQuery) -> closure_core::locale::Locale {
+    query
+        .locale
+        .as_deref()
+        .and_then(closure_core::locale::Locale::from_discord_tag)
+        .unwrap_or(closure_core::locale::Locale::DEFAULT)
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::{ViewQuery, locale_of};
+    use closure_core::locale::Locale;
+
+    #[test]
+    fn schema_locale_defaults_for_unknown_tags() {
+        for (tag, expected) in [
+            ("ja", Locale::Ja),
+            ("en", Locale::En),
+            ("fr", Locale::DEFAULT),
+        ] {
+            let query = ViewQuery {
+                view: None,
+                locale: Some(tag.into()),
+            };
+            assert_eq!(locale_of(&query), expected);
+        }
     }
 }
 

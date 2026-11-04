@@ -1,5 +1,7 @@
 # Tags (`tags`)
 
+Save and post reusable messages.
+
 - Version: 0.1.0
 - Enabled by default: yes
 

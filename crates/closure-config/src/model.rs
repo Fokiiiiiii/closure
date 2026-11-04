@@ -94,6 +94,7 @@ fn optional_emoji_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
 /// overridden individually.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(description = "config-preset")]
 pub enum Preset {
     Small,
     #[default]
@@ -299,27 +300,27 @@ pub struct PermissionsOverride {
 /// what is stored, edited by the dashboard form and exchanged as YAML.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(description = "config-document")]
 pub struct GuildOverrides {
-    /// Schema version of this document; omitted means the current one.
+    #[schemars(description = "config-version")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<Preset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<Language>,
-    /// Channel where the bot posts moderation logs.
+    #[schemars(description = "config-log-channel")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "optional_snowflake_schema")]
     pub log_channel: Option<ChannelId>,
-    /// Named webhook for logs.
+    #[schemars(description = "config-log-webhook")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "optional_webhook_schema")]
     pub log_webhook: Option<String>,
-    /// Roles whose members may use moderation commands.
+    #[schemars(description = "config-moderator-roles")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "optional_snowflakes_schema")]
     pub moderator_roles: Option<Vec<RoleId>>,
-    /// Kept as written and checked when the document is compiled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "optional_timezone_schema")]
     pub timezone: Option<String>,

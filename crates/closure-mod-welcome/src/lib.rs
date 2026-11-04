@@ -270,23 +270,23 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                     "channel": {
                         "type": ["string", "null"],
                         "pattern": "^[0-9]{1,20}$",
-                        "description": "welcome-channel",
+                        "description": "config-welcome-channel",
                         "x-ui": { "widget": "channel", "level": "basic" }
                     },
                     "message": {
                         "type": ["string", "null"],
                         "maxLength": 2000,
                         "pattern": "^([^{}]|\\{\\{|\\}\\}|\\{(user|username|server|count)\\})*$",
-                        "description": "welcome-message"
+                        "description": "config-welcome-message"
                     },
                     "delete_after": {
                         "type": ["string", "null"],
                         "pattern": "^(?:(?:[5-9]|[1-9][0-9]{1,4}|[1-5][0-9]{5}|60[0-3][0-9]{3}|604[0-7][0-9]{2}|604800)s|(?:[1-9]|[1-9][0-9]{1,3}|100[0-7][0-9]|10080)m|(?:[1-9]|[1-9][0-9]|1[0-5][0-9]|16[0-8])h|[1-7]d)$",
-                        "description": "welcome-delete-after"
+                        "description": "config-welcome-delete-after"
                     },
                     "include_bots": {
                         "type": "boolean",
-                        "description": "welcome-include-bots",
+                        "description": "config-welcome-include-bots",
                         "x-ui": { "level": "basic" }
                     }
                 },

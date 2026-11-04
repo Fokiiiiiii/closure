@@ -1,3 +1,4 @@
+module-description = Save and post reusable messages.
 command-tag = tag
     .description = Manage reusable messages
 subcommand-tag-show = show
