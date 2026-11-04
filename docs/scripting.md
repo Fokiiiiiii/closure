@@ -1,6 +1,6 @@
 # Scripting: Lua and WebAssembly modules
 
-Status: the runtime-independent bridge is implemented; loading and real runtimes remain a design. It turns the sketch in
+Status: the runtime-independent bridge and loader are implemented; real runtimes remain a design. It turns the sketch in
 [architecture](architecture.md#extending-lua-and-webassembly) into a plan.
 
 ## Who installs scripts
@@ -18,6 +18,7 @@ act beyond what the owner allowed.
 
 ```
 scripts/
+  grants.yaml        owner-approved capabilities by module id
   my-feature/
     module.yaml      the manifest
     main.wasm        or main.lua
@@ -27,9 +28,14 @@ scripts/
 
 - `runtime: wasm | lua` and `entry: main.wasm`;
 - `capabilities`: what the script asks for. The effective set is what it asks for **and** the owner
-  grants in the bot configuration (`BOT_CONFIG`, a `scripts.<id>.grant` list). A script starts with
+  grants in `scripts/grants.yaml`, for example `my-feature: [storage]`. A missing file grants nothing. A script starts with
   nothing; a request that is not granted is dropped and logged once at start-up;
 - `limits`: optional, tightening only (never above the host's ceilings, see below).
+
+The directory name must equal the module id. Unknown manifest fields, native runtimes, paths outside
+the script directory (including symlink escapes), manifests above 256 KiB and entries above 8 MiB are
+rejected. Requested limits above the host ceiling are clamped. The generated documentation includes
+only `modules()`: installed scripts are local to a particular host.
 
 Commands, subscriptions, settings schema, permission keys and the catalog (`en`/`ja`) are the same
 data native modules already declare.
@@ -93,8 +99,9 @@ behind a Cargo feature so a build that does not want them does not pay for them.
 
 ## Loading
 
-- Scripts are read once at start-up. A script that fails to load (bad manifest, missing entry,
-  an ungranted-only capability set) is skipped with one error line; the bot starts without it.
+- Scripts are read once at start-up in directory-name order. Each invalid script is skipped and
+  logged without preventing other scripts from loading. Ungranted capabilities are dropped with
+  one warning per module. This build has no runtime and reports each otherwise valid script as unavailable.
 - A manifest is validated like a native one: unique names, command and option limits, schema.
 - Reloading while running is not in the first version. It needs the unload of a module's commands,
   jobs and subscriptions to be exact; it comes after the bridge is proven.
@@ -104,8 +111,12 @@ behind a Cargo feature so a build that does not want them does not pay for them.
 - A **fake runtime** (a Rust closure per call) drives the bridge: capability narrowing, action
   validation, limits, the circuit breaker and the queue are tested without any engine.
 - A **conformance suite** of tiny scripts is run against each real runtime: an echo, an endless loop
-  (must be aborted within the deadline), a memory hog, a huge output, a forbidden call, a trap.
-  Each test fails when its limit is removed.
+  (must be aborted within the deadline), a memory hog, host execute and KV calls, a huge output and
+  a trap. Adapters provide case fixtures to `closure_script::conformance::run_all`; a runtime must
+  stop execution within its budget and reject excess memory; the host rejects excess output. The fake runtime demonstrates
+  the missing loop and memory enforcement; real guest fixtures and enforcement await the runtimes.
+  `run_all_for` selects Lua or WebAssembly. A runtime that never returns leaves its test worker
+  running, so run untrusted adapters in a disposable process.
 
 ## Not in the first version
 

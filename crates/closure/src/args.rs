@@ -58,6 +58,10 @@ pub struct Args {
     #[arg(long, env = "WEBHOOK_FILE", default_value = "webhooks.env")]
     pub webhook_file: PathBuf,
 
+    /// Directory containing installed script modules.
+    #[arg(long, env = "SCRIPTS_DIR", default_value = "scripts")]
+    pub scripts_dir: PathBuf,
+
     /// Publish slash commands to this server only (they appear at once) instead of globally
     /// (which can take up to an hour). Use it while developing.
     #[arg(long, env = "COMMAND_GUILD")]
@@ -158,6 +162,7 @@ mod tests {
         assert_eq!(args.log_format, LogFormat::Pretty);
         assert_eq!(args.application_id.get(), 42);
         assert_eq!(args.webhook_file, PathBuf::from("webhooks.env"));
+        assert_eq!(args.scripts_dir, PathBuf::from("scripts"));
         assert!(args.api_admin_token.is_none());
         assert!(!args.skip_command_registration);
     }
@@ -178,6 +183,8 @@ mod tests {
             "/etc/closure/bot.yaml",
             "--webhook-file",
             "/etc/closure/hooks",
+            "--scripts-dir",
+            "/etc/closure/scripts",
         ])
         .unwrap();
         assert_eq!(
@@ -186,6 +193,7 @@ mod tests {
         );
         assert_eq!(args.api_bind.port(), 9000);
         assert_eq!(args.webhook_file, PathBuf::from("/etc/closure/hooks"));
+        assert_eq!(args.scripts_dir, PathBuf::from("/etc/closure/scripts"));
         assert_eq!(args.command_guild.map(NonZeroU64::get), Some(7));
         assert!(args.skip_command_registration);
         assert_eq!(args.log_format, LogFormat::Json);

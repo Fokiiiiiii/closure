@@ -39,8 +39,16 @@ impl ScriptModule {
         limits: Limits,
     ) -> Result<Self, String> {
         let limits = limits.bounded(Limits::default()).map_err(str::to_owned)?;
-        manifest.capabilities =
-            effective_capabilities(&manifest.capabilities, grants, &manifest.id);
+        let effective = effective_capabilities(&manifest.capabilities, grants, &manifest.id);
+        let denied: Vec<_> = manifest
+            .capabilities
+            .iter()
+            .filter(|cap| !effective.contains(*cap))
+            .collect();
+        if !denied.is_empty() {
+            tracing::warn!(module = %manifest.id, ?denied, "script capabilities were not granted");
+        }
+        manifest.capabilities = effective;
         Ok(Self {
             manifest,
             runtime,

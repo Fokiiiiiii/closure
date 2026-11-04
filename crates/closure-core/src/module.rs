@@ -519,7 +519,7 @@ impl ModuleManifest {
         self
     }
 
-    pub(crate) fn validate(&self) -> Result<(), CoreError> {
+    pub fn validate(&self) -> Result<(), CoreError> {
         for command in &self.commands {
             command.validate(&self.id)?;
         }

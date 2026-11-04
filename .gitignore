@@ -35,3 +35,4 @@ rustc-ice-*.txt
 .vscode/
 .DS_Store
 webhooks.env
+/scripts/

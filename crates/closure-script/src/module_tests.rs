@@ -61,6 +61,50 @@ fn send(channel: u64, text: &str) -> Value {
     json!({"type":"send_message", "channel_id":channel.to_string(), "content":text, "embeds":[], "reply_to":null})
 }
 
+#[test]
+fn denied_capabilities_emit_one_warning_per_module() {
+    use std::io::Write;
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+    impl Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(move || writer.clone()),
+    );
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+    {
+        let id = ModuleId::new("warning_test").unwrap();
+        let manifest = ModuleManifest::new(id, "script", "1")
+            .capabilities([Capability::Storage, Capability::SendMessages]);
+        let runtime = Arc::new(FakeRuntime::new(|_, _, _| Ok(json!([]))));
+        let module =
+            ScriptModule::new(manifest, &Grants::new(), runtime, Limits::default()).unwrap();
+        assert_eq!(module.manifest().capabilities.iter().count(), 0);
+    }
+    let output = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("script capabilities were not granted")
+                && line.contains("warning_test"))
+            .count(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn events_actions_and_denials_keep_order() {
     let seen = Arc::new(Mutex::new(Vec::new()));

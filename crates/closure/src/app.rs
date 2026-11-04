@@ -254,9 +254,65 @@ struct Core {
     store: Arc<SettingsStore>,
 }
 
-fn build_core(bot_config: Option<&Path>) -> Result<Core> {
+struct NoRuntimes;
+
+impl closure_script::RuntimeFactory for NoRuntimes {
+    fn create(
+        &self,
+        _: closure_core::module::ModuleRuntime,
+        _: &[u8],
+    ) -> Result<Option<Arc<dyn closure_script::runtime::ScriptRuntime>>, String> {
+        Ok(None)
+    }
+}
+
+fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
+    let mut all = modules()?;
+    let grants = closure_script::load_grants(scripts_dir).unwrap_or_else(|error| {
+        tracing::error!(%error, "could not load script grants");
+        closure_script::Grants::new()
+    });
+    let loaded = closure_script::load_dir(scripts_dir, &grants, &NoRuntimes);
+    for error in loaded.errors {
+        tracing::error!(path = %error.path.display(), error = %error.message, "could not load script");
+    }
+    let mut pending: Vec<Arc<dyn closure_core::module::Module>> = loaded
+        .modules
+        .into_iter()
+        .map(|module| Arc::new(module) as Arc<dyn closure_core::module::Module>)
+        .collect();
+    while !pending.is_empty() {
+        let previous = pending.len();
+        let mut deferred = Vec::new();
+        let mut errors = Vec::new();
+        for module in pending {
+            let mut candidate = all.clone();
+            candidate.push(Arc::clone(&module));
+            let valid = (|| -> Result<()> {
+                let registry = Arc::new(ModuleRegistry::new(candidate.clone())?);
+                let mut catalogs = TranslatorBuilder::new()?;
+                catalogs.add_registry(&registry)?;
+                ConfigCompiler::new(registry)?;
+                Ok(())
+            })();
+            match valid {
+                Ok(()) => all = candidate,
+                Err(error) => {
+                    errors.push(error);
+                    deferred.push(module);
+                }
+            }
+        }
+        if deferred.len() == previous {
+            for (module, error) in deferred.iter().zip(errors) {
+                tracing::error!(module = %module.manifest().id, %error, "could not register script");
+            }
+            break;
+        }
+        pending = deferred;
+    }
     let registry =
-        Arc::new(ModuleRegistry::new(modules()?).context("the set of modules is inconsistent")?);
+        Arc::new(ModuleRegistry::new(all).context("the set of modules is inconsistent")?);
     let mut catalogs = TranslatorBuilder::new()?;
     catalogs.add_registry(&registry)?;
     let mut compiler = ConfigCompiler::new(Arc::clone(&registry))
@@ -580,7 +636,7 @@ pub async fn run(args: Args) -> Result<()> {
         "starting closure"
     );
 
-    let core = build_core(args.bot_config.as_deref())?;
+    let core = build_core(args.bot_config.as_deref(), &args.scripts_dir)?;
     let db = Db::connect(&args.database_url, &DbOptions::default())
         .await
         .context("could not connect to the database")?;
@@ -749,6 +805,30 @@ mod tests {
     }
 
     #[test]
+    fn missing_scripts_keep_the_native_registry_unchanged() {
+        let missing =
+            std::env::temp_dir().join(format!("closure-no-scripts-{}", std::process::id()));
+        assert!(!missing.exists());
+        let core = build_core(None, &missing).unwrap();
+        let native = ModuleRegistry::new(modules().unwrap()).unwrap();
+        let ids = |registry: &ModuleRegistry| {
+            registry
+                .iter()
+                .map(|m| m.manifest().id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&core.registry), ids(&native));
+        let mut catalogs = TranslatorBuilder::new().unwrap();
+        catalogs.add_registry(&core.registry).unwrap();
+        assert_eq!(
+            build_commands(&core.registry, &catalogs.build())
+                .unwrap()
+                .len(),
+            21
+        );
+    }
+
+    #[test]
     fn the_bot_configuration_file_is_the_bottom_layer_of_every_server() {
         let write = |name: &str, text: &str| {
             let path =
@@ -757,7 +837,7 @@ mod tests {
             path
         };
         let good = write("good.yaml", "language: ja\nlimits: { concurrency: 12 }\n");
-        let core = build_core(Some(&good)).unwrap();
+        let core = build_core(Some(&good), Path::new("/nonexistent-closure-scripts-test")).unwrap();
         let defaults = core.store.settings(Id::new(1));
         assert_eq!(defaults.effective.limits.concurrency, 12);
         assert!(defaults.effective.language.0.is_some());
@@ -767,7 +847,9 @@ mod tests {
         let broken = write("broken.yaml", "limits: [");
         let invalid = write("invalid.yaml", "limits: { concurrency: 0 }\n");
         for path in [&missing, &broken, &invalid] {
-            let error = build_core(Some(path)).err().expect("start-up is refused");
+            let error = build_core(Some(path), Path::new("/nonexistent-closure-scripts-test"))
+                .err()
+                .expect("start-up is refused");
             assert!(
                 format!("{error:#}").contains(&*path.to_string_lossy()),
                 "{error:#}"

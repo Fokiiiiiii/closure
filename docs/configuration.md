@@ -1,5 +1,8 @@
 # Configuration
 
+The start-up option `--scripts-dir <directory>` (environment variable `SCRIPTS_DIR`) selects the
+installed scripts directory; it defaults to `scripts`. See [scripting](scripting.md).
+
 Every server is configured by one document. There are two ways to edit it:
 
 - **Simple:** pick a `preset` and flip a few switches (typically from a dashboard form).

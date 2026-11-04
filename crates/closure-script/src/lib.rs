@@ -7,13 +7,20 @@ use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::module::ModuleId;
 use serde::Deserialize;
 
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
+mod loader;
 mod module;
 pub mod runtime;
 
+pub use loader::{LoadError, Loaded, RuntimeFactory, ScriptSpec, load_dir, load_grants};
 pub use module::ScriptModule;
 
 #[cfg(test)]
 mod module_tests;
+
+#[cfg(test)]
+mod loader_tests;
 
 /// Host ceilings for one script invocation and its dedicated workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

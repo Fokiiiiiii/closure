@@ -28,6 +28,7 @@ closure-mod-moderation.workspace = true
 closure-mod-remind.workspace = true
 closure-mod-tags.workspace = true
 closure-mod-welcome.workspace = true
+closure-script = { path = "../closure-script" }
 dotenvy.workspace = true
 futures-util.workspace = true
 metrics-exporter-prometheus.workspace = true

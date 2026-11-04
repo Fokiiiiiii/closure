@@ -436,6 +436,7 @@ dependencies = [
  "closure-mod-remind",
  "closure-mod-tags",
  "closure-mod-welcome",
+ "closure-script",
  "dotenvy",
  "futures-util",
  "metrics-exporter-prometheus",
@@ -694,6 +695,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
