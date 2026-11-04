@@ -11,6 +11,8 @@ mod builtin;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
 mod loader;
+#[cfg(feature = "lua")]
+mod lua;
 mod module;
 pub mod runtime;
 #[cfg(feature = "wasm")]
@@ -18,6 +20,8 @@ pub mod wasm;
 
 pub use builtin::BuiltinRuntimes;
 pub use loader::{LoadError, Loaded, RuntimeFactory, ScriptSpec, load_dir, load_grants};
+#[cfg(feature = "lua")]
+pub use lua::LuaRuntime;
 pub use module::ScriptModule;
 
 #[cfg(test)]

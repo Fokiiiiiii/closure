@@ -9,8 +9,9 @@ publish.workspace = true
 repository.workspace = true
 
 [features]
-default = ["script-wasm"]
+default = ["script-wasm", "script-lua"]
 script-wasm = ["closure-script/wasm"]
+script-lua = ["closure-script/lua"]
 
 [dependencies]
 anyhow.workspace = true

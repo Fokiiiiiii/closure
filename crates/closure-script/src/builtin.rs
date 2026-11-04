@@ -4,6 +4,7 @@ use closure_core::module::ModuleRuntime;
 
 use crate::{RuntimeFactory, runtime::ScriptRuntime};
 
+/// Runtimes enabled in this build.
 #[derive(Debug)]
 pub struct BuiltinRuntimes;
 
@@ -13,12 +14,15 @@ impl RuntimeFactory for BuiltinRuntimes {
         kind: ModuleRuntime,
         entry: &[u8],
     ) -> Result<Option<Arc<dyn ScriptRuntime>>, String> {
-        #[cfg(feature = "wasm")]
-        if kind == ModuleRuntime::Wasm {
-            return crate::wasm::WasmRuntime::load(entry)
-                .map(|runtime| Some(Arc::new(runtime) as Arc<dyn ScriptRuntime>));
+        match kind {
+            #[cfg(feature = "wasm")]
+            ModuleRuntime::Wasm => Ok(Some(Arc::new(crate::wasm::WasmRuntime::load(entry)?))),
+            #[cfg(feature = "lua")]
+            ModuleRuntime::Lua => Ok(Some(Arc::new(crate::LuaRuntime::new(entry)?))),
+            _ => {
+                let _ = entry;
+                Ok(None)
+            }
         }
-        let _ = (kind, entry);
-        Ok(None)
     }
 }
