@@ -13,6 +13,7 @@ using the endpoint below before allowing dashboard actions.
 | GET `/v1/schema` | Configuration schema; optional `view` and `locale` |
 | GET `/v1/guilds` | Joined servers |
 | GET `/v1/guilds/{id}/directory` | Cached channels and roles |
+| GET `/v1/guilds/{id}/stats` | Daily server statistics; optional `days` (1–30, default 7) |
 | GET `/v1/guilds/{id}/access/{user_id}` | Member level and `dashboard.edit` decision |
 | GET `/v1/guilds/{id}/config` | Stored configuration; optional `view` |
 | PUT `/v1/guilds/{id}/config` | Save a configuration; optional `view` |
@@ -41,3 +42,29 @@ Errors are JSON objects with an `error` containing a `code` and `message`. Commo
 400 malformed request, 401 authentication required, 403 forbidden, 404 server not joined,
 412 stale revision, 422 invalid configuration, 428 missing `If-Match`, and 503 unavailable.
 Rate limiting may return 429; oversized requests return 413.
+
+## Server statistics
+
+`GET /v1/guilds/{id}/stats?days=7` returns daily buckets from oldest to newest,
+including today in the configured guild timezone (UTC by default), with `Cache-Control: no-store`.
+`members.total` is Discord's current count or null when unavailable. Joins and leaves count
+non-bot accounts only from the time recording began; only counts are stored, never member IDs.
+The first day may be incomplete. Member activity older than 400 days is removed. A member day
+before `members.since_unix` is null. `messages.since_unix` is the oldest retained
+message; earlier days are null. Message counts depend on modules requesting message history and
+are limited by `MESSAGE_HISTORY_DAYS` (`retention_days`, default 7); no message body is returned.
+Cases cover all retained history; `recent` contains up to ten cases regardless of the window.
+Times are Unix seconds, dates are `YYYY-MM-DD`, and Discord IDs are strings. A guild without
+configuration returns empty counts and a null member total.
+Member activity is stored in UTC hour buckets, so zones with a non-whole-hour offset cannot
+split the bucket crossing midnight exactly; that bucket is assigned by its starting hour.
+`members.since_unix` is the earliest retained bucket and moves forward after retention purges.
+
+For example, a one-day empty result has this shape (timestamps and dates are illustrative):
+
+```json
+{"generated_at_unix":1793790000,"timezone":"UTC","days":1,
+ "members":{"total":null,"since_unix":null,"joins":0,"leaves":0,"by_day":[{"date":"2026-11-04","joins":null,"leaves":null}]},
+ "messages":{"retention_days":7,"since_unix":null,"total":0,"by_day":[{"date":"2026-11-04","count":null}]},
+ "cases":{"total":0,"by_kind":{},"by_day":[{"date":"2026-11-04","kinds":{}}],"recent":[]}}
+```

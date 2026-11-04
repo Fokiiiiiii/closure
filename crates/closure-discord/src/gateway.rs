@@ -78,6 +78,8 @@ pub trait GuildHooks: Send + Sync {
     /// A hook may change the event (the history sets what an edit took away); the modules get it
     /// as changed.
     async fn message(&self, _event: &mut ModuleEvent) {}
+
+    async fn member_activity(&self, _event: &ModuleEvent) {}
 }
 
 /// Hooks that do nothing.
@@ -306,6 +308,16 @@ impl HookQueue {
         Some(recorded)
     }
 
+    fn push_member_activity(&self, event: ModuleEvent) {
+        let mut state = self.state();
+        if state.closed || state.messages.len() >= MESSAGE_QUEUE_CAPACITY {
+            tracing::warn!("member activity hook queue is full or closed");
+            return;
+        }
+        state.messages.push_back((event, None));
+        self.wake.notify_one();
+    }
+
     /// Declares that nothing will be pushed any more, so the worker may end once it is idle.
     fn close(&self) {
         self.state().closed = true;
@@ -360,6 +372,15 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
             continue;
         }
         for (mut event, recorded) in taken.messages {
+            if recorded.is_none() {
+                let hook = AssertUnwindSafe(hooks.member_activity(&event)).catch_unwind();
+                match tokio::time::timeout(HOOK_TIMEOUT, hook).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => tracing::error!("member activity hook panicked"),
+                    Err(_) => tracing::warn!("member activity hook timed out"),
+                }
+                continue;
+            }
             // A panicking hook counts as not kept; the worker goes on with the next message.
             let hook = AssertUnwindSafe(hooks.message(&mut event)).catch_unwind();
             match tokio::time::timeout(RECORD_TIMEOUT, hook).await {
@@ -669,6 +690,11 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
     }
 
     for converted in crate::convert::events(event, &before) {
+        if matches!(&converted, ModuleEvent::MemberJoined(member) if !member.user.bot)
+            || matches!(&converted, ModuleEvent::MemberLeft { user, .. } if !user.bot)
+        {
+            context.hooks.push_member_activity(converted.clone());
+        }
         let recorded = offer_message(&context.hooks, &*context.guild_hooks, &converted);
         let hook = match &converted {
             ModuleEvent::GuildAvailable {

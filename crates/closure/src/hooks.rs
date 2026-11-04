@@ -124,6 +124,17 @@ impl GuildHooks for AppHooks {
             tracing::warn!(kind = event.kind().as_str(), %error, "could not keep a message");
         }
     }
+
+    async fn member_activity(&self, event: &ModuleEvent) {
+        let (guild, joined) = match event {
+            ModuleEvent::MemberJoined(member) if !member.user.bot => (member.guild_id, true),
+            ModuleEvent::MemberLeft { guild_id, user } if !user.bot => (*guild_id, false),
+            _ => return,
+        };
+        if let Err(error) = self.db.record_member_activity(guild, joined).await {
+            tracing::warn!(%guild, %error, "could not record member activity");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +310,58 @@ mod tests {
             .guild_available(Id::new(5), "Test", Some(Locale::Ja))
             .await;
         hooks.guild_removed(Id::new(5)).await;
+        hooks
+            .member_activity(&ModuleEvent::MemberLeft {
+                guild_id: Id::new(5),
+                user: UserInfo {
+                    id: Id::new(7),
+                    name: "user".into(),
+                    bot: false,
+                },
+            })
+            .await;
+    }
+
+    #[sqlx::test(migrations = "../closure-db/migrations")]
+    async fn member_activity_ignores_bots_and_counts_both_kinds(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        let hooks = AppHooks::new(db, store(), 7, Arc::new(ConfigChanges::default()));
+        let user = |bot| UserInfo {
+            id: Id::new(7),
+            name: "user".into(),
+            bot,
+        };
+        let join = |bot| {
+            ModuleEvent::MemberJoined(closure_core::event::MemberInfo {
+                guild_id: Id::new(5),
+                user: user(bot),
+                roles: vec![],
+                nick: None,
+                joined_at: None,
+                timed_out_until: None,
+            })
+        };
+        hooks.member_activity(&join(false)).await;
+        hooks.member_activity(&join(false)).await;
+        hooks.member_activity(&join(true)).await;
+        hooks
+            .member_activity(&ModuleEvent::MemberLeft {
+                guild_id: Id::new(5),
+                user: user(false),
+            })
+            .await;
+        hooks
+            .member_activity(&ModuleEvent::MemberLeft {
+                guild_id: Id::new(5),
+                user: user(true),
+            })
+            .await;
+        let counts: (i32, i32) =
+            sqlx::query_as("SELECT joins, leaves FROM guild_member_activity WHERE guild_id = 5")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(counts, (2, 1));
     }
 
     #[test]

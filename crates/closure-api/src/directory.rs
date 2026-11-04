@@ -38,6 +38,12 @@ pub struct Directory {
 pub trait GuildDirectory: Send + Sync {
     fn guild(&self, guild: GuildId) -> Option<Guild>;
     fn directory(&self, guild: GuildId) -> Option<Directory>;
+    fn member_count(
+        &self,
+        _guild: GuildId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<u64>> + Send + '_>> {
+        Box::pin(async { None })
+    }
 }
 
 pub(crate) async fn guilds(State(state): State<ApiState>) -> Result<Json<Vec<Guild>>, ApiError> {

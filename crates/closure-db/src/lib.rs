@@ -17,6 +17,7 @@ mod history;
 mod history_file_tests;
 mod ids;
 mod scheduler;
+mod stats;
 mod storage;
 
 use std::str::FromStr;
@@ -150,6 +151,7 @@ mod tests {
                 "guild_case_numbers",
                 "guild_config",
                 "guild_config_history",
+                "guild_member_activity",
                 "guilds",
                 "message_files",
                 "module_counters",

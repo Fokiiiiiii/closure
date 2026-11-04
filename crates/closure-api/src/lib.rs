@@ -16,6 +16,7 @@ mod directory;
 mod error;
 mod ops;
 mod server;
+mod stats;
 
 pub use access::MemberAccess;
 pub use directory::{Channel, Directory, Guild, GuildDirectory, Role};
@@ -78,6 +79,7 @@ pub(crate) struct Inner {
 #[derive(Clone)]
 pub struct ApiState {
     pub(crate) inner: Arc<Inner>,
+    pub(crate) message_history_days: u32,
 }
 
 impl fmt::Debug for ApiState {
@@ -111,7 +113,14 @@ impl ApiState {
                 token_digest: auth::digest(token),
                 failures: auth::FailureLimiter::default(),
             }),
+            message_history_days: 7,
         })
+    }
+
+    #[must_use]
+    pub fn with_message_history_days(mut self, days: u32) -> Self {
+        self.message_history_days = days;
+        self
     }
 }
 
@@ -122,6 +131,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/schema", get(ops::schema))
         .route("/v1/guilds", get(directory::guilds))
         .route("/v1/guilds/{guild_id}/directory", get(directory::directory))
+        .route("/v1/guilds/{guild_id}/stats", get(stats::stats))
         .route(
             "/v1/guilds/{guild_id}/access/{user_id}",
             get(access::get_access),

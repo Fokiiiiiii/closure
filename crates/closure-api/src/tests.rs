@@ -257,6 +257,67 @@ fn put(guild: u64, if_match: &str, body: &str) -> Call {
 const GUILD: u64 = 42;
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
+async fn stats_validate_query_and_return_empty_guild(pool: PgPool) {
+    let app = app(pool).await;
+    for suffix in ["?days=0", "?days=31", "?days=abc"] {
+        let response = send(
+            &app.router,
+            call(Method::GET, &format!("/v1/guilds/999/stats{suffix}")),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(response.json()["error"]["code"], "bad_request");
+    }
+    assert_eq!(
+        send(&app.router, call(Method::GET, "/v1/guilds/0/stats"))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        send(
+            &app.router,
+            call(Method::GET, "/v1/guilds/999/stats").token(None)
+        )
+        .await
+        .status,
+        StatusCode::UNAUTHORIZED
+    );
+    let response = send(&app.router, call(Method::GET, "/v1/guilds/999/stats")).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.headers[header::CACHE_CONTROL], "no-store");
+    let body = response.json();
+    assert_eq!(body["days"], 7);
+    assert_eq!(body["timezone"], "UTC");
+    assert!(body["members"]["total"].is_null());
+    assert_eq!(body["messages"]["total"], 0);
+    assert_eq!(body["cases"]["by_day"].as_array().unwrap().len(), 7);
+    let days = body["cases"]["by_day"].as_array().unwrap();
+    assert!(
+        days.windows(2)
+            .all(|pair| pair[0]["date"].as_str() < pair[1]["date"].as_str())
+    );
+    assert!(days.iter().all(|day| day["kinds"] == json!({})));
+    assert_eq!(body.as_object().unwrap().len(), 6);
+    assert_eq!(body["members"].as_object().unwrap().len(), 5);
+    assert_eq!(body["messages"].as_object().unwrap().len(), 4);
+
+    app.db
+        .save_config(
+            Id::new(GUILD),
+            None,
+            &closure_config::parse_overrides("timezone: Asia/Tokyo").unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    let response = send(&app.router, call(Method::GET, "/v1/guilds/42/stats?days=1")).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json()["timezone"], "Asia/Tokyo");
+    assert!(response.json()["members"]["total"].is_null());
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
 async fn unavailable_member_access_blocks_reads_and_actor_saves(pool: PgPool) {
     let app = app_with_access(pool, GatewayStatus { ready: 0, total: 1 }, false);
     app.db.register_guild(Id::new(GUILD)).await.unwrap();

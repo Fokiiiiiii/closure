@@ -54,12 +54,16 @@ struct GatewayReadiness(Arc<GatewayHealth>);
 struct CachedDirectory {
     cache: InMemoryCacheView,
     health: Arc<GatewayHealth>,
+    http: Arc<Client>,
+    counts:
+        tokio::sync::Mutex<std::collections::HashMap<GuildId, (std::time::Instant, Option<u64>)>>,
 }
 
 struct CachedAccess {
     cache: InMemoryCacheView,
     api: Arc<TwilightApi>,
     health: Arc<dyn Readiness>,
+    http: Arc<Client>,
 }
 
 impl closure_api::MemberAccess for CachedAccess {
@@ -130,6 +134,38 @@ impl CachedAccess {
 }
 
 impl closure_api::GuildDirectory for CachedDirectory {
+    fn member_count(
+        &self,
+        id: GuildId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<u64>> + Send + '_>> {
+        Box::pin(async move {
+            if let Some(count) = self
+                .cache
+                .0
+                .guild(id)
+                .and_then(|guild| guild.member_count())
+            {
+                return Some(count);
+            }
+            let mut counts = self.counts.lock().await;
+            if let Some((at, count)) = counts.get(&id)
+                && at.elapsed() < Duration::from_secs(60)
+            {
+                return *count;
+            }
+            let count = match self.http.guild(id).with_counts(true).await {
+                Ok(response) => response
+                    .model()
+                    .await
+                    .ok()
+                    .and_then(|guild| guild.approximate_member_count),
+                Err(_) => None,
+            };
+            counts.insert(id, (std::time::Instant::now(), count));
+            count
+        })
+    }
+
     fn guild(&self, id: GuildId) -> Option<closure_api::Guild> {
         if self.health.total() == 0 || self.health.ready() != self.health.total() {
             return None;
@@ -398,11 +434,14 @@ async fn start_api(
         Arc::new(CachedDirectory {
             cache: access.cache.clone(),
             health,
+            http: Arc::clone(&access.http),
+            counts: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }),
         Arc::new(access),
         move || metrics.render(),
         &SecretString::from(token.clone()),
-    )?;
+    )?
+    .with_message_history_days(args.message_history_days);
     let listener = tokio::net::TcpListener::bind(args.api_bind)
         .await
         .with_context(|| format!("could not listen on {}", args.api_bind))?;
@@ -447,6 +486,9 @@ fn start_storage_upkeep(
                 }
                 Ok(_) => {}
                 Err(error) => tracing::warn!(%error, "could not remove old messages"),
+            }
+            if let Err(error) = db.purge_member_activity().await {
+                tracing::warn!(%error, "could not remove old member activity");
             }
             tokio::select! {
                 () = shutdown.cancelled() => return,
@@ -566,6 +608,7 @@ async fn serve(
             cache: InMemoryCacheView(cache),
             api,
             health: Arc::new(GatewayReadiness(Arc::clone(gateway.health()))),
+            http: Arc::clone(&http),
         },
         metrics,
         shutdown,
@@ -752,6 +795,7 @@ mod tests {
             cache: InMemoryCacheView(Arc::clone(&cache)),
             api: Arc::clone(&api),
             health: Arc::new(TestReadiness(GatewayStatus { ready, total })),
+            http: Arc::new(Client::new("test".into())),
         };
         assert!(
             access(1, 1)
