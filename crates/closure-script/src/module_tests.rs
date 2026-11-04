@@ -61,6 +61,48 @@ fn send(channel: u64, text: &str) -> Value {
     json!({"type":"send_message", "channel_id":channel.to_string(), "content":text, "embeds":[], "reply_to":null})
 }
 
+#[cfg(feature = "lua")]
+#[tokio::test]
+async fn lua_loader_executes_only_granted_actions() {
+    use crate::{BuiltinRuntimes, load_dir};
+    use closure_core::module::ModuleRuntime;
+
+    let dir = std::env::temp_dir().join(format!("closure-lua-loader-{}", std::process::id()));
+    let script_dir = dir.join("script");
+    std::fs::create_dir_all(&script_dir).unwrap();
+    let mut manifest = ModuleManifest::new(ModuleId::new("script").unwrap(), "script", "1")
+        .capabilities([Capability::SendMessages]);
+    manifest.runtime = ModuleRuntime::Lua;
+    let mut spec = serde_json::to_value(manifest).unwrap();
+    spec["entry"] = json!("main.lua");
+    std::fs::write(
+        script_dir.join("module.yaml"),
+        serde_json::to_vec(&spec).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(script_dir.join("main.lua"), "function on_event(e) return {{type='send_message',channel_id='2',content='hello',embeds=closure.array({}),reply_to=closure.null}} end").unwrap();
+    let (_, ctx, api) = setup(
+        Arc::new(FakeRuntime::new(|_, _, _| Ok(json!([])))),
+        vec![],
+        Limits::default(),
+    );
+    for (grant, expected) in [(true, 1), (false, 1)] {
+        let grants = if grant {
+            Grants::from([(
+                ModuleId::new("script").unwrap(),
+                vec![Capability::SendMessages],
+            )])
+        } else {
+            Grants::new()
+        };
+        let loaded = load_dir(&dir, &grants, &BuiltinRuntimes);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        loaded.modules[0].on_event(&ctx, &event()).await.unwrap();
+        assert_eq!(api.actions().len(), expected);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn denied_capabilities_emit_one_warning_per_module() {
     use std::io::Write;

@@ -1,6 +1,6 @@
 # Scripting: Lua and WebAssembly modules
 
-Status: the runtime-independent bridge and loader are implemented; real runtimes remain a design. It turns the sketch in
+Status: the runtime-independent bridge, loader and Lua runtime are implemented; WebAssembly remains a design. It turns the sketch in
 [architecture](architecture.md#extending-lua-and-webassembly) into a plan.
 
 ## Who installs scripts
@@ -83,13 +83,33 @@ Every number is a ceiling the host owns; `limits` in the manifest can only lower
 
 ## Runtimes
 
-1. **WebAssembly (`wasmtime`)**, first. No WASI by default, no imports except the host calls above,
+1. **WebAssembly (`wasmtime`)**, planned. No WASI by default, no imports except the host calls above,
    fuel and epoch interruption on, memory and table limits set. Any language that compiles to it
    (Rust, AssemblyScript, JavaScript via a toolchain) can write a module.
-2. **Lua (`mlua`, vendored Lua 5.4)**, second, for small scripts that are easier to write. The
+2. **Lua (`mlua`, vendored Lua 5.4)**, available for small scripts. The
    standard library is cut down to `string`, `table`, `math`, `utf8` and `coroutine`; `os`, `io`,
    `package`, `debug`, `dofile`, `loadfile` and `load` are absent. An instruction-count hook enforces
-   the budget.
+   the budget. `loadstring`, `require`, `collectgarbage`, `string.dump`, `math.random` and
+   `math.randomseed` are also absent.
+
+Lua source must be text, and is syntax checked when loaded. Each event gets a fresh Lua state.
+The chunk defines `on_event(event)`, which returns an array of actions; `nil` and `{}` mean no
+actions. JSON arrays carry an array metatable and JSON null is `closure.null`; use
+`closure.array({})` for a newly constructed empty array. `closure.execute(action)`,
+`closure.store_get(key)`, `closure.store_set(key, value)`, `closure.store_delete(key)` and
+`closure.store_list(prefix, limit)` raise Lua errors on host errors. An upper-limit failure still
+fails the invocation even if caught with `pcall`.
+
+```lua
+function on_event(event)
+  return {}
+end
+```
+
+The instruction hook checks every 1,000 instructions, including coroutines. It checks the wall
+deadline and elapsed CPU-equivalent time excluding time in host calls. Lua allocations have a
+16 MiB ceiling, or the manifest's lower limit. The `closure` binary enables `script-lua` by default;
+use `--no-default-features` to omit it. The runtime factory is available to the application wiring.
 
 Both runtimes implement one small internal trait (`ScriptRuntime`: load, call, drop), so the bridge,
 the limits, the circuit breaker and the tests are written once. A second runtime is a thin layer.
@@ -101,7 +121,7 @@ behind a Cargo feature so a build that does not want them does not pay for them.
 
 - Scripts are read once at start-up in directory-name order. Each invalid script is skipped and
   logged without preventing other scripts from loading. Ungranted capabilities are dropped with
-  one warning per module. This build has no runtime and reports each otherwise valid script as unavailable.
+  one warning per module. The application must connect the built-in factory when loading scripts.
 - A manifest is validated like a native one: unique names, command and option limits, schema.
 - Reloading while running is not in the first version. It needs the unload of a module's commands,
   jobs and subscriptions to be exact; it comes after the bridge is proven.
@@ -114,7 +134,7 @@ behind a Cargo feature so a build that does not want them does not pay for them.
   (must be aborted within the deadline), a memory hog, host execute and KV calls, a huge output and
   a trap. Adapters provide case fixtures to `closure_script::conformance::run_all`; a runtime must
   stop execution within its budget and reject excess memory; the host rejects excess output. The fake runtime demonstrates
-  the missing loop and memory enforcement; real guest fixtures and enforcement await the runtimes.
+  the missing loop and memory enforcement; Lua supplies real guest fixtures.
   `run_all_for` selects Lua or WebAssembly. A runtime that never returns leaves its test worker
   running, so run untrusted adapters in a disposable process.
 
