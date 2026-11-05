@@ -6,8 +6,10 @@ use closure_core::action::{Action, MentionPolicy, Outcome, Reason};
 use closure_core::capability::Capability;
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{Event, EventKind};
+use closure_core::message::MessageSpec;
 use closure_core::module::EventContext;
 use closure_core::subscription::Flow;
+use closure_sdk::message::MessageTemplate;
 use closure_sdk::recent::{Burst, Claim, Recent, RecentActions, RecentFilter, RecentLimits};
 use closure_sdk::template::{Template, Values};
 use closure_sdk::{CoreError, Intents, JobCx, Locale, ModuleBuilder, SdkModule, Subscription};
@@ -25,9 +27,42 @@ const DELETE_JOB: &str = "delete_welcome";
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub channel: Option<String>,
-    pub message: Option<String>,
+    pub message: Option<Message>,
     pub delete_after: Option<String>,
     pub include_bots: bool,
+}
+
+/// What the welcome says: a text, or a message with embeds.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Message {
+    Text(String),
+    Rich(MessageSpec),
+}
+
+/// The variables a welcome message may use.
+const VARIABLES: [&str; 4] = ["user", "username", "server", "count"];
+
+/// A welcome message that has been read.
+enum Welcome {
+    Text(Template),
+    Rich(MessageTemplate),
+}
+
+impl Welcome {
+    fn uses(&self, name: &str) -> bool {
+        match self {
+            Self::Text(template) => template.uses(name),
+            Self::Rich(message) => message.uses(name),
+        }
+    }
+}
+
+fn read_message(message: &Message) -> Result<Welcome, String> {
+    match message {
+        Message::Text(text) => validate_template(text).map(Welcome::Text),
+        Message::Rich(spec) => MessageTemplate::parse(spec.clone(), &VARIABLES).map(Welcome::Rich),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,8 +82,8 @@ fn parse_config(
     ModuleError,
 > {
     let config: Config = ctx.parse_config()?;
-    if let Some(message) = config.message.as_deref() {
-        validate_template(message).map_err(ModuleError::Config)?;
+    if let Some(message) = &config.message {
+        read_message(message).map_err(ModuleError::Config)?;
     }
     let channel = channel_id(&config)?;
     let delete_after = config
@@ -65,7 +100,7 @@ fn validate_template(message: &str) -> Result<Template, String> {
         return Err("welcome message exceeds 2000 characters".into());
     }
     let template = Template::parse(message).map_err(|error| error.to_string())?;
-    if !template.uses_only(&["user", "username", "server", "count"]) {
+    if !template.uses_only(&VARIABLES) {
         return Err("welcome message has an unknown variable".into());
     }
     Ok(template)
@@ -160,12 +195,12 @@ async fn send_welcome(
     channel: closure_core::event::ChannelId,
     delete_after: Option<Duration>,
 ) -> Result<(), ModuleError> {
-    let template = match config.message.as_deref() {
-        Some(message) => validate_template(message).map_err(ModuleError::Config)?,
-        None => {
+    let template = match &config.message {
+        Some(message) => read_message(message).map_err(ModuleError::Config)?,
+        None => Welcome::Text(
             Template::parse(&ctx.t_in(ctx.locale, "welcome-default", &closure_sdk::Args::new()))
-                .map_err(|error| ModuleError::Config(error.to_string()))?
-        }
+                .map_err(|error| ModuleError::Config(error.to_string()))?,
+        ),
     };
     let mut values = json!({
         "user": format!("<@{}>", member.user.id),
@@ -195,17 +230,26 @@ async fn send_welcome(
             }
         }
     }
-    let content: String = template
-        .render(&Values::from_json(values).unwrap_or_default())
-        .chars()
-        .take(2_000)
-        .collect();
+    let values = Values::from_json(values).unwrap_or_default();
+    let (content, embeds) = match &template {
+        Welcome::Text(text) => (
+            Some(text.render(&values).chars().take(2_000).collect::<String>()),
+            Vec::new(),
+        ),
+        Welcome::Rich(message) => match message.render(ctx.now(), &values) {
+            Ok(parts) => parts,
+            Err(error) => {
+                tracing::debug!(%error, guild = %ctx.guild_id, "could not build the welcome message");
+                return Ok(());
+            }
+        },
+    };
     let message = match ctx
         .api
         .execute(Action::SendMessage {
             channel_id: channel,
-            content: Some(content),
-            embeds: Vec::new(),
+            content,
+            embeds,
             reply_to: None,
             mentions: MentionPolicy::Users(vec![member.user.id]),
         })
@@ -274,11 +318,17 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                         "x-ui": { "widget": "channel", "level": "basic" }
                     },
                     "message": {
-                        "type": ["string", "null"],
-                        "maxLength": 2000,
-                        "pattern": "^([^{}]|\\{\\{|\\}\\}|\\{(user|username|server|count)\\})*$",
+                        "anyOf": [
+                            {
+                                "type": "string",
+                                "maxLength": 2000,
+                                "pattern": "^([^{}]|\\{\\{|\\}\\}|\\{(user|username|server|count)\\})*$"
+                            },
+                            closure_core::message::schema(),
+                            { "type": "null" }
+                        ],
                         "description": "config-welcome-message",
-                        "x-ui": { "level": "basic" }
+                        "x-ui": { "level": "basic", "widget": "message", "variables": VARIABLES }
                     },
                     "delete_after": {
                         "type": ["string", "null"],

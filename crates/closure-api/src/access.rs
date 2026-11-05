@@ -23,7 +23,7 @@ pub trait MemberAccess: Send + Sync {
 pub(crate) struct Access {
     pub(crate) level: u8,
     level_name: &'static str,
-    allowed: bool,
+    pub(crate) allowed: bool,
     reason: &'static str,
 }
 

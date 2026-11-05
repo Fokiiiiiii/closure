@@ -192,6 +192,9 @@ struct Usable {
 /// left out when its duration does not read, when a timeout has none or one Discord refuses, or
 /// when an earlier template of the same punishment has its id.
 fn usable(config: &Config, kind: Kind) -> Vec<Usable> {
+    if !config.templates_enabled {
+        return Vec::new();
+    }
     let mut seen = HashSet::new();
     kind.templates(&config.templates)
         .iter()

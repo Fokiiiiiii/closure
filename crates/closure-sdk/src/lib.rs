@@ -44,6 +44,7 @@ pub mod duration;
 pub mod embed;
 mod error;
 pub mod files;
+pub mod message;
 pub mod modlog;
 mod module;
 pub mod punish;

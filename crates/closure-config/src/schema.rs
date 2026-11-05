@@ -416,7 +416,7 @@ fn check_levels(schema: &Value, inherited: bool, path: &str) -> Result<(), Strin
 }
 
 /// The widgets a dashboard can draw for a setting.
-const WIDGETS: [&str; 9] = [
+const WIDGETS: [&str; 10] = [
     "role",
     "channel",
     "duration",
@@ -426,6 +426,7 @@ const WIDGETS: [&str; 9] = [
     "entries-json",
     "json",
     "flag-or-roles",
+    "message",
 ];
 
 /// Hints for the dashboard's forms. They are annotations the bot does not act on, so only their
@@ -447,6 +448,13 @@ fn check_ui_hints(hints: &Value) -> Result<(), String> {
             "group" => text_within(value, 40),
             "help" => text_within(value, 200),
             "order" => value.as_u64().is_some_and(|order| order <= 1000),
+            // The variables a message setting may use, for the dashboard to offer.
+            "variables" => value.as_array().is_some_and(|names| {
+                names.len() <= 12
+                    && names
+                        .iter()
+                        .all(|n| n.as_str().is_some_and(|n| n.len() <= 20))
+            }),
             // Which view a setting belongs to; see the `view` module.
             "level" => value
                 .as_str()

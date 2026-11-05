@@ -291,3 +291,5 @@ trigger-thread-create-spam = a member creates threads in a burst
 detail-thread-create-spam = { $count } threads created within { $window }
 config-automod-threads_as_parent_channel = Count known threads under their parent channel in spam windows.
 config-automod-dm_messages = Custom direct-message templates by punishment kind.
+config-automod-rules_enabled = Whether the rules run. Off keeps them and runs none.
+config-automod-antiraid-enabled = Whether anti-raid runs. Off keeps its settings and runs nothing.

@@ -12,11 +12,26 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 use twilight_model::id::Id;
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Config {
+    /// Whether the delete rules run. Off keeps them, and runs none.
+    auto_delete_enabled: bool,
     auto_delete: Vec<DeleteRule>,
+    /// Whether the reactions are added. Off keeps the rules, and adds none.
+    auto_react_enabled: bool,
     auto_react: Vec<ReactRule>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            auto_delete_enabled: true,
+            auto_delete: Vec::new(),
+            auto_react_enabled: true,
+            auto_react: Vec::new(),
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,6 +113,8 @@ struct DeleteJob {
 fn settings() -> (serde_json::Value, serde_json::Value) {
     let channel = json!({"type": "string", "pattern": "^[1-9][0-9]{0,19}$"});
     let schema = json!({"type": "object", "additionalProperties": false, "properties": {
+        "auto_delete_enabled": {"type": "boolean", "description": "config-auto-delete-enabled", "x-ui": {"level": "basic"}},
+        "auto_react_enabled": {"type": "boolean", "description": "config-auto-react-enabled", "x-ui": {"level": "basic"}},
         "auto_delete": {"type": "array", "maxItems": 25, "description": "config-auto-delete", "x-ui": {"level": "basic"}, "items": {
             "type": "object", "additionalProperties": false, "required": ["channel", "after"],
             "properties": {"channel": channel, "after": {"type": "string", "pattern": "^[0-9]+[smhdw]( *[0-9]+[smhdw])*$"}, "skip_pinned": {"type": "boolean", "default": true}}
@@ -107,7 +124,10 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "properties": {"channel": channel, "emojis": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "minLength": 1, "maxLength": 64}}, "skip_bots": {"type": "boolean", "default": true}}
         }}
     }});
-    (schema, json!({"auto_delete": [], "auto_react": []}))
+    (
+        schema,
+        json!({"auto_delete_enabled": true, "auto_delete": [], "auto_react_enabled": true, "auto_react": []}),
+    )
 }
 
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
@@ -213,11 +233,13 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     let config: Config = parse_module_config(&ctx)?;
     config.validate()?;
     let channel = message.channel_id.to_string();
-    let has_rule = config
-        .auto_delete
-        .iter()
-        .any(|rule| rule.channel == channel)
-        || config.auto_react.iter().any(|rule| rule.channel == channel);
+    let (deletes_on, reacts_on) = (config.auto_delete_enabled, config.auto_react_enabled);
+    let has_rule = (deletes_on
+        && config
+            .auto_delete
+            .iter()
+            .any(|rule| rule.channel == channel))
+        || (reacts_on && config.auto_react.iter().any(|rule| rule.channel == channel));
     if has_rule && protected(&ctx, message.channel_id).await {
         if first_protected_warning(ctx.guild_id.get(), message.channel_id.get()) {
             tracing::warn!("ignoring channel rule for protected or unresolved log destination");
@@ -229,7 +251,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     let mut deletes = config
         .auto_delete
         .iter()
-        .filter(|rule| rule.channel == channel);
+        .filter(|rule| deletes_on && rule.channel == channel);
     if let Some(rule) = deletes.next() {
         if deletes.next().is_some() {
             tracing::warn!("duplicate auto_delete channel; using first rule");
@@ -253,7 +275,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     let mut reactions = config
         .auto_react
         .iter()
-        .filter(|rule| rule.channel == channel);
+        .filter(|rule| reacts_on && rule.channel == channel);
     if let Some(rule) = reactions.next() {
         if reactions.next().is_some() {
             tracing::warn!("duplicate auto_react channel; using first rule");

@@ -234,3 +234,46 @@ async fn welcome_without_channel_does_nothing_and_send_failure_does_not_fail_the
         ));
     assert!(harness.emit(join(8, false)).await.is_ok());
 }
+
+#[tokio::test]
+async fn welcome_can_be_a_message_with_an_embed() {
+    let harness = harness();
+    harness.set_config(serde_json::json!({
+        "channel": "42",
+        "message": {
+            "content": "Hi {user}",
+            "embeds": [{"title": "Welcome to {server}", "color": "#5865f2", "footer": {"text": "{username}"}}]
+        }
+    }));
+    harness
+        .api()
+        .add_channel(ChannelId::new(42), Some(GuildId::new(1)));
+    harness.api().set_guild_name(GuildId::new(1), "Example");
+
+    harness.emit(join(7, false)).await.unwrap();
+
+    assert!(harness.actions().iter().any(|action| matches!(
+        action,
+        Action::SendMessage { content: Some(content), embeds, mentions: MentionPolicy::Users(users), .. }
+            if content == "Hi <@7>"
+                && users == &vec![UserId::new(7)]
+                && embeds.len() == 1
+                && embeds[0].title.as_deref() == Some("Welcome to Example")
+                && embeds[0].color == Some(0x58_65f2)
+                && embeds[0].footer.as_ref().is_some_and(|f| f.text == "user-7")
+    )));
+}
+
+#[test]
+fn a_message_with_an_unknown_variable_or_nothing_in_it_is_refused() {
+    use crate::{Message, read_message};
+    use closure_core::message::MessageSpec;
+    let read = |value: serde_json::Value| {
+        read_message(&Message::Rich(
+            serde_json::from_value::<MessageSpec>(value).unwrap(),
+        ))
+    };
+    assert!(read(serde_json::json!({"embeds": [{"title": "{user}"}]})).is_ok());
+    assert!(read(serde_json::json!({"embeds": [{"title": "{nobody}"}]})).is_err());
+    assert!(read(serde_json::json!({})).is_err());
+}

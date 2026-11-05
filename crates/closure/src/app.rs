@@ -51,6 +51,49 @@ const ATTACHMENT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct GatewayReadiness(Arc<GatewayHealth>);
 
+/// Sends what the dashboard writes, as the bot.
+struct DiscordSink {
+    api: Arc<TwilightApi>,
+}
+
+impl closure_api::MessageSink for DiscordSink {
+    fn send(
+        &self,
+        channel: closure_core::event::ChannelId,
+        content: Option<String>,
+        embeds: Vec<twilight_model::channel::message::Embed>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<closure_api::Sent, closure_api::SendFailure>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let action = Action::SendMessage {
+                channel_id: channel,
+                content,
+                embeds,
+                reply_to: None,
+                mentions: closure_core::action::MentionPolicy::None,
+            };
+            match self.api.execute(action).await {
+                Ok(Outcome::Message(message)) => Ok(closure_api::Sent {
+                    id: message.id.get(),
+                }),
+                Ok(_) => Err(closure_api::SendFailure::Unavailable),
+                Err(DiscordError::Forbidden(_)) => Err(closure_api::SendFailure::Forbidden),
+                Err(DiscordError::NotFound) => Err(closure_api::SendFailure::NotFound),
+                Err(DiscordError::Invalid(why)) => Err(closure_api::SendFailure::Rejected(why)),
+                Err(error) => {
+                    tracing::warn!(%error, "could not send a message from the dashboard");
+                    Err(closure_api::SendFailure::Unavailable)
+                }
+            }
+        })
+    }
+}
+
 struct CachedDirectory {
     cache: InMemoryCacheView,
     health: Arc<GatewayHealth>,
@@ -427,6 +470,9 @@ async fn start_api(
     if !args.api_bind.ip().is_loopback() {
         tracing::warn!(address = %args.api_bind, "the HTTP API is reachable from other machines; put TLS in front of it");
     }
+    let sink = Arc::new(DiscordSink {
+        api: Arc::clone(&access.api),
+    });
     let state = ApiState::new(
         Arc::clone(&core.store),
         db.clone(),
@@ -441,7 +487,8 @@ async fn start_api(
         move || metrics.render(),
         &SecretString::from(token.clone()),
     )?
-    .with_message_history_days(args.message_history_days);
+    .with_message_history_days(args.message_history_days)
+    .with_messages(sink);
     let listener = tokio::net::TcpListener::bind(args.api_bind)
         .await
         .with_context(|| format!("could not listen on {}", args.api_bind))?;

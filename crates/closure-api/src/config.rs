@@ -30,7 +30,7 @@ pub(crate) fn guild_id(raw: u64) -> Result<GuildId, ApiError> {
     Ok(Id::new(raw))
 }
 
-fn actor(headers: &HeaderMap) -> Result<Option<UserId>, ApiError> {
+pub(crate) fn actor(headers: &HeaderMap) -> Result<Option<UserId>, ApiError> {
     let mut values = headers.get_all("x-closure-actor").iter();
     let Some(value) = values.next() else {
         return Ok(None);

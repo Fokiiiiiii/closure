@@ -14,12 +14,14 @@ mod auth;
 mod config;
 mod directory;
 mod error;
+mod messages;
 mod ops;
 mod server;
 mod stats;
 
 pub use access::MemberAccess;
 pub use directory::{Channel, Directory, Guild, GuildDirectory, Role};
+pub use messages::{MessageSink, SendFailure, Sent};
 pub use server::{ServerLimits, serve};
 
 use std::fmt;
@@ -80,6 +82,7 @@ pub(crate) struct Inner {
 pub struct ApiState {
     pub(crate) inner: Arc<Inner>,
     pub(crate) message_history_days: u32,
+    pub(crate) messages: Option<Arc<dyn MessageSink>>,
 }
 
 impl fmt::Debug for ApiState {
@@ -114,7 +117,15 @@ impl ApiState {
                 failures: auth::FailureLimiter::default(),
             }),
             message_history_days: 7,
+            messages: None,
         })
+    }
+
+    /// Lets the dashboard send messages through the bot.
+    #[must_use]
+    pub fn with_messages(mut self, sink: Arc<dyn MessageSink>) -> Self {
+        self.messages = Some(sink);
+        self
     }
 
     #[must_use]
@@ -149,6 +160,7 @@ pub fn router(state: ApiState) -> Router {
             get(config::effective),
         )
         .route("/v1/guilds/{guild_id}/config/history", get(config::history))
+        .route("/v1/guilds/{guild_id}/messages", post(messages::send))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

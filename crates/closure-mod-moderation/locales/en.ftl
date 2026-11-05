@@ -267,3 +267,5 @@ command-clear = clear
 option-clear-count = count
     .description = How many messages, from 1 to 100
 config-moderation-dm_messages = Custom direct-message templates by punishment kind.
+config-moderation-escalation_enabled = Whether a warning can bring about a punishment. Off keeps the rules.
+config-moderation-templates_enabled = Whether the templates are offered. Off keeps them.

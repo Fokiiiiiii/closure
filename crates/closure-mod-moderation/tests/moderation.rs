@@ -827,7 +827,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_and_no_required_reason()
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation": [], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "templates": {} })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "templates_enabled": true, "templates": {} })
     );
 }
 

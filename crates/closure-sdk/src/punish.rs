@@ -17,8 +17,10 @@ use twilight_model::channel::message::Embed;
 use crate::dm::{self, DirectMessage, Sent};
 use crate::duration::{TimeStyle, ends_at, format_in, timestamp};
 use crate::embed::{DESCRIPTION_LIMIT, EmbedBuilder, escape, truncate};
+use crate::message::MessageTemplate;
 use crate::modlog;
 use crate::template::{Template, Values};
+use closure_core::message::MessageSpec;
 
 mod roles;
 
@@ -144,15 +146,37 @@ impl Default for Settings {
     }
 }
 
+/// What a server wrote for one kind of punishment: a text, or a message with embeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DmMessage {
+    Text(Template),
+    Rich(MessageTemplate),
+}
+
+/// The variables a notification may use.
+const DM_VARIABLES: [&str; 6] = [
+    "user",
+    "server",
+    "moderator",
+    "reason",
+    "duration",
+    "expires",
+];
+
 /// Validated templates for punishment notifications.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DmMessages(BTreeMap<String, Template>);
+pub struct DmMessages(BTreeMap<String, DmMessage>);
 
 /// The public schema of the notification templates.
 #[must_use]
 pub fn dm_messages_schema(description: &str) -> serde_json::Value {
     let entry = serde_json::json!({
-        "type": "string", "maxLength": 1500, "x-ui": {"widget": "textarea"}
+        "anyOf": [
+            {"type": "string", "maxLength": 1500, "x-ui": {"widget": "textarea"}},
+            closure_core::message::schema(),
+            {"type": "null"}
+        ],
+        "x-ui": {"widget": "message", "variables": DM_VARIABLES}
     });
     serde_json::json!({
         "type": "object", "description": description, "x-ui": {"level": "basic"},
@@ -163,28 +187,36 @@ pub fn dm_messages_schema(description: &str) -> serde_json::Value {
 
 impl<'de> Deserialize<'de> for DmMessages {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let messages = BTreeMap::<String, String>::deserialize(deserializer)?;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Entry {
+            Text(String),
+            Rich(MessageSpec),
+        }
+        let messages = BTreeMap::<String, Option<Entry>>::deserialize(deserializer)?;
         let mut parsed = BTreeMap::new();
-        for (kind, text) in messages {
-            if !["warn", "timeout", "vcmute", "kick", "ban"].contains(&kind.as_str())
-                || text.chars().count() > 1500
-            {
-                return Err(serde::de::Error::custom(
-                    "invalid DM template kind or length",
-                ));
+        for (kind, entry) in messages {
+            if !["warn", "timeout", "vcmute", "kick", "ban"].contains(&kind.as_str()) {
+                return Err(serde::de::Error::custom("invalid DM template kind"));
             }
-            let template = Template::parse(&text).map_err(serde::de::Error::custom)?;
-            if !template.uses_only(&[
-                "user",
-                "server",
-                "moderator",
-                "reason",
-                "duration",
-                "expires",
-            ]) {
-                return Err(serde::de::Error::custom("unknown DM template variable"));
-            }
-            parsed.insert(kind, template);
+            let message = match entry {
+                None => continue,
+                Some(Entry::Text(text)) => {
+                    if text.chars().count() > 1500 {
+                        return Err(serde::de::Error::custom("invalid DM template length"));
+                    }
+                    let template = Template::parse(&text).map_err(serde::de::Error::custom)?;
+                    if !template.uses_only(&DM_VARIABLES) {
+                        return Err(serde::de::Error::custom("unknown DM template variable"));
+                    }
+                    DmMessage::Text(template)
+                }
+                Some(Entry::Rich(spec)) => DmMessage::Rich(
+                    MessageTemplate::parse(spec, &DM_VARIABLES)
+                        .map_err(serde::de::Error::custom)?,
+                ),
+            };
+            parsed.insert(kind, message);
         }
         Ok(Self(parsed))
     }
@@ -1200,6 +1232,29 @@ impl<'a> Punisher<'a> {
         }
     }
 
+    /// The values a notification template can use.
+    async fn template_values(&self, user: UserId, needs_server: bool, args: &Args) -> Values {
+        let server = if needs_server {
+            self.ctx
+                .api
+                .get_guild(self.ctx.guild_id)
+                .await
+                .map_or_else(|_| self.ctx.guild_id.to_string(), |guild| guild.name)
+        } else {
+            String::new()
+        };
+        let mut values = Values::new()
+            .with("user", format!("<@{user}>"))
+            .with("server", server)
+            .with("moderator", self.moderator.name.clone());
+        for (name, value) in args.iter() {
+            if let closure_core::locale::ArgValue::Text(text) = value {
+                values = values.with(name, text.clone());
+            }
+        }
+        values
+    }
+
     /// Messages `user` in the server language when the server wants that, as an embed titled with the
     /// kind of the punishment. Returns the note for the reply when the message did not arrive. A
     /// member who is not in the server gets no note.
@@ -1207,28 +1262,34 @@ impl<'a> Punisher<'a> {
         if !self.settings.dm {
             return None;
         }
-        let text = if let Some(template) = self.settings.dm_messages.0.get(kind) {
-            let server = if template.uses("server") {
-                self.ctx
-                    .api
-                    .get_guild(self.ctx.guild_id)
-                    .await
-                    .map_or_else(|_| self.ctx.guild_id.to_string(), |guild| guild.name)
-            } else {
-                String::new()
-            };
-            let mut values = Values::new()
-                .with("user", format!("<@{user}>"))
-                .with("server", server)
-                .with("moderator", self.moderator.name.clone());
-            for (name, value) in args.iter() {
-                if let closure_core::locale::ArgValue::Text(text) = value {
-                    values = values.with(name, text.clone());
-                }
+        let text = match self.settings.dm_messages.0.get(kind) {
+            Some(DmMessage::Rich(message)) => {
+                let values = self
+                    .template_values(user, message.uses("server"), args)
+                    .await;
+                return match message.render(self.ctx.now(), &values) {
+                    Ok((content, embeds)) => {
+                        match dm::send(self.ctx, user, DirectMessage { content, embeds }).await {
+                            Ok(Sent::Delivered(_))
+                            | Err(UserError::Module(ModuleError::Discord(
+                                DiscordError::NotFound,
+                            ))) => None,
+                            Ok(Sent::Closed) | Err(_) => Some(Note::DmNotDelivered),
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(user = %user, kind, %error, "a direct message could not be built");
+                        Some(Note::DmNotDelivered)
+                    }
+                };
             }
-            template.render(&values)
-        } else {
-            self.ctx.t_core(self.ctx.locale, key, args)
+            Some(DmMessage::Text(template)) => {
+                let values = self
+                    .template_values(user, template.uses("server"), args)
+                    .await;
+                template.render(&values)
+            }
+            None => self.ctx.t_core(self.ctx.locale, key, args),
         };
         let embed = match notice(self.ctx, kind, &text) {
             Ok(embed) => embed,

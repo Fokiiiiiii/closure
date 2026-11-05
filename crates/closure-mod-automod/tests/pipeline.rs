@@ -102,6 +102,7 @@ fn the_settings_default_to_no_rules_and_no_dry_run() {
     assert_eq!(
         manifest.default_config,
         json!({
+            "rules_enabled": true,
             "dry_run": false,
             "warn_expire_days": 30,
             "dm_on_action": true,

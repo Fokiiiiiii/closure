@@ -258,3 +258,5 @@ massban-failed = { $user }: 記録に失敗しました。BANは成功してい�
 massban-forbidden = { $user }: Discordが権限またはロール順位により拒否しました。
 massban-rate-limited = { $user }: Discordのレート制限です。
 massban-discord-failed = { $user }: Discordへのリクエストに失敗しました。
+config-moderation-escalation_enabled = 警告で自動の処分を行うかどうか。オフにしても、設定は残ります。
+config-moderation-templates_enabled = 処分のテンプレートを選べるようにするかどうか。オフにしても、設定は残ります。

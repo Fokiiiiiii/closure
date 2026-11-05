@@ -55,6 +55,8 @@ const MAX_COUNTER_VALUE: i64 = 2_147_483_647;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
+    /// Whether the rules run. Off keeps them, and runs none.
+    pub rules_enabled: bool,
     /// Acts on nothing; reports what would have run to the log channel instead.
     pub dry_run: bool,
     /// After how many days a warning of a rule expires.
@@ -92,11 +94,33 @@ mod dm_config_tests {
             );
         }
     }
+
+    #[test]
+    fn a_feature_that_is_off_keeps_its_settings_and_runs_nothing() {
+        let config: Config = serde_json::from_value(json!({
+            "rules_enabled": false,
+            "rules": {"a": {"triggers": [{"type": "any_message"}], "actions": [{"do": "delete"}]}},
+            "antiraid": {"enabled": false}
+        }))
+        .unwrap();
+        assert!(!config.rules_enabled && config.rules.len() == 1);
+        assert_eq!(
+            crate::antiraid::read(config.antiraid.as_ref()).unwrap(),
+            None
+        );
+        assert!(
+            crate::antiraid::read(Some(&json!({"enabled": true})))
+                .unwrap()
+                .is_some()
+        );
+        assert!(Config::default().rules_enabled);
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            rules_enabled: true,
             dry_run: false,
             warn_expire_days: 30,
             dm_on_action: true,
@@ -674,7 +698,11 @@ pub fn setup(config: &Config, store: &Store) -> Setup {
         Ok(defs) => (defs, None),
         Err(problem) => (Vec::new(), Some(problem)),
     };
-    let rules = parse_rules(&config.rules, &counters);
+    let rules = if config.rules_enabled {
+        parse_rules(&config.rules, &counters)
+    } else {
+        Vec::new()
+    };
     let (antiraid, antiraid_problem) = match crate::antiraid::read(config.antiraid.as_ref()) {
         Ok(antiraid) => (antiraid, None),
         Err(problem) => (None, Some(problem)),

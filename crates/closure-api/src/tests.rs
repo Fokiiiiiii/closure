@@ -133,6 +133,15 @@ fn app_with(pool: PgPool, gateway: GatewayStatus) -> App {
 }
 
 fn app_with_access(pool: PgPool, gateway: GatewayStatus, available: bool) -> App {
+    app_built(pool, gateway, available, None)
+}
+
+fn app_built(
+    pool: PgPool,
+    gateway: GatewayStatus,
+    available: bool,
+    sink: Option<Arc<dyn MessageSink>>,
+) -> App {
     let mut dashboard =
         ModuleManifest::new(ModuleId::new("dashboard").unwrap(), "dashboard", "0.1.0");
     dashboard = dashboard.permission(
@@ -164,10 +173,37 @@ fn app_with_access(pool: PgPool, gateway: GatewayStatus, available: bool) -> App
         &SecretString::from(TOKEN),
     )
     .unwrap();
+    let state = match sink {
+        Some(sink) => state.with_messages(sink),
+        None => state,
+    };
     App {
         router: router(state),
         db,
         store,
+    }
+}
+
+/// What the fake Discord answers to a message: it was sent, or it failed.
+struct FakeSink(
+    Result<Sent, SendFailure>,
+    std::sync::Mutex<Vec<(u64, Option<String>, usize)>>,
+);
+
+impl MessageSink for FakeSink {
+    fn send(
+        &self,
+        channel: closure_core::event::ChannelId,
+        content: Option<String>,
+        embeds: Vec<twilight_model::channel::message::Embed>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Sent, SendFailure>> + Send + '_>>
+    {
+        self.1
+            .lock()
+            .unwrap()
+            .push((channel.get(), content, embeds.len()));
+        let answer = self.0.clone();
+        Box::pin(async move { answer })
     }
 }
 
@@ -246,6 +282,10 @@ async fn send(router: &Router, call: Call) -> Response {
         headers: parts.headers,
         text: String::from_utf8_lossy(&bytes).into_owned(),
     }
+}
+
+fn post_json(uri: &str) -> Call {
+    call(Method::POST, uri).header("content-type", "application/json")
 }
 
 fn put(guild: u64, if_match: &str, body: &str) -> Call {
@@ -1384,4 +1424,104 @@ async fn the_effective_view_ignores_the_view_parameter(pool: PgPool) {
     .await;
     assert_eq!(basic.status, StatusCode::OK);
     assert_eq!(basic.json(), plain.json());
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_message_written_in_the_dashboard_is_sent_by_the_bot(pool: PgPool) {
+    let sink = Arc::new(FakeSink(Ok(Sent { id: 77 }), std::sync::Mutex::default()));
+    let app = app_built(
+        pool,
+        GatewayStatus { ready: 1, total: 1 },
+        true,
+        Some(Arc::clone(&sink) as Arc<dyn MessageSink>),
+    );
+    app.db.register_guild(Id::new(GUILD)).await.unwrap();
+    let uri = "/v1/guilds/42/messages";
+    let body = json!({"channel_id": "5", "message": {
+        "content": "hello",
+        "embeds": [{"title": "T", "color": "#5865f2", "fields": [{"name": "a", "value": "b", "inline": true}]}]
+    }})
+    .to_string();
+    assert_eq!(
+        send(&app.router, post_json(uri).token(None).body(&body))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    let sent = send(&app.router, post_json(uri).body(&body)).await;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text);
+    assert_eq!(
+        sent.json(),
+        json!({"id": "77", "channel_id": "5", "url": "https://discord.com/channels/42/5/77"})
+    );
+    assert_eq!(*sink.1.lock().unwrap(), [(5, Some("hello".to_owned()), 1)]);
+
+    // A channel that is not in the server, a message that cannot be sent, and a bad body.
+    for (body, status) in [
+        (
+            json!({"channel_id": "9", "message": {"content": "x"}}),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            json!({"channel_id": "x", "message": {"content": "x"}}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"channel_id": "5", "message": {}}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"channel_id": "5", "message": {"content": "a".repeat(2001)}}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"channel_id": "5", "message": {"embeds": [{"title": "t", "image": "ftp://x"}]}}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = send(&app.router, post_json(uri).body(&body.to_string())).await;
+        assert_eq!(response.status, status, "{body}: {}", response.text);
+    }
+    assert_eq!(sink.1.lock().unwrap().len(), 1);
+    let unknown = json!({"channel_id": "5", "message": {"content": "x"}, "extra": 1}).to_string();
+    assert!(
+        send(&app.router, post_json(uri).body(&unknown))
+            .await
+            .status
+            .is_client_error()
+    );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_refused_send_says_why_and_a_bot_without_a_sink_is_unavailable(pool: PgPool) {
+    let sink = Arc::new(FakeSink(
+        Err(SendFailure::Forbidden),
+        std::sync::Mutex::default(),
+    ));
+    let app = app_built(
+        pool.clone(),
+        GatewayStatus { ready: 1, total: 1 },
+        true,
+        Some(sink as Arc<dyn MessageSink>),
+    );
+    app.db.register_guild(Id::new(GUILD)).await.unwrap();
+    let body = json!({"channel_id": "5", "message": {"content": "x"}}).to_string();
+    let uri = "/v1/guilds/42/messages";
+    assert_eq!(
+        send(&app.router, post_json(uri).body(&body)).await.status,
+        StatusCode::FORBIDDEN
+    );
+    // Somebody who cannot edit the dashboard cannot send either.
+    let denied = send(
+        &app.router,
+        post_json(uri).header("x-closure-actor", "999").body(&body),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.text);
+    let bare = app_built(pool, GatewayStatus { ready: 1, total: 1 }, true, None);
+    bare.db.register_guild(Id::new(GUILD)).await.unwrap();
+    assert_eq!(
+        send(&bare.router, post_json(uri).body(&body)).await.status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
 }

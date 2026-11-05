@@ -37,6 +37,11 @@ pub fn settings() -> (Value, Value) {
         json!({
             "type": "object",
             "properties": {
+                "rules_enabled": {
+                    "type": "boolean",
+                    "description": "config-automod-rules_enabled",
+                    "x-ui": { "level": "basic" }
+                },
                 "dry_run": {
                     "type": "boolean",
                     "description": "config-automod-dry_run",
@@ -90,6 +95,7 @@ pub fn settings() -> (Value, Value) {
             "additionalProperties": false
         }),
         json!({
+            "rules_enabled": true,
             "dry_run": false,
             "warn_expire_days": 30,
             "dm_on_action": true,
@@ -113,6 +119,10 @@ fn antiraid() -> Value {
         "description": "config-automod-antiraid",
         "x-ui": { "level": "basic", "widget": "json" },
         "properties": {
+            "enabled": {
+                "type": "boolean",
+                "description": "config-automod-antiraid-enabled"
+            },
             "levels": {
                 "type": "array",
                 "minItems": 2,

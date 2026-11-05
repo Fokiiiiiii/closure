@@ -30,7 +30,7 @@ Set under `modules.welcome.config` in a server's configuration; see [configurati
 | `channel` | string or null | `null` | channel | Channel where new members are greeted. |
 | `delete_after` | string or null | `null` | - | Delete greetings after 5 seconds to 7 days. |
 | `include_bots` | boolean | `false` | - | Whether to greet bot accounts too. |
-| `message` | string or null | `null` | - | Greeting template; supports {user}, {username}, {server}, and {count}. |
+| `message` | any | `null` | message | Greeting template; supports {user}, {username}, {server}, and {count}. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 

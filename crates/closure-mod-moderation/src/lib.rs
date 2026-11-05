@@ -69,6 +69,8 @@ pub(crate) struct Config {
     require_reason: bool,
     /// How many days of messages a ban deletes.
     ban_delete_days: u32,
+    /// Whether a warning can bring about a punishment. Off keeps the rules, and acts on none.
+    escalation_enabled: bool,
     /// What a warning brings about once a member reaches a number of active warnings.
     escalation: Vec<Rule>,
     /// How a timeout is given: Discord's timeout, or a role that a timer takes off again.
@@ -85,6 +87,8 @@ pub(crate) struct Config {
     /// Which of the roles taken off come back when the punishment ends: the same forms, `true`
     /// by default.
     restore_roles_on_mute: RoleSetting,
+    /// Whether the templates are offered. Off keeps them, and offers none.
+    templates_enabled: bool,
     /// The templates a moderator picks from when a timeout, kick, ban or voice mute lacks a reason
     /// or a duration.
     templates: templates::Templates,
@@ -98,6 +102,7 @@ impl Default for Config {
             dm_messages: punish::DmMessages::default(),
             require_reason: false,
             ban_delete_days: 0,
+            escalation_enabled: true,
             escalation: Vec::new(),
             timeout_method: Method::Discord,
             timeout_role: None,
@@ -105,6 +110,7 @@ impl Default for Config {
             voice_mute_role: None,
             remove_roles_on_mute: RoleSetting::Flag(false),
             restore_roles_on_mute: RoleSetting::Flag(true),
+            templates_enabled: true,
             templates: templates::Templates::default(),
         }
     }
@@ -548,6 +554,9 @@ async fn escalation_line(
     active: usize,
     warning: i64,
 ) -> Option<String> {
+    if !config.escalation_enabled {
+        return None;
+    }
     let rule = rule_for(&config.escalation, active)?;
     let Some(escalation) = plan(rule) else {
         return Some(cx.t(
@@ -890,6 +899,16 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "description": "config-moderation-ban_delete_days",
                     "x-ui": { "level": "basic" }
                 },
+                "escalation_enabled": {
+                    "type": "boolean",
+                    "description": "config-moderation-escalation_enabled",
+                    "x-ui": { "level": "basic" }
+                },
+                "templates_enabled": {
+                    "type": "boolean",
+                    "description": "config-moderation-templates_enabled",
+                    "x-ui": { "level": "basic" }
+                },
                 "escalation": {
                     "type": "array",
                     "maxItems": 10,
@@ -958,6 +977,8 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "timeout_role": null,
             "voice_mute_method": "discord",
             "voice_mute_role": null,
+            "escalation_enabled": true,
+            "templates_enabled": true,
             "remove_roles_on_mute": false,
             "restore_roles_on_mute": true,
             "templates": {}
@@ -1212,5 +1233,18 @@ mod dm_config_tests {
                 serde_json::from_value::<Config>(json!({"dm_messages": {"warn": text}})).is_err()
             );
         }
+    }
+
+    #[test]
+    fn a_dm_can_be_a_message_with_embeds() {
+        let read = |value| serde_json::from_value::<Config>(json!({"dm_messages": {"ban": value}}));
+        assert!(
+            read(json!({"embeds": [{"title": "Banned from {server}", "description": "{reason}"}]}))
+                .is_ok()
+        );
+        assert!(read(json!({"embeds": [{"title": "{nobody}"}]})).is_err());
+        assert!(read(json!({"embeds": [{"colour": 1}]})).is_err());
+        assert!(read(json!({})).is_err());
+        assert!(read(serde_json::Value::Null).is_ok());
     }
 }

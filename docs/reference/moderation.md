@@ -291,11 +291,13 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | `dm_messages` | object | `{}` | - | Custom direct-message templates by punishment kind. |
 | `dm_on_action` | boolean | `true` | - | Whether the warned member gets a direct message. |
 | `escalation` | array | `[]` | - | What a warning brings about when a member reaches a number of active warnings. |
+| `escalation_enabled` | boolean | `true` | - | Whether a warning can bring about a punishment. Off keeps the rules. |
 | `remove_roles_on_mute` | any | `false` | flag-or-roles | Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `require_reason` | boolean | `false` | - | Whether a warning needs a reason. |
 | `restore_roles_on_mute` | any | `true` | flag-or-roles | Which of the roles taken off come back when the punishment ends: the same forms as remove_roles_on_mute. true by default. |
 | `templates` | object | `{}` | - | Templates a moderator picks from when a command leaves out the reason or the duration. |
+| `templates_enabled` | boolean | `true` | - | Whether the templates are offered. Off keeps them. |
 | `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
 | `timeout_role` | string or null | `null` | role | The id of the role a timeout gives, when timeout_method is role. |
@@ -311,10 +313,12 @@ Default configuration:
   "dm_messages": {},
   "dm_on_action": true,
   "escalation": [],
+  "escalation_enabled": true,
   "remove_roles_on_mute": false,
   "require_reason": false,
   "restore_roles_on_mute": true,
   "templates": {},
+  "templates_enabled": true,
   "timeout_method": "discord",
   "timeout_role": null,
   "voice_mute_method": "discord",

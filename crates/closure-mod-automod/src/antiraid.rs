@@ -71,6 +71,8 @@ const LIST_LIMIT: usize = 1_000;
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AntiraidConfig {
+    /// Off keeps the settings but runs nothing; left out, it is on.
+    pub enabled: Option<bool>,
     pub levels: Option<Vec<String>>,
     pub effects: BTreeMap<String, EffectConfig>,
     pub quarantine_release: bool,
@@ -148,6 +150,9 @@ pub fn read(raw: Option<&Value>) -> Result<Option<Antiraid>, Problem> {
     };
     let config: AntiraidConfig =
         serde_json::from_value(raw.clone()).map_err(|error| Problem::Shape(error.to_string()))?;
+    if config.enabled == Some(false) {
+        return Ok(None);
+    }
     check(config).map(Some)
 }
 

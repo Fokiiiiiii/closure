@@ -69,22 +69,22 @@ Show whether dry run is on and which rules run
 
 Raise or lower the antiraid level, and release the quarantined members
 
-- Japanese name: `アンレイド`
-- Japanese description: アンレイドのレベルを上げ下げし、隔離中のメンバーを解除する
+- Japanese name: `アンチレイド`
+- Japanese description: アンチレイドのレベルを上げ下げし、隔離中のメンバーを解除する
 
 ##### `/automod antiraid view`
 
 Show the antiraid level and the quarantine
 
 - Japanese name: `view`
-- Japanese description: アンレイドのレベルと隔離を表示する
+- Japanese description: アンチレイドのレベルと隔離を表示する
 
 ##### `/automod antiraid set`
 
 Raise or lower the antiraid level
 
 - Japanese name: `set`
-- Japanese description: アンレイドのレベルを上げ下げする
+- Japanese description: アンチレイドのレベルを上げ下げする
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
@@ -96,7 +96,7 @@ Raise or lower the antiraid level
 Put the antiraid level back to the calm one
 
 - Japanese name: `clear`
-- Japanese description: アンレイドのレベルを通常に戻す
+- Japanese description: アンチレイドのレベルを通常に戻す
 
 ##### `/automod antiraid release`
 
@@ -131,6 +131,7 @@ Set under `modules.automod.config` in a server's configuration; see [configurati
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `restore_roles_on_mute` | any | `true` | flag-or-roles | Which of the roles taken off come back when the timeout ends: the same forms as remove_roles_on_mute. true by default. |
 | `rules` | object | `{}` | entries-json | The rules, keyed by id. Each one is checked on every message; the rules are checked in the order of their ids, and the first one that trips acts unless it says to continue. |
+| `rules_enabled` | boolean | `true` | - | Whether the rules run. Off keeps them and runs none. |
 | `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
 | `timeout_role` | string or null | `null` | role | The id of the role a timeout gives, when timeout_method is role. |
@@ -148,6 +149,7 @@ Default configuration:
   "remove_roles_on_mute": false,
   "restore_roles_on_mute": true,
   "rules": {},
+  "rules_enabled": true,
   "timeout_method": "discord",
   "timeout_role": null,
   "warn_expire_days": 30

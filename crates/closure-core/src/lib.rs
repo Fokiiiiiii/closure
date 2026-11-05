@@ -25,6 +25,7 @@ mod history_file_tests;
 pub mod interaction;
 pub mod latency;
 pub mod locale;
+pub mod message;
 pub mod module;
 pub mod permission;
 pub mod registry;
