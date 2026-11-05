@@ -860,6 +860,7 @@ fn role_list_setting(description: &str) -> serde_json::Value {
 }
 
 /// The settings a server can change: their schema, and their defaults.
+#[allow(clippy::too_many_lines)]
 fn settings() -> (serde_json::Value, serde_json::Value) {
     (
         json!({
