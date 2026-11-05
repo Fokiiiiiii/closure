@@ -416,7 +416,17 @@ fn check_levels(schema: &Value, inherited: bool, path: &str) -> Result<(), Strin
 }
 
 /// The widgets a dashboard can draw for a setting.
-const WIDGETS: [&str; 5] = ["role", "channel", "duration", "textarea", "user"];
+const WIDGETS: [&str; 9] = [
+    "role",
+    "channel",
+    "duration",
+    "textarea",
+    "user",
+    "entries",
+    "entries-json",
+    "json",
+    "flag-or-roles",
+];
 
 /// Hints for the dashboard's forms. They are annotations the bot does not act on, so only their
 /// shape is checked, and every other `x-` keyword is passed through as it is.
@@ -1421,7 +1431,7 @@ mod tests {
             }
         });
         check_supported(&schema).unwrap();
-        for widget in ["role", "channel", "duration", "textarea", "user"] {
+        for widget in WIDGETS {
             check_supported(&json!({ "x-ui": { "widget": widget } })).unwrap();
         }
         check_supported(&json!({ "x-ui": { "order": 0 } })).unwrap();

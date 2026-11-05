@@ -291,12 +291,12 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | `dm_messages` | object | `{}` | - | Custom direct-message templates by punishment kind. |
 | `dm_on_action` | boolean | `true` | - | Whether the warned member gets a direct message. |
 | `escalation` | array | `[]` | - | What a warning brings about when a member reaches a number of active warnings. |
-| `remove_roles_on_mute` | any | `false` | - | Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids. |
+| `remove_roles_on_mute` | any | `false` | flag-or-roles | Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `require_reason` | boolean | `false` | - | Whether a warning needs a reason. |
-| `restore_roles_on_mute` | any | `true` | - | Which of the roles taken off come back when the punishment ends: the same forms as remove_roles_on_mute. true by default. |
+| `restore_roles_on_mute` | any | `true` | flag-or-roles | Which of the roles taken off come back when the punishment ends: the same forms as remove_roles_on_mute. true by default. |
 | `templates` | object | `{}` | - | Templates a moderator picks from when a command leaves out the reason or the duration. |
-| `texts` | any | - | - | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
+| `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
 | `timeout_role` | string or null | `null` | role | The id of the role a timeout gives, when timeout_method is role. |
 | `voice_mute_method` | string | `"discord"` | - | How a voice mute is given: Discord's voice mute, or a role that is taken off when its time is up. |

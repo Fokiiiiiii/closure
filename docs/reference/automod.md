@@ -122,18 +122,18 @@ Set under `modules.automod.config` in a server's configuration; see [configurati
 
 | Key | Type | Default | Widget | Description |
 |---|---|---|---|---|
-| `antiraid` | object or null | `null` | - | Antiraid: the levels a server is raised to while a raid runs. Absent means antiraid is off. |
-| `counters` | object | `{}` | - | The counters, keyed by name: the numbers the rules add to, set, and react to. |
+| `antiraid` | object or null | `null` | json | Antiraid: the levels a server is raised to while a raid runs. Absent means antiraid is off. |
+| `counters` | object | `{}` | entries-json | The counters, keyed by name: the numbers the rules add to, set, and react to. |
 | `dm_messages` | object | `{}` | - | Custom direct-message templates by punishment kind. |
 | `dm_on_action` | boolean | `true` | - | Whether the member gets a direct message about a punishment. |
 | `dry_run` | boolean | `false` | - | Act on nothing: post what would have happened to the log channel. |
-| `remove_roles_on_mute` | any | `false` | - | Which roles a role timeout takes off the member: false, true for every role that can be taken off, or a list of role ids. |
+| `remove_roles_on_mute` | any | `false` | flag-or-roles | Which roles a role timeout takes off the member: false, true for every role that can be taken off, or a list of role ids. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
-| `restore_roles_on_mute` | any | `true` | - | Which of the roles taken off come back when the timeout ends: the same forms as remove_roles_on_mute. true by default. |
-| `rules` | object | `{}` | - | The rules, keyed by id. Each one is checked on every message; the rules are checked in the order of their ids, and the first one that trips acts unless it says to continue. |
-| `texts` | any | - | - | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
+| `restore_roles_on_mute` | any | `true` | flag-or-roles | Which of the roles taken off come back when the timeout ends: the same forms as remove_roles_on_mute. true by default. |
+| `rules` | object | `{}` | entries-json | The rules, keyed by id. Each one is checked on every message; the rules are checked in the order of their ids, and the first one that trips acts unless it says to continue. |
+| `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 | `timeout_method` | string | `"discord"` | - | How a timeout is given: Discord's timeout, or a role that is taken off when its time is up. |
-| `timeout_role` | string or null | `null` | - | The id of the role a timeout gives, when timeout_method is role. |
+| `timeout_role` | string or null | `null` | role | The id of the role a timeout gives, when timeout_method is role. |
 | `warn_expire_days` | integer | `30` | - | After how many days a warning of a rule expires. |
 
 Default configuration:

@@ -136,14 +136,14 @@ async fn a_text_longer_than_discord_takes_is_cut_with_an_ellipsis() {
 fn the_schema_takes_any_value_under_texts_and_a_module_may_not_declare_it() {
     let built = module().build().unwrap();
     let texts = &built.manifest().config_schema["properties"]["texts"];
-    // No type and no other keyword: the schema refuses no value, so a bad text cannot refuse
-    // the whole configuration.
+    // No type and no validating keyword (only the description and the dashboard's hints): the
+    // schema refuses no value, so a bad text cannot refuse the whole configuration.
     assert!(
         texts
             .as_object()
             .unwrap()
             .keys()
-            .all(|key| key == "description"),
+            .all(|key| key == "description" || key == "x-ui"),
         "{texts}"
     );
 

@@ -880,13 +880,15 @@ impl ModuleBuilder {
                     json!({
                         "type": "string",
                         "enum": ["private", "public"],
-                        "description": "config-replies"
+                        "description": "config-replies",
+                        "x-ui": { "level": "basic" }
                     }),
                 );
                 properties.insert(
                     TEXTS_KEY.to_owned(),
                     json!({
-                        "description": "config-texts"
+                        "description": "config-texts",
+                        "x-ui": { "level": "basic", "widget": "entries" }
                     }),
                 );
             })

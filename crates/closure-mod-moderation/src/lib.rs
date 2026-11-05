@@ -855,7 +855,7 @@ fn role_list_setting(description: &str) -> serde_json::Value {
             { "type": "array", "maxItems": 50, "items": { "type": "string", "pattern": "^[0-9]{1,20}$" } }
         ],
         "description": description,
-        "x-ui": { "level": "advanced" }
+        "x-ui": { "level": "basic", "widget": "flag-or-roles" }
     })
 }
 

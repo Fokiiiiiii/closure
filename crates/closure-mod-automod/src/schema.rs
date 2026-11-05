@@ -27,7 +27,7 @@ fn role_list_setting(description: &str) -> Value {
             { "type": "array", "maxItems": 50, "items": { "type": "string", "pattern": SNOWFLAKE } }
         ],
         "description": description,
-        "x-ui": { "level": "advanced" }
+        "x-ui": { "level": "basic", "widget": "flag-or-roles" }
     })
 }
 
@@ -58,12 +58,14 @@ pub fn settings() -> (Value, Value) {
                 "timeout_method": {
                     "type": "string",
                     "enum": ["discord", "role"],
-                    "description": "config-automod-timeout_method"
+                    "description": "config-automod-timeout_method",
+                    "x-ui": { "level": "basic" }
                 },
                 "timeout_role": {
                     "type": ["string", "null"],
                     "pattern": SNOWFLAKE,
-                    "description": "config-automod-timeout_role"
+                    "description": "config-automod-timeout_role",
+                    "x-ui": { "level": "basic", "widget": "role" }
                 },
                 "remove_roles_on_mute": role_list_setting(REMOVE_ROLES_DOC),
                 "restore_roles_on_mute": role_list_setting(RESTORE_ROLES_DOC),
@@ -71,6 +73,7 @@ pub fn settings() -> (Value, Value) {
                     "type": "object",
                     "maxProperties": 10,
                     "description": "config-automod-counters",
+                    "x-ui": { "level": "basic", "widget": "entries-json" },
                     "propertyNames": { "pattern": COUNTER_NAME },
                     "additionalProperties": counter()
                 },
@@ -79,6 +82,7 @@ pub fn settings() -> (Value, Value) {
                     "type": "object",
                     "maxProperties": 100,
                     "description": "config-automod-rules",
+                    "x-ui": { "level": "basic", "widget": "entries-json" },
                     "propertyNames": { "pattern": RULE_ID },
                     "additionalProperties": rule()
                 }
@@ -107,7 +111,7 @@ fn antiraid() -> Value {
     json!({
         "type": ["object", "null"],
         "description": "config-automod-antiraid",
-        "x-ui": { "level": "advanced" },
+        "x-ui": { "level": "basic", "widget": "json" },
         "properties": {
             "levels": {
                 "type": "array",

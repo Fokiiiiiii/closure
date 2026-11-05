@@ -44,7 +44,7 @@ Set under `modules.logs.config` in a server's configuration; see [configuration]
 | `roles` | boolean | `true` | - | Post the creation, changes and removal of roles. |
 | `stage_instances` | boolean | `true` | - | Post the start, changes and end of stage instances. |
 | `stickers` | boolean | `true` | - | Post the creation, changes and removal of stickers. |
-| `texts` | any | - | - | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
+| `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 | `threads` | boolean | `true` | - | Post the creation, changes and removal of threads. |
 | `voice` | boolean | `false` | - | Post members joining, leaving and moving between voice channels. |
 | `webhook` | any | `null` | - | The named webhook the entries are posted with. |

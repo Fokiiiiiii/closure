@@ -155,7 +155,7 @@ pub fn dm_messages_schema(description: &str) -> serde_json::Value {
         "type": "string", "maxLength": 1500, "x-ui": {"widget": "textarea"}
     });
     serde_json::json!({
-        "type": "object", "description": description, "x-ui": {"level": "advanced"},
+        "type": "object", "description": description, "x-ui": {"level": "basic"},
         "properties": {"warn": entry, "timeout": entry, "vcmute": entry, "kick": entry, "ban": entry},
         "additionalProperties": false
     })
