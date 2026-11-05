@@ -494,6 +494,7 @@ pub(crate) fn schema() -> serde_json::Value {
     json!({
         "type": "object",
         "description": "config-moderation-templates",
+        "x-ui": { "level": "basic" },
         "properties": {
             "timeout": list("config-moderation-templates-timeout"),
             "kick": list("config-moderation-templates-kick"),
