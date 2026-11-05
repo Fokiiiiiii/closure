@@ -98,11 +98,11 @@ struct DeleteJob {
 fn settings() -> (serde_json::Value, serde_json::Value) {
     let channel = json!({"type": "string", "pattern": "^[1-9][0-9]{0,19}$"});
     let schema = json!({"type": "object", "additionalProperties": false, "properties": {
-        "auto_delete": {"type": "array", "maxItems": 25, "description": "config-auto-delete", "items": {
+        "auto_delete": {"type": "array", "maxItems": 25, "description": "config-auto-delete", "x-ui": {"level": "basic"}, "items": {
             "type": "object", "additionalProperties": false, "required": ["channel", "after"],
             "properties": {"channel": channel, "after": {"type": "string", "pattern": "^[0-9]+[smhdw]( *[0-9]+[smhdw])*$"}, "skip_pinned": {"type": "boolean", "default": true}}
         }},
-        "auto_react": {"type": "array", "maxItems": 25, "description": "config-auto-react", "items": {
+        "auto_react": {"type": "array", "maxItems": 25, "description": "config-auto-react", "x-ui": {"level": "basic"}, "items": {
             "type": "object", "additionalProperties": false, "required": ["channel", "emojis"],
             "properties": {"channel": channel, "emojis": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "minLength": 1, "maxLength": 64}}, "skip_bots": {"type": "boolean", "default": true}}
         }}
