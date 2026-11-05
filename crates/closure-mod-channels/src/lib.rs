@@ -14,6 +14,7 @@ use twilight_model::id::Id;
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[allow(clippy::struct_field_names)]
 struct Config {
     /// Whether the delete rules run. Off keeps them, and runs none.
     auto_delete_enabled: bool,

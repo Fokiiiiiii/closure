@@ -59,6 +59,7 @@ const MAX_CHARS: usize = 1900;
 /// The module's section of a guild's configuration.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Config {
     /// After how many days a warning expires.
     warn_expire_days: u32,
