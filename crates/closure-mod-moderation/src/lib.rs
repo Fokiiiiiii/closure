@@ -893,6 +893,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "type": "array",
                     "maxItems": 10,
                     "description": "config-moderation-escalation",
+                    "x-ui": { "level": "basic" },
                     "items": {
                         "type": "object",
                         "properties": {
