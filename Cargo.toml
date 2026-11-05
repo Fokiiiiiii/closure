@@ -27,6 +27,8 @@ closure-mod-logs = { path = "crates/closure-mod-logs" }
 closure-mod-moderation = { path = "crates/closure-mod-moderation" }
 closure-mod-channels = { path = "crates/closure-mod-channels" }
 closure-mod-remind = { path = "crates/closure-mod-remind" }
+closure-mod-persist = { path = "crates/closure-mod-persist" }
+closure-mod-roles = { path = "crates/closure-mod-roles" }
 closure-mod-tags = { path = "crates/closure-mod-tags" }
 closure-mod-welcome = { path = "crates/closure-mod-welcome" }
 

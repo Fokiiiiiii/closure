@@ -461,7 +461,9 @@ dependencies = [
  "closure-mod-diagnostics",
  "closure-mod-logs",
  "closure-mod-moderation",
+ "closure-mod-persist",
  "closure-mod-remind",
+ "closure-mod-roles",
  "closure-mod-tags",
  "closure-mod-welcome",
  "closure-script",
@@ -687,6 +689,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "closure-mod-persist"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
+]
+
+[[package]]
 name = "closure-mod-remind"
 version = "0.1.0"
 dependencies = [
@@ -697,6 +713,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "closure-mod-roles"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
 ]
 
 [[package]]
