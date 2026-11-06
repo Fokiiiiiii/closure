@@ -33,3 +33,9 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The plugins are built in with the `plugins` feature (see closure-plugins), and are built on the
+# crates of this repository.
+allow-git = [
+    "https://github.com/Fokiiiiiii/closure-plugins",
+    "https://github.com/Fokiiiiiii/closure",
+]
