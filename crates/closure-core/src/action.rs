@@ -1147,6 +1147,9 @@ impl Action {
             Self::Followup { reply, .. } | Self::EditResponse { reply, .. } => {
                 of(&reply.components)
             }
+            // A message posted to a channel carries components too: a module must not be able
+            // to post a button that another module answers.
+            Self::PostMessage { components, .. } => of(components),
             _ => Vec::new(),
         }
     }
@@ -2089,6 +2092,35 @@ mod tests {
 
     fn id<const N: u64, M>() -> Id<M> {
         Id::new(N)
+    }
+
+    #[test]
+    fn the_components_of_a_posted_message_are_among_the_custom_ids_of_the_action() {
+        use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
+        let button = Component::Button(Button {
+            custom_id: Some("other:delete:1".into()),
+            disabled: false,
+            emoji: None,
+            id: None,
+            label: Some("x".into()),
+            style: ButtonStyle::Danger,
+            url: None,
+            sku_id: None,
+        });
+        let action = Action::PostMessage {
+            channel_id: id::<5, _>(),
+            message_id: None,
+            reply_to: None,
+            content: None,
+            embeds: Vec::new(),
+            components: vec![Component::ActionRow(ActionRow {
+                id: None,
+                components: vec![button],
+            })],
+            files: Vec::new(),
+        };
+        // The check that a module sends only its own components reads this list.
+        assert_eq!(action.custom_ids(), ["other:delete:1"]);
     }
 
     #[test]

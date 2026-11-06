@@ -670,6 +670,9 @@ impl fmt::Debug for EventContext {
     }
 }
 
+/// The settings of every module that the SDK owns (see `closure_sdk`).
+const SDK_CONFIG_KEYS: [&str; 2] = ["replies", "texts"];
+
 impl EventContext {
     #[must_use]
     pub fn new(
@@ -854,9 +857,18 @@ impl EventContext {
     }
 
     /// Deserialises the module's configuration into its own typed struct.
+    ///
+    /// The settings the SDK keeps for every module (who sees the replies, the administrator's
+    /// texts) are not the module's own and are left out, so that a module that refuses settings
+    /// it does not know can still read its own.
     pub fn parse_config<T: DeserializeOwned>(&self) -> Result<T, ModuleError> {
-        serde_json::from_value((*self.config).clone())
-            .map_err(|error| ModuleError::Config(error.to_string()))
+        let mut config = (*self.config).clone();
+        if let Some(object) = config.as_object_mut() {
+            for key in SDK_CONFIG_KEYS {
+                object.remove(key);
+            }
+        }
+        serde_json::from_value(config).map_err(|error| ModuleError::Config(error.to_string()))
     }
 
     /// The translator, for messages that belong to no module (see [`Self::t_core`]).

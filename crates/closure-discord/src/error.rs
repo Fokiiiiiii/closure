@@ -34,7 +34,11 @@ pub(crate) fn classify(
         429 => DiscordError::RateLimited {
             retry_after: retry_after_secs
                 .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-                .map(|seconds| Duration::from_secs_f64(seconds).min(MAX_RETRY_AFTER)),
+                .map(|seconds| {
+                    Duration::try_from_secs_f64(seconds)
+                        .unwrap_or(MAX_RETRY_AFTER)
+                        .min(MAX_RETRY_AFTER)
+                }),
         },
         500..=599 => DiscordError::Transient(message),
         _ => DiscordError::Fatal(format!("unexpected status {status}: {message}")),
@@ -131,6 +135,9 @@ mod tests {
         };
         assert_eq!(hint(Some(1.5)), Some(Duration::from_millis(1500)));
         assert_eq!(hint(Some(1.0e12)), Some(MAX_RETRY_AFTER));
+        // A finite number too large for a duration must not panic.
+        assert_eq!(hint(Some(1.0e300)), Some(MAX_RETRY_AFTER));
+        assert_eq!(hint(Some(f64::MAX)), Some(MAX_RETRY_AFTER));
         assert_eq!(hint(Some(-1.0)), None);
         assert_eq!(hint(Some(f64::NAN)), None);
         assert_eq!(hint(None), None);
