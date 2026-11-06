@@ -27,13 +27,20 @@ struct Scheduled {
 
 async fn send(cx: JobCx) -> Result<(), ModuleError> {
     let job: Scheduled = cx.payload()?;
-    let Some(channel) = job.channel.parse::<u64>().ok().map(ChannelId::new) else {
+    let Some(channel) = job
+        .channel
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .map(ChannelId::new)
+    else {
         tracing::warn!(guild = %cx.guild_id(), "a scheduled post has no channel; it is dropped");
         return Ok(());
     };
     let edit = job
         .edit
         .and_then(|id| id.parse::<u64>().ok())
+        .filter(|id| *id > 0)
         .map(MessageId::new);
     let parts = serde_json::from_value::<MessageSpec>(job.message)
         .map_err(|error| error.to_string())

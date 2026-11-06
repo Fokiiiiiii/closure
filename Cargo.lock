@@ -798,6 +798,7 @@ dependencies = [
  "tokio",
  "tracing",
  "twilight-model",
+ "twilight-util",
 ]
 
 [[package]]
@@ -816,7 +817,7 @@ dependencies = [
 [[package]]
 name = "closure-plugins"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb578a52a030e90398d61134c3fc2e537540d858"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#275094b0832a962f37a3986af540157cacbab84c"
 dependencies = [
  "anyhow",
  "closure-core",
@@ -2625,11 +2626,12 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 [[package]]
 name = "plugin-giveaway"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb578a52a030e90398d61134c3fc2e537540d858"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#275094b0832a962f37a3986af540157cacbab84c"
 dependencies = [
  "closure-core",
  "closure-sdk",
  "serde",
+ "serde_json",
  "tracing",
  "twilight-model",
 ]
@@ -2637,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "plugin-kit"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb578a52a030e90398d61134c3fc2e537540d858"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#275094b0832a962f37a3986af540157cacbab84c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2655,7 +2657,7 @@ dependencies = [
 [[package]]
 name = "plugin-leveling"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb578a52a030e90398d61134c3fc2e537540d858"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#275094b0832a962f37a3986af540157cacbab84c"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2668,7 +2670,7 @@ dependencies = [
 [[package]]
 name = "plugin-linkexpand"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb578a52a030e90398d61134c3fc2e537540d858"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#275094b0832a962f37a3986af540157cacbab84c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2686,7 +2688,7 @@ dependencies = [
 [[package]]
 name = "plugin-starboard"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb578a52a030e90398d61134c3fc2e537540d858"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#275094b0832a962f37a3986af540157cacbab84c"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2702,7 +2704,7 @@ dependencies = [
 [[package]]
 name = "plugin-translate"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb578a52a030e90398d61134c3fc2e537540d858"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#275094b0832a962f37a3986af540157cacbab84c"
 dependencies = [
  "anyhow",
  "closure-core",

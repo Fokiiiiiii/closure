@@ -10,6 +10,7 @@ use crate::builder;
 const MODERATOR: u64 = 200;
 const SELF_ROLE: u64 = 100;
 const HIGH_ROLE: u64 = 300;
+const DENIED: u64 = 400;
 
 fn role(id: u64, position: i64) -> Role {
     serde_json::from_value(serde_json::json!({
@@ -17,6 +18,16 @@ fn role(id: u64, position: i64) -> Role {
             "primary_color": 0, "secondary_color": null, "tertiary_color": null },
         "hoist": false, "managed": false, "mentionable": false, "permissions": "0",
         "position": position, "flags": 0,
+    }))
+    .unwrap()
+}
+
+fn member(user: u64) -> twilight_model::guild::Member {
+    serde_json::from_value(serde_json::json!({
+        "user": {"id": user.to_string(), "username": "member", "discriminator": "0",
+                 "avatar": null, "bot": false},
+        "roles": [], "joined_at": "2020-01-01T00:00:00.000000+00:00",
+        "deaf": false, "mute": false, "flags": 0,
     }))
     .unwrap()
 }
@@ -132,6 +143,7 @@ fn reaction(message: u64, emoji: &str, user: u64) -> ReactionInfo {
 #[tokio::test]
 async fn a_reaction_on_a_role_message_gives_and_takes_back_the_role() {
     let harness = self::harness();
+    harness.api().set_member(Id::new(1), member(7));
     harness
         .emit(Event::ReactionAdded(reaction(900, "✅", 7)))
         .await
@@ -152,6 +164,35 @@ async fn a_reaction_on_a_role_message_gives_and_takes_back_the_role() {
         .await
         .unwrap();
     assert!(other.actions().is_empty());
+}
+
+#[tokio::test]
+async fn a_member_who_may_not_pick_roles_gets_none_from_a_button_or_a_reaction() {
+    let harness = self::harness();
+    // `roles.self` is denied to the member's role: neither way in gives them a role.
+    harness.permissions(|permissions| {
+        permissions
+            .keys
+            .entry(closure_core::permission::PermissionKey::new("roles.self").unwrap())
+            .or_default()
+            .deny_roles
+            .push(Id::new(DENIED));
+    });
+    harness.api().set_member(Id::new(1), {
+        let mut denied = member(7);
+        denied.roles = vec![Id::new(DENIED)];
+        denied
+    });
+    harness
+        .emit(Event::ReactionAdded(reaction(900, "✅", 7)))
+        .await
+        .unwrap();
+    assert!(!gave(&harness, 7, SELF_ROLE));
+    let click = Click::new(format!("roles:toggle:*:{SELF_ROLE}"))
+        .roles([DENIED])
+        .user(7);
+    let _ = harness.click(click).await;
+    assert!(!gave(&harness, 7, SELF_ROLE));
 }
 
 #[tokio::test]

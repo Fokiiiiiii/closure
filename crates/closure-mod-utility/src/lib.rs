@@ -17,7 +17,9 @@ use closure_sdk::{
     RoleId, SdkModule, Subscription, UserError, UserId,
 };
 use serde::{Deserialize, Serialize};
-use twilight_model::guild::Member;
+use twilight_model::channel::Channel;
+use twilight_model::guild::{Member, Permissions};
+use twilight_util::permission_calculator::PermissionCalculator;
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
@@ -273,6 +275,38 @@ async fn roleinfo(cx: CommandCx, args: OneRole) -> Result<(), UserError> {
     cx.reply_with(reply_of(card)?).await
 }
 
+/// Whether the invoker may see `channel`: what the bot knows of a channel it can see is not what
+/// everybody may be told of it.
+async fn invoker_sees(cx: &CommandCx, channel: &Channel) -> Result<bool, UserError> {
+    let Outcome::Roles(roles) = cx
+        .api()
+        .execute(Action::ListRoles {
+            guild_id: cx.guild_id(),
+        })
+        .await
+        .map_err(|e| failed(&e))?
+    else {
+        return Ok(false);
+    };
+    let everyone = roles
+        .iter()
+        .find(|role| role.id.get() == cx.guild_id().get())
+        .map_or(Permissions::empty(), |role| role.permissions);
+    let held: Vec<(RoleId, Permissions)> = roles
+        .iter()
+        .filter(|role| cx.invocation().roles.contains(&role.id))
+        .map(|role| (role.id, role.permissions))
+        .collect();
+    let mut calculator = PermissionCalculator::new(cx.guild_id(), cx.user().id, everyone, &held);
+    if let Some(owner) = cx.api().guild_owner().await.map_err(|e| failed(&e))? {
+        calculator = calculator.owner_id(owner);
+    }
+    let overwrites = channel.permission_overwrites.as_deref().unwrap_or(&[]);
+    Ok(calculator
+        .in_channel(channel.kind, overwrites)
+        .contains(Permissions::VIEW_CHANNEL))
+}
+
 async fn channelinfo(cx: CommandCx, args: OneChannel) -> Result<(), UserError> {
     let Outcome::Channel(channel) = cx
         .api()
@@ -284,6 +318,10 @@ async fn channelinfo(cx: CommandCx, args: OneChannel) -> Result<(), UserError> {
     else {
         return Err(UserError::message("utility-unavailable"));
     };
+    // Said as if there were no such channel: a channel nobody told the invoker of stays unknown.
+    if !invoker_sees(&cx, &channel).await? {
+        return Err(UserError::message("utility-unavailable"));
+    }
     let say = |key: &str| cx.t(key, &Args::new());
     let mut card = EmbedBuilder::new()
         .title(channel.name.clone().unwrap_or_default())
@@ -364,6 +402,8 @@ async fn locate(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
 }
 
 async fn vcmove(cx: CommandCx, args: MoveArgs) -> Result<(), UserError> {
+    // Not the invoker, the owner, a bot, or someone whose highest role is not below theirs.
+    cx.check_target(args.user).await?;
     let reason = Reason::new(cx.t("utility-reason-move", &Args::new())).map_err(|e| failed(&e))?;
     cx.api()
         .move_member(cx.guild_id(), args.user, args.channel, reason)
@@ -379,6 +419,7 @@ async fn vcmove(cx: CommandCx, args: MoveArgs) -> Result<(), UserError> {
 }
 
 async fn vckick(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
+    cx.check_target(args.user).await?;
     let reason = Reason::new(cx.t("utility-reason-kick", &Args::new())).map_err(|e| failed(&e))?;
     cx.api()
         .disconnect_member(cx.guild_id(), args.user, reason)

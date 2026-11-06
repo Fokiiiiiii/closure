@@ -8,6 +8,7 @@ use closure_core::action::{Action, Outcome, Reason, RolePatch};
 use closure_core::error::DiscordError;
 use closure_core::event::{Event, EventKind, RoleId, UserId};
 use closure_core::module::EventContext;
+use closure_core::permission::{Actor, PermissionKey};
 use closure_core::subscription::Flow;
 use closure_sdk::{
     Args, Command, CommandArgs, CommandCx, ComponentCx, CoreError, Intents, Level, Locale,
@@ -193,6 +194,8 @@ async fn take(cx: CommandCx, args: MemberRole) -> Result<(), UserError> {
 
 /// A button of a message the server posted: it gives the role, or takes it when the member has it.
 async fn toggle(cx: ComponentCx) -> Result<(), UserError> {
+    // A button is another way in to what `/role` gives: the same permission is asked.
+    cx.require("roles.self").await?;
     let Some(role) = cx
         .data()
         .parse::<u64>()
@@ -307,6 +310,21 @@ fn emoji_text(emoji: &closure_core::action::Emoji) -> Vec<String> {
     }
 }
 
+/// Whether `user` holds the permission to pick roles for themselves (`roles.self`).
+async fn may_pick(ctx: &EventContext, user: UserId) -> bool {
+    let Ok(member) = ctx.api.get_member(ctx.guild_id, user).await else {
+        return false;
+    };
+    let owner = ctx.api.guild_owner().await.ok().flatten() == Some(user);
+    let actor = Actor {
+        user,
+        roles: member.roles,
+        administrator: false,
+        owner,
+    };
+    PermissionKey::new("roles.self").is_ok_and(|key| ctx.permissions().check(&actor, &key).allowed)
+}
+
 /// A reaction on a message the server made a reaction role of: gives the role, or takes it back
 /// when the reaction is removed.
 async fn reaction(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
@@ -332,6 +350,11 @@ async fn reaction(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
         return Ok(Flow::Continue);
     };
     if !config.allows(role) {
+        return Ok(Flow::Continue);
+    }
+    // The same permission as the command and the button: a member it is denied to gets nothing
+    // from a reaction either. Taking a role back needs no permission.
+    if give && !may_pick(&ctx, info.user_id).await {
         return Ok(Flow::Continue);
     }
     let reason = Reason::new(ctx.t_in(ctx.locale, "roles-reason-reaction", &Args::new()))?;

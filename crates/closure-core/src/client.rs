@@ -162,10 +162,13 @@ impl ApiClient {
         // A click is delivered to the module whose id its `custom_id` starts with, so a module
         // that could name another's id could make that module act on a click it never offered.
         let own_prefix = format!("{}:", self.module);
+        // The posts of the dashboard carry the role buttons of the `roles` module (see
+        // `MessageSpec`): that one route, and only for the module that posts them.
+        let shared = (self.module.as_str() == "post").then_some("roles:toggle:");
         if let Some(id) = action
             .custom_ids()
             .into_iter()
-            .find(|id| !id.starts_with(&own_prefix))
+            .find(|id| !id.starts_with(&own_prefix) && !shared.is_some_and(|s| id.starts_with(s)))
         {
             tracing::warn!(module = %self.module, action = name, custom_id = id, "custom_id outside the module's own");
             return Err(DiscordError::Invalid(format!(
@@ -1292,6 +1295,63 @@ mod tests {
             );
         }
         assert_eq!(api.actions().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_posted_message_names_only_the_components_of_its_module_and_post_may_name_role_buttons()
+     {
+        use twilight_model::channel::message::Component;
+        use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
+
+        let button = |custom_id: &str| {
+            vec![Component::ActionRow(ActionRow {
+                id: None,
+                components: vec![Component::Button(Button {
+                    id: None,
+                    custom_id: Some(custom_id.into()),
+                    disabled: false,
+                    emoji: None,
+                    label: Some("go".into()),
+                    style: ButtonStyle::Primary,
+                    url: None,
+                    sku_id: None,
+                })],
+            })]
+        };
+        let post = |components| Action::PostMessage {
+            channel_id: Id::new(5),
+            message_id: None,
+            reply_to: None,
+            content: Some("hi".into()),
+            embeds: Vec::new(),
+            components,
+            files: Vec::new(),
+        };
+        let api = Arc::new(MockApi::default());
+        let module = |name: &str| {
+            ApiClient::new(
+                Arc::clone(&api) as Arc<dyn DiscordApi>,
+                [Capability::SendMessages].into_iter().collect(),
+                ModuleId::new(name).unwrap(),
+            )
+        };
+        let other = module("linkexpand");
+        assert!(other.execute(post(button("linkexpand:go"))).await.is_ok());
+        // Not the button of another module, and not the role button either.
+        for id in ["roles:toggle:*:9", "warn:go"] {
+            let error = other.execute(post(button(id))).await.unwrap_err();
+            assert!(matches!(error, DiscordError::Invalid(_)), "{id}: {error:?}");
+        }
+        // The module that posts what the dashboard wrote may name the role buttons, and no more.
+        let poster = module("post");
+        assert!(
+            poster
+                .execute(post(button("roles:toggle:*:9")))
+                .await
+                .is_ok()
+        );
+        let error = poster.execute(post(button("warn:go"))).await.unwrap_err();
+        assert!(matches!(error, DiscordError::Invalid(_)));
     }
 
     fn reason() -> Reason {

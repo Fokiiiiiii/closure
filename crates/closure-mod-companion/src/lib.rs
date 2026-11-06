@@ -39,6 +39,8 @@ impl Config {
             .iter()
             .find(|p| p.voice.parse::<u64>().ok() == Some(voice.get()))
             .and_then(|p| p.text.parse::<u64>().ok())
+            // A channel is never 0: a setting that says so names nothing, and must not panic.
+            .filter(|id| *id > 0)
             .map(ChannelId::new)
     }
 }

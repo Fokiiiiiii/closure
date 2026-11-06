@@ -34,7 +34,22 @@ fn harness() -> Harness {
             .role_levels
             .insert(Id::new(MODERATOR), Level::MODERATOR);
     });
+    harness.api().set_owner(GuildId::new(1), UserId::new(999));
+    harness.api().set_roles(
+        GuildId::new(1),
+        vec![everyone_with("1024"), role_at(MODERATOR, 5)],
+    );
     harness
+}
+
+fn role_at(id: u64, position: i64) -> twilight_model::guild::Role {
+    serde_json::from_value(serde_json::json!({
+        "id": id.to_string(), "name": format!("role-{id}"), "color": 0,
+        "colors": {"primary_color": 0, "secondary_color": null, "tertiary_color": null},
+        "hoist": false, "managed": false, "mentionable": false,
+        "permissions": "0", "position": position, "flags": 0,
+    }))
+    .unwrap()
 }
 
 fn user_option(id: u64) -> CommandOptionValue {
@@ -108,6 +123,7 @@ async fn a_member_is_found_where_they_last_went_in_voice() {
 #[tokio::test]
 async fn only_moderators_move_and_disconnect_members() {
     let harness = harness();
+    harness.api().set_member(Id::new(1), member_of(7));
     let moved = |h: &Harness| {
         h.actions().iter().any(|a| {
             matches!(a, Action::MoveMember { user_id, channel_id, .. }
@@ -180,5 +196,60 @@ fn both_catalogs_define_the_same_messages() {
     assert_eq!(
         closure_i18n::missing_keys(crate::JA, crate::EN).unwrap(),
         Vec::<String>::new()
+    );
+}
+
+fn text_channel(id: u64) -> twilight_model::channel::Channel {
+    serde_json::from_value(serde_json::json!({
+        "id": id.to_string(), "type": 0, "guild_id": "1",
+        "name": format!("channel-{id}"), "permission_overwrites": [],
+    }))
+    .unwrap()
+}
+
+fn member_of(user: u64) -> Member {
+    serde_json::from_value(serde_json::json!({
+        "user": {"id": user.to_string(), "username": "member", "discriminator": "0",
+                 "avatar": null, "bot": false},
+        "roles": [], "joined_at": "2020-01-01T00:00:00.000000+00:00",
+        "deaf": false, "mute": false, "flags": 0,
+    }))
+    .unwrap()
+}
+
+fn everyone_with(permissions: &str) -> twilight_model::guild::Role {
+    serde_json::from_value(serde_json::json!({
+        "id": "1", "name": "@everyone", "color": 0,
+        "colors": {"primary_color": 0, "secondary_color": null, "tertiary_color": null},
+        "hoist": false, "managed": false, "mentionable": false,
+        "permissions": permissions, "position": 0, "flags": 0,
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_channel_the_invoker_cannot_see_is_not_described() {
+    let channelinfo = || {
+        Invocation::new("channelinfo")
+            .option("channel", CommandOptionValue::Channel(Id::new(30)))
+            .user(50)
+    };
+    // Everybody may see it: it is described.
+    let open = harness();
+    open.api().set_channels(Id::new(1), vec![text_channel(30)]);
+    open.api()
+        .set_roles(Id::new(1), vec![everyone_with("1024")]);
+    let shown = open.invoke(channelinfo()).await.unwrap();
+    assert_eq!(shown[0].embeds[0].title.as_deref(), Some("channel-30"));
+    // Nobody may: the answer is the same as for a channel that is not there.
+    let hidden = harness();
+    hidden
+        .api()
+        .set_channels(Id::new(1), vec![text_channel(30)]);
+    hidden.api().set_roles(Id::new(1), vec![everyone_with("0")]);
+    let refused = hidden.invoke(channelinfo()).await.unwrap();
+    assert!(
+        refused[0].embeds[0].title.is_none() && !refused[0].content.contains("channel-30"),
+        "{refused:?}"
     );
 }
