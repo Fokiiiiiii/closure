@@ -22,6 +22,8 @@ env:
 jobs:
   build:
     name: build ${{ matrix.target }}
+    # A manual run is a preview for the Mac the bot runs on: the other targets only wait for a tag.
+    if: github.event_name != 'workflow_dispatch' || matrix.target == 'aarch64-apple-darwin'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,7 +44,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-${{ matrix.target }}
-          save-if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+          # Every run on main keeps its cache, a manual one too: a preview that starts from the last
+          # one compiles only what changed.
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
       # The plugins (link expansion, starboard) are built in; see closure-plugins.
       - run: cargo build --release --locked -p closure --features plugins
       - name: Package
