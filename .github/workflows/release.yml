@@ -22,20 +22,12 @@ env:
 jobs:
   build:
     name: build ${{ matrix.target }}
-    # A manual run is a preview for the Mac the bot runs on: the other targets only wait for a tag.
-    if: github.event_name != 'workflow_dispatch' || matrix.target == 'aarch64-apple-darwin'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # The oldest glibc a runner offers keeps the Linux binaries usable on older systems.
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04-arm
-          - target: aarch64-apple-darwin
-            os: macos-latest
+      # A manual run is a preview for the Mac the bot runs on: the other targets wait for a tag.
+      # The oldest glibc a runner offers keeps the Linux binaries usable on older systems.
+      matrix: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest"}]}' || '{"include":[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm"},{"target":"aarch64-apple-darwin","os":"macos-latest"}]}') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
