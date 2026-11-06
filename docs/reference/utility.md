@@ -3,7 +3,7 @@
 Commands that tell about the server, a role, a channel or a member, the names a member went by, and finding or moving members in voice.
 
 - Version: 0.1.0
-- Enabled by default: no
+- Enabled by default: yes
 
 ## Capabilities
 

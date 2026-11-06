@@ -28,23 +28,24 @@ const MAX_REMEMBERED: usize = 2000;
 /// The most characters of links sent in one question.
 const MAX_QUESTION: usize = 1500;
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-struct Config {
-    /// How long the author is timed out for, in minutes; 0 leaves them be.
-    timeout_minutes: u32,
-    /// Whether a short notice is posted where the message was.
-    notice: bool,
+/// What happens to the member who posted a flagged link.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Punishment {
+    #[default]
+    Ban,
+    Kick,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            timeout_minutes: 10,
-            notice: true,
-        }
-    }
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct Config {
+    action: Punishment,
 }
+
+/// A banned member's messages of this long ago are removed too: a phishing account tends to post
+/// the same link in several channels.
+const BAN_CLEANUP_SECONDS: u32 = 3600;
 
 struct State {
     checker: Arc<dyn LinkChecker>,
@@ -128,28 +129,16 @@ async fn on_message(
     {
         tracing::debug!(?error, guild = %ctx.guild_id, "could not remove a flagged message");
     }
-    if config.timeout_minutes > 0
-        && let Err(error) = ctx
-            .api
-            .timeout(
-                ctx.guild_id,
-                message.author.id,
-                Some(config.timeout_minutes.saturating_mul(60)),
-                reason,
-            )
-            .await
-    {
-        tracing::debug!(?error, guild = %ctx.guild_id, "could not time out the author");
-    }
-    if config.notice {
-        let notice = ctx.t_in(
-            ctx.locale,
-            "phishing-notice",
-            &Args::new().with("user", format!("<@{}>", message.author.id)),
-        );
-        if let Err(error) = ctx.api.send_message(message.channel_id, notice).await {
-            tracing::debug!(?error, guild = %ctx.guild_id, "could not post the notice");
+    let result = match config.action {
+        Punishment::Ban => {
+            ctx.api
+                .ban(ctx.guild_id, message.author.id, BAN_CLEANUP_SECONDS, reason)
+                .await
         }
+        Punishment::Kick => ctx.api.kick(ctx.guild_id, message.author.id, reason).await,
+    };
+    if let Err(error) = result {
+        tracing::warn!(?error, guild = %ctx.guild_id, "could not remove the author of a flagged link");
     }
     Ok(Flow::Continue)
 }
@@ -163,16 +152,10 @@ pub fn builder(checker: Arc<dyn LinkChecker>) -> Result<ModuleBuilder, CoreError
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "timeout_minutes": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 40320,
-                "description": "config-phishing-timeout_minutes",
-                "x-ui": { "level": "basic" }
-            },
-            "notice": {
-                "type": "boolean",
-                "description": "config-phishing-notice",
+            "action": {
+                "type": "string",
+                "enum": ["ban", "kick"],
+                "description": "config-phishing-action",
                 "x-ui": { "level": "basic" }
             }
         }
@@ -180,10 +163,10 @@ pub fn builder(checker: Arc<dyn LinkChecker>) -> Result<ModuleBuilder, CoreError
     Ok(
         ModuleBuilder::new("phishing", "Phishing", env!("CARGO_PKG_VERSION"))?
             .capability(closure_sdk::Capability::ManageMessages)
-            .capability(closure_sdk::Capability::TimeoutMembers)
-            .capability(closure_sdk::Capability::SendMessages)
+            .capability(closure_sdk::Capability::BanMembers)
+            .capability(closure_sdk::Capability::KickMembers)
             .intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
-            .config(schema, json!({"timeout_minutes": 10, "notice": true}))
+            .config(schema, json!({"action": "ban"}))
             .on(
                 Subscription::new(EventKind::MessageCreated),
                 move |ctx, event| on_message(state.clone(), ctx, event),

@@ -50,7 +50,7 @@ fn removed(harness: &Harness) -> bool {
 }
 
 #[tokio::test]
-async fn a_message_with_a_flagged_link_is_removed_and_its_author_timed_out() {
+async fn a_message_with_a_flagged_link_is_removed_and_its_author_banned() {
     let (harness, _) = harness(false);
     harness
         .message(Message::new(7, 5).content("free nitro https://evil.example/x"))
@@ -59,13 +59,30 @@ async fn a_message_with_a_flagged_link_is_removed_and_its_author_timed_out() {
     assert!(removed(&harness));
     assert!(harness.actions().iter().any(|a| matches!(
         a,
-        Action::Timeout { user_id, duration_seconds: Some(600), .. } if user_id.get() == 7
+        Action::Ban { user_id, delete_message_seconds: 3600, .. } if user_id.get() == 7
     )));
+}
+
+#[tokio::test]
+async fn kick_can_be_chosen_instead_of_a_ban() {
+    let (harness, _) = harness(false);
+    harness.set_config(serde_json::json!({"action": "kick"}));
+    harness
+        .message(Message::new(7, 5).content("https://evil.example"))
+        .await
+        .unwrap();
+    assert!(removed(&harness));
     assert!(
         harness
             .actions()
             .iter()
-            .any(|a| matches!(a, Action::SendMessage { .. }))
+            .any(|a| matches!(a, Action::Kick { user_id, .. } if user_id.get() == 7))
+    );
+    assert!(
+        !harness
+            .actions()
+            .iter()
+            .any(|a| matches!(a, Action::Ban { .. }))
     );
 }
 

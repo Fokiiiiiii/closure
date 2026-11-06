@@ -104,7 +104,18 @@ impl Default for Config {
             require_reason: false,
             ban_delete_days: 0,
             escalation_enabled: true,
-            escalation: Vec::new(),
+            escalation: vec![
+                Rule {
+                    warns: Some(3),
+                    action: Some(Action::Timeout),
+                    duration: Some("1d".to_owned()),
+                },
+                Rule {
+                    warns: Some(5),
+                    action: Some(Action::Kick),
+                    duration: None,
+                },
+            ],
             timeout_method: Method::Discord,
             timeout_role: None,
             voice_mute_method: Method::Discord,
@@ -973,7 +984,10 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "dm_on_action": true, "dm_messages": {},
             "require_reason": false,
             "ban_delete_days": 0,
-            "escalation": [],
+            "escalation": [
+                {"warns": 3, "action": "timeout", "duration": "1d"},
+                {"warns": 5, "action": "kick"}
+            ],
             "timeout_method": "discord",
             "timeout_role": null,
             "voice_mute_method": "discord",

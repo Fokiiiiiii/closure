@@ -653,6 +653,7 @@ async fn an_expired_or_revoked_warning_is_not_listed() {
 #[tokio::test]
 async fn at_most_ten_of_the_newest_warnings_are_listed() {
     let harness = harness();
+    harness.set_config(json!({ "escalation": [] }));
     for n in 1..=11 {
         harness
             .invoke(warn(MEMBER, Some(&format!("w{n}"))))
@@ -823,11 +824,12 @@ async fn the_case_commands_need_their_permissions() {
 // ---- settings and texts ----
 
 #[test]
-fn the_settings_default_to_thirty_days_a_direct_message_and_no_required_reason() {
+fn the_settings_default_to_thirty_days_a_direct_message_a_timeout_at_three_warnings_and_a_kick_at_five()
+ {
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "templates_enabled": true, "templates": {} })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "templates_enabled": true, "templates": {} })
     );
 }
 
@@ -1748,6 +1750,7 @@ async fn of_two_rules_for_the_same_count_only_the_first_applies() {
 #[tokio::test]
 async fn without_rules_no_warning_escalates() {
     let harness = harness();
+    harness.set_config(json!({ "escalation": [] }));
     let replies = warn_times(&harness, MEMBER, 5).await;
     assert!(!text(&replies).contains("Escalation"), "{replies:?}");
     assert_eq!(sequence(&harness), ["dm"; 5]);

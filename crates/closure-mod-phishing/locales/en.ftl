@@ -1,5 +1,3 @@
-module-description = Removes messages whose links an external service flags as phishing or scams.
-config-phishing-timeout_minutes = Minutes the author is timed out for after posting such a link; 0 leaves them be.
-config-phishing-notice = Post a short notice where the message was.
+module-description = Bans or kicks members who post links an external service flags as phishing or scams, and removes the message.
+config-phishing-action = What happens to the member who posts such a link: ban (with their last hour of messages removed) or kick.
 phishing-reason = A link was flagged as { $kind }
-phishing-notice = { $user }, a message of yours had a link that was flagged as unsafe, so it was removed.

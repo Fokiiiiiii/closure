@@ -1,15 +1,15 @@
 # Phishing (`phishing`)
 
-Removes messages whose links an external service flags as phishing or scams.
+Bans or kicks members who post links an external service flags as phishing or scams, and removes the message.
 
 - Version: 0.1.0
 - Enabled by default: yes
 
 ## Capabilities
 
-- `send_messages`
 - `manage_messages`
-- `timeout_members`
+- `kick_members`
+- `ban_members`
 - `respond_to_interactions`
 
 ## Permissions
@@ -26,16 +26,14 @@ Set under `modules.phishing.config` in a server's configuration; see [configurat
 
 | Key | Type | Default | Widget | Description |
 |---|---|---|---|---|
-| `notice` | boolean | `true` | - | Post a short notice where the message was. |
+| `action` | string | `"ban"` | - | What happens to the member who posts such a link: ban (with their last hour of messages removed) or kick. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
-| `timeout_minutes` | integer | `10` | - | Minutes the author is timed out for after posting such a link; 0 leaves them be. |
 
 Default configuration:
 
 ```json
 {
-  "notice": true,
-  "timeout_minutes": 10
+  "action": "ban"
 }
 ```

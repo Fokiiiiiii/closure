@@ -521,7 +521,8 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .on(Subscription::new(EventKind::MemberUpdated), on_member)
             .on(Subscription::new(EventKind::VoiceStateChanged), on_voice)
             .catalog(Locale::En, EN)
-            .catalog(Locale::Ja, JA),
+            .catalog(Locale::Ja, JA)
+            .enabled_by_default(),
     )
 }
 

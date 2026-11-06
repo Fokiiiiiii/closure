@@ -1,5 +1,3 @@
-module-description = フィッシングや詐欺と外部サービスに判定されたリンクを含むメッセージを削除します。
-config-phishing-timeout_minutes = そのようなリンクを投稿した人をタイムアウトする分数。0 ならタイムアウトしません。
-config-phishing-notice = メッセージがあった場所に短い通知を出す。
+module-description = フィッシングや詐欺と外部サービスに判定されたリンクを投稿したメンバーを BAN またはキックし、そのメッセージを削除します。
+config-phishing-action = そのようなリンクを投稿したメンバーへの処分。BAN（直近1時間のメッセージも削除）またはキック。
 phishing-reason = リンクが { $kind } と判定された
-phishing-notice = { $user } さん、あなたのメッセージには危険と判定されたリンクがあったため削除しました。

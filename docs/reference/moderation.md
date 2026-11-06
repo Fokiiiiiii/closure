@@ -290,7 +290,7 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | `ban_delete_days` | integer | `0` | - | How many days of the messages of a banned member are deleted. |
 | `dm_messages` | object | `{}` | - | Custom direct-message templates by punishment kind. |
 | `dm_on_action` | boolean | `true` | - | Whether the warned member gets a direct message. |
-| `escalation` | array | `[]` | - | What a warning brings about when a member reaches a number of active warnings. |
+| `escalation` | array | `[{"action":"timeout","duration":"1d","warns":3},{"action":"kick","warns":5}]` | - | What a warning brings about when a member reaches a number of active warnings. |
 | `escalation_enabled` | boolean | `true` | - | Whether a warning can bring about a punishment. Off keeps the rules. |
 | `remove_roles_on_mute` | any | `false` | flag-or-roles | Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
@@ -312,7 +312,17 @@ Default configuration:
   "ban_delete_days": 0,
   "dm_messages": {},
   "dm_on_action": true,
-  "escalation": [],
+  "escalation": [
+    {
+      "action": "timeout",
+      "duration": "1d",
+      "warns": 3
+    },
+    {
+      "action": "kick",
+      "warns": 5
+    }
+  ],
   "escalation_enabled": true,
   "remove_roles_on_mute": false,
   "require_reason": false,
