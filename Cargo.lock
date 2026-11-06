@@ -816,10 +816,11 @@ dependencies = [
 [[package]]
 name = "closure-plugins"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#4fb7a2a769121b373c98c9b5dee7432732bf67b8"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#bb10f33989c95bf62fc7dc9ab233bae178bec7ad"
 dependencies = [
  "anyhow",
  "closure-core",
+ "plugin-giveaway",
  "plugin-leveling",
  "plugin-linkexpand",
  "plugin-starboard",
@@ -2622,9 +2623,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "plugin-giveaway"
+version = "0.1.0"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#bb10f33989c95bf62fc7dc9ab233bae178bec7ad"
+dependencies = [
+ "closure-core",
+ "closure-sdk",
+ "fastrand",
+ "serde",
+ "tracing",
+ "twilight-model",
+]
+
+[[package]]
 name = "plugin-kit"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#4fb7a2a769121b373c98c9b5dee7432732bf67b8"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#bb10f33989c95bf62fc7dc9ab233bae178bec7ad"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2642,7 +2656,7 @@ dependencies = [
 [[package]]
 name = "plugin-leveling"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#4fb7a2a769121b373c98c9b5dee7432732bf67b8"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#bb10f33989c95bf62fc7dc9ab233bae178bec7ad"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2655,7 +2669,7 @@ dependencies = [
 [[package]]
 name = "plugin-linkexpand"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#4fb7a2a769121b373c98c9b5dee7432732bf67b8"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#bb10f33989c95bf62fc7dc9ab233bae178bec7ad"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2673,7 +2687,7 @@ dependencies = [
 [[package]]
 name = "plugin-starboard"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#4fb7a2a769121b373c98c9b5dee7432732bf67b8"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#bb10f33989c95bf62fc7dc9ab233bae178bec7ad"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2689,7 +2703,7 @@ dependencies = [
 [[package]]
 name = "plugin-translate"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#4fb7a2a769121b373c98c9b5dee7432732bf67b8"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#bb10f33989c95bf62fc7dc9ab233bae178bec7ad"
 dependencies = [
  "anyhow",
  "closure-core",
