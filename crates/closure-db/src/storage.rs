@@ -333,6 +333,263 @@ impl StorageBackend for Db {
         tx.commit().await.map_err(backend)?;
         Ok(())
     }
+
+    async fn score_add(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        subject: u64,
+        delta: i64,
+    ) -> Result<i64, StorageError> {
+        sqlx::query_scalar(
+            "INSERT INTO module_scores (module, guild_id, name, subject, value)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (module, guild_id, name, subject)
+             DO UPDATE SET value = module_scores.value + EXCLUDED.value
+             RETURNING value",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(subject_id(subject)?)
+        .bind(delta)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend)
+    }
+
+    async fn score_get(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        subject: u64,
+    ) -> Result<i64, StorageError> {
+        let value: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM module_scores
+             WHERE module = $1 AND guild_id = $2 AND name = $3 AND subject = $4",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(subject_id(subject)?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(value.unwrap_or(0))
+    }
+
+    async fn score_put(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        subject: u64,
+        value: i64,
+    ) -> Result<(), StorageError> {
+        let (guild, subject) = (guild_id(guild)?, subject_id(subject)?);
+        if value == 0 {
+            sqlx::query(
+                "DELETE FROM module_scores
+                 WHERE module = $1 AND guild_id = $2 AND name = $3 AND subject = $4",
+            )
+            .bind(module.as_str())
+            .bind(guild)
+            .bind(name)
+            .bind(subject)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        } else {
+            sqlx::query(
+                "INSERT INTO module_scores (module, guild_id, name, subject, value)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (module, guild_id, name, subject)
+                 DO UPDATE SET value = EXCLUDED.value",
+            )
+            .bind(module.as_str())
+            .bind(guild)
+            .bind(name)
+            .bind(subject)
+            .bind(value)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        }
+        Ok(())
+    }
+
+    async fn score_top(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<(u64, i64)>, StorageError> {
+        let rows: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT subject, value FROM module_scores
+             WHERE module = $1 AND guild_id = $2 AND name = $3
+             ORDER BY value DESC, subject LIMIT $4",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(subject, value)| Some((u64::try_from(subject).ok()?, value)))
+            .collect())
+    }
+
+    async fn score_above(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        value: i64,
+    ) -> Result<u64, StorageError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM module_scores
+             WHERE module = $1 AND guild_id = $2 AND name = $3 AND value > $4",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(value)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    async fn score_count(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+    ) -> Result<u64, StorageError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM module_scores
+             WHERE module = $1 AND guild_id = $2 AND name = $3",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    async fn set_add(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        member: u64,
+    ) -> Result<bool, StorageError> {
+        let done = sqlx::query(
+            "INSERT INTO module_sets (module, guild_id, name, member)
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(subject_id(member)?)
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    async fn set_remove(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        member: u64,
+    ) -> Result<bool, StorageError> {
+        let done = sqlx::query(
+            "DELETE FROM module_sets
+             WHERE module = $1 AND guild_id = $2 AND name = $3 AND member = $4",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(subject_id(member)?)
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    async fn set_has(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        member: u64,
+    ) -> Result<bool, StorageError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM module_sets
+                            WHERE module = $1 AND guild_id = $2 AND name = $3 AND member = $4)",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(subject_id(member)?)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend)
+    }
+
+    async fn set_count(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+    ) -> Result<u64, StorageError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM module_sets
+             WHERE module = $1 AND guild_id = $2 AND name = $3",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    async fn set_sample(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT member FROM module_sets
+             WHERE module = $1 AND guild_id = $2 AND name = $3
+             ORDER BY random() LIMIT $4",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(i64::try_from(count).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|m| u64::try_from(m).ok())
+            .collect())
+    }
 }
 
 impl Db {
@@ -762,5 +1019,60 @@ mod tests {
             assert_eq!(store.list("", 5).await.unwrap().len(), 1);
             assert!(store.delete("k").await.unwrap());
         }
+    }
+
+    #[sqlx::test]
+    async fn scores_rank_and_sets_draw_the_same_in_the_database_and_in_memory(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        let memory = Arc::new(MemoryStorage::default());
+        let granted: CapabilitySet = [Capability::Storage].into_iter().collect();
+        let in_memory = Store::new(
+            memory as Arc<dyn StorageBackend>,
+            &granted,
+            ModuleId::new("leveling").unwrap(),
+            Id::new(1),
+        );
+        let in_db = store(&db, "leveling", 1);
+        for store in [&in_memory, &in_db] {
+            assert_eq!(store.score_add("xp", 7_u64, 30).await.unwrap(), 30);
+            assert_eq!(store.score_add("xp", 7_u64, 20).await.unwrap(), 50);
+            store.score_add("xp", 8_u64, 50).await.unwrap();
+            store.score_add("xp", 9_u64, 10).await.unwrap();
+            assert_eq!(store.score("xp", 7_u64).await.unwrap(), 50);
+            assert_eq!(store.score("xp", 99_u64).await.unwrap(), 0);
+            // The highest first, the lower subject first among equals.
+            assert_eq!(store.score_top("xp", 2).await.unwrap(), [(7, 50), (8, 50)]);
+            assert_eq!(store.score_above("xp", 50).await.unwrap(), 0);
+            assert_eq!(store.score_above("xp", 10).await.unwrap(), 2);
+            assert_eq!(store.score_count("xp").await.unwrap(), 3);
+            store.score_put("xp", 8_u64, 0).await.unwrap();
+            assert_eq!(store.score_count("xp").await.unwrap(), 2);
+            store.score_put("xp", 9_u64, 70).await.unwrap();
+            assert_eq!(store.score_top("xp", 1).await.unwrap(), [(9, 70)]);
+            // Another name, another guild's store: apart.
+            assert_eq!(store.score_count("other").await.unwrap(), 0);
+
+            assert!(store.set_add("giveaway", 1_u64).await.unwrap());
+            assert!(!store.set_add("giveaway", 1_u64).await.unwrap());
+            for member in 2..=20_u64 {
+                store.set_add("giveaway", member).await.unwrap();
+            }
+            assert_eq!(store.set_count("giveaway").await.unwrap(), 20);
+            assert!(store.set_has("giveaway", 5_u64).await.unwrap());
+            assert!(store.set_remove("giveaway", 5_u64).await.unwrap());
+            assert!(!store.set_remove("giveaway", 5_u64).await.unwrap());
+            assert!(!store.set_has("giveaway", 5_u64).await.unwrap());
+            let mut drawn = store.set_sample("giveaway", 8).await.unwrap();
+            assert_eq!(drawn.len(), 8);
+            assert!(!drawn.contains(&5));
+            drawn.sort_unstable();
+            drawn.dedup();
+            assert_eq!(drawn.len(), 8, "each member once");
+            assert_eq!(store.set_sample("giveaway", 100).await.unwrap().len(), 19);
+        }
+        let elsewhere = store(&db, "leveling", 2);
+        assert_eq!(elsewhere.score_count("xp").await.unwrap(), 0);
+        assert_eq!(elsewhere.set_count("giveaway").await.unwrap(), 0);
     }
 }

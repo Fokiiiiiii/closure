@@ -6,7 +6,7 @@
 //! Everything is limited: keys, values, how many entries and counters a module may keep in a
 //! guild; going over a limit is an error, never silent loss.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -139,6 +139,131 @@ pub trait StorageBackend: Send + Sync {
         counter: &str,
         subject: u64,
     ) -> Result<(), StorageError>;
+
+    // The scores and the sets are for what grows with the members of a guild: a score each, a
+    // place in a set each. Their cost does not grow with what is already kept (no quota is
+    // counted, no lock is taken), and they answer the questions a ranking and a draw ask without
+    // reading everything.
+
+    /// Adds `delta` to the score `name` of `subject`, making it if there is none; returns the
+    /// new score.
+    async fn score_add(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _subject: u64,
+        _delta: i64,
+    ) -> Result<i64, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// The score, 0 when there is none.
+    async fn score_get(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _subject: u64,
+    ) -> Result<i64, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// Puts the score at `value`; a score of 0 is removed.
+    async fn score_put(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _subject: u64,
+        _value: i64,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// The `limit` highest scores, the highest first (the lower subject first among equals).
+    async fn score_top(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _limit: usize,
+    ) -> Result<Vec<(u64, i64)>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// How many subjects have a score above `value`.
+    async fn score_above(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _value: i64,
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// How many subjects have a score.
+    async fn score_count(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// Puts `member` in the set; whether it was not in it already.
+    async fn set_add(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _member: u64,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// Takes `member` out of the set; whether it was in it.
+    async fn set_remove(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _member: u64,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    async fn set_has(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _member: u64,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    async fn set_count(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// Up to `count` members of the set, chosen at random, each once.
+    async fn set_sample(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
 }
 
 /// Whether `key` is one the store accepts: 1 to 128 printable ASCII characters.
@@ -465,6 +590,124 @@ impl Store {
             .counter_reset(&self.module, self.guild, name, subject.into())
             .await
     }
+
+    /// Adds `delta` (it may be negative) to the score `name` of `subject` and returns the new
+    /// score. A score is a number kept for each member (experience, points) that can be ranked;
+    /// unlike a counter it has no history, and unlike an entry it costs the same however many
+    /// members have one.
+    pub async fn score_add(
+        &self,
+        name: &str,
+        subject: impl Into<u64>,
+        delta: i64,
+    ) -> Result<i64, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .score_add(&self.module, self.guild, name, subject.into(), delta)
+            .await
+    }
+
+    /// The score, 0 when there is none.
+    pub async fn score(&self, name: &str, subject: impl Into<u64>) -> Result<i64, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .score_get(&self.module, self.guild, name, subject.into())
+            .await
+    }
+
+    /// Puts the score at `value`; 0 removes it.
+    pub async fn score_put(
+        &self,
+        name: &str,
+        subject: impl Into<u64>,
+        value: i64,
+    ) -> Result<(), StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .score_put(&self.module, self.guild, name, subject.into(), value)
+            .await
+    }
+
+    /// The `limit` highest scores (at most 1000), the highest first.
+    pub async fn score_top(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<(u64, i64)>, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .score_top(&self.module, self.guild, name, limit.min(1000))
+            .await
+    }
+
+    /// How many subjects have a score above `value`: the place of a score is this plus one.
+    pub async fn score_above(&self, name: &str, value: i64) -> Result<u64, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .score_above(&self.module, self.guild, name, value)
+            .await
+    }
+
+    /// How many subjects have a score.
+    pub async fn score_count(&self, name: &str) -> Result<u64, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .score_count(&self.module, self.guild, name)
+            .await
+    }
+
+    /// Puts `member` (a user, a role, anything with a number) in the set `name`; whether it was
+    /// not in it already. A set holds as many members as there are; asking whether one is in it,
+    /// how many there are and for a random few do not read the rest.
+    pub async fn set_add(&self, name: &str, member: impl Into<u64>) -> Result<bool, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .set_add(&self.module, self.guild, name, member.into())
+            .await
+    }
+
+    /// Takes `member` out of the set; whether it was in it.
+    pub async fn set_remove(
+        &self,
+        name: &str,
+        member: impl Into<u64>,
+    ) -> Result<bool, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .set_remove(&self.module, self.guild, name, member.into())
+            .await
+    }
+
+    pub async fn set_has(&self, name: &str, member: impl Into<u64>) -> Result<bool, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .set_has(&self.module, self.guild, name, member.into())
+            .await
+    }
+
+    pub async fn set_count(&self, name: &str) -> Result<u64, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend.set_count(&self.module, self.guild, name).await
+    }
+
+    /// Up to `count` members of the set, chosen at random, each once.
+    pub async fn set_sample(&self, name: &str, count: usize) -> Result<Vec<u64>, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .set_sample(&self.module, self.guild, name, count)
+            .await
+    }
 }
 
 type RowKey = (ModuleId, GuildId, String);
@@ -490,6 +733,8 @@ struct Inner {
     revisions: i64,
     entries: HashMap<RowKey, Row>,
     counters: HashMap<CounterKey, CounterRow>,
+    scores: HashMap<(ModuleId, GuildId, String, u64), i64>,
+    sets: HashMap<(ModuleId, GuildId, String), BTreeSet<u64>>,
 }
 
 type UnixClock = Arc<dyn Fn() -> i64 + Send + Sync>;
@@ -720,6 +965,191 @@ impl StorageBackend for MemoryStorage {
             .counters
             .remove(&(module.clone(), guild, counter.to_owned(), subject));
         Ok(())
+    }
+
+    async fn score_add(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        subject: u64,
+        delta: i64,
+    ) -> Result<i64, StorageError> {
+        let mut inner = self.lock();
+        let score = inner
+            .scores
+            .entry((module.clone(), guild, name.to_owned(), subject))
+            .or_default();
+        *score = score
+            .checked_add(delta)
+            .ok_or_else(|| StorageError::Backend("the score overflows".into()))?;
+        Ok(*score)
+    }
+
+    async fn score_get(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        subject: u64,
+    ) -> Result<i64, StorageError> {
+        Ok(self
+            .lock()
+            .scores
+            .get(&(module.clone(), guild, name.to_owned(), subject))
+            .copied()
+            .unwrap_or(0))
+    }
+
+    async fn score_put(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        subject: u64,
+        value: i64,
+    ) -> Result<(), StorageError> {
+        let key = (module.clone(), guild, name.to_owned(), subject);
+        let mut inner = self.lock();
+        if value == 0 {
+            inner.scores.remove(&key);
+        } else {
+            inner.scores.insert(key, value);
+        }
+        Ok(())
+    }
+
+    async fn score_top(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<(u64, i64)>, StorageError> {
+        let mut all: Vec<(u64, i64)> = self
+            .lock()
+            .scores
+            .iter()
+            .filter(|((m, g, n, _), _)| m == module && *g == guild && n == name)
+            .map(|((_, _, _, subject), value)| (*subject, *value))
+            .collect();
+        all.sort_by_key(|(subject, value)| (std::cmp::Reverse(*value), *subject));
+        all.truncate(limit);
+        Ok(all)
+    }
+
+    async fn score_above(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        value: i64,
+    ) -> Result<u64, StorageError> {
+        let count = self
+            .lock()
+            .scores
+            .iter()
+            .filter(|((m, g, n, _), v)| m == module && *g == guild && n == name && **v > value)
+            .count();
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
+    async fn score_count(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+    ) -> Result<u64, StorageError> {
+        let count = self
+            .lock()
+            .scores
+            .keys()
+            .filter(|(m, g, n, _)| m == module && *g == guild && n == name)
+            .count();
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
+    async fn set_add(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        member: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .sets
+            .entry((module.clone(), guild, name.to_owned()))
+            .or_default()
+            .insert(member))
+    }
+
+    async fn set_remove(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        member: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .sets
+            .get_mut(&(module.clone(), guild, name.to_owned()))
+            .is_some_and(|set| set.remove(&member)))
+    }
+
+    async fn set_has(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        member: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .sets
+            .get(&(module.clone(), guild, name.to_owned()))
+            .is_some_and(|set| set.contains(&member)))
+    }
+
+    async fn set_count(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+    ) -> Result<u64, StorageError> {
+        let count = self
+            .lock()
+            .sets
+            .get(&(module.clone(), guild, name.to_owned()))
+            .map_or(0, BTreeSet::len);
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
+    async fn set_sample(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        let mut members: Vec<u64> = self
+            .lock()
+            .sets
+            .get(&(module.clone(), guild, name.to_owned()))
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        // A real shuffle, from the clock and the size: nothing here needs to be unpredictable.
+        let mut state = u64::try_from((self.clock)().rem_euclid(i64::MAX)).unwrap_or(1) | 1;
+        for at in (1..members.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let other = usize::try_from(state % (at as u64 + 1)).unwrap_or(0);
+            members.swap(at, other);
+        }
+        members.truncate(count);
+        Ok(members)
     }
 }
 
