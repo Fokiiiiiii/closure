@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
 };
 use closure_core::event::{ChannelId, GuildId, MessageId};
 use closure_core::message::MessageSpec;
@@ -286,7 +286,7 @@ pub(crate) async fn unschedule(
     State(state): State<ApiState>,
     Path((raw, key)): Path<(u64, String)>,
     headers: HeaderMap,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let guild = authorize(&state, raw, &headers).await?;
     let module = ModuleId::new("post").map_err(|e| ApiError::Internal(e.to_string()))?;
     let removed = state
@@ -296,7 +296,7 @@ pub(crate) async fn unschedule(
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
     if removed {
-        Ok(StatusCode::NO_CONTENT)
+        Ok(Json(json!({ "removed": true })))
     } else {
         Err(ApiError::NotFound("no such scheduled post".into()))
     }

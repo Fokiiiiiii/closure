@@ -1546,7 +1546,8 @@ async fn a_post_can_be_scheduled_listed_and_taken_back_and_buttons_are_checked(p
         ),
     )
     .await;
-    assert_eq!(removed.status, StatusCode::NO_CONTENT);
+    assert_eq!(removed.status, StatusCode::OK);
+    assert_eq!(removed.json()["removed"], true);
     let again = send(
         &app.router,
         call(
