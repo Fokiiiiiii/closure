@@ -214,6 +214,7 @@ impl MockApi {
             Action::GetInvite { code } => self.invite(code),
             Action::SendMessage { channel_id, .. }
             | Action::PostMessage { channel_id, .. }
+            | Action::SuppressEmbeds { channel_id, .. }
             | Action::SendFile { channel_id, .. } => Ok(self.sent(*channel_id)),
             // The channel of a direct message or webhook is not known to the mock.
             Action::SendViaWebhook { .. } | Action::SendDirectMessage { .. } => {

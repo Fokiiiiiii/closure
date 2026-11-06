@@ -1829,7 +1829,7 @@ async fn a_member_who_gains_many_roles_is_logged_with_the_roles_that_fit() {
 }
 
 #[tokio::test]
-async fn a_bot_leaving_is_not_logged() {
+async fn a_bot_leaving_is_logged_like_anybody_else() {
     let harness = harness();
     let bot_user = UserInfo {
         id: Id::new(40),
@@ -1845,7 +1845,7 @@ async fn a_bot_leaving_is_not_logged() {
         .await
         .unwrap();
 
-    assert!(sent(&harness).is_empty());
+    assert_eq!(sent(&harness).len(), 1);
 }
 
 #[tokio::test]

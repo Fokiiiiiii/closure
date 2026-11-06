@@ -385,7 +385,8 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     Ok(Flow::Continue)
 }
 
-/// Whether an event is about a bot: a bot's message, or a bot's member events. Those are not logged.
+/// Whether an event is about a bot: a bot's message, or its roles, nickname, timeout or voice.
+/// Those are not logged; its joining, leaving, kick and ban are.
 /// A deleted message is about a bot when the history kept it from one.
 async fn about_a_bot(ctx: &EventContext, event: &Event) -> bool {
     match event {
@@ -398,12 +399,10 @@ async fn about_a_bot(ctx: &EventContext, event: &Event) -> bool {
             ctx.history().get(*channel_id, *message_id).await,
             Ok(Some(saved)) if saved.author_bot
         ),
-        Event::MemberJoined(member) => member.user.bot,
+        // A bot that joins, leaves, is kicked or banned is a change of who is in the server, so it
+        // is logged like anybody else.
         Event::RolesChanged(change) => change.user.bot,
-        Event::MemberLeft { user, .. }
-        | Event::BanAdded { user, .. }
-        | Event::BanRemoved { user, .. }
-        | Event::NicknameChanged { user, .. }
+        Event::NicknameChanged { user, .. }
         | Event::TimeoutChanged { user, .. }
         | Event::VoiceStateChanged { user, .. } => user.bot,
         _ => false,

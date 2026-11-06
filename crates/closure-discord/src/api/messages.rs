@@ -99,6 +99,10 @@ impl TwilightApi {
     /// when that fails nothing is sent.
     /// Sends a message with components, or replaces a message of the bot with one. Nobody is
     /// mentioned.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the fields of `Action::PostMessage`"
+    )]
     pub(super) async fn post_message(
         &self,
         channel: ChannelId,
@@ -107,6 +111,7 @@ impl TwilightApi {
         content: Option<&str>,
         embeds: &[Embed],
         components: &[Component],
+        files: &[closure_core::action::FileUpload],
     ) -> Result<Outcome, DiscordError> {
         let allowed = AllowedMentions::default();
         let message = if let Some(message) = edit {
@@ -120,12 +125,24 @@ impl TwilightApi {
             )
             .await?
         } else {
+            let attachments: Vec<twilight_model::http::attachment::Attachment> = files
+                .iter()
+                .zip(0_u64..)
+                .map(|(file, id)| {
+                    twilight_model::http::attachment::Attachment::from_bytes(
+                        file.filename.clone(),
+                        file.data.clone(),
+                        id,
+                    )
+                })
+                .collect();
             let mut request = self
                 .http
                 .create_message(channel)
                 .allowed_mentions(Some(&allowed))
                 .embeds(embeds)
-                .components(components);
+                .components(components)
+                .attachments(&attachments);
             if let Some(content) = content {
                 request = request.content(content);
             }
@@ -135,6 +152,21 @@ impl TwilightApi {
             read(request).await?
         };
         Ok(Outcome::Message(Box::new(message)))
+    }
+
+    /// Hides the link previews of a message.
+    pub(super) async fn suppress_embeds(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+    ) -> Result<Outcome, DiscordError> {
+        read(
+            self.http
+                .update_message(channel, message)
+                .flags(twilight_model::channel::message::MessageFlags::SUPPRESS_EMBEDS),
+        )
+        .await
+        .map(|message| Outcome::Message(Box::new(message)))
     }
 
     pub(super) async fn send_direct_message(

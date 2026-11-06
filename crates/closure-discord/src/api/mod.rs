@@ -702,6 +702,7 @@ impl TwilightApi {
                 content,
                 embeds,
                 components,
+                files,
             } => {
                 self.post_message(
                     *channel_id,
@@ -710,9 +711,14 @@ impl TwilightApi {
                     content.as_deref(),
                     embeds,
                     components,
+                    files,
                 )
                 .await
             }
+            Action::SuppressEmbeds {
+                channel_id,
+                message_id,
+            } => self.suppress_embeds(*channel_id, *message_id).await,
             Action::SendDirectMessage {
                 guild_id,
                 user_id,

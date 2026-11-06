@@ -74,6 +74,7 @@ impl closure_api::MessageSink for DiscordSink {
                 channel_id: channel,
                 message_id: edit,
                 reply_to: None,
+                files: Vec::new(),
                 content: post.content,
                 embeds: post.embeds,
                 components: post.components,

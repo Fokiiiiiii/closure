@@ -409,6 +409,8 @@ impl fmt::Debug for FileUpload {
 pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 /// The longest name a file may have, in characters.
 pub const MAX_FILENAME_CHARS: usize = 255;
+/// The most files Discord takes in one message.
+pub const MAX_FILES: usize = 10;
 
 /// Every Discord operation available to modules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -448,6 +450,15 @@ pub enum Action {
         content: Option<String>,
         embeds: Vec<Embed>,
         components: Vec<Component>,
+        /// Files sent with a new message (a replaced message keeps the files it has).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<FileUpload>,
+    },
+    /// Hides the link previews of a message, as the person who posted it could. Needs the
+    /// permission to manage messages when the message is somebody else's.
+    SuppressEmbeds {
+        channel_id: ChannelId,
+        message_id: MessageId,
     },
     /// Privately to a member of `guild_id`: the host checks the membership before sending.
     SendDirectMessage {
@@ -1397,6 +1408,7 @@ impl Action {
             | Self::GetReactionUsers { .. }
             | Self::ListThreadMembers { .. } => Capability::ReadMessages,
             Self::PinMessage { .. }
+            | Self::SuppressEmbeds { .. }
             | Self::UnpinMessage { .. }
             | Self::CrosspostMessage { .. }
             | Self::RemoveReaction { .. }
@@ -1517,6 +1529,7 @@ impl Action {
             | Self::MoveMember { guild_id, .. }
             | Self::DisconnectMember { guild_id, .. } => Some(*guild_id),
             Self::GetInvite { .. }
+            | Self::SuppressEmbeds { .. }
             | Self::SendMessage { .. }
             | Self::PostMessage { .. }
             | Self::SendFile { .. }
@@ -1583,6 +1596,7 @@ impl Action {
                 .into_iter()
                 .collect(),
             Self::SendMessage { channel_id, .. }
+            | Self::SuppressEmbeds { channel_id, .. }
             | Self::PostMessage { channel_id, .. }
             | Self::SendFile { channel_id, .. }
             | Self::EditMessage { channel_id, .. }
@@ -1675,6 +1689,7 @@ impl Action {
             | Self::Followup { token, .. }
             | Self::EditResponse { token, .. } => Some(token),
             Self::GetInvite { .. }
+            | Self::SuppressEmbeds { .. }
             | Self::SendMessage { .. }
             | Self::PostMessage { .. }
             | Self::SendFile { .. }
@@ -1803,6 +1818,7 @@ impl Action {
             Self::GetReactionUsers { .. } => "get_reaction_users",
             Self::SendMessage { .. } => "send_message",
             Self::PostMessage { .. } => "post_message",
+            Self::SuppressEmbeds { .. } => "suppress_embeds",
             Self::SendFile { .. } => "send_file",
             Self::SendDirectMessage { .. } => "send_direct_message",
             Self::EditMessage { .. } => "edit_message",
@@ -1922,10 +1938,25 @@ impl Action {
                 content,
                 embeds,
                 components,
+                files,
                 ..
             } => {
                 check_new_message(content.as_deref(), embeds)?;
-                check_components(components)
+                check_components(components)?;
+                ensure(files.len() <= MAX_FILES, || {
+                    format!("a message has at most {MAX_FILES} files")
+                })?;
+                for file in files {
+                    ensure(
+                        !file.filename.is_empty()
+                            && file.filename.chars().count() <= MAX_FILENAME_CHARS,
+                        || format!("a file name is 1 to {MAX_FILENAME_CHARS} characters"),
+                    )?;
+                }
+                ensure(
+                    files.iter().map(|f| f.data.len()).sum::<usize>() <= MAX_UPLOAD_BYTES,
+                    || format!("the files of a message are at most {MAX_UPLOAD_BYTES} bytes"),
+                )
             }
             Self::SendMessage {
                 content, embeds, ..
@@ -2005,7 +2036,8 @@ impl Action {
             },
             Self::Followup { reply, .. } => check_reply(reply, true),
             Self::EditResponse { reply, .. } => check_reply(reply, false),
-            Self::AddReaction { .. }
+            Self::SuppressEmbeds { .. }
+            | Self::AddReaction { .. }
             | Self::DeleteMessage { .. }
             | Self::GetGuild { .. }
             | Self::GetMember { .. }
@@ -2170,6 +2202,44 @@ mod tests {
         };
         assert!(action.validate().is_err());
         assert_eq!(MentionPolicy::default(), MentionPolicy::None);
+    }
+
+    #[test]
+    fn files_and_the_suppression_of_previews_follow_the_rules_of_a_message() {
+        let post = |files: Vec<FileUpload>| Action::PostMessage {
+            channel_id: id::<1, _>(),
+            message_id: None,
+            reply_to: None,
+            content: Some("x".into()),
+            embeds: vec![],
+            components: vec![],
+            files,
+        };
+        let file = |bytes: usize| FileUpload {
+            filename: "a.jpg".into(),
+            data: vec![0; bytes],
+        };
+        assert!(post(vec![]).validate().is_ok());
+        assert!(post(vec![file(10)]).validate().is_ok());
+        assert!(
+            post(vec![file(MAX_UPLOAD_BYTES), file(1)])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            post((0..=MAX_FILES).map(|_| file(1)).collect())
+                .validate()
+                .is_err()
+        );
+        let hide = Action::SuppressEmbeds {
+            channel_id: id::<1, _>(),
+            message_id: id::<2, _>(),
+        };
+        assert_eq!(hide.capability(), Capability::ManageMessages);
+        assert_eq!(hide.guild_id(), None);
+        assert_eq!(hide.channels().len(), 1);
+        assert_eq!(hide.name(), "suppress_embeds");
+        assert!(hide.validate().is_ok());
     }
 
     #[test]
