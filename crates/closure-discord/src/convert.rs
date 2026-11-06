@@ -58,6 +58,23 @@ fn member(guild_id: GuildId, member: &Member) -> MemberInfo {
     }
 }
 
+/// The text of the embeds of a message, one part to a line, at most `MAX_EMBEDS_TEXT` characters.
+fn embeds_text(embeds: &[twilight_model::channel::message::Embed]) -> String {
+    const MAX_EMBEDS_TEXT: usize = 6000;
+    let mut parts: Vec<&str> = Vec::new();
+    for embed in embeds {
+        parts.extend(embed.author.as_ref().map(|author| author.name.as_str()));
+        parts.extend(embed.title.as_deref());
+        parts.extend(embed.description.as_deref());
+        for field in &embed.fields {
+            parts.push(&field.name);
+            parts.push(&field.value);
+        }
+        parts.extend(embed.footer.as_ref().map(|footer| footer.text.as_str()));
+    }
+    parts.join("\n").chars().take(MAX_EMBEDS_TEXT).collect()
+}
+
 fn attachment(attachment: &Attachment) -> AttachmentInfo {
     AttachmentInfo {
         id: attachment.id.get(),
@@ -87,6 +104,7 @@ fn message(message: &Message) -> Option<MessageInfo> {
         mentions_everyone: message.mention_everyone,
         attachments: message.attachments.iter().map(attachment).collect(),
         embed_count: u32::try_from(message.embeds.len()).unwrap_or(u32::MAX),
+        embeds_text: embeds_text(&message.embeds),
         sticker_count: u32::try_from(message.sticker_items.len()).unwrap_or(u32::MAX),
         // Only a reply answers its reference; pins and crossposts point at a message too.
         reply_to: match (message.kind, &message.reference) {

@@ -49,8 +49,8 @@ spam detection, `clean` and logs rely on), config overrides by level/channel/rol
 | --- | --- |
 | rule record, OR triggers, action map | list of rules, one check each, ordered actions |
 | `cooldown`, `allow_further_rules`, `conditions.member_age`, `affects_bots/self` | `cooldown` (per rule and member), `continue_after_match`, `scope` (channels, roles, bots, moderators, `member_age`). No `presets` |
-| `match_words` | `words`: whole word or contains, case, `normalize`, `strip_markdown`, message or username targets. No loose matching, no embeds |
-| `match_links`, `match_invites` | `links`: any, allowlist, blocklist, subdomains, bare domains, include and exclude regexes. `invites`: allowed and blocked codes. No guild rules |
+| `match_words` | `words`: whole word or contains, case, `normalize`, `strip_markdown`, `loose_matching` (with `loose_gap`), message, username or embed targets |
+| `match_links`, `match_invites` | `links`: any, allowlist, blocklist, subdomains, bare domains, include and exclude regexes. `invites`: allowed and blocked codes, and allowed and blocked servers (`allow_guilds`, `block_guilds`; the server of a code is asked of Discord and remembered for an hour). Invites to this server are allowed unless `allow_own_server` is off |
 | windowed spam triggers | `spam`: messages, mentions, links, attachments, emojis, lines, characters, stickers, duplicates; `within`, `per_channel`, `distinct_channels`, `distinct_users`, `threads_as_parent_channel`, identical-text options, burst handled once. Coordinated message and link spam use `distinct_users`. |
 | `match_regex`, attachment type, MIME type | `regex` (linear time, size-limited), `attachments` (count, extensions, MIME types with `type/*`) |
 | `role_added`, `role_removed` | `role_added`, `role_removed`: a role given or taken away (from `RolesChanged`; the bot's own role changes are left out for ten seconds) |

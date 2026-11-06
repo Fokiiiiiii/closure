@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use closure_core::permission::Actor;
 use closure_sdk::recent::{RecentActions, RecentLimits};
@@ -32,7 +33,17 @@ pub struct State {
     recent: RecentActions,
     loaded: Mutex<HashMap<GuildId, Arc<Loaded>>>,
     pub memory: Memory,
+    /// The server each invite code led to when it was last asked about, and when.
+    invites: Mutex<HashMap<String, (Instant, Option<GuildId>)>>,
 }
+
+/// How long the server of an invite code is remembered. An invite can be deleted, but not made to
+/// lead elsewhere, so an hour is safe.
+const INVITE_MEMORY: Duration = Duration::from_secs(3600);
+/// How many codes are remembered; past this the memory starts over.
+const MAX_INVITES_REMEMBERED: usize = 2000;
+/// The most invite codes of one message that are asked about.
+const MAX_INVITES_ASKED: usize = 5;
 
 /// A guild's configuration as it was read, with its rules and counters.
 #[derive(Debug)]
@@ -59,7 +70,70 @@ impl State {
             recent: RecentActions::new(RecentLimits::default()),
             loaded: Mutex::new(HashMap::new()),
             memory: Memory::default(),
+            invites: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The server each invite code of the message leads to, when a rule in scope asks for it.
+    /// A code Discord does not know, or cannot be asked about now, maps to `None`.
+    async fn invite_servers(
+        &self,
+        ctx: &EventContext,
+        rules: &[&Rule],
+        context: &Context,
+    ) -> HashMap<String, Option<GuildId>> {
+        let mut found = HashMap::new();
+        let Some(message) = context.message.as_ref() else {
+            return found;
+        };
+        let asked = rules.iter().any(|rule| {
+            rule.triggers.iter().any(|trigger| {
+                matches!(trigger, crate::config::Trigger::Invites(invites) if invites.reads_servers())
+            })
+        });
+        if !asked {
+            return found;
+        }
+        for code in closure_sdk::text::invites(&message.content)
+            .into_iter()
+            .take(MAX_INVITES_ASKED)
+        {
+            let remembered = self
+                .invites
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&code)
+                .filter(|(at, _)| at.elapsed() < INVITE_MEMORY)
+                .map(|(_, server)| *server);
+            let server = if let Some(server) = remembered {
+                server
+            } else {
+                let answer = ctx
+                    .api
+                    .execute(closure_sdk::Action::GetInvite { code: code.clone() })
+                    .await;
+                let server = match answer {
+                    Ok(closure_core::action::Outcome::Invite(invite)) => {
+                        invite.guild.map(|guild| guild.id)
+                    }
+                    // An invite that is gone leads nowhere, and that does not change.
+                    Err(closure_sdk::DiscordError::NotFound) => None,
+                    // Anything else is not remembered: the next message asks again.
+                    _ => {
+                        found.insert(code, None);
+                        continue;
+                    }
+                };
+                let mut memory = self.invites.lock().unwrap_or_else(PoisonError::into_inner);
+                if memory.len() >= MAX_INVITES_REMEMBERED {
+                    memory.clear();
+                }
+                memory.insert(code.clone(), (Instant::now(), server));
+                server
+            };
+            found.insert(code, server);
+        }
+        found
     }
 
     pub fn load(&self, ctx: &EventContext) -> Result<Arc<Loaded>, ModuleError> {
@@ -213,12 +287,14 @@ async fn process(
             scoped.push(rule);
         }
     }
+    let invite_servers = state.invite_servers(ctx, &scoped, &context).await;
     let scan = Scan {
         ctx,
         recent: &state.recent,
         memory: &state.memory,
         commit: !loaded.config.dry_run,
         created: context.created,
+        invite_servers: &invite_servers,
     };
     // Counted before any rule is checked, so that the event which trips a burst is one of it.
     if depth == 0 {

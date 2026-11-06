@@ -91,6 +91,10 @@ pub struct MessageInfo {
     /// Number of embeds (link previews included).
     #[serde(default)]
     pub embed_count: u32,
+    /// The text of the embeds, one part to a line: titles, descriptions, fields, authors and
+    /// footers. Empty when there are none.
+    #[serde(default)]
+    pub embeds_text: String,
     #[serde(default)]
     pub sticker_count: u32,
     /// The message this one replies to. `None` for anything that is not a reply.

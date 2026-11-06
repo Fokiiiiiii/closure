@@ -12,7 +12,7 @@ use closure_sdk::counters::{Condition, CounterDef, Counters, Decay, TriggerDef};
 use closure_sdk::duration;
 use closure_sdk::punish::{Method, RoleSetting};
 use closure_sdk::template::Template;
-use closure_sdk::{ChannelId, RoleId, Store};
+use closure_sdk::{ChannelId, GuildId, RoleId, Store};
 use regex::{Regex, RegexBuilder};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
@@ -384,8 +384,18 @@ pub struct Words {
     /// Drops `* _ ~ | ` and backslashes before matching, so `sp*am` is `spam`.
     #[serde(default)]
     pub strip_markdown: bool,
+    /// A word is also found with other characters between its letters, as in `b.a.d`: the
+    /// letters have to come in order, at most `loose_gap` characters apart.
+    #[serde(default)]
+    pub loose_matching: bool,
+    #[serde(default = "loose_gap_default")]
+    pub loose_gap: u8,
     #[serde(default = "message_only")]
     pub targets: Vec<Target>,
+}
+
+fn loose_gap_default() -> u8 {
+    2
 }
 
 /// Regular expressions; a message trips when one of them matches.
@@ -450,6 +460,27 @@ pub struct Invites {
     /// Invites with these codes always trip, even when they are allowed.
     #[serde(default)]
     pub block_codes: Vec<String>,
+    /// Invites to these servers are fine, whatever their code.
+    #[serde(default, deserialize_with = "snowflake_list")]
+    pub allow_guilds: Vec<GuildId>,
+    /// Invites to these servers always trip, even when they are allowed.
+    #[serde(default, deserialize_with = "snowflake_list")]
+    pub block_guilds: Vec<GuildId>,
+    /// Invites to this very server are fine. On unless turned off.
+    #[serde(default = "own_server_allowed")]
+    pub allow_own_server: bool,
+}
+
+fn own_server_allowed() -> bool {
+    true
+}
+
+impl Invites {
+    /// Whether the rule has to know which server an invite leads to.
+    #[must_use]
+    pub fn reads_servers(&self) -> bool {
+        self.allow_own_server || !self.allow_guilds.is_empty() || !self.block_guilds.is_empty()
+    }
 }
 
 /// Files attached to the message.
@@ -546,6 +577,8 @@ pub enum Measure {
 pub enum Target {
     Message,
     Username,
+    /// The text of the embeds of the message (a bot or a webhook posts them; so do link previews).
+    Embeds,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]

@@ -123,6 +123,7 @@ fn edited(
         removed_attachments: removed,
         previous_content: None,
         embed_count: 0,
+        embeds_text: String::new(),
         sticker_count: 0,
         reply_to: None,
         from_webhook: false,

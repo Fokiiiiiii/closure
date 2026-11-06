@@ -1,8 +1,10 @@
 //! The triggers of a rule: each one reads a message and says whether it trips the rule, and why.
 
+use std::collections::HashMap;
+
 use closure_core::event::MessageId;
 use closure_sdk::text::{self, Link};
-use closure_sdk::{Args, ChannelId, EventContext, MessageInfo, RoleId, UserId, duration};
+use closure_sdk::{Args, ChannelId, EventContext, GuildId, MessageInfo, RoleId, UserId, duration};
 
 use crate::config::{
     AntiraidTrigger, Attachments, Caps, CaseTrigger, CounterTrigger, Invites, LinkMode, Links,
@@ -60,6 +62,9 @@ pub struct Scan<'a> {
     pub commit: bool,
     /// Whether the message is new. Edits count for the triggers that read text, not for spam.
     pub created: bool,
+    /// The server each invite code of the message leads to, for the rules that ask (see
+    /// `Invites::reads_servers`).
+    pub invite_servers: &'a HashMap<String, Option<GuildId>>,
 }
 
 /// Runs trigger number `index` of `rule` on a context.
@@ -85,19 +90,24 @@ pub fn check(scan: &Scan<'_>, rule: &Rule, index: usize, context: &Context) -> O
         Trigger::AntiraidLevel(antiraid) => antiraid_hit(ctx, antiraid, context),
         other => {
             let message = context.message.as_ref()?;
-            message_check(ctx, other, message)
+            message_check(ctx, other, message, scan.invite_servers)
         }
     }
 }
 
 /// The triggers that read the text, the attachments and the stickers of a message.
-fn message_check(ctx: &EventContext, trigger: &Trigger, message: &MessageInfo) -> Option<Hit> {
+fn message_check(
+    ctx: &EventContext,
+    trigger: &Trigger,
+    message: &MessageInfo,
+    servers: &HashMap<String, Option<GuildId>>,
+) -> Option<Hit> {
     match trigger {
         Trigger::AnyMessage(_) => Some(Hit::of(say(ctx, "detail-any", &Args::new()), message)),
         Trigger::Words(words) => words_hit(ctx, words, message),
         Trigger::Regex(patterns) => regex_hit(ctx, patterns, message),
         Trigger::Links(links) => links_hit(ctx, links, message),
-        Trigger::Invites(invites) => invites_hit(ctx, invites, message),
+        Trigger::Invites(invites) => invites_hit(ctx, invites, message, servers),
         Trigger::Attachments(files) => attachments_hit(ctx, files, message),
         Trigger::Caps(caps) => caps_hit(ctx, caps, message),
         Trigger::Repeat(repeat) => repeat_hit(ctx, repeat, message),
@@ -239,7 +249,12 @@ fn words_hit(ctx: &EventContext, words: &Words, message: &MessageInfo) -> Option
         );
         for listed in &words.words {
             let word = prepared(listed, words.normalize, false, lowercase);
-            if contains_word(&text, &word, words.whole_words) {
+            let found = if words.loose_matching {
+                loose_contains(&text, &word, usize::from(words.loose_gap.clamp(1, 8)))
+            } else {
+                contains_word(&text, &word, words.whole_words)
+            };
+            if found {
                 let args = Args::new().with("word", listed.as_str());
                 return Some(Hit::of(say(ctx, "detail-words", &args), message));
             }
@@ -290,10 +305,30 @@ fn links_hit(ctx: &EventContext, links: &Links, message: &MessageInfo) -> Option
     None
 }
 
-fn invites_hit(ctx: &EventContext, invites: &Invites, message: &MessageInfo) -> Option<Hit> {
+/// Whether an invite trips: its code or its server is blocked, or neither is allowed. The server
+/// of an invite is `None` when Discord did not say (the invite is gone, or the lookup failed).
+fn invites_hit(
+    ctx: &EventContext,
+    invites: &Invites,
+    message: &MessageInfo,
+    servers: &HashMap<String, Option<GuildId>>,
+) -> Option<Hit> {
     text::invites(&message.content)
         .into_iter()
-        .find(|code| invites.block_codes.contains(code) || !invites.allow_codes.contains(code))
+        .find(|code| {
+            let server = servers.get(code).copied().flatten();
+            if invites.block_codes.contains(code)
+                || server.is_some_and(|server| invites.block_guilds.contains(&server))
+            {
+                return true;
+            }
+            let allowed = invites.allow_codes.contains(code)
+                || server.is_some_and(|server| {
+                    invites.allow_guilds.contains(&server)
+                        || (invites.allow_own_server && server == ctx.guild_id)
+                });
+            !allowed
+        })
         .map(|code| {
             let args = Args::new().with("code", code.as_str());
             Hit::of(say(ctx, "detail-invite", &args), message)
@@ -377,6 +412,7 @@ pub fn target_text(target: Target, message: &MessageInfo) -> &str {
     match target {
         Target::Message => &message.content,
         Target::Username => &message.author.name,
+        Target::Embeds => &message.embeds_text,
     }
 }
 
@@ -412,6 +448,31 @@ pub fn contains_word(text: &str, word: &str, whole: bool) -> bool {
         let after = text[at + word.len()..].chars().next();
         !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
     })
+}
+
+/// Whether the letters of `word` come in `text` in order, each at most `gap` characters after the
+/// one before (`b.a.d` holds `bad` with a gap of 1).
+pub fn loose_contains(text: &str, word: &str, gap: usize) -> bool {
+    let text: Vec<char> = text.chars().collect();
+    let mut letters = word.chars();
+    let Some(first) = letters.next() else {
+        return false;
+    };
+    // The places in the text where the letters so far can end.
+    let mut ends: Vec<usize> = (0..text.len()).filter(|at| text[*at] == first).collect();
+    for letter in letters {
+        let mut next = Vec::new();
+        for (at, found) in text.iter().enumerate() {
+            if *found == letter && ends.iter().any(|end| *end < at && at <= end + gap + 1) {
+                next.push(at);
+            }
+        }
+        if next.is_empty() {
+            return false;
+        }
+        ends = next;
+    }
+    !ends.is_empty()
 }
 
 /// The links of a text. Without `only_real`, a bare `example.org` counts too.

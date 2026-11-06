@@ -132,6 +132,7 @@ pub fn custom(author: u64, channel: u64, content: &str) -> MessageInfo {
         mentions_everyone: false,
         attachments: Vec::new(),
         embed_count: 0,
+        embeds_text: String::new(),
         sticker_count: 0,
         reply_to: None,
         from_webhook: false,

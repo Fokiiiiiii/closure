@@ -698,6 +698,11 @@ pub enum Action {
         reason: Reason,
     },
 
+    /// Reads a public invite by its code: which server it leads to. Asks Discord, so a module
+    /// caches the answer.
+    GetInvite {
+        code: String,
+    },
     GetGuild {
         guild_id: GuildId,
     },
@@ -1419,7 +1424,8 @@ impl Action {
             | Self::SearchMembers { .. }
             | Self::ListMembers { .. }
             | Self::ListScheduledEvents { .. }
-            | Self::ListEmojis { .. } => Capability::ReadGuild,
+            | Self::ListEmojis { .. }
+            | Self::GetInvite { .. } => Capability::ReadGuild,
             Self::CreateScheduledEvent { .. }
             | Self::EditScheduledEvent { .. }
             | Self::DeleteScheduledEvent { .. } => Capability::ManageEvents,
@@ -1506,7 +1512,8 @@ impl Action {
             | Self::SetVoiceDeafen { guild_id, .. }
             | Self::MoveMember { guild_id, .. }
             | Self::DisconnectMember { guild_id, .. } => Some(*guild_id),
-            Self::SendMessage { .. }
+            Self::GetInvite { .. }
+            | Self::SendMessage { .. }
             | Self::PostMessage { .. }
             | Self::SendFile { .. }
             | Self::EditMessage { .. }
@@ -1649,7 +1656,8 @@ impl Action {
             | Self::DeleteScheduledEvent { .. }
             | Self::ListEmojis { .. }
             | Self::CreateEmoji { .. }
-            | Self::DeleteEmoji { .. } => Vec::new(),
+            | Self::DeleteEmoji { .. }
+            | Self::GetInvite { .. } => Vec::new(),
         }
     }
 
@@ -1662,7 +1670,8 @@ impl Action {
             Self::Respond { token, .. }
             | Self::Followup { token, .. }
             | Self::EditResponse { token, .. } => Some(token),
-            Self::SendMessage { .. }
+            Self::GetInvite { .. }
+            | Self::SendMessage { .. }
             | Self::PostMessage { .. }
             | Self::SendFile { .. }
             | Self::EditMessage { .. }
@@ -1768,6 +1777,7 @@ impl Action {
             Self::CreateInvite { .. } => "create_invite",
             Self::ListInvites { .. } => "list_invites",
             Self::DeleteInvite { .. } => "delete_invite",
+            Self::GetInvite { .. } => "get_invite",
             Self::CreateThread { .. } => "create_thread",
             Self::EditThread { .. } => "edit_thread",
             Self::JoinThread { .. } => "join_thread",
@@ -1897,6 +1907,13 @@ impl Action {
                     format!("a file is at most {MAX_UPLOAD_BYTES} bytes")
                 })
             }
+            Self::GetInvite { code } => ensure(
+                (2..=64).contains(&code.len())
+                    && code
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+                || "an invite code is 2-64 letters, digits, - or _".into(),
+            ),
             Self::PostMessage {
                 content,
                 embeds,
@@ -2149,6 +2166,19 @@ mod tests {
         };
         assert!(action.validate().is_err());
         assert_eq!(MentionPolicy::default(), MentionPolicy::None);
+    }
+
+    #[test]
+    fn reading_an_invite_needs_the_read_capability_and_names_no_guild() {
+        let read = |code: &str| Action::GetInvite { code: code.into() };
+        assert_eq!(read("abc-DEF_1").capability(), Capability::ReadGuild);
+        assert_eq!(read("abc").guild_id(), None);
+        assert!(read("abc").channels().is_empty());
+        assert_eq!(read("abc").name(), "get_invite");
+        assert!(read("abc").validate().is_ok());
+        for bad in ["", "a", "a b", "a/b", &"a".repeat(65)] {
+            assert!(read(bad).validate().is_err(), "{bad}");
+        }
     }
 
     #[test]

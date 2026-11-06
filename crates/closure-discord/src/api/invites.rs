@@ -28,6 +28,13 @@ impl TwilightApi {
             .map(|invite| Outcome::Invite(Box::new(invite)))
     }
 
+    /// The invite with `code`, as Discord shows it to anybody.
+    pub(super) async fn get_invite(&self, code: &str) -> Result<Outcome, DiscordError> {
+        read(self.http.invite(code))
+            .await
+            .map(|invite| Outcome::Invite(Box::new(invite)))
+    }
+
     pub(super) async fn list_invites(&self, guild: GuildId) -> Result<Outcome, DiscordError> {
         read_list(self.http.guild_invites(guild))
             .await

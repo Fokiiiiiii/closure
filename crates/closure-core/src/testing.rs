@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use twilight_model::channel::{Channel, Message};
 use twilight_model::guild::audit_log::{AuditLog, AuditLogEntry};
+use twilight_model::guild::invite::Invite;
 use twilight_model::guild::{Guild, Member, Role};
 
 use crate::action::{Action, AuditLogQuery, InteractionResponse, Outcome, OverwriteTarget};
@@ -82,6 +83,20 @@ fn guild_named(guild: GuildId, name: &str, invites_disabled: bool) -> Guild {
     .unwrap_or_else(|error| panic!("a test guild: {error}"))
 }
 
+/// An invite with `code` that leads to `guild`.
+fn invite_to(code: &str, guild: GuildId) -> Invite {
+    serde_json::from_value(serde_json::json!({
+        "code": code,
+        "type": 0,
+        "guild": {
+            "id": guild.to_string(), "name": "server", "features": [],
+            "splash": null, "banner": null, "description": null, "icon": null,
+            "verification_level": 0, "nsfw_level": 0, "vanity_url_code": null,
+        },
+    }))
+    .unwrap_or_else(|error| panic!("a test invite: {error}"))
+}
+
 /// A module that does nothing; handy for exercising registries and configuration.
 #[derive(Debug, Clone)]
 pub struct StubModule(pub ModuleManifest);
@@ -115,6 +130,10 @@ pub struct MockApi {
     roles: Mutex<HashMap<GuildId, Vec<Role>>>,
     guild_channels: Mutex<HashMap<GuildId, Vec<Channel>>>,
     guild_names: Mutex<HashMap<GuildId, String>>,
+    /// The server each invite code leads to, as the pretend Discord answers for it.
+    invites: Mutex<HashMap<String, GuildId>>,
+    /// How often an invite was asked about.
+    invite_lookups: Mutex<usize>,
     /// The guilds whose invites are switched off by an edit, as the pretend Discord reports them.
     invites_disabled: Mutex<HashSet<GuildId>>,
     lookups: Mutex<usize>,
@@ -189,6 +208,7 @@ impl MockApi {
                 }
                 Ok(Outcome::None)
             }
+            Action::GetInvite { code } => self.invite(code),
             Action::SendMessage { channel_id, .. }
             | Action::PostMessage { channel_id, .. }
             | Action::SendFile { channel_id, .. } => Ok(self.sent(*channel_id)),
@@ -366,6 +386,26 @@ impl MockApi {
     /// Declares the name of `guild`, which the pretend Discord gives when the guild is asked for.
     pub fn set_guild_name(&self, guild: GuildId, name: &str) {
         lock(&self.guild_names).insert(guild, name.to_owned());
+    }
+
+    /// Declares that the invite `code` leads to `guild`; a code not declared is one Discord does
+    /// not know.
+    pub fn set_invite(&self, code: &str, guild: GuildId) {
+        lock(&self.invites).insert(code.to_owned(), guild);
+    }
+
+    fn invite(&self, code: &str) -> Result<Outcome, DiscordError> {
+        *lock(&self.invite_lookups) += 1;
+        match lock(&self.invites).get(code) {
+            Some(guild) => Ok(Outcome::Invite(Box::new(invite_to(code, *guild)))),
+            None => Err(DiscordError::NotFound),
+        }
+    }
+
+    /// How often an invite was asked about.
+    #[must_use]
+    pub fn invite_lookups(&self) -> usize {
+        *lock(&self.invite_lookups)
     }
 
     /// How often a channel's guild was looked up.

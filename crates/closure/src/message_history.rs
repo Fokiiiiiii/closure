@@ -415,6 +415,7 @@ mod tests {
             mentions_everyone: false,
             attachments: Vec::new(),
             embed_count: 0,
+            embeds_text: String::new(),
             sticker_count: 0,
             reply_to: None,
             from_webhook: false,

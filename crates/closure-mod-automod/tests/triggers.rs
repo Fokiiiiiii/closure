@@ -158,6 +158,36 @@ async fn links_include_and_exclude_regex_narrow_the_urls() {
     assert!(trips(not_github, "https://other.com").await);
 }
 
+#[tokio::test]
+async fn words_can_look_in_the_text_of_the_embeds() {
+    let mut info = custom(MEMBER, CHANNEL, "look");
+    info.embeds_text = "free nitro here".into();
+    let in_embeds = json!({ "type": "words", "words": ["nitro"], "targets": ["embeds"] });
+    assert!(trips_with(in_embeds.clone(), info.clone()).await);
+    let in_message = json!({ "type": "words", "words": ["nitro"] });
+    assert!(
+        !trips_with(in_message, info).await,
+        "the message alone is clean"
+    );
+    assert!(
+        !trips(in_embeds, "free nitro here").await,
+        "the embeds are what is read"
+    );
+}
+
+#[tokio::test]
+async fn loose_matching_finds_a_word_with_characters_between_its_letters() {
+    let loose = json!({ "type": "words", "words": ["bad"], "loose_matching": true });
+    assert!(trips(loose.clone(), "you are b.a.d").await);
+    assert!(trips(loose.clone(), "B--A--D").await);
+    assert!(!trips(loose.clone(), "b....a....d").await, "too far apart");
+    assert!(!trips(loose, "dab").await, "in order");
+    let wide = json!({ "type": "words", "words": ["bad"], "loose_matching": true, "loose_gap": 4 });
+    assert!(trips(wide, "b....a....d").await);
+    // Without it a word has to stand on its own.
+    assert!(!trips(json!({ "type": "words", "words": ["bad"] }), "b.a.d").await);
+}
+
 // ---- invites ----
 
 #[tokio::test]
@@ -170,6 +200,84 @@ async fn invites_hit_unless_the_code_is_allowed_and_blocked_codes_always_hit() {
     });
     assert!(trips(blocked, "join discord.gg/abc123").await);
     assert!(!trips(json!({ "type": "invites" }), "no invite here").await);
+}
+
+/// Whether a rule with the invites trigger `trigger` deletes a message with `content`, when
+/// Discord says each of `known` leads to the server it is paired with.
+async fn trips_with_invites(
+    trigger: serde_json::Value,
+    content: &str,
+    known: &[(&str, u64)],
+) -> (bool, usize) {
+    let harness = deletes_when(trigger);
+    for (code, server) in known {
+        harness
+            .api()
+            .set_invite(code, closure_sdk::GuildId::new(*server));
+    }
+    post(&harness, custom(MEMBER, CHANNEL, content)).await;
+    (deletions(&harness) > 0, harness.api().invite_lookups())
+}
+
+#[tokio::test]
+async fn invites_to_this_server_are_fine_and_those_to_listed_servers_are_judged_by_the_server() {
+    let own = [("mine", GUILD)];
+    let (tripped, _) =
+        trips_with_invites(json!({ "type": "invites" }), "discord.gg/mine", &own).await;
+    assert!(
+        !tripped,
+        "an invite to this server is allowed unless turned off"
+    );
+    let strict = json!({ "type": "invites", "allow_own_server": false });
+    assert!(trips_with_invites(strict, "discord.gg/mine", &own).await.0);
+
+    let other = [("abc", 900)];
+    assert!(
+        trips_with_invites(json!({ "type": "invites" }), "discord.gg/abc", &other)
+            .await
+            .0
+    );
+    let allowed = json!({ "type": "invites", "allow_guilds": ["900"] });
+    assert!(
+        !trips_with_invites(allowed, "discord.gg/abc", &other)
+            .await
+            .0
+    );
+    // A blocked server wins over an allowed code, and over this server.
+    let blocked = json!({
+        "type": "invites", "allow_codes": ["abc"], "block_guilds": ["900"]
+    });
+    assert!(
+        trips_with_invites(blocked, "discord.gg/abc", &other)
+            .await
+            .0
+    );
+    // An invite Discord does not know leads nowhere, so it is not allowed.
+    let unknown = json!({ "type": "invites", "allow_guilds": ["900"] });
+    assert!(
+        trips_with_invites(unknown, "discord.gg/gone", &other)
+            .await
+            .0
+    );
+}
+
+#[tokio::test]
+async fn the_server_of_an_invite_is_asked_once_and_only_when_a_rule_needs_it() {
+    let harness = deletes_when(json!({ "type": "invites" }));
+    harness
+        .api()
+        .set_invite("abc", closure_sdk::GuildId::new(900));
+    for _ in 0..3 {
+        post(&harness, custom(MEMBER, CHANNEL, "discord.gg/abc")).await;
+    }
+    assert_eq!(harness.api().invite_lookups(), 1);
+
+    // Codes alone decide a rule that names no server and turns the own server off.
+    let codes = json!({ "type": "invites", "allow_own_server": false, "allow_codes": ["abc"] });
+    assert_eq!(
+        trips_with_invites(codes, "discord.gg/abc", &[]).await,
+        (false, 0)
+    );
 }
 
 // ---- attachments ----

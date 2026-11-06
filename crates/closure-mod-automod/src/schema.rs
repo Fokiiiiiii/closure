@@ -307,6 +307,8 @@ fn trigger() -> Value {
                 "whole_words": { "type": "boolean" },
                 "normalize": { "type": "boolean" },
                 "strip_markdown": { "type": "boolean" },
+                "loose_matching": { "type": "boolean" },
+                "loose_gap": { "type": "integer", "minimum": 1, "maximum": 8 },
                 "targets": targets()
             }),
             &["words"],
@@ -344,7 +346,12 @@ fn trigger() -> Value {
                 "allow_codes": { "type": "array", "maxItems": 100,
                                  "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
                 "block_codes": { "type": "array", "maxItems": 100,
-                                 "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+                                 "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+                "allow_guilds": { "type": "array", "maxItems": 100,
+                                  "items": { "type": "string", "pattern": SNOWFLAKE } },
+                "block_guilds": { "type": "array", "maxItems": 100,
+                                  "items": { "type": "string", "pattern": SNOWFLAKE } },
+                "allow_own_server": { "type": "boolean" }
             }),
             &[],
         ),
@@ -484,7 +491,7 @@ fn targets() -> Value {
     json!({
         "type": "array",
         "minItems": 1,
-        "items": { "type": "string", "enum": ["message", "username"] }
+        "items": { "type": "string", "enum": ["message", "username", "embeds"] }
     })
 }
 

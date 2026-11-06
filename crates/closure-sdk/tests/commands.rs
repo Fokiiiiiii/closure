@@ -311,6 +311,7 @@ fn message_event(channel: u64, bot: bool, roles: &[u64]) -> Event {
         mentioned_roles: Vec::new(),
         attachments: Vec::new(),
         embed_count: 0,
+        embeds_text: String::new(),
         sticker_count: 0,
         reply_to: None,
         from_webhook: false,
