@@ -43,7 +43,8 @@ jobs:
         with:
           shared-key: release-${{ matrix.target }}
           save-if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-      - run: cargo build --release --locked -p closure
+      # The plugins (link expansion, starboard) are built in; see closure-plugins.
+      - run: cargo build --release --locked -p closure --features plugins
       - name: Package
         shell: bash
         run: |

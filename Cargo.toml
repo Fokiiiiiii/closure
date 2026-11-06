@@ -84,6 +84,13 @@ twilight-standby = "0.17"
 unic-langid = "0.9"
 twilight-util = { version = "0.17", features = ["builder", "permission-calculator"] }
 
+# The plugins (https://github.com/Fokiiiiiii/closure-plugins) are built on the crates of this very
+# repository. Where the `plugins` feature pulls them in, they must use these, not a second copy.
+[patch."https://github.com/Fokiiiiiii/closure"]
+closure-core = { path = "crates/closure-core" }
+closure-sdk = { path = "crates/closure-sdk" }
+closure-i18n = { path = "crates/closure-i18n" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"

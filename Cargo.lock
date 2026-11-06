@@ -470,6 +470,7 @@ dependencies = [
  "closure-mod-tags",
  "closure-mod-utility",
  "closure-mod-welcome",
+ "closure-plugins",
  "closure-script",
  "dotenvy",
  "futures-util",
@@ -810,6 +811,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "closure-plugins"
+version = "0.1.0"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#6de26aba21140771fb64c5d3694e416b40353e16"
+dependencies = [
+ "anyhow",
+ "closure-core",
+ "plugin-linkexpand",
+ "plugin-starboard",
 ]
 
 [[package]]
@@ -2606,6 +2618,55 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "plugin-kit"
+version = "0.1.0"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#6de26aba21140771fb64c5d3694e416b40353e16"
+dependencies = [
+ "twilight-model",
+ "twilight-util",
+]
+
+[[package]]
+name = "plugin-linkexpand"
+version = "0.1.0"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#6de26aba21140771fb64c5d3694e416b40353e16"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "closure-core",
+ "closure-sdk",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "plugin-kit",
+ "regex",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
+ "twilight-util",
+]
+
+[[package]]
+name = "plugin-starboard"
+version = "0.1.0"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#6de26aba21140771fb64c5d3694e416b40353e16"
+dependencies = [
+ "closure-core",
+ "closure-sdk",
+ "plugin-kit",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
+ "twilight-util",
+]
 
 [[package]]
 name = "portable-atomic"

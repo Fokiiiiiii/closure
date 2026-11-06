@@ -14,7 +14,8 @@ mod message_files_tests;
 
 /// Every module this build ships. Adding a module means adding it here.
 pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
-    Ok(vec![
+    #[allow(unused_mut, reason = "the plugins feature adds to it")]
+    let mut modules: Vec<Arc<dyn Module>> = vec![
         Arc::new(closure_mod_dashboard::module()?),
         Arc::new(closure_mod_diagnostics::module()?),
         Arc::new(closure_mod_logs::module()?),
@@ -32,5 +33,8 @@ pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
         Arc::new(closure_mod_utility::module()?),
         Arc::new(closure_mod_companion::module()?),
         Arc::new(closure_mod_persist::module()?),
-    ])
+    ];
+    #[cfg(feature = "plugins")]
+    modules.extend(closure_plugins::modules()?);
+    Ok(modules)
 }

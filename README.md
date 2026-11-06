@@ -58,6 +58,16 @@ SIGTERM; it finishes queued work first.
 
 The HTTP API listens on `127.0.0.1:8080` by default. If you expose it, put TLS in front of it.
 
+## Plugins
+
+Extra modules live in [closure-plugins](https://github.com/Fokiiiiiii/closure-plugins): link
+expansion (messages of the server, posts on X) and a starboard. They are built in with a Cargo
+feature, which the release builds turn on:
+
+```sh
+cargo build --release --features plugins
+```
+
 ## Development
 
 ```text

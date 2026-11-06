@@ -79,6 +79,8 @@ jobs:
           shared-key: ci-linux
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace --locked
+      # The build with the plugins built in: their modules must register cleanly.
+      - run: cargo test -p closure --locked --features plugins
       # The generated references must match the modules; the check builds the app crate too.
       - run: cargo run --locked -p closure-xtask -- docs --check
 

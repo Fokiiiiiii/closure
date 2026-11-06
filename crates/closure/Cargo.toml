@@ -12,6 +12,8 @@ repository.workspace = true
 default = ["script-wasm", "script-lua"]
 script-wasm = ["closure-script/wasm"]
 script-lua = ["closure-script/lua"]
+# The modules of closure-plugins (link expansion, starboard), built in when asked for.
+plugins = ["dep:closure-plugins"]
 
 [dependencies]
 anyhow.workspace = true
@@ -39,6 +41,7 @@ closure-mod-utility.workspace = true
 closure-mod-companion.workspace = true
 closure-mod-tags.workspace = true
 closure-mod-welcome.workspace = true
+closure-plugins = { git = "https://github.com/Fokiiiiiii/closure-plugins", optional = true }
 closure-script = { path = "../closure-script" }
 dotenvy.workspace = true
 futures-util.workspace = true
