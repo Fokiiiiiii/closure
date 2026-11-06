@@ -441,6 +441,10 @@ pub enum Action {
     PostMessage {
         channel_id: ChannelId,
         message_id: Option<MessageId>,
+        /// The message a new one answers (ignored when `message_id` replaces one). It is sent
+        /// even if that message has been deleted since.
+        #[serde(default)]
+        reply_to: Option<MessageId>,
         content: Option<String>,
         embeds: Vec<Embed>,
         components: Vec<Component>,

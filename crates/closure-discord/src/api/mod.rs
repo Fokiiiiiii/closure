@@ -698,6 +698,7 @@ impl TwilightApi {
             Action::PostMessage {
                 channel_id,
                 message_id,
+                reply_to,
                 content,
                 embeds,
                 components,
@@ -705,6 +706,7 @@ impl TwilightApi {
                 self.post_message(
                     *channel_id,
                     *message_id,
+                    *reply_to,
                     content.as_deref(),
                     embeds,
                     components,

@@ -73,6 +73,7 @@ impl closure_api::MessageSink for DiscordSink {
             let action = Action::PostMessage {
                 channel_id: channel,
                 message_id: edit,
+                reply_to: None,
                 content: post.content,
                 embeds: post.embeds,
                 components: post.components,
@@ -805,6 +806,9 @@ mod tests {
     use super::*;
     use closure_api::MemberAccess;
 
+    /// The commands of the shipped modules; the plugins (see closure-plugins) add theirs.
+    const SHIPPED_COMMANDS: usize = if cfg!(feature = "plugins") { 36 } else { 32 };
+
     struct TestReadiness(GatewayStatus);
     impl Readiness for TestReadiness {
         fn gateway(&self) -> GatewayStatus {
@@ -913,7 +917,7 @@ mod tests {
             build_commands(&core.registry, &catalogs.build())
                 .unwrap()
                 .len(),
-            32
+            SHIPPED_COMMANDS
         );
     }
 
@@ -1133,7 +1137,7 @@ mod tests {
         let mut catalogs = TranslatorBuilder::new().unwrap();
         catalogs.add_registry(&registry).unwrap();
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
-        assert_eq!(commands.len(), 32);
+        assert_eq!(commands.len(), SHIPPED_COMMANDS);
         for command in commands {
             // A name Discord would refuse (uppercase, too long) is dropped with only a log line,
             // so it is looked for here.

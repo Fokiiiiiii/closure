@@ -816,12 +816,14 @@ dependencies = [
 [[package]]
 name = "closure-plugins"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#6de26aba21140771fb64c5d3694e416b40353e16"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#e1a8e99bf1e651d0bc08c5b831b2c9eb420eacc5"
 dependencies = [
  "anyhow",
  "closure-core",
+ "plugin-leveling",
  "plugin-linkexpand",
  "plugin-starboard",
+ "plugin-translate",
 ]
 
 [[package]]
@@ -2622,31 +2624,47 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 [[package]]
 name = "plugin-kit"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#6de26aba21140771fb64c5d3694e416b40353e16"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#e1a8e99bf1e651d0bc08c5b831b2c9eb420eacc5"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rustls",
+ "serde_json",
+ "tokio",
  "twilight-model",
  "twilight-util",
 ]
 
 [[package]]
+name = "plugin-leveling"
+version = "0.1.0"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#e1a8e99bf1e651d0bc08c5b831b2c9eb420eacc5"
+dependencies = [
+ "closure-core",
+ "closure-sdk",
+ "plugin-kit",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "plugin-linkexpand"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#6de26aba21140771fb64c5d3694e416b40353e16"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#e1a8e99bf1e651d0bc08c5b831b2c9eb420eacc5"
 dependencies = [
  "anyhow",
  "async-trait",
  "closure-core",
  "closure-sdk",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
  "plugin-kit",
  "regex",
- "rustls",
  "serde",
  "serde_json",
- "tokio",
  "tracing",
  "twilight-model",
  "twilight-util",
@@ -2655,7 +2673,7 @@ dependencies = [
 [[package]]
 name = "plugin-starboard"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#6de26aba21140771fb64c5d3694e416b40353e16"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#e1a8e99bf1e651d0bc08c5b831b2c9eb420eacc5"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2666,6 +2684,18 @@ dependencies = [
  "tracing",
  "twilight-model",
  "twilight-util",
+]
+
+[[package]]
+name = "plugin-translate"
+version = "0.1.0"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#e1a8e99bf1e651d0bc08c5b831b2c9eb420eacc5"
+dependencies = [
+ "anyhow",
+ "closure-core",
+ "closure-sdk",
+ "plugin-kit",
+ "serde_json",
 ]
 
 [[package]]

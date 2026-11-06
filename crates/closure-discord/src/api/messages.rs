@@ -103,6 +103,7 @@ impl TwilightApi {
         &self,
         channel: ChannelId,
         edit: Option<MessageId>,
+        reply_to: Option<MessageId>,
         content: Option<&str>,
         embeds: &[Embed],
         components: &[Component],
@@ -127,6 +128,9 @@ impl TwilightApi {
                 .components(components);
             if let Some(content) = content {
                 request = request.content(content);
+            }
+            if let Some(reply) = reply_to {
+                request = request.reply(reply).fail_if_not_exists(false);
             }
             read(request).await?
         };

@@ -53,6 +53,7 @@ async fn send(cx: JobCx) -> Result<(), ModuleError> {
         .execute(Action::PostMessage {
             channel_id: channel,
             message_id: edit,
+            reply_to: None,
             content,
             embeds,
             components,
