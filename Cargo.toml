@@ -29,6 +29,8 @@ closure-mod-channels = { path = "crates/closure-mod-channels" }
 closure-mod-remind = { path = "crates/closure-mod-remind" }
 closure-mod-persist = { path = "crates/closure-mod-persist" }
 closure-mod-roles = { path = "crates/closure-mod-roles" }
+closure-mod-utility = { path = "crates/closure-mod-utility" }
+closure-mod-companion = { path = "crates/closure-mod-companion" }
 closure-mod-tags = { path = "crates/closure-mod-tags" }
 closure-mod-welcome = { path = "crates/closure-mod-welcome" }
 

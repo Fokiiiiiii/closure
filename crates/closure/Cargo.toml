@@ -33,6 +33,8 @@ closure-mod-moderation.workspace = true
 closure-mod-remind.workspace = true
 closure-mod-persist.workspace = true
 closure-mod-roles.workspace = true
+closure-mod-utility.workspace = true
+closure-mod-companion.workspace = true
 closure-mod-tags.workspace = true
 closure-mod-welcome.workspace = true
 closure-script = { path = "../closure-script" }

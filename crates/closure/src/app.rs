@@ -913,7 +913,7 @@ mod tests {
             build_commands(&core.registry, &catalogs.build())
                 .unwrap()
                 .len(),
-            23
+            32
         );
     }
 
@@ -1133,7 +1133,7 @@ mod tests {
         let mut catalogs = TranslatorBuilder::new().unwrap();
         catalogs.add_registry(&registry).unwrap();
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
-        assert_eq!(commands.len(), 23);
+        assert_eq!(commands.len(), 32);
         for command in commands {
             // A name Discord would refuse (uppercase, too long) is dropped with only a log line,
             // so it is looked for here.
@@ -1145,10 +1145,12 @@ mod tests {
                 "{} has no Japanese name",
                 command.name
             );
+            // A context-menu command has no description to translate.
             assert!(
-                command
-                    .description_localizations
-                    .is_some_and(|l| l.contains_key("ja")),
+                command.kind != twilight_model::application::command::CommandType::ChatInput
+                    || command
+                        .description_localizations
+                        .is_some_and(|l| l.contains_key("ja")),
                 "{}",
                 command.name
             );

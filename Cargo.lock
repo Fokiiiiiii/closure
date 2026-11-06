@@ -457,6 +457,7 @@ dependencies = [
  "closure-i18n",
  "closure-mod-automod",
  "closure-mod-channels",
+ "closure-mod-companion",
  "closure-mod-dashboard",
  "closure-mod-diagnostics",
  "closure-mod-logs",
@@ -465,6 +466,7 @@ dependencies = [
  "closure-mod-remind",
  "closure-mod-roles",
  "closure-mod-tags",
+ "closure-mod-utility",
  "closure-mod-welcome",
  "closure-script",
  "dotenvy",
@@ -640,6 +642,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "closure-mod-companion"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
+]
+
+[[package]]
 name = "closure-mod-dashboard"
 version = "0.1.0"
 dependencies = [
@@ -736,6 +752,20 @@ dependencies = [
  "closure-i18n",
  "closure-sdk",
  "tokio",
+]
+
+[[package]]
+name = "closure-mod-utility"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
 ]
 
 [[package]]
