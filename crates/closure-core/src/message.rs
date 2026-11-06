@@ -5,10 +5,11 @@
 //! written and not when a member joins.
 
 use serde::Deserialize;
-use twilight_model::channel::message::Embed;
+use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
 use twilight_model::channel::message::embed::{
     EmbedAuthor, EmbedField, EmbedFooter, EmbedImage, EmbedThumbnail,
 };
+use twilight_model::channel::message::{Component, Embed};
 use twilight_model::util::Timestamp;
 
 pub const CONTENT_LIMIT: usize = 2000;
@@ -21,6 +22,11 @@ const FIELD_VALUE_LIMIT: usize = 1024;
 const FOOTER_LIMIT: usize = 2048;
 const AUTHOR_LIMIT: usize = 256;
 const TOTAL_LIMIT: usize = 6000;
+const BUTTON_LABEL_LIMIT: usize = 80;
+/// Discord takes five rows of five buttons.
+pub const MAX_BUTTONS: usize = 25;
+/// Where a role button leads: the `roles` module, its `toggle` route, for anyone, with the role.
+const ROLE_BUTTON_ID: &str = "roles:toggle:*:";
 
 /// The JSON Schema of a [`MessageSpec`], for a setting that holds a message.
 #[must_use]
@@ -101,6 +107,21 @@ impl MessageSpec {
 pub struct MessageSpec {
     pub content: Option<String>,
     pub embeds: Vec<EmbedSpec>,
+    /// Buttons that give or take a role (see `closure-mod-roles`); only a posted message holds
+    /// them, never a setting.
+    pub buttons: Vec<ButtonSpec>,
+}
+
+/// What is posted: the text, the embeds and the rows of buttons.
+pub type Post = (Option<String>, Vec<Embed>, Vec<Component>);
+
+/// A button under a message that gives or takes the role `role` of whoever presses it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ButtonSpec {
+    pub label: String,
+    /// The id of the role.
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -171,6 +192,8 @@ pub enum MessageError {
     EmptyField,
     #[error("the time cannot be shown")]
     InvalidTime,
+    #[error("a button needs a label of at most {BUTTON_LABEL_LIMIT} characters and a role")]
+    InvalidButton,
 }
 
 fn text(
@@ -313,7 +336,55 @@ impl EmbedSpec {
     }
 }
 
+/// The rows of buttons for `buttons`, five to a row.
+fn role_buttons(buttons: &[ButtonSpec]) -> Result<Vec<Component>, MessageError> {
+    if buttons.len() > MAX_BUTTONS {
+        return Err(MessageError::TooMany {
+            part: "buttons",
+            limit: MAX_BUTTONS,
+        });
+    }
+    let mut components = Vec::new();
+    for row in buttons.chunks(5) {
+        let mut cells = Vec::new();
+        for button in row {
+            let label = button.label.trim();
+            let role = button.role.trim();
+            let valid_role =
+                (1..=20).contains(&role.len()) && role.bytes().all(|b| b.is_ascii_digit());
+            if label.is_empty() || label.chars().count() > BUTTON_LABEL_LIMIT || !valid_role {
+                return Err(MessageError::InvalidButton);
+            }
+            cells.push(Component::Button(Button {
+                id: None,
+                custom_id: Some(format!("{ROLE_BUTTON_ID}{role}")),
+                disabled: false,
+                emoji: None,
+                label: Some(label.to_owned()),
+                style: ButtonStyle::Secondary,
+                url: None,
+                sku_id: None,
+            }));
+        }
+        components.push(Component::ActionRow(ActionRow {
+            id: None,
+            components: cells,
+        }));
+    }
+    Ok(components)
+}
+
 impl MessageSpec {
+    /// The text, the embeds and the buttons to post (see [`Self::into_parts`]).
+    ///
+    /// # Errors
+    /// The first limit the message breaks.
+    pub fn into_post(self, now: i64, map: &dyn Fn(&str) -> String) -> Result<Post, MessageError> {
+        let buttons = self.buttons.clone();
+        let (content, embeds) = self.into_parts(now, map)?;
+        Ok((content, embeds, role_buttons(&buttons)?))
+    }
+
     /// The text and the embeds to send. `map` is applied to every text the writer typed (a
     /// template fills its variables in there); a link is never passed through it.
     ///
@@ -359,6 +430,32 @@ mod tests {
 
     fn same(text: &str) -> String {
         text.to_owned()
+    }
+
+    #[test]
+    fn role_buttons_are_laid_out_five_to_a_row_and_point_at_the_roles_module() {
+        let buttons: Vec<_> = (1..=7)
+            .map(|n| json!({"label": format!("Role {n}"), "role": n.to_string()}))
+            .collect();
+        let (_, _, rows) = spec(json!({"content": "pick", "buttons": buttons}))
+            .into_post(0, &same)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let Component::ActionRow(first) = &rows[0] else {
+            panic!("a row")
+        };
+        assert_eq!(first.components.len(), 5);
+        let Component::Button(button) = &first.components[0] else {
+            panic!("a button")
+        };
+        assert_eq!(button.custom_id.as_deref(), Some("roles:toggle:*:1"));
+        for bad in [
+            json!([{"label": "", "role": "1"}]),
+            json!([{"label": "x", "role": "role"}]),
+        ] {
+            let result = spec(json!({"content": "pick", "buttons": bad})).into_post(0, &same);
+            assert_eq!(result.unwrap_err(), MessageError::InvalidButton);
+        }
     }
 
     #[test]

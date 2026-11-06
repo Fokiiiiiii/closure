@@ -274,6 +274,9 @@ fn step(action: Action, kind: &str, channel: ChannelId, translator: &dyn Transla
     match action {
         Action::SendMessage {
             content, embeds, ..
+        }
+        | Action::PostMessage {
+            content, embeds, ..
         } => message(channel, content, embeds, kind),
         Action::SendFile {
             content,

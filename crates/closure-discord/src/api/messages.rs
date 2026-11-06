@@ -3,7 +3,7 @@ use closure_core::error::DiscordError;
 use closure_core::event::{ChannelId, GuildId, MessageId, UserId};
 use twilight_http::request::AuditLogReason;
 use twilight_http::request::channel::reaction::RequestReactionType;
-use twilight_model::channel::message::{AllowedMentions, Embed};
+use twilight_model::channel::message::{AllowedMentions, Component, Embed};
 
 use super::{TwilightApi, read, read_list, run};
 
@@ -97,6 +97,42 @@ impl TwilightApi {
     /// Opens the private channel with `user` and sends the message there. The user must be a
     /// member of `guild`: the cache is trusted when it knows, otherwise Discord is asked, and
     /// when that fails nothing is sent.
+    /// Sends a message with components, or replaces a message of the bot with one. Nobody is
+    /// mentioned.
+    pub(super) async fn post_message(
+        &self,
+        channel: ChannelId,
+        edit: Option<MessageId>,
+        content: Option<&str>,
+        embeds: &[Embed],
+        components: &[Component],
+    ) -> Result<Outcome, DiscordError> {
+        let allowed = AllowedMentions::default();
+        let message = if let Some(message) = edit {
+            read(
+                self.http
+                    .update_message(channel, message)
+                    .allowed_mentions(Some(&allowed))
+                    .content(Some(content.unwrap_or_default()))
+                    .embeds(Some(embeds))
+                    .components(Some(components)),
+            )
+            .await?
+        } else {
+            let mut request = self
+                .http
+                .create_message(channel)
+                .allowed_mentions(Some(&allowed))
+                .embeds(embeds)
+                .components(components);
+            if let Some(content) = content {
+                request = request.content(content);
+            }
+            read(request).await?
+        };
+        Ok(Outcome::Message(Box::new(message)))
+    }
+
     pub(super) async fn send_direct_message(
         &self,
         guild: GuildId,

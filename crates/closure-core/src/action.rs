@@ -436,6 +436,15 @@ pub enum Action {
         #[serde(default)]
         mentions: MentionPolicy,
     },
+    /// A message with buttons or menus under it; with `message_id` it replaces that message of the
+    /// bot (text, embeds and components alike) instead of sending a new one. Nobody is mentioned.
+    PostMessage {
+        channel_id: ChannelId,
+        message_id: Option<MessageId>,
+        content: Option<String>,
+        embeds: Vec<Embed>,
+        components: Vec<Component>,
+    },
     /// Privately to a member of `guild_id`: the host checks the membership before sending.
     SendDirectMessage {
         guild_id: GuildId,
@@ -1384,6 +1393,7 @@ impl Action {
             | Self::RemoveReaction { .. }
             | Self::RemoveAllReactions { .. } => Capability::ManageMessages,
             Self::SendMessage { .. }
+            | Self::PostMessage { .. }
             | Self::SendFile { .. }
             | Self::SendViaWebhook { .. }
             | Self::EditMessage { .. }
@@ -1497,6 +1507,7 @@ impl Action {
             | Self::MoveMember { guild_id, .. }
             | Self::DisconnectMember { guild_id, .. } => Some(*guild_id),
             Self::SendMessage { .. }
+            | Self::PostMessage { .. }
             | Self::SendFile { .. }
             | Self::EditMessage { .. }
             | Self::DeleteMessage { .. }
@@ -1561,6 +1572,7 @@ impl Action {
                 .into_iter()
                 .collect(),
             Self::SendMessage { channel_id, .. }
+            | Self::PostMessage { channel_id, .. }
             | Self::SendFile { channel_id, .. }
             | Self::EditMessage { channel_id, .. }
             | Self::GetMessage { channel_id, .. }
@@ -1651,6 +1663,7 @@ impl Action {
             | Self::Followup { token, .. }
             | Self::EditResponse { token, .. } => Some(token),
             Self::SendMessage { .. }
+            | Self::PostMessage { .. }
             | Self::SendFile { .. }
             | Self::EditMessage { .. }
             | Self::DeleteMessage { .. }
@@ -1775,6 +1788,7 @@ impl Action {
             Self::RemoveAllReactions { .. } => "remove_all_reactions",
             Self::GetReactionUsers { .. } => "get_reaction_users",
             Self::SendMessage { .. } => "send_message",
+            Self::PostMessage { .. } => "post_message",
             Self::SendFile { .. } => "send_file",
             Self::SendDirectMessage { .. } => "send_direct_message",
             Self::EditMessage { .. } => "edit_message",
@@ -1882,6 +1896,15 @@ impl Action {
                 ensure(file.data.len() <= MAX_UPLOAD_BYTES, || {
                     format!("a file is at most {MAX_UPLOAD_BYTES} bytes")
                 })
+            }
+            Self::PostMessage {
+                content,
+                embeds,
+                components,
+                ..
+            } => {
+                check_new_message(content.as_deref(), embeds)?;
+                check_components(components)
             }
             Self::SendMessage {
                 content, embeds, ..

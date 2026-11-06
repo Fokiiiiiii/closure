@@ -694,6 +694,22 @@ impl TwilightApi {
                 self.send_message(*channel_id, content.as_deref(), embeds, *reply_to, mentions)
                     .await
             }
+            Action::PostMessage {
+                channel_id,
+                message_id,
+                content,
+                embeds,
+                components,
+            } => {
+                self.post_message(
+                    *channel_id,
+                    *message_id,
+                    content.as_deref(),
+                    embeds,
+                    components,
+                )
+                .await
+            }
             Action::SendDirectMessage {
                 guild_id,
                 user_id,

@@ -7,6 +7,7 @@
 //! - [`run_gateway`] connects the shards, feeds the cache and the dispatcher, and shuts down
 //!   gracefully.
 
+mod antifish;
 mod api;
 mod breaker;
 mod commands;
@@ -20,6 +21,7 @@ mod jobs;
 mod notice;
 mod text_commands;
 
+pub use antifish::AntiFish;
 pub use api::{RetryPolicy, TwilightApi, joined_guilds};
 pub use breaker::BreakerConfig;
 pub use commands::{CommandBuildError, CommandScope, build_commands, register_commands};

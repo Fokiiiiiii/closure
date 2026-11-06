@@ -463,6 +463,8 @@ dependencies = [
  "closure-mod-logs",
  "closure-mod-moderation",
  "closure-mod-persist",
+ "closure-mod-phishing",
+ "closure-mod-post",
  "closure-mod-remind",
  "closure-mod-roles",
  "closure-mod-tags",
@@ -706,6 +708,35 @@ dependencies = [
 
 [[package]]
 name = "closure-mod-persist"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
+]
+
+[[package]]
+name = "closure-mod-phishing"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
+]
+
+[[package]]
+name = "closure-mod-post"
 version = "0.1.0"
 dependencies = [
  "closure-core",

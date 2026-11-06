@@ -41,6 +41,38 @@ fn job_of(
     })
 }
 
+/// A post waiting for its time (see `closure-mod-post`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduledPost {
+    pub key: String,
+    /// Unix seconds.
+    pub run_at: i64,
+    pub payload: serde_json::Value,
+}
+
+impl Db {
+    /// The posts of `guild` that wait for their time, soonest first.
+    pub async fn scheduled_posts(&self, guild: GuildId) -> Result<Vec<ScheduledPost>, DbError> {
+        let rows: Vec<(String, i64, serde_json::Value)> = sqlx::query_as(
+            "SELECT dedupe_key, extract(epoch FROM run_at)::bigint, payload
+             FROM scheduled_jobs
+             WHERE module = 'post' AND guild_id = $1 AND name = 'send' AND dedupe_key IS NOT NULL
+             ORDER BY run_at, id LIMIT 100",
+        )
+        .bind(to_db(guild)?)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(key, run_at, payload)| ScheduledPost {
+                key,
+                run_at,
+                payload,
+            })
+            .collect())
+    }
+}
+
 #[async_trait]
 impl SchedulerBackend for Db {
     async fn schedule(&self, job: NewJob, if_absent: bool) -> Result<i64, ScheduleError> {

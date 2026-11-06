@@ -194,14 +194,14 @@ impl MessageSink for FakeSink {
     fn send(
         &self,
         channel: closure_core::event::ChannelId,
-        content: Option<String>,
-        embeds: Vec<twilight_model::channel::message::Embed>,
+        _edit: Option<closure_core::event::MessageId>,
+        post: crate::Post,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Sent, SendFailure>> + Send + '_>>
     {
         self.1
             .lock()
             .unwrap()
-            .push((channel.get(), content, embeds.len()));
+            .push((channel.get(), post.content, post.embeds.len()));
         let answer = self.0.clone();
         Box::pin(async move { answer })
     }
@@ -1490,6 +1490,83 @@ async fn a_message_written_in_the_dashboard_is_sent_by_the_bot(pool: PgPool) {
             .status
             .is_client_error()
     );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_post_can_be_scheduled_listed_and_taken_back_and_buttons_are_checked(pool: PgPool) {
+    let sink = Arc::new(FakeSink(Ok(Sent { id: 77 }), std::sync::Mutex::default()));
+    let app = app_built(
+        pool,
+        GatewayStatus { ready: 1, total: 1 },
+        true,
+        Some(Arc::clone(&sink) as Arc<dyn MessageSink>),
+    );
+    app.db.register_guild(Id::new(GUILD)).await.unwrap();
+    let uri = "/v1/guilds/42/messages";
+    let later = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let body = json!({"channel_id": "5", "send_at": later, "message": {
+        "content": "later", "buttons": [{"label": "News", "role": "9"}]
+    }});
+    let scheduled = send(&app.router, post_json(uri).body(&body.to_string())).await;
+    assert_eq!(scheduled.status, StatusCode::OK, "{}", scheduled.text);
+    assert_eq!(scheduled.json()["scheduled"], true);
+    let key = scheduled.json()["key"].as_str().unwrap().to_owned();
+    assert!(sink.1.lock().unwrap().is_empty(), "nothing is sent now");
+
+    let listed = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/scheduled-posts"),
+    )
+    .await;
+    let posts = listed.json()["posts"].as_array().unwrap().clone();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0]["key"], key.as_str());
+    assert_eq!(posts[0]["channel_id"], "5");
+    assert_eq!(posts[0]["message"]["content"], "later");
+
+    // A time in the past or far ahead, and a button without a role, are refused.
+    for bad in [
+        json!({"channel_id": "5", "send_at": 5, "message": {"content": "x"}}),
+        json!({"channel_id": "5", "send_at": later + 400 * 24 * 3600, "message": {"content": "x"}}),
+        json!({"channel_id": "5", "message": {"content": "x", "buttons": [{"label": "a", "role": "r"}]}}),
+    ] {
+        let response = send(&app.router, post_json(uri).body(&bad.to_string())).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    let removed = send(
+        &app.router,
+        call(
+            Method::DELETE,
+            &format!("/v1/guilds/42/scheduled-posts/{key}"),
+        ),
+    )
+    .await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT);
+    let again = send(
+        &app.router,
+        call(
+            Method::DELETE,
+            &format!("/v1/guilds/42/scheduled-posts/{key}"),
+        ),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::NOT_FOUND);
+    let listed = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/scheduled-posts"),
+    )
+    .await;
+    assert!(listed.json()["posts"].as_array().unwrap().is_empty());
+
+    // With `edit` the sink is told which message to replace.
+    let edit = json!({"channel_id": "5", "edit": "123", "message": {"content": "new"}});
+    let sent = send(&app.router, post_json(uri).body(&edit.to_string())).await;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text);
 }
 
 #[sqlx::test(migrations = "../closure-db/migrations")]

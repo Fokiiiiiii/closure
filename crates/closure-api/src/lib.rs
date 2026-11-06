@@ -21,7 +21,7 @@ mod stats;
 
 pub use access::MemberAccess;
 pub use directory::{Channel, Directory, Guild, GuildDirectory, Role};
-pub use messages::{MessageSink, SendFailure, Sent};
+pub use messages::{MessageSink, Post, SendFailure, Sent};
 pub use server::{ServerLimits, serve};
 
 use std::fmt;
@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
 use closure_config::SettingsStore;
 use closure_db::Db;
@@ -161,6 +161,14 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/guilds/{guild_id}/config/history", get(config::history))
         .route("/v1/guilds/{guild_id}/messages", post(messages::send))
+        .route(
+            "/v1/guilds/{guild_id}/scheduled-posts",
+            get(messages::scheduled),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/scheduled-posts/{key}",
+            delete(messages::unschedule),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

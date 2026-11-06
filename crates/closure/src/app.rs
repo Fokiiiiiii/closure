@@ -60,8 +60,8 @@ impl closure_api::MessageSink for DiscordSink {
     fn send(
         &self,
         channel: closure_core::event::ChannelId,
-        content: Option<String>,
-        embeds: Vec<twilight_model::channel::message::Embed>,
+        edit: Option<closure_core::event::MessageId>,
+        post: closure_api::Post,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<closure_api::Sent, closure_api::SendFailure>>
@@ -70,12 +70,12 @@ impl closure_api::MessageSink for DiscordSink {
         >,
     > {
         Box::pin(async move {
-            let action = Action::SendMessage {
+            let action = Action::PostMessage {
                 channel_id: channel,
-                content,
-                embeds,
-                reply_to: None,
-                mentions: closure_core::action::MentionPolicy::None,
+                message_id: edit,
+                content: post.content,
+                embeds: post.embeds,
+                components: post.components,
             };
             match self.api.execute(action).await {
                 Ok(Outcome::Message(message)) => Ok(closure_api::Sent {
