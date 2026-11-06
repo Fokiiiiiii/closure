@@ -86,12 +86,18 @@ fn attachment(attachment: &Attachment) -> AttachmentInfo {
 }
 
 fn message(message: &Message) -> Option<MessageInfo> {
+    message_in(message, None)
+}
+
+/// The message as the bot sees it. A message Discord resolves for a context-menu command carries
+/// no `guild_id` of its own: it is in the guild the interaction came from, `fallback`.
+fn message_in(message: &Message, fallback: Option<GuildId>) -> Option<MessageInfo> {
     Some(MessageInfo {
         removed_attachments: Vec::new(),
         previous_content: None,
         id: message.id,
         channel_id: message.channel_id,
-        guild_id: message.guild_id?,
+        guild_id: message.guild_id.or(fallback)?,
         author: user(&message.author),
         author_roles: message
             .member
@@ -413,6 +419,7 @@ fn context(interaction: &Interaction) -> Option<ContextInvocation> {
     };
     let target_id = data.target_id?;
     let resolved = data.resolved.as_ref()?;
+    let origin = origin(interaction)?;
     let target = match data.kind {
         CommandType::User => {
             let user_id: closure_core::event::UserId = target_id.cast();
@@ -420,11 +427,13 @@ fn context(interaction: &Interaction) -> Option<ContextInvocation> {
         }
         CommandType::Message => {
             let message_id: closure_core::event::MessageId = target_id.cast();
-            ContextTarget::Message(message(resolved.messages.get(&message_id)?)?)
+            ContextTarget::Message(message_in(
+                resolved.messages.get(&message_id)?,
+                Some(origin.guild_id),
+            )?)
         }
         _ => return None,
     };
-    let origin = origin(interaction)?;
     Some(ContextInvocation {
         interaction_id: origin.interaction_id,
         application_id: origin.application_id,
@@ -1505,6 +1514,22 @@ mod tests {
         };
         assert_eq!(target.id.get(), 80);
         assert_eq!(target.content, "hello");
+    }
+
+    #[test]
+    fn a_message_resolved_without_its_own_guild_is_in_the_guild_of_the_interaction() {
+        // The shape Discord documents: the resolved message has no `guild_id`, the interaction does.
+        let mut message = message_json(None);
+        message["id"] = json!("80");
+        message.as_object_mut().unwrap().remove("guild_id");
+        let gateway = context_gateway(3, "80", json!({ "messages": { "80": message } }));
+        let Some(Event::ContextCommand(invocation)) = event(&gateway) else {
+            panic!("the command is dropped");
+        };
+        let ContextTarget::Message(target) = invocation.target else {
+            panic!("expected a message target");
+        };
+        assert_eq!(target.guild_id.get(), 1);
     }
 
     #[test]

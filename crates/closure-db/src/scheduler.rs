@@ -96,10 +96,10 @@ impl SchedulerBackend for Db {
         .execute(&mut *tx)
         .await
         .map_err(backend)?;
-        let existing: Option<i64> = match &job.key {
+        let existing: Option<(i64, String)> = match &job.key {
             // Locks the row, so a concurrent complete() cannot delete it before the UPDATE.
-            Some(key) => sqlx::query_scalar(
-                "SELECT id FROM scheduled_jobs
+            Some(key) => sqlx::query_as(
+                "SELECT id, state FROM scheduled_jobs
                  WHERE module = $1 AND guild_id = $2 AND dedupe_key = $3 FOR UPDATE",
             )
             .bind(job.module.as_str())
@@ -110,8 +110,9 @@ impl SchedulerBackend for Db {
             .map_err(backend)?,
             None => None,
         };
-        let id = if let Some(id) = existing {
-            if if_absent {
+        let id = if let Some((id, state)) = existing {
+            // A job that failed for good is no job: asking for one again starts it over.
+            if if_absent && state != "failed" {
                 tx.commit().await.map_err(backend)?;
                 return Ok(id);
             }
@@ -542,6 +543,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db.purge_scheduled_jobs().await.unwrap(), 1);
+    }
+
+    #[sqlx::test]
+    async fn asking_again_for_a_job_that_failed_for_good_starts_it_over(pool: PgPool) {
+        let db = database(pool).await;
+        let again = || async {
+            scheduler(&db, "warn", 1)
+                .job("x", &1)
+                .unwrap()
+                .key("sweep")
+                .if_absent()
+                .after(Duration::ZERO)
+                .await
+                .unwrap();
+        };
+        again().await;
+        for _ in 1..=MAX_ATTEMPTS {
+            let jobs = db.claim_due(1, LEASE).await.unwrap();
+            let job = &jobs[0];
+            db.retry(job.id, job.token, Duration::ZERO, "boom")
+                .await
+                .unwrap();
+        }
+        let state = || async {
+            sqlx::query_scalar::<_, String>("SELECT state FROM scheduled_jobs")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap()
+        };
+        assert_eq!(state().await, "failed");
+        // Whoever makes sure the job is there finds it failed, and it runs again.
+        again().await;
+        assert_eq!(state().await, "pending");
+        assert_eq!(count(&db).await, 1);
+        // One that waits is left as it is.
+        again().await;
+        assert_eq!(count(&db).await, 1);
     }
 
     #[sqlx::test]
