@@ -157,6 +157,8 @@ mod tests {
                 "message_files",
                 "module_counters",
                 "module_kv",
+                "module_scores",
+                "module_sets",
                 "saved_messages",
                 "scheduled_jobs"
             ]

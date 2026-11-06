@@ -112,12 +112,18 @@ impl StorageBackend for Db {
             _ => return Err(StorageError::Conflict),
         }
         if current.is_none() {
+            // Counted up to the quota and no further, so the cost of a new entry does not grow
+            // with what is kept.
             let kept: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM module_kv
-                 WHERE module = $1 AND guild_id = $2 AND (expires_at IS NULL OR expires_at > now())",
+                "SELECT count(*) FROM (
+                     SELECT 1 FROM module_kv
+                     WHERE module = $1 AND guild_id = $2
+                       AND (expires_at IS NULL OR expires_at > now())
+                     LIMIT $3) AS counted",
             )
             .bind(module.as_str())
             .bind(guild)
+            .bind(i64::try_from(MAX_ENTRIES).unwrap_or(i64::MAX))
             .fetch_one(&mut *tx)
             .await
             .map_err(backend)?;
@@ -226,11 +232,14 @@ impl StorageBackend for Db {
         .map_err(backend)?;
         if !known {
             let kept: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM module_counters
-                 WHERE module = $1 AND guild_id = $2 AND bucket = 0",
+                "SELECT count(*) FROM (
+                     SELECT 1 FROM module_counters
+                     WHERE module = $1 AND guild_id = $2 AND bucket = 0
+                     LIMIT $3) AS counted",
             )
             .bind(module.as_str())
             .bind(guild)
+            .bind(i64::try_from(MAX_COUNTERS).unwrap_or(i64::MAX))
             .fetch_one(&mut *tx)
             .await
             .map_err(backend)?;
