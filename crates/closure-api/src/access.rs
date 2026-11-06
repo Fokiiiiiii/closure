@@ -95,14 +95,14 @@ pub(crate) async fn get_access(
     ))
 }
 
-pub(crate) async fn actor_level(
+/// What `user` may do with the dashboard of `guild` as the stored settings `current` decide, at
+/// the moment of the call: the level, and whether `dashboard.edit` is allowed.
+pub(crate) async fn actor_access(
     state: &ApiState,
     guild: GuildId,
     user: UserId,
     current: &closure_config::GuildOverrides,
-) -> Result<u8, ApiError> {
+) -> Result<Access, ApiError> {
     let settings = state.inner.settings.compiler().compile(current)?;
-    Ok(evaluate(state, guild, user, settings.permissions())
-        .await?
-        .level)
+    evaluate(state, guild, user, settings.permissions()).await
 }

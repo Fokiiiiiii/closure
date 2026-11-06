@@ -215,7 +215,15 @@ pub(crate) async fn put_config(
         )?,
     };
     if let Some(user) = actor {
-        let level = crate::access::actor_level(&state, guild, user, &current).await?;
+        let access = crate::access::actor_access(&state, guild, user, &current).await?;
+        // The guard of the dashboard asked this before it let the request through; a permission
+        // taken away since then, or the writer who is no longer a member, stops it here too.
+        if !access.allowed {
+            return Err(ApiError::Forbidden(
+                "the member may not edit the dashboard".into(),
+            ));
+        }
+        let level = access.level;
         if level < 100 {
             if privileged_changed(&current, &overrides) {
                 return Err(ApiError::Forbidden(

@@ -55,7 +55,8 @@ impl MemberAccess for FakeAccess {
                         vec![]
                     },
                     administrator: false,
-                    owner: user.get() == 1,
+                    // The owners; the others are members of the server with no say in it.
+                    owner: matches!(user.get(), 1 | 123 | 9_223_372_036_854_775_807),
                 }),
             )
         })
@@ -648,6 +649,25 @@ async fn dashboard_guilds_waits_for_gateway_even_when_database_is_empty(pool: Pg
             "{uri}"
         );
     }
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_member_who_may_not_edit_the_dashboard_cannot_save_even_past_the_guard(pool: PgPool) {
+    let app = app(pool).await;
+    // A member of the server with no say in it: the writer is checked when the settings are saved.
+    let general = send(
+        &app.router,
+        put(GUILD, "\"0\"", "preset: small").header("x-closure-actor", "77"),
+    )
+    .await;
+    assert_eq!(general.status, StatusCode::FORBIDDEN, "{}", general.text);
+    // Somebody who is not a member at all fares the same.
+    let stranger = send(
+        &app.router,
+        put(GUILD, "\"0\"", "preset: small").header("x-closure-actor", "999"),
+    )
+    .await;
+    assert_eq!(stranger.status, StatusCode::FORBIDDEN, "{}", stranger.text);
 }
 
 #[sqlx::test(migrations = "../closure-db/migrations")]

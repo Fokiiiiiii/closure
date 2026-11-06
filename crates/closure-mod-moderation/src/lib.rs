@@ -48,6 +48,8 @@ const SHOWN: usize = 10;
 const LISTED: usize = 10;
 /// How many cases a page of [`Cases::for_target`] holds at most.
 const PAGE: usize = 25;
+/// The most cases of one kind that stand against one member that are asked for.
+const MAX_STANDING: usize = 10_000;
 /// How many cases back an active warning is looked for. shortcut: a member with more cases
 /// than this has the older warnings left out of the count, upgrade with an index on the target.
 const SCAN: usize = 100;
@@ -295,8 +297,9 @@ fn stands(case: &Case, kind: &str, now: i64) -> bool {
     case.kind.as_str() == kind && state(case, now) == State::Active
 }
 
-/// The cases of `kind` against `target` that still stand, newest first, at most `wanted`. Looks
-/// back over at most [`SCAN`] cases.
+/// The cases of `kind` against `target` that still stand, newest first, at most `wanted`. The
+/// store picks them, not a look back over the newest cases: a punishment still in force is found
+/// however many notes and warnings were written after it.
 async fn active_cases(
     cases: &Cases,
     target: UserId,
@@ -304,20 +307,9 @@ async fn active_cases(
     now: i64,
     wanted: usize,
 ) -> Result<Vec<Case>, CaseError> {
-    let mut found = Vec::new();
-    let mut before = None;
-    let mut looked = 0;
-    while found.len() < wanted && looked < SCAN {
-        let page = cases.for_target(target, before, PAGE).await?;
-        looked += page.len();
-        before = page.last().map(|case| case.number);
-        found.extend(page.iter().filter(|case| stands(case, kind, now)).cloned());
-        if page.len() < PAGE {
-            break;
-        }
-    }
-    found.truncate(wanted);
-    Ok(found)
+    cases
+        .standing(target, kind, now, wanted.min(MAX_STANDING))
+        .await
 }
 
 fn mention(user: UserId) -> String {

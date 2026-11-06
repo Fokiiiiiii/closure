@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use closure_core::action::Reason;
+use closure_core::error::DiscordError;
 use closure_core::event::{Event, EventKind, MemberInfo, RoleId};
 use closure_core::module::EventContext;
 use closure_core::subscription::Flow;
@@ -76,6 +77,21 @@ async fn changed(ctx: &EventContext, member: &MemberInfo) -> Result<(), ModuleEr
     Ok(())
 }
 
+/// Runs `attempt` again, twice at most, while it fails in a way that may pass.
+async fn again<F, Fut, T>(mut attempt: F) -> Result<T, DiscordError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, DiscordError>>,
+{
+    let mut tries = 0;
+    loop {
+        match attempt().await {
+            Err(error) if error.is_retryable() && tries < 2 => tries += 1,
+            other => return other,
+        }
+    }
+}
+
 async fn joined(ctx: &EventContext, member: &MemberInfo) -> Result<(), ModuleError> {
     let config: Config = ctx.parse_config()?;
     let key = key(member.user.id.get());
@@ -89,33 +105,47 @@ async fn joined(ctx: &EventContext, member: &MemberInfo) -> Result<(), ModuleErr
     };
     let reason = Reason::new(ctx.t_in(ctx.locale, "persist-reason", &Args::new()))?;
     let allowed: Vec<u64> = config.roles.iter().filter_map(|r| r.parse().ok()).collect();
+    // A failure that may pass (a busy Discord) is tried again, and if it stays, the snapshot is
+    // kept for the next time; one that will not (a role above the bot's) is only noted.
+    let mut pending: Option<DiscordError> = None;
     for role in note.roles.iter().filter(|r| allowed.contains(r)) {
-        if let Err(error) = ctx
-            .api
-            .add_role(
+        let given = again(|| {
+            ctx.api.add_role(
                 ctx.guild_id,
                 member.user.id,
                 RoleId::new(*role),
                 reason.clone(),
             )
-            .await
-        {
+        })
+        .await;
+        if let Err(error) = given {
             tracing::debug!(?error, guild = %ctx.guild_id, "could not give a role back");
+            if error.is_retryable() {
+                pending = Some(error);
+            }
         }
     }
     if config.nickname
         && let Some(nick) = note.nick
-        && let Err(error) = ctx
-            .api
-            .execute(closure_core::action::Action::SetNickname {
+    {
+        let set = again(|| {
+            ctx.api.execute(closure_core::action::Action::SetNickname {
                 guild_id: ctx.guild_id,
                 user_id: member.user.id,
-                nickname: Some(nick),
-                reason,
+                nickname: Some(nick.clone()),
+                reason: reason.clone(),
             })
-            .await
-    {
-        tracing::debug!(?error, guild = %ctx.guild_id, "could not give a nickname back");
+        })
+        .await;
+        if let Err(error) = set {
+            tracing::debug!(?error, guild = %ctx.guild_id, "could not give a nickname back");
+            if error.is_retryable() {
+                pending = Some(error);
+            }
+        }
+    }
+    if let Some(error) = pending {
+        return Err(error.into());
     }
     ctx.store().delete(&key).await.map_err(|e| stored(&e))?;
     Ok(())

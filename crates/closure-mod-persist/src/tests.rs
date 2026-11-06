@@ -108,3 +108,40 @@ fn both_catalogs_define_the_same_messages() {
         Vec::<String>::new()
     );
 }
+
+#[tokio::test]
+async fn a_busy_discord_is_asked_again_and_a_refusal_is_not() {
+    let busy = harness(false);
+    busy.emit(Event::MemberUpdated(member(7, &[10], None)))
+        .await
+        .unwrap();
+    busy.api().fail_nth(
+        1,
+        closure_core::error::DiscordError::Transient("busy".into()),
+    );
+    busy.emit(Event::MemberJoined(member(7, &[], None)))
+        .await
+        .unwrap();
+    let given = |h: &Harness| {
+        h.actions()
+            .iter()
+            .filter(|a| matches!(a, Action::AddRole { .. }))
+            .count()
+    };
+    assert_eq!(given(&busy), 1, "the second try got through");
+
+    let refused = harness(false);
+    refused
+        .emit(Event::MemberUpdated(member(7, &[10], None)))
+        .await
+        .unwrap();
+    refused.api().fail_nth(
+        1,
+        closure_core::error::DiscordError::Forbidden("above the bot".into()),
+    );
+    refused
+        .emit(Event::MemberJoined(member(7, &[], None)))
+        .await
+        .unwrap();
+    assert_eq!(given(&refused), 0, "a refusal is not tried again");
+}

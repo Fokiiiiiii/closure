@@ -4205,6 +4205,37 @@ async fn a_failing_role_does_not_stop_the_voice_role_from_being_given_again() {
     );
 }
 
+#[tokio::test]
+async fn a_punishment_in_force_is_found_however_many_cases_were_written_after_it() {
+    let harness = harness();
+    harness.set_config(json!({
+        "timeout_method": "role",
+        "timeout_role": "30",
+        "voice_mute_method": "role",
+        "voice_mute_role": "31"
+    }));
+    harness
+        .invoke(timeout(MEMBER, "1h", Some("spam")))
+        .await
+        .unwrap();
+    // More cases than a look back over the newest ones reaches.
+    for at in 0..150 {
+        harness
+            .invoke(note(MEMBER, &format!("note {at}")))
+            .await
+            .unwrap();
+    }
+    rejoin(&harness, MEMBER).await.unwrap();
+    assert_eq!(
+        roles_added(&harness)
+            .into_iter()
+            .filter(|role| *role == TIMEOUT_ROLE)
+            .count(),
+        2,
+        "the timeout role is given again after the member comes back"
+    );
+}
+
 #[test]
 fn the_module_listens_for_joins_with_the_members_intent() {
     let manifest = module().unwrap().manifest().clone();
