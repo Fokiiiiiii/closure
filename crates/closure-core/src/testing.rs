@@ -12,7 +12,7 @@ use twilight_model::guild::{Guild, Member, Role};
 use crate::action::{Action, AuditLogQuery, InteractionResponse, Outcome, OverwriteTarget};
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
-use crate::event::{ChannelId, Event, GuildId, RoleId, UserId};
+use crate::event::{ChannelId, Event, GuildId, MessageId, RoleId, UserId};
 use crate::locale::Locale;
 use crate::module::{EventContext, Module, ModuleId, ModuleManifest};
 use crate::permission::GuildPermissions;
@@ -130,6 +130,9 @@ pub struct MockApi {
     roles: Mutex<HashMap<GuildId, Vec<Role>>>,
     guild_channels: Mutex<HashMap<GuildId, Vec<Channel>>>,
     guild_names: Mutex<HashMap<GuildId, String>>,
+    /// The messages a test declared, as the pretend Discord holds them; any other message asked
+    /// for is a plain one.
+    declared: Mutex<HashMap<(ChannelId, MessageId), Message>>,
     /// The server each invite code leads to, as the pretend Discord answers for it.
     invites: Mutex<HashMap<String, GuildId>>,
     /// How often an invite was asked about.
@@ -223,8 +226,7 @@ impl MockApi {
             | Action::CrosspostMessage {
                 channel_id,
                 message_id,
-            } => Ok(sent_message(*channel_id, message_id.get())
-                .map_or(Outcome::None, |message| Outcome::Message(Box::new(message)))),
+            } => Ok(self.message_of(*channel_id, *message_id)),
             // The pretend Discord holds nothing else: lists come back empty, counts as zero.
             Action::GetMessages {
                 channel_id, limit, ..
@@ -388,10 +390,24 @@ impl MockApi {
         lock(&self.guild_names).insert(guild, name.to_owned());
     }
 
+    /// Declares a message of the pretend Discord, with its text, author and reactions.
+    pub fn set_message(&self, message: Message) {
+        lock(&self.declared).insert((message.channel_id, message.id), message);
+    }
+
     /// Declares that the invite `code` leads to `guild`; a code not declared is one Discord does
     /// not know.
     pub fn set_invite(&self, code: &str, guild: GuildId) {
         lock(&self.invites).insert(code.to_owned(), guild);
+    }
+
+    /// The message a test declared, else a plain one.
+    fn message_of(&self, channel: ChannelId, id: MessageId) -> Outcome {
+        lock(&self.declared)
+            .get(&(channel, id))
+            .cloned()
+            .or_else(|| sent_message(channel, id.get()))
+            .map_or(Outcome::None, |message| Outcome::Message(Box::new(message)))
     }
 
     fn invite(&self, code: &str) -> Result<Outcome, DiscordError> {
