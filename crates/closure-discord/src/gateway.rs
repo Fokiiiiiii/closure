@@ -178,6 +178,20 @@ impl GatewayHealth {
     pub fn all_ready(&self) -> bool {
         self.total() > 0 && self.ready() == self.total()
     }
+
+    /// Whether the shard that holds `guild` has a session: a guild's pages need its own shard, not
+    /// every one of them. Discord gives a guild to shard `(id >> 22) % shards`.
+    #[must_use]
+    pub fn guild_ready(&self, guild: u64) -> bool {
+        let total = self.shards.len() as u64;
+        if total == 0 {
+            return false;
+        }
+        usize::try_from((guild >> 22) % total)
+            .ok()
+            .and_then(|index| self.shards.get(index))
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+    }
 }
 
 /// The running gateway.
@@ -1228,5 +1242,25 @@ mod tests {
             latency: Arc::default(),
         };
         assert!(!format!("{config:?}").contains("super-secret"));
+    }
+}
+
+#[cfg(test)]
+mod guild_ready_tests {
+    use super::*;
+
+    #[test]
+    fn a_guild_needs_the_shard_it_belongs_to_and_not_the_others() {
+        let health = GatewayHealth::new(2);
+        health.set(ShardId::new(0, 2), true);
+        // Shard 0 holds the guilds whose id shifted by 22 is even, shard 1 the odd ones.
+        let on_shard_0 = 2_u64 << 22;
+        let on_shard_1 = 3_u64 << 22;
+        assert!(health.guild_ready(on_shard_0));
+        assert!(!health.guild_ready(on_shard_1));
+        assert!(!health.all_ready());
+        health.set(ShardId::new(1, 2), true);
+        assert!(health.guild_ready(on_shard_1));
+        assert!(!GatewayHealth::new(0).guild_ready(on_shard_0));
     }
 }

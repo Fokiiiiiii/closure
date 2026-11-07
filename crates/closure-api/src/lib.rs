@@ -58,6 +58,13 @@ pub struct GatewayStatus {
 /// Lets the API report on the gateway without depending on the crate that runs it.
 pub trait Readiness: Send + Sync {
     fn gateway(&self) -> GatewayStatus;
+
+    /// Whether the shard of `guild` holds a session. By default all of them must, which is the
+    /// answer for a gateway that cannot tell the shards of guilds apart.
+    fn guild_ready(&self, _guild: u64) -> bool {
+        let status = self.gateway();
+        status.total > 0 && status.ready == status.total
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

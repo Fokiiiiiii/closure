@@ -163,9 +163,7 @@ impl closure_api::MemberAccess for CachedAccess {
 
 impl CachedAccess {
     fn ensure_ready(&self, guild: GuildId) -> Result<(), ()> {
-        let status = self.health.gateway();
-        if status.total == 0
-            || status.ready != status.total
+        if !self.health.guild_ready(guild.get())
             || self
                 .cache
                 .0
@@ -288,6 +286,10 @@ impl Readiness for GatewayReadiness {
             ready: self.0.ready(),
             total: self.0.total(),
         }
+    }
+
+    fn guild_ready(&self, guild: u64) -> bool {
+        self.0.guild_ready(guild)
     }
 }
 

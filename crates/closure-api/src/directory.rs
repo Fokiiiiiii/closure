@@ -64,8 +64,7 @@ pub(crate) async fn directory(
     Path(raw): Path<u64>,
 ) -> Result<Json<Directory>, ApiError> {
     let guild = guild_id(raw)?;
-    let status = state.inner.readiness.gateway();
-    if status.total == 0 || status.ready != status.total {
+    if !state.inner.readiness.guild_ready(raw) {
         return Err(ApiError::Unavailable);
     }
     if !state.inner.db.is_guild_active(guild).await? {

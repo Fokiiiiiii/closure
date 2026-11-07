@@ -126,8 +126,7 @@ pub(crate) async fn send(
     Json(body): Json<SendBody>,
 ) -> Result<Json<Value>, ApiError> {
     let sink: Arc<dyn MessageSink> = state.messages.clone().ok_or(ApiError::Unavailable)?;
-    let status = state.inner.readiness.gateway();
-    if status.total == 0 || status.ready != status.total {
+    if !state.inner.readiness.guild_ready(raw) {
         return Err(ApiError::Unavailable);
     }
     let guild = authorize(&state, raw, &headers).await?;
