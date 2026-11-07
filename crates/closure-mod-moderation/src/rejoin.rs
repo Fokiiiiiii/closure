@@ -61,6 +61,7 @@ async fn alert_staff(
         .for_target(user.id, None, ALERT_READ)
         .await
         .map_err(|error| ModuleError::other(error.to_string()))?;
+    let cases: Vec<_> = cases.into_iter().filter(|case| !case.hidden).collect();
     if cases.is_empty() {
         return Ok(());
     }

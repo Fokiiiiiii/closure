@@ -363,6 +363,30 @@ impl CaseBackend for NotifyingCases {
     ) -> Result<Case, CaseError> {
         self.inner.revoke(guild, number, by, reason).await
     }
+
+    async fn edit(
+        &self,
+        guild: GuildId,
+        number: i64,
+        change: closure_core::cases::CaseEdit,
+    ) -> Result<Case, CaseError> {
+        self.inner.edit(guild, number, change).await
+    }
+
+    async fn delete(&self, guild: GuildId, number: i64) -> Result<bool, CaseError> {
+        self.inner.delete(guild, number).await
+    }
+
+    async fn search(
+        &self,
+        guild: GuildId,
+        filter: &closure_core::cases::CaseFilter,
+        now: i64,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        self.inner.search(guild, filter, now, before, limit).await
+    }
 }
 
 /// How an event concerns a particular channel, user or role: events with the same key are

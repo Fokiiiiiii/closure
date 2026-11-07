@@ -168,6 +168,7 @@ async fn a_case_announcement_reaches_a_module_that_subscribed() {
         expires_at: None,
         revoked: None,
         source: closure_sdk::CaseSource::Command,
+        hidden: false,
     };
 
     assert_eq!(

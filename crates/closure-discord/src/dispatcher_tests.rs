@@ -3126,6 +3126,7 @@ fn case_announced() -> Event {
         expires_at: None,
         revoked: None,
         source: closure_core::cases::CaseSource::Command,
+        hidden: false,
     })
 }
 

@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use closure_core::cases::{
-    Case, CaseBackend, CaseError, CaseKind, CaseSource, MAX_CASES, NewCase, Revoked,
+    Case, CaseBackend, CaseEdit, CaseError, CaseFilter, CaseKind, CaseSource, CaseState, MAX_CASES,
+    NewCase, Revoked,
 };
 use closure_core::event::{GuildId, UserId};
 use closure_core::module::ModuleId;
@@ -15,7 +16,7 @@ macro_rules! case_columns {
     () => {
         "guild_id, number, module, kind, target, moderator, reason,
          extract(epoch FROM created_at)::bigint, extract(epoch FROM expires_at)::bigint,
-         revoked_by, extract(epoch FROM revoked_at)::bigint, revoked_reason, source"
+         revoked_by, extract(epoch FROM revoked_at)::bigint, revoked_reason, source, hidden"
     };
 }
 
@@ -33,6 +34,7 @@ type CaseRow = (
     Option<i64>,
     Option<String>,
     String,
+    bool,
 );
 
 /// Takes the next number of a guild. The row stays locked until the transaction ends, so two
@@ -60,6 +62,7 @@ fn case_from_row(
         revoked_at,
         revoked_reason,
         source,
+        hidden,
     ): CaseRow,
 ) -> Result<Case, CaseError> {
     let revoked = match (revoked_by, revoked_at) {
@@ -84,6 +87,7 @@ fn case_from_row(
         revoked,
         source: CaseSource::named(&source)
             .ok_or_else(|| backend(format!("an unknown source of a case: {source}")))?,
+        hidden,
     })
 }
 
@@ -252,6 +256,97 @@ impl CaseBackend for Db {
             Some(true) => CaseError::AlreadyRevoked,
             Some(false) | None => CaseError::NotFound,
         })
+    }
+
+    async fn edit(&self, guild: GuildId, number: i64, change: CaseEdit) -> Result<Case, CaseError> {
+        let moderator = change
+            .moderator
+            .map(|user| to_db(user).map_err(backend))
+            .transpose()?;
+        let row: Option<CaseRow> = sqlx::query_as(concat!(
+            "UPDATE cases SET reason = COALESCE($3, reason), hidden = COALESCE($4, hidden),
+                              moderator = COALESCE($5, moderator)
+             WHERE guild_id = $1 AND number = $2
+             RETURNING ",
+            case_columns!()
+        ))
+        .bind(to_db(guild).map_err(backend)?)
+        .bind(number)
+        .bind(change.reason)
+        .bind(change.hidden)
+        .bind(moderator)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        row.map(case_from_row)
+            .transpose()?
+            .ok_or(CaseError::NotFound)
+    }
+
+    async fn delete(&self, guild: GuildId, number: i64) -> Result<bool, CaseError> {
+        let done = sqlx::query("DELETE FROM cases WHERE guild_id = $1 AND number = $2")
+            .bind(to_db(guild).map_err(backend)?)
+            .bind(number)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    async fn search(
+        &self,
+        guild: GuildId,
+        filter: &CaseFilter,
+        _now: i64,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        let id = |user: Option<UserId>| user.map(|user| to_db(user).map_err(backend)).transpose();
+        // The word is matched as text: its own `%` and `_` mean themselves.
+        let text = filter.text.as_deref().map(|text| {
+            let escaped = text
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("%{escaped}%")
+        });
+        let rows: Vec<CaseRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            case_columns!(),
+            " FROM cases
+             WHERE guild_id = $1
+               AND ($2::bigint IS NULL OR number < $2)
+               AND ($3::bigint IS NULL OR moderator = $3)
+               AND ($4::bigint IS NULL OR target = $4)
+               AND ($5::text IS NULL OR kind = $5)
+               AND ($6::text IS NULL OR source = $6)
+               AND ($7::bigint IS NULL OR created_at >= to_timestamp($7))
+               AND ($8::bigint IS NULL OR created_at < to_timestamp($8))
+               AND ($9::text IS NULL OR CASE $9
+                      WHEN 'revoked' THEN revoked_at IS NOT NULL
+                      WHEN 'expired' THEN revoked_at IS NULL AND expires_at <= now()
+                      ELSE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
+                    END)
+               AND ($10::text IS NULL OR reason ILIKE $10 ESCAPE '\\')
+               AND ($11 OR NOT hidden)
+             ORDER BY number DESC LIMIT $12"
+        ))
+        .bind(to_db(guild).map_err(backend)?)
+        .bind(before)
+        .bind(id(filter.moderator)?)
+        .bind(id(filter.target)?)
+        .bind(filter.kind.as_deref())
+        .bind(filter.source.map(CaseSource::as_str))
+        .bind(filter.since)
+        .bind(filter.until)
+        .bind(filter.state.map(CaseState::as_str))
+        .bind(text)
+        .bind(filter.include_hidden)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        rows.into_iter().map(case_from_row).collect()
     }
 }
 
@@ -619,5 +714,117 @@ mod tests {
             cases.create(new_case(5, None)).await.unwrap().source,
             CaseSource::Command
         );
+    }
+
+    #[sqlx::test]
+    async fn cases_can_be_edited_deleted_and_searched_by_who_what_when_and_how(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let cases = cases(&db, "moderation", 1);
+        let make =
+            |kind: &str, target: u64, moderator: u64, reason: &str, source: CaseSource| NewCase {
+                source,
+                kind: CaseKind::new(kind).unwrap(),
+                target: Id::new(target),
+                moderator: Id::new(moderator),
+                reason: Some(reason.to_owned()),
+                expires_at: None,
+            };
+        cases
+            .create(make("ban", 5, 9, "Raiding the server", CaseSource::Command))
+            .await
+            .unwrap();
+        cases
+            .create(make("warn", 5, 8, "50% off links_", CaseSource::Automod))
+            .await
+            .unwrap();
+        cases
+            .create(make("ban", 6, 9, "spam", CaseSource::Manual))
+            .await
+            .unwrap();
+        let search = |filter: CaseFilter| {
+            let cases = cases.clone();
+            async move {
+                cases
+                    .search(&filter, 1_800_000_000, None, 50)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|case| case.number)
+                    .collect::<Vec<_>>()
+            }
+        };
+        let by = |f: fn(&mut CaseFilter)| {
+            let mut filter = CaseFilter::default();
+            f(&mut filter);
+            filter
+        };
+        assert_eq!(search(CaseFilter::default()).await, [3, 2, 1]);
+        assert_eq!(search(by(|f| f.moderator = Some(Id::new(9)))).await, [3, 1]);
+        assert_eq!(search(by(|f| f.kind = Some("warn".into()))).await, [2]);
+        assert_eq!(
+            search(by(|f| f.source = Some(CaseSource::Manual))).await,
+            [3]
+        );
+        assert_eq!(search(by(|f| f.target = Some(Id::new(5)))).await, [2, 1]);
+        assert_eq!(search(by(|f| f.text = Some("RAID".into()))).await, [1]);
+        // The characters of a pattern mean themselves.
+        assert_eq!(search(by(|f| f.text = Some("50%".into()))).await, [2]);
+        assert_eq!(search(by(|f| f.text = Some("links_".into()))).await, [2]);
+        assert_eq!(search(by(|f| f.text = Some("%".into()))).await, [2]);
+        assert_eq!(
+            search(by(|f| f.state = Some(CaseState::Active))).await,
+            [3, 2, 1]
+        );
+        // Editing: the reason, the hiding, the moderator named.
+        let edited = cases
+            .edit(
+                2,
+                CaseEdit {
+                    reason: Some("links".into()),
+                    hidden: Some(true),
+                    moderator: Some(Id::new(7)),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited.reason.as_deref(), Some("links"));
+        assert!(edited.hidden);
+        assert_eq!(edited.moderator, Id::new(7));
+        assert_eq!(
+            search(CaseFilter::default()).await,
+            [3, 1],
+            "hidden is left out"
+        );
+        assert_eq!(search(by(|f| f.include_hidden = true)).await, [3, 2, 1]);
+        cases
+            .edit(
+                2,
+                CaseEdit {
+                    hidden: Some(false),
+                    ..CaseEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            cases.get(2).await.unwrap().unwrap().reason.as_deref(),
+            Some("links"),
+            "what is not named stays"
+        );
+        assert!(cases.edit(99, CaseEdit::default()).await.is_err());
+        // Revoked cases are found as such; deleting one removes it and keeps the numbers.
+        cases.revoke(1, Id::new(9), None).await.unwrap();
+        assert_eq!(
+            search(by(|f| f.state = Some(CaseState::Revoked))).await,
+            [1]
+        );
+        assert!(cases.delete(3).await.unwrap());
+        assert!(!cases.delete(3).await.unwrap());
+        let next = cases
+            .create(make("note", 5, 9, "x", CaseSource::Command))
+            .await
+            .unwrap();
+        assert_eq!(next.number, 4, "a deleted number is not given again");
     }
 }

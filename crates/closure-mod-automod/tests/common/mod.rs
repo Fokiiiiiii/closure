@@ -381,6 +381,7 @@ pub fn case(kind: &str, target: u64, moderator: u64) -> Case {
         expires_at: None,
         revoked: None,
         source: closure_sdk::CaseSource::Command,
+        hidden: false,
     }
 }
 

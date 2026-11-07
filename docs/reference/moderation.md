@@ -35,6 +35,10 @@ Warn members, note about them, and look at and revoke the cases of a server.
 | `moderation.note` | 50 | Add notes about members |
 | `moderation.cases` | 50 | See the cases and warnings of members |
 | `moderation.revoke` | 50 | Revoke cases |
+| `moderation.addcase` | 50 | Record and change cases by hand |
+| `moderation.hidecase` | 75 | Hide cases from the lists |
+| `moderation.deletecase` | 75 | Delete cases for good |
+| `moderation.export` | 75 | Export cases as a file |
 | `moderation.timeout` | 50 | Time members out and lift timeouts |
 | `moderation.kick` | 50 | Kick members |
 | `moderation.ban` | 75 | Ban and unban members |
@@ -132,6 +136,104 @@ Revoke a case
 |---|---|---|---|---|---|
 | `number` | 番号 | integer | yes | - | Number of the case |
 | `reason` | 理由 | string | no | max_length 512 | Why it is revoked |
+
+#### `/case add`
+
+Record a case by hand, such as a note or something done elsewhere
+
+- Japanese name: `追加`
+- Japanese description: ノートや、ほかの場所で行ったことをケースとして手で記録します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `user` | ユーザー | user | yes | - | Member |
+| `kind` | 種類 | string | yes | - | note, warn, kick, ban, timeout or softban |
+| `reason` | 理由 | string | no | max_length 512 | Why |
+
+#### `/case update`
+
+Change the reason of a case, or who it names as its moderator
+
+- Japanese name: `更新`
+- Japanese description: ケースの理由や、担当者として示す人を変えます
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `number` | 番号 | integer | yes | - | Number of the case |
+| `reason` | 理由 | string | no | max_length 512 | The new reason |
+| `moderator` | 担当者 | user | no | - | The moderator to name for the case |
+
+#### `/case hide`
+
+Hide a case from the lists
+
+- Japanese name: `非表示`
+- Japanese description: ケースを一覧から隠します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `number` | 番号 | integer | yes | - | Number of the case |
+
+#### `/case unhide`
+
+Show a hidden case in the lists again
+
+- Japanese name: `再表示`
+- Japanese description: 隠したケースを一覧に戻します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `number` | 番号 | integer | yes | - | Number of the case |
+
+#### `/case delete`
+
+Delete a case for good
+
+- Japanese name: `削除`
+- Japanese description: ケースを完全に削除します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `number` | 番号 | integer | yes | - | Number of the case |
+| `confirm` | 確認 | boolean | yes | - | Yes: the case is gone for good |
+
+#### `/case search`
+
+Find cases by member, moderator, kind, source, state, time or a word of the reason
+
+- Japanese name: `検索`
+- Japanese description: メンバー・担当者・種類・発生元・状態・期間・理由の語でケースを探します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `user` | ユーザー | user | no | - | Cases against this member |
+| `moderator` | 担当者 | user | no | - | Cases made by this moderator |
+| `kind` | 種類 | string | no | max_length 32 | The kind: warn, note, ban, kick, timeout, softban, ... |
+| `source` | 発生元 | string | no | max_length 16 | Where it came from: command, button, automod, manual, dashboard, script, appeal |
+| `state` | 状態 | string | no | max_length 16 | Where it stands: active, expired or revoked |
+| `within` | 期間 | string | no | max_length 32 | Made within this long, such as 7d |
+| `text` | 語 | string | no | max_length 100 | A word of the reason |
+| `hidden` | 非表示も含める | boolean | no | - | Include hidden cases (needs the permission to hide cases) |
+| `before` | 前の番号 | integer | no | - | Show only the cases numbered below this |
+
+#### `/case export`
+
+Send what a search finds as a CSV file to the staff channel for exports
+
+- Japanese name: `出力`
+- Japanese description: 検索の結果を CSV ファイルとして、出力用のスタッフチャンネルに送ります
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `user` | ユーザー | user | no | - | Cases against this member |
+| `moderator` | 担当者 | user | no | - | Cases made by this moderator |
+| `kind` | 種類 | string | no | max_length 32 | The kind: warn, note, ban, kick, timeout, softban, ... |
+| `source` | 発生元 | string | no | max_length 16 | Where it came from: command, button, automod, manual, dashboard, script, appeal |
+| `state` | 状態 | string | no | max_length 16 | Where it stands: active, expired or revoked |
+| `within` | 期間 | string | no | max_length 32 | Made within this long, such as 7d |
+| `text` | 語 | string | no | max_length 100 | A word of the reason |
+| `hidden` | 非表示も含める | boolean | no | - | Include hidden cases (needs the permission to hide cases) |
+| `before` | 前の番号 | integer | no | - | Show only the cases numbered below this |
 
 ### `/slowmode`
 
@@ -245,6 +347,19 @@ Ban a member, for good or for a while
 | `duration` | 期間 | string | no | - | How long (7d) or until (2026-11-01 18:00); forever if left out |
 | `delete_days` | 削除日数 | integer | no | min 0; max 7 | Days of the member's messages to delete, 0 to 7 |
 
+### `/softban`
+
+Ban a member and delete their recent messages, then lift the ban at once
+
+- Japanese name: `ソフトバン`
+- Japanese description: メンバーを BAN して直近のメッセージを消し、すぐに BAN を解除します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `user` | ユーザー | user | yes | - | Member to softban |
+| `reason` | 理由 | string | no | max_length 512 | Why |
+| `delete_days` | 削除日数 | integer | no | min 1; max 7 | Days of the member's messages to delete, 1 to 7 |
+
 ### `/unban`
 
 Lift the ban of a member
@@ -295,6 +410,7 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | `dm_on_action` | boolean | `true` | - | Whether the warned member gets a direct message. |
 | `escalation` | array | `[{"action":"timeout","duration":"1d","warns":3},{"action":"kick","warns":5}]` | - | What a warning brings about when a member reaches a number of active warnings. |
 | `escalation_enabled` | boolean | `true` | - | Whether a warning can bring about a punishment. Off keeps the rules. |
+| `export_channel` | string or null | `null` | channel | The staff channel the exports of cases (CSV files) are sent to. |
 | `manual_cases` | boolean | `true` | - | Record a ban, a kick or a timeout made by hand in Discord as a case, with the moderator the audit log names. |
 | `remove_roles_on_mute` | any | `false` | flag-or-roles | Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
@@ -330,6 +446,7 @@ Default configuration:
     }
   ],
   "escalation_enabled": true,
+  "export_channel": null,
   "manual_cases": true,
   "remove_roles_on_mute": false,
   "require_reason": false,

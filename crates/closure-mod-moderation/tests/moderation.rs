@@ -830,7 +830,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_a_timeout_at_three_warni
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "manual_cases": true, "alert_on_rejoin": false, "alert_channel": null, "templates_enabled": true, "templates": {} })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "manual_cases": true, "export_channel": null, "alert_on_rejoin": false, "alert_channel": null, "templates_enabled": true, "templates": {} })
     );
 }
 
@@ -5029,4 +5029,277 @@ async fn a_member_with_cases_who_comes_back_is_told_to_the_staff_channel() {
     off.invoke(warn(MEMBER, None)).await.unwrap();
     rejoin(&off, MEMBER).await.unwrap();
     assert!(sent_to(&off, 60).is_empty());
+}
+
+// ---- softban ----
+
+fn softban(target: u64, reason: Option<&str>, days: Option<i64>) -> Invocation {
+    let invocation = with_reason(
+        Invocation::new("softban").option("user", user(target)),
+        reason,
+    );
+    let invocation = match days {
+        Some(days) => invocation.option("delete_days", CommandOptionValue::Integer(days)),
+        None => invocation,
+    };
+    by_admin(invocation)
+}
+
+#[tokio::test]
+async fn a_softban_bans_with_the_messages_of_a_day_deleted_and_lifts_the_ban_at_once() {
+    let harness = harness();
+    let replies = harness
+        .invoke(softban(MEMBER, Some("raid"), None))
+        .await
+        .unwrap();
+    let actions = harness.api().actions();
+    assert!(!actions.is_empty(), "{replies:?}");
+    let ban = actions
+        .iter()
+        .position(|a| {
+            matches!(a, Action::Ban { user_id, delete_message_seconds, .. }
+            if user_id.get() == MEMBER && *delete_message_seconds == 86_400)
+        })
+        .unwrap_or_else(|| panic!("no ban: {actions:?} {replies:?}"));
+    let unban = actions
+        .iter()
+        .position(|a| matches!(a, Action::Unban { user_id, .. } if user_id.get() == MEMBER))
+        .expect("and unbanned");
+    assert!(ban < unban);
+    let cases = cases_of(&harness, MEMBER).await;
+    assert_eq!(cases.len(), 1, "one case, not a ban and an unban");
+    assert_eq!(cases[0].kind.as_str(), "softban");
+    assert_eq!(cases[0].reason.as_deref(), Some("raid"));
+    // The days are asked for as given, one to seven.
+    let seven = self::harness();
+    seven.invoke(softban(MEMBER, None, Some(7))).await.unwrap();
+    assert!(seven.api().actions().iter().any(
+        |a| matches!(a, Action::Ban { delete_message_seconds, .. } if *delete_message_seconds == 7 * 86_400)
+    ));
+}
+
+#[tokio::test]
+async fn a_softban_whose_unban_fails_once_is_tried_again_and_a_moderator_below_cannot_softban() {
+    let harness = harness();
+    harness
+        .api()
+        .fail_nth(4, DiscordError::Transient("busy".to_owned()));
+    harness.invoke(softban(MEMBER, None, None)).await.unwrap();
+    let unbans = harness
+        .api()
+        .actions()
+        .iter()
+        .filter(|a| matches!(a, Action::Unban { .. }))
+        .count();
+    assert_eq!(unbans, 1, "the second try got through");
+    assert_eq!(cases_of(&harness, MEMBER).await[0].kind.as_str(), "softban");
+    // Without the permission to ban, nothing happens.
+    let nobody = self::harness();
+    let _ = nobody
+        .invoke(
+            with_reason(
+                Invocation::new("softban").option("user", user(MEMBER)),
+                None,
+            )
+            .user(55),
+        )
+        .await;
+    assert!(
+        !nobody
+            .api()
+            .actions()
+            .iter()
+            .any(|a| matches!(a, Action::Ban { .. }))
+    );
+}
+
+// ---- the tools for the cases themselves ----
+
+fn case_cmd(sub: &str) -> Invocation {
+    Invocation::new("case").subcommand(sub)
+}
+
+fn by_moderator_of(invocation: Invocation) -> Invocation {
+    invocation.roles([MODERATOR_ROLE]).user(MODERATOR)
+}
+
+fn opt_text(value: &str) -> CommandOptionValue {
+    CommandOptionValue::String(value.to_owned())
+}
+
+#[tokio::test]
+async fn a_case_is_recorded_changed_hidden_and_deleted_by_hand() {
+    let harness = harness();
+    harness
+        .invoke(by_moderator_of(
+            case_cmd("add")
+                .option("user", user(MEMBER))
+                .option("kind", opt_text("note"))
+                .option("reason", opt_text("seen with an alt")),
+        ))
+        .await
+        .unwrap();
+    let cases = cases_of(&harness, MEMBER).await;
+    assert_eq!(cases.len(), 1);
+    assert_eq!(cases[0].kind.as_str(), "note");
+    assert_eq!(cases[0].source, closure_sdk::CaseSource::Command);
+    // A kind that is none of ours is refused.
+    let refused = harness
+        .invoke(by_moderator_of(
+            case_cmd("add")
+                .option("user", user(MEMBER))
+                .option("kind", opt_text("mute")),
+        ))
+        .await
+        .unwrap();
+    assert!(refused[0].content.contains("softban"), "{refused:?}");
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+    // The reason is changed; a moderator may.
+    harness
+        .invoke(by_moderator_of(
+            case_cmd("update")
+                .option("number", CommandOptionValue::Integer(1))
+                .option("reason", opt_text("a better reason")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        harness
+            .cases()
+            .get(1)
+            .await
+            .unwrap()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("a better reason")
+    );
+    // Hiding needs the admin level: a moderator is refused, an admin hides, the list leaves it out.
+    let _ = harness
+        .invoke(by_moderator_of(
+            case_cmd("hide").option("number", CommandOptionValue::Integer(1)),
+        ))
+        .await;
+    assert!(!harness.cases().get(1).await.unwrap().unwrap().hidden);
+    harness
+        .invoke(by_admin(
+            case_cmd("hide").option("number", CommandOptionValue::Integer(1)),
+        ))
+        .await
+        .unwrap();
+    assert!(harness.cases().get(1).await.unwrap().unwrap().hidden);
+    let listed = harness
+        .invoke(by_moderator_of(
+            case_cmd("list").option("user", user(MEMBER)),
+        ))
+        .await
+        .unwrap();
+    assert!(!listed[0].content.contains("a better reason"), "{listed:?}");
+    // The number still shows it.
+    let viewed = harness
+        .invoke(by_moderator_of(
+            case_cmd("view").option("number", CommandOptionValue::Integer(1)),
+        ))
+        .await
+        .unwrap();
+    assert!(!viewed.is_empty());
+    // Deleting asks to be told yes.
+    let asked = harness
+        .invoke(by_admin(
+            case_cmd("delete")
+                .option("number", CommandOptionValue::Integer(1))
+                .option("confirm", CommandOptionValue::Boolean(false)),
+        ))
+        .await
+        .unwrap();
+    assert!(asked[0].content.contains("confirm"), "{asked:?}");
+    assert!(harness.cases().get(1).await.unwrap().is_some());
+    harness
+        .invoke(by_admin(
+            case_cmd("delete")
+                .option("number", CommandOptionValue::Integer(1))
+                .option("confirm", CommandOptionValue::Boolean(true)),
+        ))
+        .await
+        .unwrap();
+    assert!(harness.cases().get(1).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cases_are_found_by_who_what_where_from_and_a_word_and_exported_as_a_file() {
+    let harness = harness();
+    harness.api().add_channel(Id::new(61), Some(Id::new(GUILD)));
+    harness.set_config(json!({"export_channel": "61"}));
+    harness
+        .invoke(by_moderator_of(warn(MEMBER, Some("links, again"))))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(10));
+    harness
+        .invoke(by_moderator_of(note(MEMBER, "=HYPERLINK(\"x\")")))
+        .await
+        .unwrap();
+    // The commands have a short cooldown for each moderator.
+    harness.advance(Duration::from_secs(10));
+    let spam = harness
+        .invoke(by_moderator_of(warn(FREE, Some("spam"))))
+        .await
+        .unwrap();
+    assert!(cases_of(&harness, FREE).await.len() == 1, "{spam:?}");
+    let find =
+        |filter: Invocation| async { harness.invoke(by_moderator_of(filter)).await.unwrap() };
+    let by_kind = find(case_cmd("search").option("kind", opt_text("warn"))).await;
+    assert!(
+        by_kind[0].content.contains("links") && by_kind[0].content.contains("spam"),
+        "{by_kind:?}"
+    );
+    assert!(!by_kind[0].content.contains("HYPERLINK"), "{by_kind:?}");
+    let by_word = find(case_cmd("search").option("text", opt_text("LINKS"))).await;
+    assert!(by_word[0].content.contains("links"));
+    assert!(!by_word[0].content.contains("spam"));
+    let none = find(case_cmd("search").option("source", opt_text("automod"))).await;
+    assert!(none[0].content.contains("No case"), "{none:?}");
+    let bad = find(case_cmd("search").option("state", opt_text("sleeping"))).await;
+    assert!(bad[0].content.contains("active"), "{bad:?}");
+    // Hidden ones are for those who may hide.
+    let denied = harness
+        .invoke(by_moderator_of(
+            case_cmd("search").option("hidden", CommandOptionValue::Boolean(true)),
+        ))
+        .await
+        .unwrap();
+    assert!(denied[0].content.contains("level"), "{denied:?}");
+    // The export is a file in the channel for exports, by an admin; formulas are made plain.
+    harness
+        .invoke(by_admin(case_cmd("export").option("user", user(MEMBER))))
+        .await
+        .unwrap();
+    let file = harness
+        .api()
+        .actions()
+        .into_iter()
+        .find_map(|action| match action {
+            Action::SendFile {
+                channel_id, file, ..
+            } if channel_id.get() == 61 => Some(file),
+            _ => None,
+        })
+        .expect("a file was sent");
+    assert!(
+        std::path::Path::new(&file.filename)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+    );
+    let csv = String::from_utf8(file.data).unwrap();
+    assert!(csv.starts_with("number,kind,target"));
+    assert_eq!(csv.lines().count(), 3, "{csv}");
+    assert!(csv.contains("\"links, again\""), "{csv}");
+    assert!(csv.contains("'=HYPERLINK"), "{csv}");
+    // Without the channel, nothing is sent.
+    let bare = self::harness();
+    let said = bare.invoke(by_admin(case_cmd("export"))).await.unwrap();
+    assert!(
+        said.last().unwrap().content.contains("export_channel"),
+        "{said:?}"
+    );
 }

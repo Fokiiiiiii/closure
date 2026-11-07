@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::json;
 use twilight_model::gateway::Intents;
 
+mod casetools;
 mod channel_controls;
 mod clear;
 mod history;
@@ -30,6 +31,7 @@ mod manual;
 mod massban;
 mod rejoin;
 mod restrict;
+mod softban;
 mod templates;
 mod undo;
 mod userinfo;
@@ -93,6 +95,8 @@ pub(crate) struct Config {
     restore_roles_on_mute: RoleSetting,
     /// Whether a ban, kick or timeout made by hand in Discord becomes a case.
     manual_cases: bool,
+    /// The staff channel the case exports (CSV files) are sent to.
+    export_channel: Option<String>,
     /// Whether the staff are told when a member with cases comes back.
     alert_on_rejoin: bool,
     /// The staff channel of that alert.
@@ -105,6 +109,15 @@ pub(crate) struct Config {
 }
 
 impl Config {
+    /// The channel the exports of cases go to.
+    fn export_target(&self) -> Option<closure_sdk::ChannelId> {
+        self.export_channel
+            .as_deref()
+            .and_then(|text| text.parse::<u64>().ok())
+            .filter(|id| *id > 0)
+            .map(closure_sdk::ChannelId::new)
+    }
+
     /// The staff channel of the alert on a rejoin.
     fn alert_target(&self) -> Option<closure_sdk::ChannelId> {
         self.alert_channel
@@ -143,6 +156,7 @@ impl Default for Config {
             remove_roles_on_mute: RoleSetting::Flag(false),
             restore_roles_on_mute: RoleSetting::Flag(true),
             manual_cases: true,
+            export_channel: None,
             alert_on_rejoin: false,
             alert_channel: None,
             templates_enabled: true,
@@ -720,10 +734,12 @@ async fn case_view(cx: CommandCx, args: Number) -> Result<(), UserError> {
 
 /// Lists the cases of a member, newest first, `before` a number if given.
 async fn case_list(cx: CommandCx, args: Listing) -> Result<(), UserError> {
-    let cases = cx
+    let mut cases = cx
         .cases()
         .for_target(args.user, args.before, LISTED)
         .await?;
+    // A hidden case is shown by its number only.
+    cases.retain(|case| !case.hidden);
     if cases.is_empty() {
         return cx
             .reply_private_t(
@@ -935,6 +951,12 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "description": "config-moderation-manual_cases",
                     "x-ui": { "level": "basic" }
                 },
+                "export_channel": {
+                    "type": ["string", "null"],
+                    "pattern": "^[0-9]{1,20}$",
+                    "description": "config-moderation-export_channel",
+                    "x-ui": { "level": "basic", "widget": "channel" }
+                },
                 "alert_on_rejoin": {
                     "type": "boolean",
                     "description": "config-moderation-alert_on_rejoin",
@@ -1024,6 +1046,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "voice_mute_role": null,
             "escalation_enabled": true,
             "manual_cases": true,
+            "export_channel": null,
             "alert_on_rejoin": false,
             "alert_channel": null,
             "templates_enabled": true,
@@ -1060,6 +1083,12 @@ fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
                 .requires("moderation.ban")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(ban),
+        )
+        .command(
+            Command::<softban::SoftbanArgs>::new("softban")
+                .requires("moderation.ban")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler(softban::softban),
         )
         .command(
             Command::<MemberReason>::new("unban")
@@ -1114,6 +1143,26 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
             "moderation.revoke",
             Level::MODERATOR,
             "permission-moderation-revoke",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.addcase",
+            Level::MODERATOR,
+            "permission-moderation-addcase",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.hidecase",
+            Level::ADMIN,
+            "permission-moderation-hidecase",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.deletecase",
+            Level::ADMIN,
+            "permission-moderation-deletecase",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.export",
+            Level::ADMIN,
+            "permission-moderation-export",
         )?)
         .permission(PermissionSpec::new(
             "moderation.timeout",
@@ -1266,6 +1315,27 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 Command::<Revoke>::new("revoke")
                     .requires("moderation.revoke")
                     .handler(case_revoke),
+                Command::<casetools::Add>::new("add")
+                    .requires("moderation.addcase")
+                    .handler(casetools::add),
+                Command::<casetools::Update>::new("update")
+                    .requires("moderation.addcase")
+                    .handler(casetools::update),
+                Command::<casetools::Number>::new("hide")
+                    .requires("moderation.hidecase")
+                    .handler(casetools::hide),
+                Command::<casetools::Number>::new("unhide")
+                    .requires("moderation.hidecase")
+                    .handler(casetools::unhide),
+                Command::<casetools::Delete>::new("delete")
+                    .requires("moderation.deletecase")
+                    .handler(casetools::delete),
+                Command::<casetools::Find>::new("search")
+                    .requires("moderation.cases")
+                    .handler(casetools::search),
+                Command::<casetools::Find>::new("export")
+                    .requires("moderation.export")
+                    .handler(casetools::export),
             ],
         );
     Ok(permissions(punishments(moderator_tools(builder)))?

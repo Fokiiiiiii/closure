@@ -19,8 +19,12 @@ use crate::module::ModuleId;
 
 /// The longest reason, in characters.
 pub const MAX_REASON_CHARS: usize = 512;
+/// The most cases one search returns.
+pub const MAX_SEARCH: usize = 1000;
 /// The most cases one listing returns.
 pub const MAX_PAGE: usize = 25;
+/// How many pages the default search reads at most.
+const SEARCH_PAGES: usize = 40;
 /// How many cases a guild may have.
 pub const MAX_CASES: i64 = 1_000_000;
 
@@ -155,6 +159,98 @@ pub struct NewCase {
     pub expires_at: Option<i64>,
 }
 
+/// What may be changed of a case that is already recorded: the text of its reason, whether it is
+/// hidden from the lists, and who is named as its moderator. A field left `None` stays as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaseEdit {
+    pub reason: Option<String>,
+    pub hidden: Option<bool>,
+    pub moderator: Option<UserId>,
+}
+
+/// Where a case stands at a time, for a search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseState {
+    /// Not revoked, and not past its expiry.
+    Active,
+    /// Past its expiry and not revoked.
+    Expired,
+    Revoked,
+}
+
+impl CaseState {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Expired => "expired",
+            Self::Revoked => "revoked",
+        }
+    }
+
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Active, Self::Expired, Self::Revoked]
+            .into_iter()
+            .find(|state| state.as_str() == name)
+    }
+
+    /// Whether `case` is in this state at `now`.
+    #[must_use]
+    pub fn holds(self, case: &Case, now: i64) -> bool {
+        let revoked = case.revoked.is_some();
+        let expired = case.expires_at.is_some_and(|at| at <= now);
+        match self {
+            Self::Revoked => revoked,
+            Self::Expired => !revoked && expired,
+            Self::Active => !revoked && !expired,
+        }
+    }
+}
+
+/// What a search of the cases of a guild asks for; every field left `None` asks for nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaseFilter {
+    pub target: Option<UserId>,
+    pub moderator: Option<UserId>,
+    pub kind: Option<String>,
+    pub source: Option<CaseSource>,
+    pub state: Option<CaseState>,
+    /// Made at or after this time (unix seconds).
+    pub since: Option<i64>,
+    /// Made before this time (unix seconds).
+    pub until: Option<i64>,
+    /// A word the reason contains, in any case.
+    pub text: Option<String>,
+    /// Hidden cases are left out unless this is set.
+    pub include_hidden: bool,
+}
+
+impl CaseFilter {
+    /// Whether `case` is what the filter asks for, at `now`.
+    #[must_use]
+    pub fn matches(&self, case: &Case, now: i64) -> bool {
+        self.target.is_none_or(|target| case.target == target)
+            && self
+                .moderator
+                .is_none_or(|moderator| case.moderator == moderator)
+            && self
+                .kind
+                .as_deref()
+                .is_none_or(|kind| case.kind.as_str() == kind)
+            && self.source.is_none_or(|source| case.source == source)
+            && self.state.is_none_or(|state| state.holds(case, now))
+            && self.since.is_none_or(|since| case.created_at >= since)
+            && self.until.is_none_or(|until| case.created_at < until)
+            && self.text.as_deref().is_none_or(|text| {
+                case.reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.to_lowercase().contains(&text.to_lowercase()))
+            })
+            && (self.include_hidden || !case.hidden)
+    }
+}
+
 /// Who revoked a case, when and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revoked {
@@ -180,6 +276,8 @@ pub struct Case {
     pub expires_at: Option<i64>,
     pub revoked: Option<Revoked>,
     pub source: CaseSource,
+    /// Left out of the lists of members and of the history; shown by its number.
+    pub hidden: bool,
 }
 
 /// Where cases are kept. Every call is for one guild; the checks of [`Cases`] come first.
@@ -221,6 +319,46 @@ pub trait CaseBackend: Send + Sync {
         by: UserId,
         reason: Option<String>,
     ) -> Result<Case, CaseError>;
+
+    /// Changes the reason, the hiding or the named moderator of the case.
+    async fn edit(&self, _: GuildId, _: i64, _: CaseEdit) -> Result<Case, CaseError> {
+        Err(CaseError::Unavailable)
+    }
+
+    /// Removes the case for good; whether there was one. Its number is not given again.
+    async fn delete(&self, _: GuildId, _: i64) -> Result<bool, CaseError> {
+        Err(CaseError::Unavailable)
+    }
+
+    /// The cases that match `filter`, newest first, below `before` if given, at most `limit`.
+    /// The default pages through [`Self::list_recent`]; a backend that can filter in its own query
+    /// should override it.
+    async fn search(
+        &self,
+        guild: GuildId,
+        filter: &CaseFilter,
+        now: i64,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        let mut found = Vec::new();
+        let mut cursor = before;
+        // A bounded scan: a search that matches little is not allowed to read a million cases.
+        for _ in 0..SEARCH_PAGES {
+            let page = self.list_recent(guild, cursor, MAX_PAGE).await?;
+            cursor = page.last().map(|case| case.number);
+            found.extend(
+                page.iter()
+                    .filter(|case| filter.matches(case, now))
+                    .cloned(),
+            );
+            if page.len() < MAX_PAGE || found.len() >= limit {
+                break;
+            }
+        }
+        found.truncate(limit);
+        Ok(found)
+    }
 
     /// The cases of `kind` against `target` that stand at `now` (unix seconds): not revoked, and
     /// not past their expiry. Newest first, at most `limit`. The default pages through
@@ -421,6 +559,33 @@ impl Cases {
             .list_standing(self.guild, target, kind, now, limit)
             .await
     }
+
+    /// Changes the reason, the hiding or the named moderator of the case.
+    pub async fn edit(&self, number: i64, change: CaseEdit) -> Result<Case, CaseError> {
+        self.allowed()?;
+        check_reason(change.reason.as_deref())?;
+        self.backend.edit(self.guild, number, change).await
+    }
+
+    /// Removes the case for good; whether there was one.
+    pub async fn delete(&self, number: i64) -> Result<bool, CaseError> {
+        self.allowed()?;
+        self.backend.delete(self.guild, number).await
+    }
+
+    /// The cases that match `filter` (at most [`MAX_SEARCH`]), newest first, below `before`.
+    pub async fn search(
+        &self,
+        filter: &CaseFilter,
+        now: i64,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Case>, CaseError> {
+        self.allowed()?;
+        self.backend
+            .search(self.guild, filter, now, before, limit.clamp(1, MAX_SEARCH))
+            .await
+    }
 }
 
 /// Whether `case` stands at `now`: of `kind`, not revoked, and not past its expiry.
@@ -538,6 +703,7 @@ impl CaseBackend for MemoryCases {
             expires_at: case.expires_at,
             revoked: None,
             source: case.source,
+            hidden: false,
         };
         cases.by_number.insert(number, stored.clone());
         Ok(stored)
@@ -592,6 +758,31 @@ impl CaseBackend for MemoryCases {
             reason,
         });
         Ok(case.clone())
+    }
+
+    async fn edit(&self, guild: GuildId, number: i64, change: CaseEdit) -> Result<Case, CaseError> {
+        let mut guilds = self.lock();
+        let case = guilds
+            .get_mut(&guild)
+            .and_then(|cases| cases.by_number.get_mut(&number))
+            .ok_or(CaseError::NotFound)?;
+        if let Some(reason) = change.reason {
+            case.reason = Some(reason);
+        }
+        if let Some(hidden) = change.hidden {
+            case.hidden = hidden;
+        }
+        if let Some(moderator) = change.moderator {
+            case.moderator = moderator;
+        }
+        Ok(case.clone())
+    }
+
+    async fn delete(&self, guild: GuildId, number: i64) -> Result<bool, CaseError> {
+        Ok(self
+            .lock()
+            .get_mut(&guild)
+            .is_some_and(|cases| cases.by_number.remove(&number).is_some()))
     }
 }
 
@@ -704,6 +895,7 @@ mod tests {
                 expires_at: Some(1_700_600_000),
                 revoked: None,
                 source: CaseSource::Command,
+                hidden: false,
             }
         );
         assert_eq!(warn.get(1).await.unwrap(), Some(created));
@@ -953,6 +1145,52 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_memory_edits_deletes_and_searches_cases_like_the_database() {
+        let f = fixture();
+        let warn = f.cases("warn", 1);
+        for (target, reason) in [(5, "Raiding"), (5, "links"), (6, "spam")] {
+            warn.create(new_case(target, Some(reason))).await.unwrap();
+        }
+        let numbers = |found: Vec<Case>| found.iter().map(|case| case.number).collect::<Vec<_>>();
+        let all = warn
+            .search(&CaseFilter::default(), 0, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(numbers(all), [3, 2, 1]);
+        let raid = CaseFilter {
+            text: Some("RAID".into()),
+            ..CaseFilter::default()
+        };
+        assert_eq!(numbers(warn.search(&raid, 0, None, 50).await.unwrap()), [1]);
+        warn.edit(
+            2,
+            CaseEdit {
+                hidden: Some(true),
+                reason: Some("edited".into()),
+                ..CaseEdit::default()
+            },
+        )
+        .await
+        .unwrap();
+        let visible = warn
+            .search(&CaseFilter::default(), 0, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(numbers(visible), [3, 1]);
+        assert_eq!(
+            warn.get(2).await.unwrap().unwrap().reason.as_deref(),
+            Some("edited")
+        );
+        assert!(warn.delete(3).await.unwrap());
+        assert!(!warn.delete(3).await.unwrap());
+        assert_eq!(warn.create(new_case(5, None)).await.unwrap().number, 4);
+        assert_eq!(
+            warn.edit(99, CaseEdit::default()).await,
+            Err(CaseError::NotFound)
         );
     }
 }
