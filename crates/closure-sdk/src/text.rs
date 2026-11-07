@@ -320,23 +320,18 @@ fn is_trailing_punctuation(ch: char) -> bool {
     )
 }
 
-/// The host of a link: the part after the scheme, before any path, without userinfo or port.
+/// The host of a link, as a browser reads it: the standard parser decides where the host is (a
+/// backslash ends it like a slash, a name that is percent-encoded or written in Unicode is decoded
+/// and made ASCII), so what is shown, judged and fetched is the same name.
 fn host_of(url: &str) -> Option<String> {
-    let rest = if url.to_ascii_lowercase().starts_with("http") {
-        url.split_once("://")?.1
+    let lower = url.to_ascii_lowercase();
+    let with_scheme = if lower.starts_with("http://") || lower.starts_with("https://") {
+        url.to_owned()
     } else {
-        url
+        format!("http://{url}")
     };
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let host_and_port = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host_and_port)| host_and_port);
-    let host = if host_and_port.starts_with('[') {
-        host_and_port.split_inclusive(']').next()?
-    } else {
-        host_and_port.split(':').next()?
-    };
-    let host = host.trim_end_matches('.').to_lowercase();
+    let parsed = url::Url::parse(&with_scheme).ok()?;
+    let host = parsed.host_str()?.trim_end_matches('.').to_lowercase();
     (!host.is_empty()).then_some(host)
 }
 
@@ -911,5 +906,38 @@ mod tests {
             combining_run(&format!("a{}", "\u{301}".repeat(10_000))),
             10_000
         );
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::host_of;
+
+    #[test]
+    fn the_host_is_the_one_a_browser_goes_to() {
+        // A backslash ends the host like a slash; what follows `@` is not the host here.
+        assert_eq!(
+            host_of("http://evil.example\\@good.example/").as_deref(),
+            Some("evil.example")
+        );
+        // A name written with percent-encoding or in Unicode is the name its ASCII form is.
+        assert_eq!(
+            host_of("http://%65vil.example/x").as_deref(),
+            Some("evil.example")
+        );
+        assert_eq!(
+            host_of("https://bücher.example/").as_deref(),
+            Some("xn--bcher-kva.example")
+        );
+        // Userinfo, a port and a trailing dot are not part of the host.
+        assert_eq!(
+            host_of("https://user:pw@Example.COM.:8443/p?q#f").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            host_of("www.example.com/path").as_deref(),
+            Some("www.example.com")
+        );
+        assert_eq!(host_of("http://[::1]:80/").as_deref(), Some("[::1]"));
     }
 }
