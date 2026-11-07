@@ -41,6 +41,8 @@ pub struct State {
 /// lead elsewhere, so an hour is safe.
 const INVITE_MEMORY: Duration = Duration::from_secs(3600);
 /// How many codes are remembered; past this the memory starts over.
+/// The most guilds whose compiled setup is kept.
+const MAX_LOADED_GUILDS: usize = 20_000;
 const MAX_INVITES_REMEMBERED: usize = 2000;
 /// The most invite codes of one message that are asked about.
 const MAX_INVITES_ASKED: usize = 5;
@@ -137,11 +139,18 @@ impl State {
     }
 
     pub fn load(&self, ctx: &EventContext) -> Result<Arc<Loaded>, ModuleError> {
-        let mut loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(found) = loaded.get(&ctx.guild_id)
+        // The lock is held to find and to put, not to compare or to compile: a big configuration of
+        // one guild does not hold up the others.
+        let found = self
+            .loaded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&ctx.guild_id)
+            .cloned();
+        if let Some(found) = found
             && found.source == *ctx.config()
         {
-            return Ok(Arc::clone(found));
+            return Ok(found);
         }
         let config: Config = parse_module_config(ctx)?;
         let setup = crate::config::setup(&config, ctx.store());
@@ -150,6 +159,11 @@ impl State {
             config,
             setup,
         });
+        let mut loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
+        // Guilds that went quiet do not stay for ever: the table starts again past a bound.
+        if loaded.len() >= MAX_LOADED_GUILDS {
+            loaded.clear();
+        }
         loaded.insert(ctx.guild_id, Arc::clone(&fresh));
         Ok(fresh)
     }

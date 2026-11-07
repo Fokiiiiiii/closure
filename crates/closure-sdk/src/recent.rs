@@ -105,7 +105,9 @@ impl GuildLog {
 #[derive(Debug)]
 struct Inner {
     limits: RecentLimits,
-    guilds: Mutex<HashMap<GuildId, GuildLog>>,
+    /// A lock of its own for each guild: a window that is counted in one guild does not hold up
+    /// the others. The map is locked only to find the guild's log.
+    guilds: Mutex<HashMap<GuildId, Arc<Mutex<GuildLog>>>>,
 }
 
 /// The recent actions of every guild. Cloning shares the same store.
@@ -133,6 +135,11 @@ impl Query<'_> {
                 .group
                 .is_none_or(|group| entry.group.as_deref() == Some(group))
     }
+}
+
+/// The actions of `log` that match, oldest first.
+fn held(log: &Mutex<GuildLog>) -> MutexGuard<'_, GuildLog> {
+    log.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The actions of `log` that match, oldest first.
@@ -172,12 +179,25 @@ impl RecentActions {
         }
     }
 
-    fn guilds(&self) -> MutexGuard<'_, HashMap<GuildId, GuildLog>> {
+    /// The log of `guild`, made when there is none.
+    fn log_of(&self, guild: GuildId) -> Arc<Mutex<GuildLog>> {
         // The map is only ever left whole by the methods below, so a poisoned lock is still usable.
+        let mut guilds = self
+            .inner
+            .guilds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(guilds.entry(guild).or_default())
+    }
+
+    /// The log of `guild`, when it has one.
+    fn existing(&self, guild: GuildId) -> Option<Arc<Mutex<GuildLog>>> {
         self.inner
             .guilds
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .get(&guild)
+            .cloned()
     }
 
     /// Stores an action. Actions older than `max_age` before it, and the oldest ones past
@@ -187,8 +207,8 @@ impl RecentActions {
         let max_entries = self.inner.limits.max_entries_per_guild;
         let at = entry.at;
         let oldest = at.saturating_sub(max_age);
-        let mut guilds = self.guilds();
-        let log = guilds.entry(guild).or_default();
+        let log = self.log_of(guild);
+        let mut log = held(&log);
         log.prune_handled(at);
         while log.entries.front().is_some_and(|front| front.at < oldest) {
             log.entries.pop_front();
@@ -213,11 +233,11 @@ impl RecentActions {
         now: i64,
         filter: &RecentFilter,
     ) -> u32 {
-        let guilds = self.guilds();
-        let Some(log) = guilds.get(&guild) else {
+        let Some(log) = self.existing(guild) else {
             return 0;
         };
-        let selected = select(log, query(kind, subject, within, now, filter));
+        let log = held(&log);
+        let selected = select(&log, query(kind, subject, within, now, filter));
         if !spans_enough(filter, &selected) {
             return 0;
         }
@@ -237,11 +257,11 @@ impl RecentActions {
         now: i64,
         filter: &RecentFilter,
     ) -> Vec<Recent> {
-        let guilds = self.guilds();
-        let Some(log) = guilds.get(&guild) else {
+        let Some(log) = self.existing(guild) else {
             return Vec::new();
         };
-        let selected = select(log, query(kind, subject, within, now, filter));
+        let log = held(&log);
+        let selected = select(&log, query(kind, subject, within, now, filter));
         if !spans_enough(filter, &selected) {
             return Vec::new();
         }
@@ -259,12 +279,12 @@ impl RecentActions {
         now: i64,
         filter: &RecentFilter,
     ) -> Vec<Recent> {
-        let mut guilds = self.guilds();
-        let Some(log) = guilds.get_mut(&guild) else {
+        let Some(log) = self.existing(guild) else {
             return Vec::new();
         };
+        let mut log = held(&log);
         let wanted = query(kind, subject, within, now, filter);
-        if !spans_enough(filter, &select(log, wanted)) {
+        if !spans_enough(filter, &select(&log, wanted)) {
             return Vec::new();
         }
         let mut taken = Vec::new();
@@ -283,10 +303,10 @@ impl RecentActions {
     /// Whether `key` was marked handled and has not expired at `now`.
     #[must_use]
     pub fn already_handled(&self, guild: GuildId, key: &str, now: i64) -> bool {
-        let mut guilds = self.guilds();
-        let Some(log) = guilds.get_mut(&guild) else {
+        let Some(log) = self.existing(guild) else {
             return false;
         };
+        let mut log = held(&log);
         log.prune_handled(now);
         log.handled.contains_key(key)
     }
@@ -294,8 +314,8 @@ impl RecentActions {
     /// Marks `key` handled until the Unix second `until`; later actions of the same burst then
     /// do not trigger again.
     pub fn mark_handled(&self, guild: GuildId, key: &str, until: i64) {
-        let mut guilds = self.guilds();
-        mark(guilds.entry(guild).or_default(), key, until);
+        let log = self.log_of(guild);
+        mark(&mut held(&log), key, until);
     }
 
     /// Checks a burst and, when it passes, takes the actions it counts out of the window and marks
@@ -332,15 +352,15 @@ impl RecentActions {
         commit: bool,
         counts: impl FnOnce(&[&Recent]) -> Option<u64>,
     ) -> Claim {
-        let mut guilds = self.guilds();
-        let log = guilds.entry(guild).or_default();
+        let log = self.log_of(guild);
+        let mut log = held(&log);
         log.prune_handled(now);
         if log.handled.contains_key(burst.handled_key) {
             return Claim::Handled;
         }
         let wanted = query(burst.kind, burst.subject, burst.within, now, burst.filter);
         let (count, entries) = {
-            let selected = select(log, wanted);
+            let selected = select(&log, wanted);
             if !spans_enough(burst.filter, &selected) {
                 return Claim::Short;
             }
@@ -351,7 +371,7 @@ impl RecentActions {
         };
         if commit {
             log.entries.retain(|entry| !wanted.matches(entry));
-            mark(log, burst.handled_key, burst.handled_until);
+            mark(&mut log, burst.handled_key, burst.handled_until);
         }
         Claim::Counted { count, entries }
     }
