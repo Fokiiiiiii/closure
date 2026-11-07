@@ -63,6 +63,9 @@ pub trait MessageSink: Send + Sync {
 
 /// The most posts that wait for their time in one server.
 const MAX_SCHEDULED: usize = 50;
+/// Counting the waiting posts and keeping a new one are one step: two requests at once cannot both
+/// pass the limit. The API runs in one process, so one lock is enough; scheduling a post is rare.
+static SCHEDULING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// How far ahead a post can be scheduled.
 const MAX_AHEAD_SECONDS: i64 = 366 * 24 * 3600;
 /// How far back a time may be and still count as now.
@@ -214,6 +217,7 @@ async fn schedule(
             "send_at must be between now and a year ahead".into(),
         ));
     }
+    let _one_at_a_time = SCHEDULING.lock().await;
     if state.inner.db.scheduled_posts(guild).await?.len() >= MAX_SCHEDULED {
         return Err(ApiError::BadRequest(format!(
             "at most {MAX_SCHEDULED} posts can wait at once"

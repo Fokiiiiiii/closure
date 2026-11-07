@@ -51,8 +51,8 @@ impl Cooldown {
 }
 
 /// How many cooldowns are followed at once. Past it, expired ones are dropped; if all are still
-/// running, a new one is not recorded (the command is not limited for that user) rather than
-/// let memory grow.
+/// running, a new use is turned away until the soonest one ends rather than let memory grow or
+/// leave the command unlimited.
 const MAX_ENTRIES: usize = 50_000;
 
 type Key = (String, GuildId, u64);
@@ -86,9 +86,12 @@ impl Cooldowns {
         if until.len() >= MAX_ENTRIES {
             until.retain(|_, end| *end > now);
         }
-        if until.len() < MAX_ENTRIES || until.contains_key(&key) {
-            until.insert(key, now + cooldown.period);
+        if until.len() >= MAX_ENTRIES && !until.contains_key(&key) {
+            // Full of cooldowns that are all running: wait for the soonest to end.
+            let soonest = until.values().map(|end| *end - now).min();
+            return Err(soonest.unwrap_or(cooldown.period));
         }
+        until.insert(key, now + cooldown.period);
         Ok(())
     }
 
@@ -208,21 +211,19 @@ mod tests {
             .unwrap();
         assert_eq!(cooldowns.len(), 1);
 
-        // While all are running, a new one is not recorded: the table does not grow.
+        // While all are running, a new use waits for the soonest to end: the table does not grow
+        // and the command is not left unlimited.
         for user in 1..MAX_ENTRIES as u64 {
             cooldowns
                 .take("a", &invocation(1, 5, user), &long, later)
                 .unwrap();
         }
         assert_eq!(cooldowns.len(), MAX_ENTRIES);
-        cooldowns
-            .take("a", &invocation(1, 5, 1_000_000), &long, later)
-            .unwrap();
-        assert_eq!(cooldowns.len(), MAX_ENTRIES);
         assert!(
             cooldowns
                 .take("a", &invocation(1, 5, 1_000_000), &long, later)
-                .is_ok()
+                .is_err()
         );
+        assert_eq!(cooldowns.len(), MAX_ENTRIES);
     }
 }
