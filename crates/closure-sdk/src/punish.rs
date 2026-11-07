@@ -1699,6 +1699,7 @@ async fn reconcile_intents(ctx: &EventContext) -> Result<(), ModuleError> {
         "unban",
         "untimeout",
         "vcunmute",
+        "softban",
     ];
     let mut remaining = RECONCILE_BATCH;
     for offset in 0..kinds.len() {
@@ -1767,6 +1768,7 @@ async fn reconcile_batch(
             match kind {
                 "ban" => reconcile_ban(ctx, &key).await,
                 "kick" | "unban" | "untimeout" | "vcunmute" => reconcile_action(ctx, &key).await,
+                "softban" => reconcile_softban(ctx, &key).await,
                 _ => reconcile_restriction(ctx, &key).await,
             }
         }
@@ -1921,6 +1923,81 @@ async fn action_done(
             !bans.iter().any(|ban| ban.user.id == target)
         },
     )
+}
+
+/// Saves the intent of a softban before its ban goes out, so a stop between the ban and the unban
+/// is finished by lifting the ban. Call it under [`member_turn`] and clear it with
+/// [`forget_softban`] once the case is made.
+///
+/// # Errors
+/// When the intent cannot be saved: the softban must not start then.
+pub async fn remember_softban(
+    ctx: &EventContext,
+    moderator: UserId,
+    target: UserId,
+    reason: Option<&str>,
+) -> Result<(), UserError> {
+    let case_before = ctx
+        .cases()
+        .for_target(target, None, 1)
+        .await?
+        .first()
+        .map_or(0, |case| case.number);
+    let intent = ActionIntent {
+        kind: "softban".to_owned(),
+        target: target.get(),
+        moderator: moderator.get(),
+        reason: reason.map(str::to_owned),
+        case_before,
+        undoing: None,
+        method: None,
+        role: None,
+    };
+    ctx.store()
+        .set(&action_intent_key("softban", target), &intent)
+        .await?;
+    Ok(())
+}
+
+/// Drops the intent of a softban that is done, or that never banned.
+///
+/// # Errors
+/// When the store cannot be reached.
+pub async fn forget_softban(ctx: &EventContext, target: UserId) -> Result<(), UserError> {
+    ctx.store()
+        .delete(&action_intent_key("softban", target))
+        .await?;
+    Ok(())
+}
+
+/// Finishes a softban that stopped after its ban: lifts the ban, unless somebody else's ban stands
+/// against the member by now, and then makes its case.
+async fn reconcile_softban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
+    let Some(intent) = ctx.store().get::<ActionIntent>(key).await? else {
+        return Ok(());
+    };
+    let target = UserId::new_checked(intent.target)
+        .ok_or_else(|| ModuleError::other("invalid intent target"))?;
+    if !action_done(ctx, &intent, target).await? {
+        // Still banned: a ban that stands as a case is a punishment of its own, not the softban's.
+        let others = active_cases(ctx.cases(), target, "ban", ctx.now(), 1)
+            .await
+            .map_err(|error| ModuleError::other(error.to_string()))?;
+        if !others.is_empty() {
+            ctx.store().delete(key).await?;
+            return Ok(());
+        }
+        ctx.api
+            .unban(
+                ctx.guild_id,
+                target,
+                closure_core::action::Reason::truncated(
+                    intent.reason.as_deref().unwrap_or("Softban"),
+                ),
+            )
+            .await?;
+    }
+    reconcile_action(ctx, key).await
 }
 
 /// Finishes a kick or an unban that stopped between Discord and its case: when the member is gone

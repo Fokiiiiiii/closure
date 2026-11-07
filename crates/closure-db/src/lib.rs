@@ -158,11 +158,85 @@ mod tests {
                 "message_files",
                 "module_counters",
                 "module_kv",
+                "module_kv_usage",
                 "module_scores",
                 "module_sets",
                 "saved_messages",
                 "scheduled_jobs"
             ]
+        );
+    }
+
+    /// What the three plugins kept as entries before they had scores and sets is moved by 0015.
+    #[sqlx::test(migrations = false)]
+    async fn the_entries_of_the_plugins_move_to_scores_and_sets(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        // A guild that had run the new code already has some experience of its own.
+        sqlx::query("INSERT INTO module_scores VALUES ('leveling', 1, 'xp', 7, 5)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (module, key, value) in [
+            ("leveling", "xp:7", r#"{"xp": 100, "last": 1}"#),
+            ("leveling", "xp:8", r#"{"xp": 40, "last": 1}"#),
+            ("leveling", "xp:9", r#"{"xp": 0, "last": 1}"#),
+            ("giveaway", "e:55:7", "1"),
+            ("giveaway", "e:55:8", "1"),
+            ("starboard", "post:300", r#"{"board": 20, "post": 301}"#),
+            ("leveling", "other", "1"),
+        ] {
+            sqlx::query(
+                "INSERT INTO module_kv (module, guild_id, key, value, revision)
+                 VALUES ($1, 1, $2, $3::jsonb, nextval('module_kv_revisions'))",
+            )
+            .bind(module)
+            .bind(key)
+            .bind(value)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::raw_sql(include_str!(
+            "../migrations/0015_backfill_scores_and_sets.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let xp: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT subject, value FROM module_scores WHERE name = 'xp' ORDER BY subject",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            xp,
+            [(7, 105), (8, 40)],
+            "added to what was there, nothing for no experience"
+        );
+        let entered: Vec<i64> = sqlx::query_scalar(
+            "SELECT member FROM module_sets WHERE name = 'e-55' ORDER BY member",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(entered, [7, 8]);
+        let post: i64 = sqlx::query_scalar(
+            "SELECT value FROM module_scores WHERE module = 'starboard' AND subject = 300",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(post, 301);
+        let left: Vec<String> = sqlx::query_scalar("SELECT key FROM module_kv ORDER BY key")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            left,
+            ["other"],
+            "the entries of the three plugins are gone, the rest stays"
         );
     }
 }

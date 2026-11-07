@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
 
-use closure_core::action::{Action as Discord, ChannelPatch, MentionPolicy, Reason};
+use closure_core::action::{Action as Discord, ChannelPatch, MentionPolicy, Outcome, Reason};
 use closure_core::error::DiscordError;
 use closure_core::event::MessageId;
 use closure_sdk::counters::CounterDef;
@@ -22,6 +22,7 @@ use closure_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Embed;
+use twilight_model::guild::Permissions;
 use twilight_model::id::Id;
 
 use crate::config::{Action, Config, Rule, action_key};
@@ -443,6 +444,46 @@ where
     first_error.map_or(Ok(()), Err)
 }
 
+/// The powers that make a role not one for a rule to give.
+const GIVING_BARRED: Permissions = Permissions::ADMINISTRATOR
+    .union(Permissions::MANAGE_GUILD)
+    .union(Permissions::MANAGE_ROLES)
+    .union(Permissions::MANAGE_CHANNELS)
+    .union(Permissions::MANAGE_WEBHOOKS)
+    .union(Permissions::BAN_MEMBERS)
+    .union(Permissions::KICK_MEMBERS)
+    .union(Permissions::MODERATE_MEMBERS)
+    .union(Permissions::MANAGE_MESSAGES);
+
+/// Which of `roles` a rule must not give: those with powers of [`GIVING_BARRED`], those a
+/// punishment owns, and all of them when that cannot be told.
+async fn unsafe_to_give(ctx: &EventContext, roles: &[RoleId]) -> Result<Vec<RoleId>, DiscordError> {
+    let outcome = ctx
+        .api
+        .execute(Discord::ListRoles {
+            guild_id: ctx.guild_id,
+        })
+        .await?;
+    let Outcome::Roles(known) = outcome else {
+        return Ok(roles.to_vec());
+    };
+    let mut barred = Vec::new();
+    for role in roles {
+        let powerful = known
+            .iter()
+            .find(|known| known.id == *role)
+            .is_none_or(|known| known.permissions.intersects(GIVING_BARRED));
+        if powerful
+            || closure_sdk::punish::is_restriction_role(ctx, *role)
+                .await
+                .unwrap_or(true)
+        {
+            barred.push(*role);
+        }
+    }
+    Ok(barred)
+}
+
 /// Gives or takes each role of the list from the member. The bot's own change is remembered first,
 /// so that the role event Discord sends for it is not counted as someone else's.
 async fn change_roles(
@@ -454,7 +495,22 @@ async fn change_roles(
 ) -> Result<(), ModuleError> {
     let ctx = deps.ctx;
     let mut first_error = None;
+    // A rule is written by whoever may edit the settings, which is not who may hand out any role:
+    // one with the powers of a moderator or of the server, or one a punishment owns, is not given.
+    let unsafe_roles = if add {
+        unsafe_to_give(ctx, roles).await?
+    } else {
+        Vec::new()
+    };
     for role in roles {
+        if unsafe_roles.contains(role) {
+            tracing::warn!(
+                role = role.get(),
+                "an automod rule would give a role that is not safe to give"
+            );
+            first_error.get_or_insert(ModuleError::other("the role is not safe to give"));
+            continue;
+        }
         deps.memory
             .ignore_role(ctx.guild_id, target, *role, ctx.now());
         let result = if add {

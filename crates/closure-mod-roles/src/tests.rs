@@ -13,10 +13,14 @@ const HIGH_ROLE: u64 = 300;
 const DENIED: u64 = 400;
 
 fn role(id: u64, position: i64) -> Role {
+    role_with(id, position, 0)
+}
+
+fn role_with(id: u64, position: i64, permissions: u64) -> Role {
     serde_json::from_value(serde_json::json!({
         "id": id.to_string(), "name": format!("role-{id}"), "color": 0, "colors": {
             "primary_color": 0, "secondary_color": null, "tertiary_color": null },
-        "hoist": false, "managed": false, "mentionable": false, "permissions": "0",
+        "hoist": false, "managed": false, "mentionable": false, "permissions": permissions.to_string(),
         "position": position, "flags": 0,
     }))
     .unwrap()
@@ -127,6 +131,40 @@ async fn a_moderator_hands_out_only_roles_below_their_own() {
         .user(50);
     harness.invoke(take).await.unwrap();
     assert!(took(&harness, 9, SELF_ROLE));
+}
+
+#[tokio::test]
+async fn a_role_with_powers_the_moderator_lacks_is_not_handed_out_whatever_its_position() {
+    const ADMIN_ROLE: u64 = 150;
+    let harness = harness();
+    harness.api().set_roles(
+        Id::new(1),
+        vec![
+            role(SELF_ROLE, 1),
+            role_with(ADMIN_ROLE, 2, 0x8),
+            role_with(MODERATOR, 5, 0x10_0000),
+        ],
+    );
+    harness.api().set_member(Id::new(1), member(9));
+    let give = |role: u64| {
+        Invocation::new("role")
+            .subcommand("give")
+            .option("user", user_option(9))
+            .option("role", role_option(role))
+            .roles([MODERATOR])
+            .user(50)
+    };
+    let refused = harness.invoke(give(ADMIN_ROLE)).await.unwrap();
+    assert!(!gave(&harness, 9, ADMIN_ROLE));
+    assert!(
+        refused[0].content.contains("permissions you do not have"),
+        "{refused:?}"
+    );
+    harness.invoke(give(SELF_ROLE)).await.unwrap();
+    assert!(
+        gave(&harness, 9, SELF_ROLE),
+        "a role with no powers is still handed out"
+    );
 }
 
 fn reaction(message: u64, emoji: &str, user: u64) -> ReactionInfo {

@@ -560,7 +560,9 @@ impl Harness {
             }
         };
         let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(unix_now.clone());
-        let storage = Arc::new(MemoryStorage::with_clock(unix_now.clone()));
+        // A room of ten thousand entries: a test that fills it does not wait for a million writes.
+        let storage =
+            Arc::new(MemoryStorage::with_clock(unix_now.clone()).with_entry_quota(10_000));
         let cases = Arc::new(MemoryCases::with_clock(unix_now.clone()));
         let history = Arc::new(MemoryHistory::default());
         let scheduler = Arc::new(MemoryScheduler::with_clock(unix_now));

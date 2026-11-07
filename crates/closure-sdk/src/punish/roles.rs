@@ -637,17 +637,26 @@ async fn finish(
 ) -> Result<(), ModuleError> {
     let store = cx.ctx().store();
     store
-        .set(&synced_key(job.which), &job.role)
-        .await
-        .map_err(|error| store_error(&error))?;
-    store
         .delete(&retries_key(job.which))
         .await
         .map_err(|error| store_error(&error))?;
-    store
-        .delete(&pending_key(job.which))
-        .await
-        .map_err(|error| store_error(&error))?;
+    if skipped == 0 {
+        store
+            .set(&synced_key(job.which), &job.role)
+            .await
+            .map_err(|error| store_error(&error))?;
+        store
+            .delete(&pending_key(job.which))
+            .await
+            .map_err(|error| store_error(&error))?;
+    } else {
+        // Channels the role does not deny yet: the sync is not done. The next punishment after
+        // the delay starts it again, instead of the role being taken for set up for good.
+        store
+            .set_for(&pending_key(job.which), &job.role, SYNC_RETRY_DELAY)
+            .await
+            .map_err(|error| store_error(&error))?;
+    }
     let guild = cx.guild_id().get();
     let allowed = channels
         .iter()

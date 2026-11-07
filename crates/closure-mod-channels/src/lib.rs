@@ -387,8 +387,8 @@ async fn ensure_sweep(state: &Sweeps, ctx: &EventContext) -> Result<(), ModuleEr
 }
 
 /// Deletes the messages of the sets that are due, channel by channel, with a budget for the run.
-/// A deletion that fails for a reason that passes puts its message back and ends the run: the next
-/// one tries again.
+/// A deletion that fails for a reason that passes leaves its message in the set and ends the run:
+/// the next one tries again.
 async fn sweep(cx: JobCx) -> Result<(), ModuleError> {
     let ctx = cx.ctx();
     let config: Config = parse_module_config(ctx)?;
@@ -414,33 +414,31 @@ async fn sweep(cx: JobCx) -> Result<(), ModuleError> {
         while cursor < now_bucket && steps < SWEEP_STEPS && budget > 0 {
             let bucket = cursor + 1;
             let name = bucket_set(channel, bucket);
+            // A message leaves its set once it is deleted, so a stop in the middle loses none.
+            let mut after = 0_u64;
             loop {
                 let batch = store
-                    .set_take(&name, budget.min(SWEEP_BUDGET))
+                    .set_after(&name, after, budget.min(SWEEP_BUDGET))
                     .await
                     .map_err(|e| ModuleError::other(e.to_string()))?;
-                if batch.is_empty() {
+                let Some(last) = batch.last().copied() else {
                     break;
-                }
-                let mut retry_from = None;
-                for (at, message) in batch.iter().enumerate() {
-                    match delete_message(ctx, Id::new(channel), *message, rule.skip_pinned).await {
-                        Ok(()) => budget = budget.saturating_sub(1),
+                };
+                after = last;
+                for message in batch {
+                    match delete_message(ctx, Id::new(channel), message, rule.skip_pinned).await {
+                        Ok(()) => {
+                            store
+                                .set_remove(&name, message)
+                                .await
+                                .map_err(|e| ModuleError::other(e.to_string()))?;
+                            budget = budget.saturating_sub(1);
+                        }
                         Err(error) => {
                             tracing::warn!(?error, "could not delete a message that is due; later");
-                            retry_from = Some(at);
-                            break;
+                            return Ok(());
                         }
                     }
-                }
-                if let Some(at) = retry_from {
-                    for message in &batch[at..] {
-                        store
-                            .set_add(&name, *message)
-                            .await
-                            .map_err(|e| ModuleError::other(e.to_string()))?;
-                    }
-                    return Ok(());
                 }
                 if budget == 0 {
                     break;

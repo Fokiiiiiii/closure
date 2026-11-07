@@ -16,6 +16,7 @@ use closure_sdk::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use twilight_model::guild::Permissions;
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
@@ -166,6 +167,21 @@ async fn may_hand_out(cx: &CommandCx, role: RoleId) -> Result<(), UserError> {
         .unwrap_or(0);
     if target >= own {
         return Err(UserError::message("roles-too-high"));
+    }
+    // Position alone is not enough: a role below theirs may carry powers they do not have, and
+    // handing it out would be a way to take them.
+    if !actor.administrator {
+        let held = roles
+            .iter()
+            .filter(|r| actor.roles.contains(&r.id) || r.id.get() == cx.guild_id().get())
+            .fold(Permissions::empty(), |all, r| all | r.permissions);
+        let granted = roles
+            .iter()
+            .find(|r| r.id == role)
+            .map_or(Permissions::empty(), |r| r.permissions);
+        if !held.contains(granted) {
+            return Err(UserError::message("roles-too-powerful"));
+        }
     }
     Ok(())
 }

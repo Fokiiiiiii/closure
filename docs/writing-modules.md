@@ -109,7 +109,7 @@ a plain module):
   wrote since you read revision `r` (`entry(key)`), so two handlers do not lose each other's
   update. A revision is a number no two writes share, so one read before the entry was deleted
   (or ran out) and made again never matches the new entry; keys are 1-128 printable ASCII characters, values at most 32 KiB of JSON, at most
-  10 000 entries per module and guild;
+  1 000 000 entries per module and guild;
 - counters: `counter_add(name, subject, delta)` returns the total, `counter_total`,
   `counter_recent(name, subject, window)` (what was added in the last minutes, up to 7 days;
   a window is whole minutes, rounded up, the current minute included), `counter_reset`; at most

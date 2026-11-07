@@ -39,6 +39,8 @@ const BATCH: usize = 5;
 const PAUSE: Duration = Duration::from_secs(2);
 /// How many problems an operation remembers by name.
 const MAX_PROBLEMS: usize = 30;
+/// How often a change of state is tried again when somebody else changed the operation first.
+const TRANSITION_TRIES: usize = 5;
 /// How long an operation is kept after its last change.
 const KEEP: Duration = Duration::from_hours(24 * 30);
 
@@ -166,6 +168,85 @@ async fn save(ctx: &EventContext, id: i64, operation: &Operation) -> Result<(), 
         .set_for(&key(id), operation, KEEP)
         .await
         .map_err(|e| stored(&e))
+}
+
+/// Moves an operation from one of the states `from` to `to`, against the revision it was read at, so
+/// two who decide at once (a cancel and the next batch, an approval and a denial) do not both win.
+/// Whether it moved.
+async fn transition(
+    ctx: &EventContext,
+    id: i64,
+    from: &[State],
+    to: State,
+) -> Result<bool, ModuleError> {
+    for _ in 0..TRANSITION_TRIES {
+        let Some(entry) = ctx.store().entry(&key(id)).await.map_err(|e| stored(&e))? else {
+            return Ok(false);
+        };
+        let mut operation: Operation = serde_json::from_value(entry.value)
+            .map_err(|error| ModuleError::other(error.to_string()))?;
+        if !from.contains(&operation.state) {
+            return Ok(false);
+        }
+        operation.state = to;
+        match ctx
+            .store()
+            .replace(
+                &key(id),
+                &operation,
+                closure_core::storage::Expect::Revision(entry.revision),
+                Some(KEEP),
+            )
+            .await
+        {
+            Ok(_) => return Ok(true),
+            Err(closure_sdk::StorageError::Conflict) => {}
+            Err(error) => return Err(stored(&error)),
+        }
+    }
+    Err(ModuleError::other(
+        "the bulk operation is changed too often",
+    ))
+}
+
+/// Saves what a batch did (the counters) without taking back a decision made while it ran: the
+/// state is whatever it is now, except that a running operation whose queue is empty is done.
+/// Returns the state it was left in.
+async fn record_progress(
+    ctx: &EventContext,
+    id: i64,
+    ours: &Operation,
+    finished: bool,
+) -> Result<State, ModuleError> {
+    for _ in 0..TRANSITION_TRIES {
+        let Some(entry) = ctx.store().entry(&key(id)).await.map_err(|e| stored(&e))? else {
+            return Ok(ours.state);
+        };
+        let current: Operation = serde_json::from_value(entry.value)
+            .map_err(|error| ModuleError::other(error.to_string()))?;
+        let mut merged = ours.clone();
+        merged.state = match current.state {
+            State::Running if finished => State::Done,
+            other => other,
+        };
+        match ctx
+            .store()
+            .replace(
+                &key(id),
+                &merged,
+                closure_core::storage::Expect::Revision(entry.revision),
+                Some(KEEP),
+            )
+            .await
+        {
+            Ok(_) => return Ok(merged.state),
+            Err(closure_sdk::StorageError::Conflict) => {}
+            Err(error) => return Err(stored(&error)),
+        }
+    }
+    Err(ModuleError::other(
+        "the bulk operation is changed too often",
+    ))
 }
 
 /// A member that is not done, as the one who started the operation is told.
@@ -442,10 +523,12 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
             if needs_approval(&cx, &config, &operation).await {
                 return ask_for_approval(&cx, &config, id, &mut operation).await;
             }
-            operation.state = State::Running;
-            save(ctx, id, &operation)
+            if !transition(ctx, id, &[State::Preview], State::Running)
                 .await
-                .map_err(|e| user_error(&e))?;
+                .map_err(|e| user_error(&e))?
+            {
+                return Err(UserError::message("bulk-wrong-state"));
+            }
             schedule(&cx, id, Duration::ZERO).await?;
         }
         ("approve" | "deny", State::Awaiting) => {
@@ -454,21 +537,24 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
                 return Err(UserError::message("bulk-approve-own"));
             }
             if cx.now() - operation.created > APPROVAL_VALID.as_secs().cast_signed() {
-                operation.state = State::Cancelled;
-                save(ctx, id, &operation)
+                transition(ctx, id, &[State::Awaiting], State::Cancelled)
                     .await
                     .map_err(|e| user_error(&e))?;
                 return Err(UserError::message("bulk-approval-expired"));
             }
             let approved = action == "approve";
-            operation.state = if approved {
+            let to = if approved {
                 State::Running
             } else {
                 State::Cancelled
             };
-            save(ctx, id, &operation)
+            // Only the first of two who decide at once decides.
+            if !transition(ctx, id, &[State::Awaiting], to)
                 .await
-                .map_err(|e| user_error(&e))?;
+                .map_err(|e| user_error(&e))?
+            {
+                return Err(UserError::message("bulk-wrong-state"));
+            }
             if approved {
                 // What it does is checked against the one who asked: their roles, then.
                 schedule(&cx, id, Duration::ZERO).await?;
@@ -487,10 +573,14 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
                 .await;
         }
         ("cancel", State::Preview | State::Awaiting | State::Running) => {
-            operation.state = State::Cancelled;
-            save(ctx, id, &operation)
-                .await
-                .map_err(|e| user_error(&e))?;
+            transition(
+                ctx,
+                id,
+                &[State::Preview, State::Awaiting, State::Running],
+                State::Cancelled,
+            )
+            .await
+            .map_err(|e| user_error(&e))?;
         }
         ("retry", State::Done | State::Cancelled) => {
             cx.require(operation.what.permission()).await?;
@@ -530,18 +620,25 @@ async fn retry_failed(
     operation: &mut Operation,
 ) -> Result<usize, ModuleError> {
     let mut again = 0;
+    let mut after = 0_u64;
     loop {
+        // Each is in the queue before it is out of the failed set: a stop in between loses none.
         let batch = ctx
             .store()
-            .set_take(&failed_set(id), 100)
+            .set_after(&failed_set(id), after, 100)
             .await
             .map_err(|e| stored(&e))?;
-        if batch.is_empty() {
+        let Some(last) = batch.last().copied() else {
             break;
-        }
+        };
+        after = last;
         for user in batch {
             ctx.store()
                 .set_add(&queue(id), user)
+                .await
+                .map_err(|e| stored(&e))?;
+            ctx.store()
+                .set_remove(&failed_set(id), user)
                 .await
                 .map_err(|e| stored(&e))?;
             again += 1;
@@ -568,19 +665,24 @@ pub(crate) async fn status(cx: CommandCx, args: OfOperation) -> Result<(), UserE
 /// `/bulk cancel`: stops an operation between two batches.
 pub(crate) async fn cancel(cx: CommandCx, args: OfOperation) -> Result<(), UserError> {
     let ctx = cx.ctx();
-    let Some(mut operation) = load(ctx, args.number).await.map_err(|e| user_error(&e))? else {
+    if load(ctx, args.number)
+        .await
+        .map_err(|e| user_error(&e))?
+        .is_none()
+    {
         return Err(UserError::message("bulk-not-found"));
-    };
-    if !matches!(
-        operation.state,
-        State::Preview | State::Awaiting | State::Running
-    ) {
+    }
+    if !transition(
+        ctx,
+        args.number,
+        &[State::Preview, State::Awaiting, State::Running],
+        State::Cancelled,
+    )
+    .await
+    .map_err(|e| user_error(&e))?
+    {
         return Err(UserError::message("bulk-wrong-state"));
     }
-    operation.state = State::Cancelled;
-    save(ctx, args.number, &operation)
-        .await
-        .map_err(|e| user_error(&e))?;
     cx.say_private_t(
         closure_sdk::Tone::Success,
         "bulk-cancelled",
@@ -655,13 +757,23 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
         name: operation.by_name.clone(),
     };
     let punisher = Punisher::new(ctx, moderator, settings);
+    // A member leaves the queue only once the action on them has an outcome, so a stop in the middle
+    // leaves the rest, and the one being done, to be done again (the punishments finish themselves
+    // from their intents, so doing one twice is safe).
     let batch = ctx
         .store()
-        .set_take(&queue(id), BATCH)
+        .set_sample(&queue(id), BATCH)
         .await
         .map_err(|e| stored(&e))?;
     let mut pause = PAUSE;
     for member in batch {
+        // A cancel is heard between two members, not only between two batches.
+        if load(ctx, id)
+            .await?
+            .is_none_or(|current| current.state != State::Running)
+        {
+            break;
+        }
         let user = UserId::new(member);
         let checked = if operation.what == What::Unban {
             Ok(())
@@ -694,17 +806,14 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
             },
         };
         match result {
-            Ok(()) => operation.done += 1,
+            Ok(()) => {}
             Err(error) => {
-                // A busy Discord is not a failure of the member: they wait for the next batch.
+                // A busy Discord is not a failure of the member: they wait for the next batch,
+                // and stay in the queue.
                 if let UserError::Module(ModuleError::Discord(DiscordError::RateLimited {
                     retry_after,
                 })) = &error
                 {
-                    ctx.store()
-                        .set_add(&queue(id), member)
-                        .await
-                        .map_err(|e| stored(&e))?;
                     pause = retry_after.unwrap_or(PAUSE).max(PAUSE);
                     continue;
                 }
@@ -721,21 +830,36 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
                 remember(&mut operation, member, why);
             }
         }
+        ctx.store()
+            .set_remove(&queue(id), member)
+            .await
+            .map_err(|e| stored(&e))?;
     }
     let left = waiting(ctx, id).await;
-    if left == 0 {
-        operation.state = State::Done;
-        save(ctx, id, &operation).await?;
-        return announce(ctx, id, &operation).await;
+    // What was done is what is neither waiting, nor failed, nor left out: counted from the queue, so
+    // a stop that lost a count of this job does not leave the total and the result disagreeing.
+    operation.done = operation
+        .total
+        .saturating_sub(left)
+        .saturating_sub(operation.failed)
+        .saturating_sub(operation.skipped);
+    let state = record_progress(ctx, id, &operation, left == 0).await?;
+    match state {
+        State::Done => {
+            operation.state = State::Done;
+            announce(ctx, id, &operation).await
+        }
+        State::Running => cx
+            .scheduler()
+            .job(JOB, &serde_json::json!({ "id": id }))
+            .map_err(|e| ModuleError::other(e.to_string()))?
+            .key(&format!("bulk-{id}"))
+            .after(pause)
+            .await
+            .map_err(|e| ModuleError::other(e.to_string())),
+        // Cancelled while the batch ran: nothing more is scheduled.
+        _ => Ok(()),
     }
-    save(ctx, id, &operation).await?;
-    cx.scheduler()
-        .job(JOB, &serde_json::json!({ "id": id }))
-        .map_err(|e| ModuleError::other(e.to_string()))?
-        .key(&format!("bulk-{id}"))
-        .after(pause)
-        .await
-        .map_err(|e| ModuleError::other(e.to_string()))
 }
 
 /// Posts the result where the operation was started.

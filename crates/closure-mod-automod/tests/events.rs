@@ -23,7 +23,6 @@ use common::*;
 use serde_json::{Value, json};
 use twilight_model::id::Id;
 
-const OTHER_ROLE: u64 = 78;
 /// The owner of the pretend server, as the harness names it when a test does not.
 const OWNER: u64 = 999_999_999;
 const THREAD: u64 = 90;
@@ -385,6 +384,36 @@ async fn add_roles_adds_each_role_to_the_member() {
         })
         .collect();
     assert_eq!(added, vec![ROLE, OTHER_ROLE]);
+}
+
+#[tokio::test]
+async fn add_roles_does_not_give_a_role_with_the_powers_of_a_moderator() {
+    let harness = with_rules(rules(&[(
+        "roles",
+        rule(
+            json!([{ "type": "words", "words": ["roles"] }]),
+            json!([{ "do": "add_roles", "roles": [ROLE.to_string(), OTHER_ROLE.to_string()] }]),
+        ),
+    )]));
+    // The second role carries Ban Members: a rule may not give it.
+    let mut strong = plain_role(OTHER_ROLE);
+    strong.permissions = twilight_model::guild::Permissions::BAN_MEMBERS;
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![plain_role(ROLE), strong]);
+    let _ = harness
+        .message(closure_sdk::testing::Message::new(MEMBER, CHANNEL).content("roles"))
+        .await;
+    let added: Vec<u64> = harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::AddRole { role_id, .. } => Some(role_id.get()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(added, vec![ROLE], "only the plain role is given");
 }
 
 #[tokio::test]

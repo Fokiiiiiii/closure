@@ -53,7 +53,26 @@ pub fn harness() -> Harness {
             .api()
             .add_channel(Id::new(channel), Some(Id::new(GUILD)));
     }
+    // The roles the rules give: plain ones, with no powers (a rule does not give any other).
+    harness.api().set_roles(
+        Id::new(GUILD),
+        vec![plain_role(ROLE), plain_role(OTHER_ROLE)],
+    );
     harness
+}
+
+/// The second role of the tests.
+pub const OTHER_ROLE: u64 = 78;
+
+/// A role with no permissions at all.
+pub fn plain_role(id: u64) -> twilight_model::guild::Role {
+    serde_json::from_value(json!({
+        "id": id.to_string(), "name": format!("role-{id}"), "color": 0, "hoist": false,
+        "managed": false, "mentionable": false, "permissions": "0", "position": 1, "flags": 0,
+        "icon": null, "unicode_emoji": null, "tags": null,
+        "colors": { "primary_color": 0, "secondary_color": null, "tertiary_color": null }
+    }))
+    .unwrap()
 }
 
 /// A harness with the log channel set and `config` as the module's configuration.

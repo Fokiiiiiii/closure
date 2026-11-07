@@ -5031,6 +5031,33 @@ fn opt_text(value: &str) -> CommandOptionValue {
 }
 
 #[tokio::test]
+async fn a_case_of_a_punishment_is_added_only_by_whoever_may_punish() {
+    let harness = harness();
+    harness.permissions(|permissions| {
+        permissions
+            .keys
+            .entry(closure_core::permission::PermissionKey::new("moderation.ban").unwrap())
+            .or_default()
+            .deny_roles
+            .push(Id::new(MODERATOR_ROLE));
+    });
+    let add = |kind: &str| {
+        by_moderator_of(
+            case_cmd("add")
+                .option("user", user(MEMBER))
+                .option("kind", opt_text(kind)),
+        )
+    };
+    harness.invoke(add("ban")).await.unwrap();
+    assert!(
+        cases_of(&harness, MEMBER).await.is_empty(),
+        "a moderator who may not ban cannot record a standing ban"
+    );
+    harness.invoke(add("note")).await.unwrap();
+    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
+}
+
+#[tokio::test]
 async fn a_case_is_recorded_changed_hidden_and_deleted_by_hand() {
     let harness = harness();
     harness
@@ -5266,6 +5293,45 @@ async fn a_bulk_ban_shows_what_it_would_do_and_does_nothing_until_run_is_pressed
     assert!(bans_of(&harness).is_empty(), "nothing is done before Run");
     harness.run_due_jobs().await;
     assert!(bans_of(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn a_cancel_while_a_batch_runs_is_not_taken_back_by_the_batch() {
+    let harness = harness();
+    harness.api().add_channel(Id::new(5), Some(Id::new(GUILD)));
+    let members: Vec<u64> = (2000..2012).collect();
+    for member in &members {
+        harness
+            .api()
+            .set_not_a_member(Id::new(GUILD), Id::new(*member));
+    }
+    let list = members
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    harness.invoke(bulk_start("ban", &list)).await.unwrap();
+    let press = Click::new("moderation:bulk:*:run:1")
+        .user(MODERATOR)
+        .roles([ADMIN_ROLE]);
+    harness.click(press).await.unwrap();
+    let cancel = bulk("cancel")
+        .option("number", CommandOptionValue::Integer(1))
+        .user(MODERATOR)
+        .owner();
+    // The mock gives the other task its turn at each call, so the cancel lands inside the batch.
+    let (_, cancelled) = tokio::join!(harness.run_due_jobs(), harness.invoke(cancel));
+    cancelled.unwrap();
+    let operation: serde_json::Value = harness.store().get("bulk:1").await.unwrap().unwrap();
+    assert_eq!(operation["state"], "cancelled", "{operation}");
+    assert!(
+        bans_of(&harness).len() < members.len(),
+        "the rest of the batch and the queue were left alone"
+    );
+    harness.advance(Duration::from_secs(10));
+    let before = bans_of(&harness).len();
+    harness.run_due_jobs().await;
+    assert_eq!(bans_of(&harness).len(), before, "no later batch runs");
 }
 
 #[tokio::test]

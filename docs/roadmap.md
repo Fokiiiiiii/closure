@@ -92,7 +92,7 @@ Added 2026-11-06. P1-1, P1-2, P1-3 and P2-1 to P2-8 are built (see each row); th
 comes first still holds, and so does the target the owner set: **servers of hundreds of thousands
 of members**. Every piece below is written for that size: what grows with the members (cases,
 names, warnings, quarantine, tickets) is kept in the module scores and sets or in a table of its
-own, never in the key-value entries (10,000 a module and guild); a job does one small piece of
+own, never in the key-value entries (a million a module and guild); a job does one small piece of
 work and can be resumed; a write costs the same in a server of a hundred members and of a
 million. Every piece also has to pass the audit of 2026-11-06 (see
 `project_closure_audit_2026_11_06` in the owner's notes): permissions checked at every way in

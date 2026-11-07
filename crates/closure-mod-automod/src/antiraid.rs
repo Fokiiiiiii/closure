@@ -1465,36 +1465,34 @@ pub async fn release(
     Ok(tally)
 }
 
-/// Releases every quarantined member, a batch of each set at a time. A member that could not be
-/// released is put back in its set, and the others go on.
+/// Releases every quarantined member, a batch of each set at a time. A member leaves the set only
+/// once the role is back, so a stop in the middle leaves the rest quarantined and in their sets for
+/// the next release; one that could not be released stays there and the others go on.
 pub async fn release_all(ctx: &EventContext, memory: &Memory) -> Result<Tally, ModuleError> {
     let store = ctx.store();
     migrate(store).await?;
     let mut total = Tally::default();
     for (index, pair) in pairs(store).await?.0.into_iter().enumerate() {
-        let mut failed = Vec::new();
+        let mut after = 0_u64;
         loop {
             let batch = store
-                .set_take(&set_of(index), RELEASE_BATCH)
+                .set_after(&set_of(index), after, RELEASE_BATCH)
                 .await
                 .map_err(|error| store_error(&error))?;
-            if batch.is_empty() {
+            let Some(last) = batch.last().copied() else {
                 break;
-            }
+            };
+            after = last;
             for user in batch.into_iter().filter_map(UserId::new_checked) {
                 let _turn = member_turn(ctx, user).await;
                 if take_off(ctx, memory, user, pair, &mut total).await {
+                    store
+                        .set_remove(&set_of(index), user.get())
+                        .await
+                        .map_err(|error| store_error(&error))?;
                     total.changed += 1;
-                } else {
-                    failed.push(user.get());
                 }
             }
-        }
-        for user in failed {
-            store
-                .set_add(&set_of(index), user)
-                .await
-                .map_err(|error| store_error(&error))?;
         }
     }
     Ok(total)

@@ -137,22 +137,39 @@ impl StorageBackend for Db {
             _ => return Err(StorageError::Conflict),
         }
         if current.is_none() {
-            // New keys take turns, so the count is exact; it goes up to the quota and no
-            // further, so the cost of a new entry does not grow with what is kept.
+            // New keys take turns, so the count is exact. It is read from the row the table keeps
+            // for the module and the guild, so a new entry costs the same however many there are.
             lock(&mut tx, module, guild).await?;
-            let kept: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM (
-                     SELECT 1 FROM module_kv
-                     WHERE module = $1 AND guild_id = $2
-                       AND (expires_at IS NULL OR expires_at > now())
-                     LIMIT $3) AS counted",
-            )
-            .bind(module.as_str())
-            .bind(guild)
-            .bind(i64::try_from(MAX_ENTRIES).unwrap_or(i64::MAX))
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(backend)?;
+            let usage = "SELECT COALESCE(
+                             (SELECT entries FROM module_kv_usage
+                              WHERE module = $1 AND guild_id = $2),
+                             0)";
+            let mut kept: i64 = sqlx::query_scalar(usage)
+                .bind(module.as_str())
+                .bind(guild)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(backend)?;
+            if usize::try_from(kept).unwrap_or(usize::MAX) >= MAX_ENTRIES {
+                // The entries that ran out but are not purged yet take room: they go first.
+                sqlx::query(
+                    "DELETE FROM module_kv WHERE ctid IN (
+                         SELECT ctid FROM module_kv
+                         WHERE module = $1 AND guild_id = $2 AND expires_at <= now()
+                         LIMIT 1000)",
+                )
+                .bind(module.as_str())
+                .bind(guild)
+                .execute(&mut *tx)
+                .await
+                .map_err(backend)?;
+                kept = sqlx::query_scalar(usage)
+                    .bind(module.as_str())
+                    .bind(guild)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(backend)?;
+            }
             if usize::try_from(kept).unwrap_or(usize::MAX) >= MAX_ENTRIES {
                 return Err(StorageError::QuotaExceeded { limit: MAX_ENTRIES });
             }
@@ -602,6 +619,33 @@ impl StorageBackend for Db {
         Ok(u64::try_from(count).unwrap_or(0))
     }
 
+    async fn set_after(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        after: u64,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT member FROM module_sets
+             WHERE module = $1 AND guild_id = $2 AND name = $3 AND member > $4
+             ORDER BY member LIMIT $5",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(i64::try_from(after).unwrap_or(i64::MAX))
+        .bind(i64::try_from(count).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|m| u64::try_from(m).ok())
+            .collect())
+    }
+
     async fn set_sample(
         &self,
         module: &ModuleId,
@@ -968,10 +1012,17 @@ mod tests {
     async fn the_quota_of_entries_is_exact_under_concurrency(pool: PgPool) {
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
-        // Fill all but three places directly, then race eight writers for them.
+        // Fill all but three places (a few rows, and the count the table keeps for them), then
+        // race eight writers for the three.
         sqlx::query(
             "INSERT INTO module_kv (module, guild_id, key, value, revision)
-             SELECT 'warn', 1, 'k' || n, '1'::jsonb, 1 FROM generate_series(1, $1) AS n",
+             SELECT 'warn', 1, 'k' || n, '1'::jsonb, 1 FROM generate_series(1, 5) AS n",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE module_kv_usage SET entries = $1 WHERE module = 'warn' AND guild_id = 1",
         )
         .bind(i64::try_from(MAX_ENTRIES - 3).unwrap())
         .execute(&db.pool)
@@ -992,6 +1043,49 @@ mod tests {
             }
         }
         assert_eq!(stored, 3);
+    }
+
+    #[sqlx::test]
+    async fn the_count_of_entries_follows_writes_deletes_and_the_purge(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let store = store(&db, "warn", 1);
+        let used = |db: Db| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE((SELECT entries FROM module_kv_usage
+                                  WHERE module = 'warn' AND guild_id = 1), -1)",
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(used(db.clone()).await, -1);
+        store.set("a", &1).await.unwrap();
+        store.set("b", &1).await.unwrap();
+        store.set("a", &2).await.unwrap();
+        assert_eq!(
+            used(db.clone()).await,
+            2,
+            "a replaced entry is not counted twice"
+        );
+        store.delete("b").await.unwrap();
+        assert_eq!(used(db.clone()).await, 1);
+        store
+            .set_for("short", &1, Duration::from_secs(1))
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE module_kv SET expires_at = now() - interval '1 second' WHERE key = 'short'",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        db.purge_module_storage().await.unwrap();
+        assert_eq!(
+            used(db.clone()).await,
+            1,
+            "what the purge removed is not counted"
+        );
     }
 
     #[sqlx::test]
@@ -1202,6 +1296,23 @@ mod tests {
             drawn.dedup();
             assert_eq!(drawn.len(), 8, "each member once");
             assert_eq!(store.set_sample("giveaway", 100).await.unwrap().len(), 19);
+            // A walk in pages: ascending, past the cursor, and nothing is removed.
+            assert_eq!(
+                store.set_after("giveaway", 0_u64, 3).await.unwrap(),
+                [1, 2, 3]
+            );
+            assert_eq!(
+                store.set_after("giveaway", 3_u64, 3).await.unwrap(),
+                [4, 6, 7]
+            );
+            assert!(
+                store
+                    .set_after("giveaway", 20_u64, 3)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(store.set_count("giveaway").await.unwrap(), 19);
             // A queue: taken once, gone from the set.
             let mut first = store.set_take("giveaway", 5).await.unwrap();
             let rest = store.set_take("giveaway", 100).await.unwrap();

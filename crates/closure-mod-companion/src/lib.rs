@@ -61,6 +61,14 @@ fn kept_deny(text: ChannelId) -> String {
     format!("kept-deny-{}", text.get())
 }
 
+/// Whether the member's own overwrite was captured, and what it was: 0 not yet, 1 there was none,
+/// 2 there was one (its bits are in the two scores above). Told apart from "not yet" so that a
+/// second voice channel of the same text channel does not take the overwrite this module made for
+/// the member's own.
+fn kept_state(text: ChannelId) -> String {
+    format!("kept-state-{}", text.get())
+}
+
 fn to_score(bits: Permissions) -> i64 {
     i64::try_from(bits.bits())
         .unwrap_or(i64::MAX - 1)
@@ -71,29 +79,51 @@ fn from_score(score: i64) -> Permissions {
     Permissions::from_bits_truncate(u64::try_from(score.saturating_sub(1)).unwrap_or(0))
 }
 
-/// The member's overwrite of the text channel as it is now, when there is one.
+/// The member's overwrite of the text channel as it is now: `None` when there is none. A channel
+/// that cannot be read is an error, not "none": nothing may be written over what is there.
 async fn current_overwrite(
     ctx: &EventContext,
     text: ChannelId,
     user: UserId,
-) -> Option<OverwriteSpec> {
-    let Ok(Outcome::Channel(channel)) = ctx
+) -> Result<Option<OverwriteSpec>, ModuleError> {
+    let Outcome::Channel(channel) = ctx
         .api
         .execute(Action::GetChannel { channel_id: text })
-        .await
+        .await?
     else {
-        return None;
+        return Ok(None);
     };
-    channel
+    Ok(channel
         .permission_overwrites
-        .as_deref()?
-        .iter()
-        .find(|item| item.kind == PermissionOverwriteType::Member && item.id.get() == user.get())
+        .as_deref()
+        .and_then(|overwrites| {
+            overwrites.iter().find(|item| {
+                item.kind == PermissionOverwriteType::Member && item.id.get() == user.get()
+            })
+        })
         .map(|item| OverwriteSpec {
             target: OverwriteTarget::Member(user),
             allow: item.allow,
             deny: item.deny,
-        })
+        }))
+}
+
+/// What is kept of the member's own overwrite: 0 nothing yet, 1 they had none, 2 they had one.
+/// Overwrites kept before the state was written have only their bits: they were the member's own.
+async fn captured(ctx: &EventContext, text: ChannelId, user: UserId) -> Result<i64, ModuleError> {
+    let store = ctx.store();
+    let state = store
+        .score(&kept_state(text), user)
+        .await
+        .map_err(|e| ModuleError::other(e.to_string()))?;
+    if state > 0 {
+        return Ok(state);
+    }
+    let allow = store
+        .score(&kept_allow(text), user)
+        .await
+        .map_err(|e| ModuleError::other(e.to_string()))?;
+    Ok(if allow > 0 { 2 } else { 0 })
 }
 
 #[allow(
@@ -120,12 +150,13 @@ async fn on_voice(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     let entered = after.and_then(|c| config.text_of(c));
     if let Some(text) = left.filter(|text| Some(*text) != entered) {
         // What the member had of their own before is given back; otherwise the overwrite goes.
-        let allow = ctx
-            .store()
-            .score(&kept_allow(text), user.id)
-            .await
-            .map_err(|e| ModuleError::other(e.to_string()))?;
-        let result = if allow > 0 {
+        let state = captured(&ctx, text, user.id).await?;
+        let result = if state == 2 {
+            let allow = ctx
+                .store()
+                .score(&kept_allow(text), user.id)
+                .await
+                .map_err(|e| ModuleError::other(e.to_string()))?;
             let deny = ctx
                 .store()
                 .score(&kept_deny(text), user.id)
@@ -155,7 +186,7 @@ async fn on_voice(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
         };
         note(&result, "take a text channel away");
         if result.is_ok() {
-            for name in [kept_allow(text), kept_deny(text)] {
+            for name in [kept_allow(text), kept_deny(text), kept_state(text)] {
                 ctx.store()
                     .score_put(&name, user.id, 0)
                     .await
@@ -164,29 +195,53 @@ async fn on_voice(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
         }
     }
     if let Some(text) = entered {
-        // The member's own overwrite is kept before it is changed, once: a second entering finds
-        // the one this module made, which is not theirs to be given back.
-        let had_before = ctx
-            .store()
-            .score(&kept_allow(text), user.id)
-            .await
-            .map_err(|e| ModuleError::other(e.to_string()))?
-            > 0;
-        let previous = if had_before {
-            None
-        } else {
-            current_overwrite(&ctx, text, user.id).await
+        // The member's own overwrite is kept before it is changed, once: a second entering (the
+        // same text channel of another voice channel, say) finds the one this module made, which
+        // is not theirs to be given back.
+        let previous = match captured(&ctx, text, user.id).await? {
+            0 => {
+                // Read first: a channel that cannot be read is left alone.
+                let found = current_overwrite(&ctx, text, user.id).await?;
+                let store = ctx.store();
+                if let Some(found) = &found {
+                    for (name, bits) in [
+                        (kept_allow(text), found.allow),
+                        (kept_deny(text), found.deny),
+                    ] {
+                        store
+                            .score_put(&name, user.id, to_score(bits))
+                            .await
+                            .map_err(|e| ModuleError::other(e.to_string()))?;
+                    }
+                }
+                store
+                    .score_put(
+                        &kept_state(text),
+                        user.id,
+                        if found.is_some() { 2 } else { 1 },
+                    )
+                    .await
+                    .map_err(|e| ModuleError::other(e.to_string()))?;
+                found
+            }
+            2 => {
+                let store = ctx.store();
+                let allow = store
+                    .score(&kept_allow(text), user.id)
+                    .await
+                    .map_err(|e| ModuleError::other(e.to_string()))?;
+                let deny = store
+                    .score(&kept_deny(text), user.id)
+                    .await
+                    .map_err(|e| ModuleError::other(e.to_string()))?;
+                Some(OverwriteSpec {
+                    target,
+                    allow: from_score(allow),
+                    deny: from_score(deny),
+                })
+            }
+            _ => None,
         };
-        if let Some(previous) = &previous {
-            ctx.store()
-                .score_put(&kept_allow(text), user.id, to_score(previous.allow))
-                .await
-                .map_err(|e| ModuleError::other(e.to_string()))?;
-            ctx.store()
-                .score_put(&kept_deny(text), user.id, to_score(previous.deny))
-                .await
-                .map_err(|e| ModuleError::other(e.to_string()))?;
-        }
         let (allow, deny) = previous.map_or((SEEN, Permissions::empty()), |previous| {
             (previous.allow | SEEN, previous.deny - SEEN)
         });

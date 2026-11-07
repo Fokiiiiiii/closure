@@ -629,6 +629,13 @@ async fn a_sync_that_keeps_failing_is_retried_three_times_and_then_noted() {
         "one run and three retries of two channels"
     );
     assert_eq!(harness.jobs(), 0, "no retry after the third");
+    // The role is not taken for set up for good: the next use of it, after the delay, syncs again.
+    harness.config_changed().await.unwrap();
+    assert_eq!(
+        harness.jobs(),
+        1,
+        "a sync that left channels undone starts again"
+    );
     let texts = sent_texts(&harness);
     assert!(
         texts

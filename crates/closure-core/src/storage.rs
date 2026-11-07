@@ -23,7 +23,7 @@ pub const MAX_KEY_CHARS: usize = 128;
 /// The largest value, as JSON text.
 pub const MAX_VALUE_BYTES: usize = 32 * 1024;
 /// How many entries a module may keep in one guild.
-pub const MAX_ENTRIES: usize = 10_000;
+pub const MAX_ENTRIES: usize = 1_000_000;
 /// How many counters (a name and a subject) a module may keep in one guild.
 pub const MAX_COUNTERS: usize = 100_000;
 /// The widest window of [`Store::counter_recent`], and how long the minutes behind it are kept.
@@ -260,6 +260,20 @@ pub trait StorageBackend: Send + Sync {
         _module: &ModuleId,
         _guild: GuildId,
         _name: &str,
+        _count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// Up to `count` members of the set that come after `after`, in ascending order, and none is
+    /// removed: a walk through the set in pages, for work that takes each member out only once it
+    /// is done.
+    async fn set_after(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _after: u64,
         _count: usize,
     ) -> Result<Vec<u64>, StorageError> {
         Err(StorageError::Unavailable)
@@ -721,6 +735,22 @@ impl Store {
             .await
     }
 
+    /// Up to `count` members of the set that come after `after`, in ascending order, none removed:
+    /// the pages of a walk through the set, for work that removes a member once it is done (a
+    /// queue that takes its members out first loses them if the work stops).
+    pub async fn set_after(
+        &self,
+        name: &str,
+        after: impl Into<u64>,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .set_after(&self.module, self.guild, name, after.into(), count)
+            .await
+    }
+
     /// Up to `count` members of the set, chosen at random, each once.
     pub async fn set_sample(&self, name: &str, count: usize) -> Result<Vec<u64>, StorageError> {
         self.allowed()?;
@@ -765,6 +795,8 @@ type UnixClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 pub struct MemoryStorage {
     clock: UnixClock,
     inner: Mutex<Inner>,
+    /// How many live entries a module may keep in a guild.
+    quota: usize,
 }
 
 impl std::fmt::Debug for MemoryStorage {
@@ -792,7 +824,16 @@ impl MemoryStorage {
         Self {
             clock: Arc::new(clock),
             inner: Mutex::new(Inner::default()),
+            quota: MAX_ENTRIES,
         }
+    }
+
+    /// The same storage with room for `quota` entries of a module in a guild, so that a test can
+    /// reach the quota without a million writes.
+    #[must_use]
+    pub fn with_entry_quota(mut self, quota: usize) -> Self {
+        self.quota = quota;
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -850,8 +891,8 @@ impl StorageBackend for MemoryStorage {
                 .iter()
                 .filter(|((m, g, _), row)| m == module && *g == guild && Self::live(row, now))
                 .count();
-            if kept >= MAX_ENTRIES {
-                return Err(StorageError::QuotaExceeded { limit: MAX_ENTRIES });
+            if kept >= self.quota {
+                return Err(StorageError::QuotaExceeded { limit: self.quota });
             }
         }
         inner.revisions += 1;
@@ -1173,6 +1214,27 @@ impl StorageBackend for MemoryStorage {
         Ok(members)
     }
 
+    async fn set_after(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        after: u64,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        Ok(self
+            .lock()
+            .sets
+            .get(&(module.clone(), guild, name.to_owned()))
+            .map(|set| {
+                set.range(after.saturating_add(1)..)
+                    .take(count)
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     async fn set_take(
         &self,
         module: &ModuleId,
@@ -1417,14 +1479,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_module_cannot_keep_more_entries_than_the_quota_but_may_replace_them() {
-        let f = fixture();
+        let f = Fixture {
+            backend: Arc::new(MemoryStorage::with_clock(|| 1_700_000_000).with_entry_quota(50)),
+            now: Arc::new(AtomicI64::new(1_700_000_000)),
+        };
         let store = f.store("warn", 1);
-        for n in 0..MAX_ENTRIES {
+        for n in 0..50 {
             store.set(&format!("k{n}"), &n).await.unwrap();
         }
         assert_eq!(
             store.set("one-too-many", &1).await,
-            Err(StorageError::QuotaExceeded { limit: MAX_ENTRIES })
+            Err(StorageError::QuotaExceeded { limit: 50 })
         );
         store.set("k0", &"changed").await.unwrap();
         // Another guild has its own room, and so does a deleted key.

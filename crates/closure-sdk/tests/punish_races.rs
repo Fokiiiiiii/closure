@@ -470,6 +470,62 @@ async fn an_unban_that_stopped_before_its_case_is_finished_and_the_ban_case_is_r
 }
 
 #[tokio::test]
+async fn a_softban_that_stopped_after_its_ban_is_lifted_and_recorded_by_the_recovery() {
+    let _guard = TEST_LOCK.lock().await;
+    let (_, ctx, api) = ban_recovery_fixture().await;
+    closure_sdk::punish::remember_softban(&ctx, ctx.bot().unwrap(), Id::new(7), Some("spam"))
+        .await
+        .unwrap();
+    // The ban went out and the process stopped before the unban.
+    api.banned.store(true, Ordering::SeqCst);
+    run_ban_recovery(&ctx).await;
+    assert!(!api.banned.load(Ordering::SeqCst), "the ban was lifted");
+    let case = ctx.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.kind.as_str(), "softban");
+    assert!(
+        ctx.store()
+            .entry("softban-intent:7")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_softban_recovery_leaves_a_ban_that_stands_as_a_case_of_its_own() {
+    let _guard = TEST_LOCK.lock().await;
+    let (_, ctx, api) = ban_recovery_fixture().await;
+    closure_sdk::punish::remember_softban(&ctx, ctx.bot().unwrap(), Id::new(7), None)
+        .await
+        .unwrap();
+    api.banned.store(true, Ordering::SeqCst);
+    ctx.cases()
+        .create(closure_sdk::NewCase {
+            source: closure_sdk::CaseSource::Command,
+            kind: closure_sdk::CaseKind::new("ban").unwrap(),
+            target: Id::new(7),
+            moderator: ctx.bot().unwrap(),
+            reason: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    run_ban_recovery(&ctx).await;
+    assert!(
+        api.banned.load(Ordering::SeqCst),
+        "somebody else's ban is not the softban's to lift"
+    );
+    assert!(
+        ctx.store()
+            .entry("softban-intent:7")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(ctx.cases().get(2).await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn timed_ban_recovery_discards_absent_ban() {
     let _guard = TEST_LOCK.lock().await;
     let (_, ctx, _) = ban_recovery_fixture().await;

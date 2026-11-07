@@ -50,4 +50,5 @@ roles-reason-ping = A member asked to ping the role
 roles-reason-ping-end = The minute to ping the role is over
 roles-pingable = { $role } can be pinged for the next minute.
 roles-not-pingable = That role is not one that can be pinged this way.
+roles-too-powerful = You cannot hand out a role that has permissions you do not have.
 roles-restricted = That role belongs to a punishment, which gives it and takes it off. It cannot be handed out or taken by hand.

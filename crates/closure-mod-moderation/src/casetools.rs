@@ -97,6 +97,16 @@ pub(crate) async fn add(cx: CommandCx, args: Add) -> Result<(), UserError> {
     if !KINDS.contains(&kind.as_str()) {
         return Err(UserError::message("case-kind-unknown"));
     }
+    // A recorded ban or timeout counts as a standing punishment, so it takes the permission of the
+    // punishment itself and not only the one to add cases.
+    cx.require(match kind.as_str() {
+        "ban" | "softban" => "moderation.ban",
+        "kick" => "moderation.kick",
+        "timeout" => "moderation.timeout",
+        "warn" => "moderation.warn",
+        _ => "moderation.note",
+    })
+    .await?;
     let case = cx
         .cases()
         .create(NewCase {

@@ -6,7 +6,7 @@
 
 use closure_core::action::Reason;
 use closure_core::cases::{CaseKind, CaseSource, NewCase};
-use closure_sdk::{Args, CommandCx, Tone, UserError, UserId};
+use closure_sdk::{Args, CommandCx, Tone, UserError, UserId, punish};
 
 use crate::{delete_seconds, mention, reason_of};
 
@@ -27,8 +27,14 @@ pub(crate) async fn softban(
     });
     let reason = Reason::truncated(&text);
     let api = cx.api();
-    api.ban(cx.guild_id(), user, seconds, reason.clone())
-        .await?;
+    // Nothing else is done to the member meanwhile, and the intent is saved first: a stop after the
+    // ban is finished by lifting it (see `closure_sdk::punish::remember_softban`).
+    let _turn = punish::member_turn(cx.ctx(), user).await;
+    punish::remember_softban(cx.ctx(), cx.user().id, user, Some(reason.as_str())).await?;
+    if let Err(error) = api.ban(cx.guild_id(), user, seconds, reason.clone()).await {
+        punish::forget_softban(cx.ctx(), user).await?;
+        return Err(error.into());
+    }
     // The unban is tried twice: a ban left standing is the one thing this command must not do.
     let mut lifted = api.unban(cx.guild_id(), user, reason.clone()).await;
     if lifted.is_err() {
@@ -47,6 +53,10 @@ pub(crate) async fn softban(
             expires_at: None,
         })
         .await;
+    // Kept when the case could not be made: the recovery makes it.
+    if recorded.is_ok() {
+        punish::forget_softban(cx.ctx(), user).await?;
+    }
     let number = recorded.as_ref().map_or(0, |case| case.number);
     let said = Args::new()
         .with("user", mention(user))
