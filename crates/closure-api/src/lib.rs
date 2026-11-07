@@ -82,6 +82,9 @@ pub(crate) struct Inner {
     pub(crate) render_metrics: Box<dyn Fn() -> String + Send + Sync>,
     pub(crate) token_digest: [u8; 32],
     pub(crate) failures: auth::FailureLimiter,
+    /// Proxies whose `X-Forwarded-For` is believed: a login failure is counted for the client the
+    /// proxy names, not for the proxy.
+    pub(crate) trusted_proxies: Vec<std::net::IpAddr>,
 }
 
 /// Everything the handlers need; cheap to clone.
@@ -122,6 +125,7 @@ impl ApiState {
                 render_metrics: Box::new(render_metrics),
                 token_digest: auth::digest(token),
                 failures: auth::FailureLimiter::default(),
+                trusted_proxies: Vec::new(),
             }),
             message_history_days: 7,
             messages: None,
@@ -132,6 +136,17 @@ impl ApiState {
     #[must_use]
     pub fn with_messages(mut self, sink: Arc<dyn MessageSink>) -> Self {
         self.messages = Some(sink);
+        self
+    }
+
+    /// Names the reverse proxies in front of the API. For a request that comes from one of them, the
+    /// client in `X-Forwarded-For` (the last address the proxy added) is who failed logins are
+    /// counted for; without this, everyone behind a proxy shares one allowance.
+    #[must_use]
+    pub fn with_trusted_proxies(mut self, proxies: Vec<std::net::IpAddr>) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.trusted_proxies = proxies;
+        }
         self
     }
 

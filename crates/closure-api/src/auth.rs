@@ -120,16 +120,32 @@ impl FailureLimiter {
     }
 }
 
+/// Who a request is from: the address it came over, or, when that is a proxy that is trusted, the
+/// last address the proxy put in `X-Forwarded-For` (the one it saw itself; earlier ones are the
+/// client's to write).
+fn client_of(connected: IpAddr, headers: &axum::http::HeaderMap, trusted: &[IpAddr]) -> IpAddr {
+    if !trusted.contains(&connected) {
+        return connected;
+    }
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|list| list.rsplit(',').next())
+        .and_then(|last| last.trim().parse::<IpAddr>().ok())
+        .unwrap_or(connected)
+}
+
 pub(crate) async fn require_token(
     State(state): State<ApiState>,
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     // Requests that did not come over a socket (the tests) are all one address.
-    let address = request
+    let connected = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map_or(OVERFLOW, |connection| connection.0.ip());
+    let address = client_of(connected, request.headers(), &state.inner.trusted_proxies);
     if let Some(wait) = state.inner.failures.blocked(address) {
         return Err(ApiError::TooManyAttempts {
             retry_after_secs: wait.as_secs().max(1),
@@ -149,6 +165,26 @@ pub(crate) async fn require_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_client_behind_a_trusted_proxy_is_who_failures_are_counted_for() {
+        let proxy: IpAddr = "10.0.0.1".parse().unwrap();
+        let other: IpAddr = "10.0.0.2".parse().unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-forwarded-for", "6.6.6.6, 203.0.113.9".parse().unwrap());
+        let trusted = [proxy];
+        // The last address is the one the proxy saw; an earlier one is the client's own claim.
+        assert_eq!(
+            client_of(proxy, &headers, &trusted),
+            "203.0.113.9".parse::<IpAddr>().unwrap()
+        );
+        // From anyone else the header means nothing.
+        assert_eq!(client_of(other, &headers, &trusted), other);
+        assert_eq!(
+            client_of(proxy, &axum::http::HeaderMap::new(), &trusted),
+            proxy
+        );
+    }
 
     fn ip(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, last))

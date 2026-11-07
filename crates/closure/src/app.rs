@@ -492,6 +492,7 @@ async fn start_api(
         &SecretString::from(token.clone()),
     )?
     .with_message_history_days(args.message_history_days)
+    .with_trusted_proxies(args.api_trusted_proxies.clone())
     .with_messages(sink);
     let listener = tokio::net::TcpListener::bind(args.api_bind)
         .await

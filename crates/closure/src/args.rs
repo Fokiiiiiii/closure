@@ -44,6 +44,12 @@ pub struct Args {
     #[arg(long, env = "API_BIND", default_value = "127.0.0.1:8080")]
     pub api_bind: SocketAddr,
 
+    /// Reverse proxies in front of the HTTP API (addresses, separated by commas). For a request from
+    /// one of them, failed logins are counted for the client the proxy names in `X-Forwarded-For`,
+    /// so one client cannot lock everyone behind the proxy out.
+    #[arg(long, env = "API_TRUSTED_PROXIES", value_delimiter = ',')]
+    pub api_trusted_proxies: Vec<std::net::IpAddr>,
+
     /// Bearer token for the HTTP API (at least 24 characters). Without it the API is not
     /// started and only the bot runs.
     #[arg(long, env = "API_ADMIN_TOKEN", hide_env_values = true)]
@@ -95,6 +101,7 @@ impl fmt::Debug for Args {
             .field("command_guild", &self.command_guild)
             .field("skip_command_registration", &self.skip_command_registration)
             .field("clear_guild_commands", &self.clear_guild_commands)
+            .field("api_trusted_proxies", &self.api_trusted_proxies)
             .field("message_history_days", &self.message_history_days)
             .field("log_format", &self.log_format)
             .finish_non_exhaustive()
