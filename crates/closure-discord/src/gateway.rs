@@ -222,7 +222,7 @@ impl GatewayHandle {
 struct ShardContext {
     cache: Arc<InMemoryCache>,
     dispatcher: Dispatcher,
-    hooks: Arc<HookQueue>,
+    hooks: Arc<HookQueues>,
     /// Asked whether a message event is wanted before it is queued.
     guild_hooks: Arc<dyn GuildHooks>,
     health: Arc<GatewayHealth>,
@@ -368,6 +368,45 @@ impl HookQueue {
     }
 }
 
+/// How many workers record messages. A guild always has the same one, so its events stay in
+/// order, and a guild whose database writes crawl holds up only the guilds that share its lane.
+const MESSAGE_LANES: usize = 8;
+
+/// The queues the gateway feeds: one for guild arrivals and departures, so those never wait behind
+/// recorded messages, and [`MESSAGE_LANES`] for the message and member-activity hooks.
+struct HookQueues {
+    lifecycle: Arc<HookQueue>,
+    lanes: Vec<Arc<HookQueue>>,
+}
+
+impl HookQueues {
+    fn new() -> Self {
+        Self {
+            lifecycle: Arc::default(),
+            lanes: (0..MESSAGE_LANES).map(|_| Arc::default()).collect(),
+        }
+    }
+
+    fn lane(&self, guild: GuildId) -> &Arc<HookQueue> {
+        let lane = usize::try_from(guild.get() % MESSAGE_LANES as u64).unwrap_or(0);
+        &self.lanes[lane]
+    }
+
+    fn close(&self) {
+        self.lifecycle.close();
+        for lane in &self.lanes {
+            lane.close();
+        }
+    }
+
+    /// Every queue with the worker that runs it.
+    fn spawn_workers(&self, hooks: &Arc<dyn GuildHooks>, tracker: &TaskTracker) {
+        for queue in std::iter::once(&self.lifecycle).chain(&self.lanes) {
+            tracker.spawn(run_hook_worker(Arc::clone(hooks), Arc::clone(queue)));
+        }
+    }
+}
+
 /// Abandons the queue when the worker ends, whether it returns, panics or is aborted. The lanes wait
 /// for the messages they hold, so none may stay queued for a worker that is gone.
 struct WorkerExit(Arc<HookQueue>);
@@ -499,11 +538,10 @@ pub async fn start_gateway(
     tracing::info!(shards = shards.len(), "starting gateway");
 
     let health = Arc::new(GatewayHealth::new(shards.len()));
-    let hook_queue = Arc::new(HookQueue::default());
     let context = Arc::new(ShardContext {
         cache,
         dispatcher,
-        hooks: Arc::clone(&hook_queue),
+        hooks: Arc::new(HookQueues::new()),
         guild_hooks: Arc::clone(&hooks),
         health: Arc::clone(&health),
         latency: config.latency,
@@ -512,7 +550,7 @@ pub async fn start_gateway(
         shutdown,
     });
     let tracker = TaskTracker::new();
-    tracker.spawn(run_hook_worker(hooks, hook_queue));
+    context.hooks.spawn_workers(&hooks, &tracker);
     for shard in shards {
         tracker.spawn(run_shard(shard, Arc::clone(&context)));
     }
@@ -719,9 +757,16 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
         if matches!(&converted, ModuleEvent::MemberJoined(member) if !member.user.bot)
             || matches!(&converted, ModuleEvent::MemberLeft { user, .. } if !user.bot)
         {
-            context.hooks.push_member_activity(converted.clone());
+            context
+                .hooks
+                .lane(converted.guild_id())
+                .push_member_activity(converted.clone());
         }
-        let recorded = offer_message(&context.hooks, &*context.guild_hooks, &converted);
+        let recorded = offer_message(
+            context.hooks.lane(converted.guild_id()),
+            &*context.guild_hooks,
+            &converted,
+        );
         let hook = match &converted {
             ModuleEvent::GuildAvailable {
                 guild_id,
@@ -748,7 +793,7 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
             }),
         }
         if let Some(job) = hook {
-            context.hooks.push(job);
+            context.hooks.lifecycle.push(job);
         }
     }
 }
@@ -1059,11 +1104,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let queue = Arc::new(HookQueue::default());
+        let queues = Arc::new(HookQueues::new());
         let context = Arc::new(ShardContext {
             cache: new_cache(),
             dispatcher,
-            hooks: Arc::clone(&queue),
+            hooks: Arc::clone(&queues),
             guild_hooks: Arc::new(NoHooks),
             health: Arc::new(GatewayHealth::new(2)),
             latency: Arc::default(),
@@ -1074,9 +1119,43 @@ mod tests {
         let second = Arc::clone(&context);
 
         drop(context);
-        assert!(!queue.take().closed, "one shard is still running");
+        assert!(
+            !queues.lifecycle.take().closed,
+            "one shard is still running"
+        );
         drop(second);
-        assert!(queue.take().closed, "the last shard is gone");
+        assert!(queues.lifecycle.take().closed, "the last shard is gone");
+        assert!(queues.lanes.iter().all(|lane| lane.take().closed));
+    }
+
+    #[test]
+    fn a_guild_always_has_the_same_lane_and_guilds_are_spread_over_them() {
+        let queues = HookQueues::new();
+        assert!(Arc::ptr_eq(
+            queues.lane(Id::new(5)),
+            queues.lane(Id::new(5))
+        ));
+        let used: std::collections::HashSet<_> = (1..=64_u64)
+            .map(|guild| Arc::as_ptr(queues.lane(Id::new(guild))))
+            .collect();
+        assert_eq!(used.len(), MESSAGE_LANES);
+        assert!(!Arc::ptr_eq(
+            queues.lane(Id::new(1)),
+            queues.lane(Id::new(2))
+        ));
+    }
+
+    #[test]
+    fn a_message_backlog_does_not_sit_before_the_guild_hooks() {
+        let queues = HookQueues::new();
+        for id in 1..=10_u64 {
+            queues.lane(Id::new(1)).push_message(deleted(1, id));
+        }
+        queues
+            .lifecycle
+            .push(HookJob::Removed { guild: Id::new(1) });
+        let taken = queues.lifecycle.take();
+        assert_eq!((taken.jobs.len(), taken.messages.len()), (1, 0));
     }
 
     /// Panics on the first message event it is given, and keeps the id of each later one.
