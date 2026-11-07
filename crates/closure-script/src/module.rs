@@ -273,17 +273,28 @@ impl Module for ScriptModule {
             self.pool.record_failure();
             return Err(ModuleError::other(error));
         }
+        // A scheduled job whose action failed for a reason that passes is tried again, so the
+        // failure is not reported as a success; any other failure is only logged.
+        let mut retry: Option<DiscordError> = None;
         if let Some(actions) = result.as_array() {
             for value in actions {
                 let result = match serde_json::from_value::<Action>(value.clone()) {
                     Ok(action) => match host.reserve_action(&action) {
-                        Ok(()) => tokio::time::timeout_at(
+                        Ok(()) => match tokio::time::timeout_at(
                             tokio::time::Instant::from_std(host.deadline),
                             host.ctx.api.execute(action),
                         )
                         .await
-                        .map_err(|_| host.failure("script deadline exceeded"))
-                        .and_then(|result| result.map(drop).map_err(|error| error.to_string())),
+                        {
+                            Ok(Ok(_)) => Ok(()),
+                            Ok(Err(error)) => {
+                                if error.is_retryable() && retry.is_none() {
+                                    retry = Some(error.clone());
+                                }
+                                Err(error.to_string())
+                            }
+                            Err(_) => Err(host.failure("script deadline exceeded")),
+                        },
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error.to_string()),
@@ -292,6 +303,9 @@ impl Module for ScriptModule {
                     tracing::error!(module = %self.manifest.id, %error, "script action failed");
                 }
             }
+        }
+        if let (Some(error), Event::Scheduled(_)) = (retry, event) {
+            return Err(error.into());
         }
         if let Some(error) = host.limit_failure() {
             self.pool.record_failure();
