@@ -9,7 +9,9 @@ use twilight_model::guild::audit_log::{AuditLog, AuditLogEntry};
 use twilight_model::guild::invite::Invite;
 use twilight_model::guild::{Guild, Member, Role};
 
-use crate::action::{Action, AuditLogQuery, InteractionResponse, Outcome, OverwriteTarget};
+use crate::action::{
+    Action, AuditLogQuery, InteractionResponse, NewChannel, Outcome, OverwriteTarget,
+};
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
 use crate::event::{ChannelId, Event, GuildId, MessageId, RoleId, UserId};
@@ -55,6 +57,17 @@ async fn yield_now() {
 }
 
 /// A role as Discord answers its creation: no permissions, not hoisted, not managed.
+/// A channel as Discord answers when the bot made it.
+fn created_channel(id: u64, name: &str, parent: Option<ChannelId>) -> Channel {
+    serde_json::from_value(serde_json::json!({
+        "id": id.to_string(),
+        "type": 0,
+        "name": name,
+        "parent_id": parent.map(|parent| parent.get().to_string()),
+    }))
+    .unwrap_or_else(|error| unreachable!("a channel of the test double is valid: {error}"))
+}
+
 fn created_role(id: u64, name: &str) -> Role {
     serde_json::from_value(serde_json::json!({
         "id": id.to_string(), "name": name, "color": 0, "hoist": false,
@@ -153,6 +166,10 @@ impl MockApi {
     }
     /// What the pretend Discord answers an action with: what was declared for the members and
     /// roles it asks about, nothing for everything else.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm for each action the pretend Discord answers"
+    )]
     fn answer(&self, action: &Action) -> Result<Outcome, DiscordError> {
         match action {
             Action::GetMember { guild_id, user_id } => {
@@ -165,6 +182,10 @@ impl MockApi {
             Action::ListRoles { guild_id } => Ok(Outcome::Roles(
                 lock(&self.roles).get(guild_id).cloned().unwrap_or_default(),
             )),
+            // A created channel gets the next id, and Discord knows it from then on.
+            Action::CreateChannel { guild_id, spec, .. } => {
+                Ok(self.create_channel(*guild_id, spec))
+            }
             // A created role gets the next id, so a test can tell the roles it made apart.
             Action::CreateRole { guild_id, spec, .. } => {
                 let id = 500 + u64::try_from(lock(&self.actions).len()).unwrap_or(0);
@@ -257,6 +278,18 @@ impl MockApi {
             // Writes that return a new object are recorded but answered with `Outcome::None`.
             _ => Ok(Outcome::None),
         }
+    }
+
+    /// A created channel gets the next id, and Discord knows it from then on.
+    fn create_channel(&self, guild_id: GuildId, spec: &NewChannel) -> Outcome {
+        let id = 600 + u64::try_from(lock(&self.actions).len()).unwrap_or(0);
+        let channel = created_channel(id, &spec.name, spec.parent_id);
+        lock(&self.guild_channels)
+            .entry(guild_id)
+            .or_default()
+            .push(channel.clone());
+        lock(&self.channels).insert(channel.id, Some(guild_id));
+        Outcome::Channel(Box::new(channel))
     }
 
     /// The answer to a message sent to `channel`. Each message gets an id of its own, so a test
