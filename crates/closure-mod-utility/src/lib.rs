@@ -66,10 +66,10 @@ struct Info {
 
 #[derive(CommandArgs)]
 struct MoveArgs {
-    /// The voice channel to move them to.
-    channel: ChannelId,
     /// The member, who has to be in voice.
     user: Option<UserId>,
+    /// The voice channel to move them to; left out, they are disconnected.
+    channel: Option<ChannelId>,
     /// Instead of one member: the voice channel to empty.
     from: Option<ChannelId>,
 }
@@ -520,9 +520,10 @@ async fn locate(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
 
 /// Moves a member to a voice channel, or everyone in a voice channel.
 async fn vcmove(cx: CommandCx, args: MoveArgs) -> Result<(), UserError> {
-    match (args.user, args.from) {
-        (Some(user), None) => move_one(cx, user, args.channel).await,
-        (None, Some(from)) => move_all(cx, from, args.channel).await,
+    match (args.user, args.from, args.channel) {
+        (Some(user), None, Some(to)) => move_one(cx, user, to).await,
+        (Some(user), None, None) => disconnect(cx, user).await,
+        (None, Some(from), Some(to)) => move_all(cx, from, to).await,
         _ => Err(UserError::message("utility-move-one")),
     }
 }
@@ -647,16 +648,16 @@ async fn snowflake(cx: CommandCx, args: Snowflake) -> Result<(), UserError> {
     .await
 }
 
-async fn vckick(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
-    cx.check_target(args.user).await?;
+async fn disconnect(cx: CommandCx, user: UserId) -> Result<(), UserError> {
+    cx.check_target(user).await?;
     let reason = Reason::new(cx.t("utility-reason-kick", &Args::new())).map_err(|e| failed(&e))?;
     cx.api()
-        .disconnect_member(cx.guild_id(), args.user, reason)
+        .disconnect_member(cx.guild_id(), user, reason)
         .await
         .map_err(|e| failed(&e))?;
     cx.reply_private_t(
         "utility-disconnected",
-        &Args::new().with("user", format!("<@{}>", args.user)),
+        &Args::new().with("user", format!("<@{user}>")),
     )
     .await
 }
@@ -858,11 +859,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 Command::<MoveArgs>::new("vcmove")
                     .requires("utility.voice")
                     .handler(vcmove),
-            )
-            .command(
-                Command::<OneUser>::new("vckick")
-                    .requires("utility.voice")
-                    .handler(vckick),
             )
             .context(
                 ContextCommand::user("Info")

@@ -141,7 +141,7 @@ async fn only_moderators_move_and_disconnect_members() {
     assert!(!moved(&harness));
     harness.invoke(attempt(&[MODERATOR])).await.unwrap();
     assert!(moved(&harness));
-    let kick = Invocation::new("vckick")
+    let kick = Invocation::new("vcmove")
         .option("user", user_option(7))
         .roles([MODERATOR])
         .user(50);
