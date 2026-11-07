@@ -46,6 +46,7 @@ The bot reads its settings from the environment or from flags (`closure --help`)
 | `COMMAND_GUILD` | Publish the slash commands to this one server only (development). |
 | `API_TRUSTED_PROXIES` | The reverse proxies in front of the API (addresses, separated by commas). Failed logins are then counted for the client in `X-Forwarded-For`, not for the proxy. |
 | `MEMBER_REQUEST_LIMIT` | A server with more members than this is not asked for all of them at start-up (default 500000; 0 asks for every server). Its members are known as the gateway reports them and are fetched when a check needs one. |
+| `HOOK_SPOOL_DIR` | Where joins and leaves are kept when the database is too slow to take them (default `spool`, relative to the working directory). They are played back in order, also after a restart. |
 | `CLEAR_GUILD_COMMANDS` | With global publishing, also empty the commands each server has of its own. Set it for one start after a run that used `COMMAND_GUILD`; it is a request for every server the bot is in. |
 | `MESSAGE_HISTORY_DAYS` | How long the message history is kept, 7 by default, 0 = never record. |
 | `LOG_FORMAT` | `pretty` or `json`. |

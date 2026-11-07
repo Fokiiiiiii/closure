@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::io::Write as _;
 use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -47,6 +49,9 @@ const RECORD_TIMEOUT: Duration = Duration::from_secs(20);
 /// How many message events may wait for their hook. Past it the newest is dropped and logged:
 /// keeping them all would let a slow database grow memory without bound.
 const MESSAGE_QUEUE_CAPACITY: usize = 10_000;
+
+/// The most a spill file holds. Past it the newest member event is dropped and logged.
+const SPILL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Called by the gateway for guild arrivals and departures.
 ///
@@ -106,6 +111,9 @@ pub struct GatewayConfig {
     /// are known as they speak and as the gateway reports them, and are fetched when a check needs
     /// one. `0` asks for every guild's members.
     pub member_request_limit: u64,
+    /// Where the member events that do not fit in a full queue are kept until the hooks catch up;
+    /// without it they are dropped.
+    pub member_spool: Option<PathBuf>,
 }
 
 impl fmt::Debug for GatewayConfig {
@@ -272,6 +280,8 @@ impl HookJob {
 struct HookQueue {
     state: Mutex<HookQueueState>,
     wake: Notify,
+    /// Where member events go when the queue is full (see [`Spill`]).
+    spill: Option<Spill>,
 }
 
 #[derive(Default)]
@@ -285,6 +295,9 @@ struct HookQueueState {
     /// Set once no shard can push any more, and by the worker when it stops.
     /// No message is accepted after that.
     closed: bool,
+    /// Member events go to the spill file, not the queue, until the file has been worked off: they
+    /// then stay in the order they came.
+    spilling: bool,
 }
 
 /// What the worker takes from the queue in one go, so that the queue cannot close between the
@@ -328,14 +341,69 @@ impl HookQueue {
         Some(recorded)
     }
 
+    /// Queues a join or a leave for [`GuildHooks::member_activity`]. When the queue is full the
+    /// event is written to the spill file instead, and the worker plays it back once it has caught
+    /// up, so a slow database delays these records and does not lose them.
     fn push_member_activity(&self, event: ModuleEvent) {
         let mut state = self.state();
-        if state.closed || state.messages.len() >= MESSAGE_QUEUE_CAPACITY {
-            tracing::warn!("member activity hook queue is full or closed");
+        if state.closed {
+            tracing::warn!("member activity hook queue is closed");
+            return;
+        }
+        if state.spilling || state.messages.len() >= MESSAGE_QUEUE_CAPACITY {
+            if self
+                .spill
+                .as_ref()
+                .is_some_and(|spill| spill.append(&event))
+            {
+                state.spilling = true;
+                self.wake.notify_one();
+            } else {
+                tracing::warn!("member activity hook queue is full; an event was dropped");
+            }
             return;
         }
         state.messages.push_back((event, None));
         self.wake.notify_one();
+    }
+
+    /// A queue whose overflow of member events is kept in `path`. Events left there by an earlier
+    /// run are played back first.
+    fn with_spill(path: PathBuf) -> Self {
+        let spill = Spill::new(path);
+        let queue = Self {
+            state: Mutex::new(HookQueueState {
+                spilling: spill.has_events(),
+                ..HookQueueState::default()
+            }),
+            wake: Notify::new(),
+            spill: Some(spill),
+        };
+        queue.wake.notify_one();
+        queue
+    }
+
+    /// Plays back what the spill file holds. Returns whether there may be more to do.
+    async fn replay_spill(&self, hooks: &Arc<dyn GuildHooks>) -> bool {
+        let Some(spill) = &self.spill else {
+            return false;
+        };
+        let events = spill.take();
+        if events.is_empty() {
+            // Nothing is left: events go to the queue again. Checked under the queue's lock, so
+            // none is written to the file between the check and the change.
+            let mut state = self.state();
+            if spill.has_events() {
+                return true;
+            }
+            state.spilling = false;
+            return false;
+        }
+        for event in events {
+            run_member_activity(hooks.as_ref(), &event).await;
+        }
+        spill.finish();
+        true
     }
 
     /// Declares that nothing will be pushed any more, so the worker may end once it is idle.
@@ -380,10 +448,17 @@ struct HookQueues {
 }
 
 impl HookQueues {
-    fn new() -> Self {
+    /// With a directory, each lane keeps the member events that do not fit in it there.
+    fn new(spool: Option<&Path>) -> Self {
         Self {
             lifecycle: Arc::default(),
-            lanes: (0..MESSAGE_LANES).map(|_| Arc::default()).collect(),
+            lanes: (0..MESSAGE_LANES)
+                .map(|lane| {
+                    Arc::new(spool.map_or_else(HookQueue::default, |dir| {
+                        HookQueue::with_spill(dir.join(format!("member-activity-{lane}.jsonl")))
+                    }))
+                })
+                .collect(),
         }
     }
 
@@ -407,6 +482,88 @@ impl HookQueues {
     }
 }
 
+/// Member events that did not fit in a full queue, one JSON object to a line. Taking them moves
+/// the file aside first and removes it once they were played back, so a stop in the middle plays
+/// them back again on the next start.
+struct Spill {
+    path: PathBuf,
+    replay: PathBuf,
+    /// Writes and takes of the file go one at a time.
+    turn: Mutex<()>,
+}
+
+impl Spill {
+    fn new(path: PathBuf) -> Self {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let replay = path.with_extension("replay");
+        Self {
+            path,
+            replay,
+            turn: Mutex::new(()),
+        }
+    }
+
+    fn turn(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.turn.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn has_events(&self) -> bool {
+        let _turn = self.turn();
+        [&self.path, &self.replay]
+            .iter()
+            .any(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0))
+    }
+
+    /// Writes `event` at the end of the file; whether it was kept.
+    fn append(&self, event: &ModuleEvent) -> bool {
+        let _turn = self.turn();
+        let Ok(mut line) = serde_json::to_vec(event) else {
+            return false;
+        };
+        line.push(b'\n');
+        let size = std::fs::metadata(&self.path).map_or(0, |meta| meta.len());
+        if size + line.len() as u64 > SPILL_LIMIT_BYTES {
+            return false;
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .and_then(|mut file| file.write_all(&line))
+            .is_ok()
+    }
+
+    /// The events to play back: the ones an earlier stop left half played, else the ones written.
+    fn take(&self) -> Vec<ModuleEvent> {
+        let _turn = self.turn();
+        if !self.replay.exists() && std::fs::rename(&self.path, &self.replay).is_err() {
+            return Vec::new();
+        }
+        let text = std::fs::read_to_string(&self.replay).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
+    /// The events taken were played back.
+    fn finish(&self) {
+        let _turn = self.turn();
+        let _ = std::fs::remove_file(&self.replay);
+    }
+}
+
+/// Runs the member-activity hook for one event; a hook that panics or takes too long is logged.
+async fn run_member_activity(hooks: &dyn GuildHooks, event: &ModuleEvent) {
+    let hook = AssertUnwindSafe(hooks.member_activity(event)).catch_unwind();
+    match tokio::time::timeout(HOOK_TIMEOUT, hook).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => tracing::error!("member activity hook panicked"),
+        Err(_) => tracing::warn!("member activity hook timed out"),
+    }
+}
+
 /// Abandons the queue when the worker ends, whether it returns, panics or is aborted. The lanes wait
 /// for the messages they hold, so none may stay queued for a worker that is gone.
 struct WorkerExit(Arc<HookQueue>);
@@ -424,6 +581,9 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
     loop {
         let taken = queue.take();
         if taken.jobs.is_empty() && taken.messages.is_empty() {
+            if queue.replay_spill(&hooks).await {
+                continue;
+            }
             if taken.closed {
                 return;
             }
@@ -432,12 +592,7 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
         }
         for (mut event, recorded) in taken.messages {
             if recorded.is_none() {
-                let hook = AssertUnwindSafe(hooks.member_activity(&event)).catch_unwind();
-                match tokio::time::timeout(HOOK_TIMEOUT, hook).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(_)) => tracing::error!("member activity hook panicked"),
-                    Err(_) => tracing::warn!("member activity hook timed out"),
-                }
+                run_member_activity(hooks.as_ref(), &event).await;
                 continue;
             }
             // A panicking hook counts as not kept; the worker goes on with the next message.
@@ -541,7 +696,7 @@ pub async fn start_gateway(
     let context = Arc::new(ShardContext {
         cache,
         dispatcher,
-        hooks: Arc::new(HookQueues::new()),
+        hooks: Arc::new(HookQueues::new(config.member_spool.as_deref())),
         guild_hooks: Arc::clone(&hooks),
         health: Arc::clone(&health),
         latency: config.latency,
@@ -1104,7 +1259,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let queues = Arc::new(HookQueues::new());
+        let queues = Arc::new(HookQueues::new(None));
         let context = Arc::new(ShardContext {
             cache: new_cache(),
             dispatcher,
@@ -1130,7 +1285,7 @@ mod tests {
 
     #[test]
     fn a_guild_always_has_the_same_lane_and_guilds_are_spread_over_them() {
-        let queues = HookQueues::new();
+        let queues = HookQueues::new(None);
         assert!(Arc::ptr_eq(
             queues.lane(Id::new(5)),
             queues.lane(Id::new(5))
@@ -1145,9 +1300,88 @@ mod tests {
         ));
     }
 
+    /// Remembers the id of every event the member-activity hook was given.
+    #[derive(Default)]
+    struct ActivityLog(Mutex<Vec<u64>>);
+
+    #[async_trait]
+    impl GuildHooks for ActivityLog {
+        async fn member_activity(&self, event: &ModuleEvent) {
+            if let ModuleEvent::MessageDeleted { message_id, .. } = event {
+                self.0.lock().unwrap().push(message_id.get());
+            }
+        }
+    }
+
+    fn spool_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("closure-spool-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[tokio::test]
+    async fn member_events_past_the_capacity_are_kept_and_played_back_in_order() {
+        let dir = spool_dir("order");
+        let queue = Arc::new(HookQueue::with_spill(dir.join("lane.jsonl")));
+        let capacity = u64::try_from(MESSAGE_QUEUE_CAPACITY).unwrap();
+        for id in 1..=capacity + 5 {
+            queue.push_member_activity(deleted(1, id));
+        }
+        assert_eq!(queue.state().messages.len(), MESSAGE_QUEUE_CAPACITY);
+        // Once the file holds events, later ones go behind them even if the queue has room.
+        queue.state().messages.clear();
+        queue.push_member_activity(deleted(1, capacity + 6));
+        assert!(queue.state().messages.is_empty());
+
+        let log = Arc::new(ActivityLog::default());
+        queue.close();
+        run_hook_worker(Arc::clone(&log) as Arc<dyn GuildHooks>, Arc::clone(&queue)).await;
+
+        let rest: Vec<u64> = (capacity + 1..=capacity + 6).collect();
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            rest,
+            "the cleared queue held nothing; the file the rest"
+        );
+        assert!(!queue.state().spilling);
+        assert!(!queue.spill.as_ref().unwrap().has_events());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn events_left_in_the_file_by_an_earlier_run_are_played_back_first() {
+        let dir = spool_dir("restart");
+        {
+            let queue = HookQueue::with_spill(dir.join("lane.jsonl"));
+            queue.state().spilling = true;
+            queue.push_member_activity(deleted(1, 7));
+            queue.push_member_activity(deleted(1, 8));
+        }
+        let queue = Arc::new(HookQueue::with_spill(dir.join("lane.jsonl")));
+        assert!(
+            queue.state().spilling,
+            "a file left behind is worked off first"
+        );
+        queue.push_member_activity(deleted(1, 9));
+        let log = Arc::new(ActivityLog::default());
+        queue.close();
+        run_hook_worker(Arc::clone(&log) as Arc<dyn GuildHooks>, Arc::clone(&queue)).await;
+        assert_eq!(*log.0.lock().unwrap(), [7, 8, 9]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn without_a_spool_a_full_queue_drops_the_member_event() {
+        let queue = HookQueue::default();
+        for id in 1..=u64::try_from(MESSAGE_QUEUE_CAPACITY).unwrap() + 1 {
+            queue.push_member_activity(deleted(1, id));
+        }
+        assert_eq!(queue.state().messages.len(), MESSAGE_QUEUE_CAPACITY);
+    }
+
     #[test]
     fn a_message_backlog_does_not_sit_before_the_guild_hooks() {
-        let queues = HookQueues::new();
+        let queues = HookQueues::new(None);
         for id in 1..=10_u64 {
             queues.lane(Id::new(1)).push_message(deleted(1, id));
         }
@@ -1360,6 +1594,7 @@ mod tests {
             intents: Intents::GUILDS,
             latency: Arc::default(),
             member_request_limit: 0,
+            member_spool: None,
         };
         assert!(!format!("{config:?}").contains("super-secret"));
     }

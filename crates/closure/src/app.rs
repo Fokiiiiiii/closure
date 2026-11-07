@@ -643,6 +643,7 @@ async fn serve(
                 intents: gateway_intents(&core.registry),
                 latency,
                 member_request_limit: args.member_request_limit,
+                member_spool: Some(args.hook_spool_dir.clone()),
             },
             Arc::clone(&cache),
             dispatcher,

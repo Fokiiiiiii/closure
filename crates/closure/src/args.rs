@@ -95,6 +95,12 @@ pub struct Args {
     #[arg(long, env = "MEMBER_REQUEST_LIMIT", default_value_t = 500_000)]
     pub member_request_limit: u64,
 
+    /// Where the joins and leaves that the database is too slow to take are kept until it catches
+    /// up (up to 64 MiB for each of eight files); they are played back in order, also after a
+    /// restart.
+    #[arg(long, env = "HOOK_SPOOL_DIR", default_value = "spool")]
+    pub hook_spool_dir: std::path::PathBuf,
+
     #[arg(long, env = "LOG_FORMAT", value_enum, default_value_t = LogFormat::Pretty)]
     pub log_format: LogFormat,
 }
@@ -110,6 +116,7 @@ impl fmt::Debug for Args {
             .field("clear_guild_commands", &self.clear_guild_commands)
             .field("api_trusted_proxies", &self.api_trusted_proxies)
             .field("member_request_limit", &self.member_request_limit)
+            .field("hook_spool_dir", &self.hook_spool_dir)
             .field("message_history_days", &self.message_history_days)
             .field("log_format", &self.log_format)
             .finish_non_exhaustive()
