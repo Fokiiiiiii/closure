@@ -119,25 +119,60 @@ pub struct ScriptStatus {
     pub recent_failures: usize,
 }
 
-/// Tracks failures across calls; creating a new breaker represents a restart.
-#[derive(Debug, Default)]
+/// How long an open breaker stays open before the script gets another chance.
+const BREAKER_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+/// After that chance, a failure within this long opens the breaker again at once.
+const BREAKER_PROBE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Tracks failures across calls. An open breaker closes by itself after a while, so a script that
+/// failed in a bad hour is not off until the next restart; a failure soon after reopens it.
+#[derive(Debug)]
 pub struct Breaker {
     state: Mutex<BreakerState>,
+    cooldown: std::time::Duration,
+}
+
+impl Default for Breaker {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(BreakerState::default()),
+            cooldown: BREAKER_COOLDOWN,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct BreakerState {
     failures: VecDeque<Instant>,
     disabled: bool,
+    opened_at: Option<Instant>,
+    probing_until: Option<Instant>,
+}
+
+impl BreakerState {
+    /// Closes the breaker when its time is up.
+    fn refresh(&mut self, now: Instant, cooldown: std::time::Duration) {
+        if self.disabled
+            && self
+                .opened_at
+                .is_some_and(|at| now.duration_since(at) >= cooldown)
+        {
+            self.disabled = false;
+            self.opened_at = None;
+            self.failures.clear();
+            self.probing_until = Some(now + BREAKER_PROBE);
+        }
+    }
 }
 
 impl Breaker {
     #[must_use]
     pub fn status(&self) -> ScriptStatus {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.refresh(Instant::now(), self.cooldown);
         ScriptStatus {
             disabled: state.disabled,
             recent_failures: state.failures.len(),
@@ -151,6 +186,7 @@ impl Breaker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
+        state.refresh(now, self.cooldown);
         while state
             .failures
             .front()
@@ -162,8 +198,11 @@ impl Breaker {
             return false;
         }
         state.failures.push_back(now);
-        if state.failures.len() >= 5 {
+        let probing = state.probing_until.is_some_and(|until| now < until);
+        if probing || state.failures.len() >= 5 {
             state.disabled = true;
+            state.opened_at = Some(now);
+            state.probing_until = None;
             return true;
         }
         false
@@ -387,6 +426,22 @@ mod tests {
         assert!(breaker.status().disabled);
         assert!(!breaker.record_failure());
         assert!(!Breaker::default().status().disabled);
+    }
+
+    #[test]
+    fn an_open_breaker_closes_after_its_cooldown_and_a_failure_soon_after_opens_it_again() {
+        let breaker = Breaker {
+            state: Mutex::new(BreakerState::default()),
+            cooldown: std::time::Duration::ZERO,
+        };
+        for _ in 0..4 {
+            assert!(!breaker.record_failure());
+        }
+        assert!(breaker.record_failure());
+        // The cooldown is over at once: the next look finds it closed.
+        assert!(!breaker.status().disabled);
+        // One failure in the probing time is enough to open it again.
+        assert!(breaker.record_failure());
     }
 
     #[tokio::test]
