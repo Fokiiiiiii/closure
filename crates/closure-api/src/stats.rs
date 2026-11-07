@@ -34,7 +34,14 @@ pub(crate) async fn stats(
         .filter(|days| (1..=30).contains(days))
         .ok_or_else(|| ApiError::BadRequest("days must be an integer from 1 to 30".into()))?;
     let (revision, overrides) = stored(&state, guild).await?;
-    let timezone = overrides.timezone.as_deref().unwrap_or("UTC");
+    // The effective timezone, with what the bot's configuration file gives under the server's own.
+    let settings = state.inner.settings.compiler().compile(&overrides)?;
+    let timezone = settings
+        .effective
+        .timezone
+        .as_deref()
+        .or(overrides.timezone.as_deref())
+        .unwrap_or("UTC");
     let offset = Timezone::parse(timezone)
         .map_err(|error| ApiError::Internal(error.to_string()))?
         .offset_seconds();
