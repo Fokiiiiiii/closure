@@ -751,6 +751,11 @@ async fn revert_locked(ctx: &EventContext, generation: u64) -> Result<Option<Cha
         (tally.failed > 0).then_some(Gap::Failed),
     )
     .await;
+    // What could not be put back is tried again, as for a level that is set: the section is gone,
+    // but the changes it made are still there.
+    if gap.is_some() {
+        schedule_resume(ctx, level.generation).await?;
+    }
     let change = Change {
         old: old.name,
         new: calm,
@@ -774,11 +779,11 @@ async fn revert_locked(ctx: &EventContext, generation: u64) -> Result<Option<Cha
 pub async fn resume(state: &State, cx: JobCx) -> Result<(), ModuleError> {
     let payload: Resume = cx.payload()?;
     let loaded = state.load(cx.ctx())?;
-    // The effects come from the section: without it there is nothing to apply.
-    let Some(cfg) = loaded.setup.antiraid.as_ref() else {
-        return Ok(());
-    };
     let ctx = cx.ctx();
+    // The effects come from the section: without it there is only the revert to finish.
+    let Some(cfg) = loaded.setup.antiraid.as_ref() else {
+        return resume_unconfigured(ctx, payload.generation).await;
+    };
     let lock = guild_lock(ctx.guild_id);
     let _guard = lock.lock().await;
     let store = ctx.store();
@@ -798,6 +803,39 @@ pub async fn resume(state: &State, cx: JobCx) -> Result<(), ModuleError> {
         ..current
     };
     let gap = settle(store, &next, revision, gap_of(&effects, &tally)).await;
+    if gap.is_some() && next.tries < RESUME_TRIES {
+        schedule_resume(ctx, next.generation).await?;
+    }
+    Ok(())
+}
+
+/// Puts back again what the revert of a level without its section could not: the slowmodes and the
+/// invites. A try that does not finish schedules the next one, until [`RESUME_TRIES`].
+async fn resume_unconfigured(ctx: &EventContext, generation: u64) -> Result<(), ModuleError> {
+    let lock = guild_lock(ctx.guild_id);
+    let _guard = lock.lock().await;
+    let store = ctx.store();
+    let (current, revision) = level(store, DEFAULT_LEVELS[0]).await?;
+    let Some(revision) = revision else {
+        return Ok(());
+    };
+    if current.applied || current.generation != generation || current.tries >= RESUME_TRIES {
+        return Ok(());
+    }
+    let mut tally = Tally::default();
+    slowmodes(ctx, None, &mut tally).await;
+    invites(ctx, false, generation, &mut tally).await;
+    let next = Level {
+        tries: current.tries + 1,
+        ..current
+    };
+    let gap = settle(
+        store,
+        &next,
+        revision,
+        (tally.failed > 0).then_some(Gap::Failed),
+    )
+    .await;
     if gap.is_some() && next.tries < RESUME_TRIES {
         schedule_resume(ctx, next.generation).await?;
     }
