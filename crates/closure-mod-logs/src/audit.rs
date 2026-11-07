@@ -395,7 +395,26 @@ pub(crate) async fn bulk_audit_of(
     })
 }
 
+/// An embed holds at most this many fields and, in all its texts, this many characters.
+const MAX_FIELDS: usize = 25;
+const MAX_EMBED_CHARS: usize = 6000;
+
+/// How many characters the texts of the embed hold.
+fn used(embed: &twilight_model::channel::message::Embed) -> usize {
+    let text = |value: &Option<String>| value.as_ref().map_or(0, |text| text.chars().count());
+    text(&embed.title)
+        + text(&embed.description)
+        + embed.footer.as_ref().map_or(0, |f| f.text.chars().count())
+        + embed.author.as_ref().map_or(0, |a| a.name.chars().count())
+        + embed
+            .fields
+            .iter()
+            .map(|f| f.name.chars().count() + f.value.chars().count())
+            .sum::<usize>()
+}
+
 /// The entry with who made its change, and the reason they gave, when the audit log named them.
+/// What would not fit in the embed is left out, so that the entry itself is never refused for it.
 pub(crate) fn add_audit(
     ctx: &EventContext,
     mut entry: LogEntry,
@@ -404,19 +423,34 @@ pub(crate) fn add_audit(
     let Some(audit) = audit else {
         return entry;
     };
-    if let Some(by) = audit.by {
-        entry.embed.fields.push(EmbedField {
-            inline: true,
-            name: label(ctx, "logs-by"),
-            value: format!("<@{}>", by.get()),
-        });
+    if let Some(by) = audit.by
+        && entry.embed.fields.len() < MAX_FIELDS
+    {
+        let name = label(ctx, "logs-by");
+        let value = format!("<@{}>", by.get());
+        if used(&entry.embed) + name.chars().count() + value.chars().count() <= MAX_EMBED_CHARS {
+            entry.embed.fields.push(EmbedField {
+                inline: true,
+                name,
+                value,
+            });
+        }
     }
-    if let Some(reason) = audit.reason.as_deref().filter(|reason| !reason.is_empty()) {
-        entry.embed.fields.push(EmbedField {
-            inline: false,
-            name: label(ctx, "logs-reason"),
-            value: code_block(reason),
-        });
+    if let Some(reason) = audit.reason.as_deref().filter(|reason| !reason.is_empty())
+        && entry.embed.fields.len() < MAX_FIELDS
+    {
+        let name = label(ctx, "logs-reason");
+        // The room that is left, less the marks around the reason.
+        let room = MAX_EMBED_CHARS
+            .saturating_sub(used(&entry.embed) + name.chars().count() + 8)
+            .min(1000);
+        if room >= 16 {
+            entry.embed.fields.push(EmbedField {
+                inline: false,
+                name,
+                value: code_block(&closure_sdk::embed::truncate(reason, room)),
+            });
+        }
     }
     entry
 }

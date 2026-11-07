@@ -89,10 +89,30 @@ async fn post_or_retry(
             .collect(),
     };
     if let Err(error) = files::post(ctx, &destination, entries).await {
-        if retryable(&error)
-            && let Err(error) = schedule_retry(ctx.scheduler(), &retry).await
-        {
-            tracing::warn!(?error, "could not schedule log retry");
+        if retryable(&error) {
+            // The files of an entry can be too big for the job that keeps it: the entry is kept
+            // without them, and is delivered later, instead of not at all.
+            let mut scheduled = schedule_retry(ctx.scheduler(), &retry).await;
+            if matches!(
+                scheduled,
+                Err(ScheduleError::TooLarge { .. } | ScheduleError::Payload(_))
+            ) {
+                let lean = RetryPost {
+                    entries: retry
+                        .entries
+                        .iter()
+                        .map(|entry| RetryEntry {
+                            embed: entry.embed.clone(),
+                            files: Vec::new(),
+                        })
+                        .collect(),
+                    ..retry
+                };
+                scheduled = schedule_retry(ctx.scheduler(), &lean).await;
+            }
+            if let Err(error) = scheduled {
+                tracing::warn!(?error, "could not schedule log retry");
+            }
         }
         return Err(error);
     }
@@ -1049,7 +1069,10 @@ fn channel_changed_entry(
         card = card.field(label(ctx, "logs-nsfw"), shown, false);
         any = true;
     }
-    for change in permissions::overwrite_changes(&before.overwrites, &after.overwrites) {
+    // An embed holds 25 fields: the changes past a number are counted, not lost with the entry.
+    let changes = permissions::overwrite_changes(&before.overwrites, &after.overwrites);
+    let more = changes.len().saturating_sub(MAX_OVERWRITE_FIELDS);
+    for change in changes.into_iter().take(MAX_OVERWRITE_FIELDS) {
         card = card.field(
             label(ctx, "logs-overwrite"),
             permissions::overwrite_value(ctx, &change),
@@ -1057,8 +1080,14 @@ fn channel_changed_entry(
         );
         any = true;
     }
+    if more > 0 {
+        card = card.field(label(ctx, "logs-overwrite"), format!("+{more}"), false);
+    }
     if any { plain(card).map(Some) } else { Ok(None) }
 }
+
+/// The most permission changes of a channel that one entry shows.
+const MAX_OVERWRITE_FIELDS: usize = 15;
 
 fn thread_entry(
     ctx: &EventContext,
