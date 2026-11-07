@@ -27,6 +27,12 @@ const REMEMBER: Duration = Duration::from_secs(600);
 const MAX_REMEMBERED: usize = 2000;
 /// The most characters of links sent in one question.
 const MAX_QUESTION: usize = 1500;
+/// The most questions one message is asked about: the service is not asked about a wall of links
+/// without end.
+const MAX_QUESTIONS: usize = 4;
+/// After the service fails to answer, it is not asked for this long: messages are left alone at
+/// once instead of each waiting its turn on a service that is down.
+const BACK_OFF: Duration = Duration::from_secs(15);
 
 /// What happens to the member who posted a flagged link.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -50,6 +56,8 @@ const BAN_CLEANUP_SECONDS: u32 = 3600;
 struct State {
     checker: Arc<dyn LinkChecker>,
     seen: Mutex<HashMap<String, (Instant, Option<String>)>>,
+    /// Until when the service is left alone, after it failed to answer.
+    down_until: Mutex<Option<Instant>>,
 }
 
 impl State {
@@ -66,11 +74,23 @@ impl State {
         {
             return kind.clone();
         }
+        if self
+            .down_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|until| now < until)
+        {
+            return None;
+        }
         let kind = match self.checker.check(question).await {
             Ok(LinkVerdict::Safe) => None,
             Ok(LinkVerdict::Unsafe(kind)) => Some(kind),
             Err(error) => {
                 tracing::warn!(%error, "the link check did not answer; the message is left alone");
+                *self
+                    .down_until
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now + BACK_OFF);
                 return None;
             }
         };
@@ -89,14 +109,26 @@ impl State {
     }
 }
 
-/// The links of a message, as the one text the service is asked about.
-fn question(content: &str) -> Option<String> {
-    let links: Vec<String> = text::links(content).into_iter().map(|l| l.url).collect();
-    if links.is_empty() {
-        return None;
+/// The links of a message, as the texts the service is asked about: as many links as fit in one
+/// question, never cut in the middle of a link.
+fn questions(content: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for link in text::links(content).into_iter().map(|l| l.url) {
+        let link: String = link.chars().take(MAX_QUESTION).collect();
+        match out.last_mut() {
+            Some(last) if last.chars().count() + 1 + link.chars().count() <= MAX_QUESTION => {
+                last.push(' ');
+                last.push_str(&link);
+            }
+            _ => {
+                if out.len() == MAX_QUESTIONS {
+                    break;
+                }
+                out.push(link);
+            }
+        }
     }
-    let joined = links.join(" ");
-    Some(joined.chars().take(MAX_QUESTION).collect())
+    out
 }
 
 async fn on_message(
@@ -104,16 +136,21 @@ async fn on_message(
     ctx: EventContext,
     event: Event,
 ) -> Result<Flow, ModuleError> {
-    let Event::MessageCreated(message) = &event else {
+    // An edit is checked as well: a link can be put in a message that was clean.
+    let (Event::MessageCreated(message) | Event::MessageUpdated(message)) = &event else {
         return Ok(Flow::Continue);
     };
     if message.author.bot {
         return Ok(Flow::Continue);
     }
-    let Some(question) = question(&message.content) else {
-        return Ok(Flow::Continue);
-    };
-    let Some(kind) = state.threat(&question).await else {
+    let mut flagged = None;
+    for question in questions(&message.content) {
+        if let Some(kind) = state.threat(&question).await {
+            flagged = Some(kind);
+            break;
+        }
+    }
+    let Some(kind) = flagged else {
         return Ok(Flow::Continue);
     };
     let config: Config = ctx.parse_config()?;
@@ -147,6 +184,7 @@ pub fn builder(checker: Arc<dyn LinkChecker>) -> Result<ModuleBuilder, CoreError
     let state = Arc::new(State {
         checker,
         seen: Mutex::new(HashMap::new()),
+        down_until: Mutex::new(None),
     });
     let schema = json!({
         "type": "object",
@@ -167,10 +205,14 @@ pub fn builder(checker: Arc<dyn LinkChecker>) -> Result<ModuleBuilder, CoreError
             .capability(closure_sdk::Capability::KickMembers)
             .intents(Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT)
             .config(schema, json!({"action": "ban"}))
-            .on(
-                Subscription::new(EventKind::MessageCreated),
-                move |ctx, event| on_message(state.clone(), ctx, event),
-            )
+            .on(Subscription::new(EventKind::MessageCreated), {
+                let state = state.clone();
+                move |ctx, event| on_message(state.clone(), ctx, event)
+            })
+            .on(Subscription::new(EventKind::MessageUpdated), {
+                let state = state.clone();
+                move |ctx, event| on_message(state.clone(), ctx, event)
+            })
             .catalog(Locale::En, EN)
             .catalog(Locale::Ja, JA)
             .enabled_by_default(),

@@ -129,3 +129,34 @@ fn both_catalogs_define_the_same_messages() {
         Vec::<String>::new()
     );
 }
+
+#[tokio::test]
+async fn a_link_far_into_a_long_message_is_checked_and_a_service_that_is_down_is_asked_once() {
+    let (harness, fake) = harness(false);
+    // 60 safe links, then a flagged one: it does not sit in the first question, but within four.
+    let safe: Vec<String> = (0..60)
+        .map(|n| format!("https://ok{n}.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        .collect();
+    let text = format!("{} https://evil.example/x", safe.join(" "));
+    harness
+        .message(Message::new(7, 5).content(text))
+        .await
+        .unwrap();
+    assert!(
+        fake.asked.load(Ordering::Relaxed) > 1,
+        "several questions, none cut in a link"
+    );
+    let (harness, fake) = self::harness(true);
+    for _ in 0..5 {
+        harness
+            .message(Message::new(7, 5).content("https://evil.example"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        fake.asked.load(Ordering::Relaxed),
+        1,
+        "after a failure it is left alone for a while"
+    );
+    assert!(!removed(&harness));
+}
