@@ -319,7 +319,7 @@ async fn showcase_case_list_shows_the_cases_of_a_member() {
     let replies = h
         .invoke(
             moderator_runs("case")
-                .subcommand("list")
+                .subcommand("view")
                 .option("user", user(TARGET)),
         )
         .await

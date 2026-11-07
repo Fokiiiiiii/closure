@@ -808,7 +808,7 @@ mod tests {
     use closure_api::MemberAccess;
 
     /// The commands of the shipped modules; the plugins (see closure-plugins) add theirs.
-    const SHIPPED_COMMANDS: usize = if cfg!(feature = "plugins") { 45 } else { 39 };
+    const SHIPPED_COMMANDS: usize = if cfg!(feature = "plugins") { 43 } else { 37 };
 
     struct TestReadiness(GatewayStatus);
     impl Readiness for TestReadiness {

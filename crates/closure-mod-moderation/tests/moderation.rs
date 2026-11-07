@@ -53,107 +53,6 @@ fn member(id: u64, roles: &[u64], bot: bool) -> Member {
     .unwrap()
 }
 
-fn massban(users: &str) -> Invocation {
-    Invocation::new("massban")
-        .option("users", CommandOptionValue::String(users.to_owned()))
-        .option("reason", CommandOptionValue::String("raid".to_owned()))
-        .user(MODERATOR)
-        .owner()
-}
-
-#[tokio::test]
-async fn massban_deduplicates_excludes_and_requires_owner() {
-    let harness = harness();
-    harness
-        .api()
-        .set_member(Id::new(GUILD), member(BOT, &[], true));
-    let denied = harness
-        .invoke(by_admin(
-            Invocation::new("massban")
-                .option("users", CommandOptionValue::String("7".into()))
-                .option("reason", CommandOptionValue::String("raid".into())),
-        ))
-        .await
-        .unwrap();
-    assert!(text(&denied).contains("level"), "{denied:?}");
-    let result = harness
-        .invoke(massban("7, <@7> invalid 8 100").text_command())
-        .await
-        .unwrap();
-    assert!(
-        text(&result).contains("Banned: 1; failed: 0; excluded: 3"),
-        "{result:?}"
-    );
-    assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
-    assert!(text(&result).contains("invalid user ID"));
-    assert!(text(&result).contains("bot"));
-    assert!(text(&result).contains("yourself"));
-}
-
-#[tokio::test]
-async fn massban_rejects_more_than_fifty_entries() {
-    let harness = harness();
-    let users = (1..=51)
-        .map(|n| n.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let result = harness.invoke(massban(&users)).await.unwrap();
-    assert!(text(&result).contains("50"), "{result:?}");
-    assert!(sequence(&harness).is_empty());
-}
-
-#[tokio::test]
-async fn massban_excludes_owner_and_higher_roles() {
-    let harness = harness();
-    harness.permissions(|permissions| {
-        permissions
-            .role_levels
-            .insert(Id::new(MODERATOR_ROLE), Level::OWNER);
-    });
-    harness
-        .api()
-        .set_member(Id::new(GUILD), member(ABOVE, &[ADMIN_ROLE], false));
-    let invocation = Invocation::new("massban")
-        .option(
-            "users",
-            CommandOptionValue::String(format!("{OWNER} {ABOVE}")),
-        )
-        .option("reason", CommandOptionValue::String("raid".into()))
-        .user(MODERATOR)
-        .roles([MODERATOR_ROLE]);
-    let result = harness.invoke(invocation).await.unwrap();
-    assert!(text(&result).contains("excluded: 2"), "{result:?}");
-    assert!(text(&result).contains("server owner"), "{result:?}");
-    assert!(text(&result).contains("role is too high"), "{result:?}");
-    assert!(sequence(&harness).is_empty());
-}
-
-#[tokio::test]
-async fn massban_reports_a_partial_discord_failure() {
-    let mut found = false;
-    for call in 1..=24 {
-        let harness = harness();
-        harness.set_config(json!({"dm_on_action": false}));
-        harness
-            .api()
-            .fail_nth(call, DiscordError::Forbidden("test".into()));
-        if let Ok(result) = harness.invoke(massban("7,42")).await
-            && text(&result).contains("Banned: 1; failed: 1; excluded: 0")
-        {
-            assert!(
-                text(&result).contains("Discord refused permission"),
-                "{result:?}"
-            );
-            found = true;
-            break;
-        }
-    }
-    assert!(
-        found,
-        "a failed ban must be reported alongside a successful ban"
-    );
-}
-
 #[tokio::test]
 async fn userinfo_shows_timeout_and_configured_mute_role() {
     let harness = harness();
@@ -307,7 +206,7 @@ fn case_view(number: i64) -> Invocation {
 
 fn case_list(target: u64, before: Option<i64>) -> Invocation {
     let invocation = Invocation::new("case")
-        .subcommand("list")
+        .subcommand("view")
         .option("user", user(target));
     let invocation = match before {
         Some(before) => invocation.option("before", CommandOptionValue::Integer(before)),
@@ -5035,7 +4934,9 @@ async fn a_member_with_cases_who_comes_back_is_told_to_the_staff_channel() {
 
 fn softban(target: u64, reason: Option<&str>, days: Option<i64>) -> Invocation {
     let invocation = with_reason(
-        Invocation::new("softban").option("user", user(target)),
+        Invocation::new("ban")
+            .option("soft", CommandOptionValue::Boolean(true))
+            .option("user", user(target)),
         reason,
     );
     let invocation = match days {
@@ -5098,7 +4999,9 @@ async fn a_softban_whose_unban_fails_once_is_tried_again_and_a_moderator_below_c
     let _ = nobody
         .invoke(
             with_reason(
-                Invocation::new("softban").option("user", user(MEMBER)),
+                Invocation::new("ban")
+                    .option("soft", CommandOptionValue::Boolean(true))
+                    .option("user", user(MEMBER)),
                 None,
             )
             .user(55),
@@ -5190,7 +5093,7 @@ async fn a_case_is_recorded_changed_hidden_and_deleted_by_hand() {
     assert!(harness.cases().get(1).await.unwrap().unwrap().hidden);
     let listed = harness
         .invoke(by_moderator_of(
-            case_cmd("list").option("user", user(MEMBER)),
+            case_cmd("view").option("user", user(MEMBER)),
         ))
         .await
         .unwrap();
@@ -5271,7 +5174,11 @@ async fn cases_are_found_by_who_what_where_from_and_a_word_and_exported_as_a_fil
     assert!(denied[0].content.contains("level"), "{denied:?}");
     // The export is a file in the channel for exports, by an admin; formulas are made plain.
     harness
-        .invoke(by_admin(case_cmd("export").option("user", user(MEMBER))))
+        .invoke(by_admin(
+            case_cmd("search")
+                .option("user", user(MEMBER))
+                .option("export", CommandOptionValue::Boolean(true)),
+        ))
         .await
         .unwrap();
     let file = harness
@@ -5297,7 +5204,12 @@ async fn cases_are_found_by_who_what_where_from_and_a_word_and_exported_as_a_fil
     assert!(csv.contains("'=HYPERLINK"), "{csv}");
     // Without the channel, nothing is sent.
     let bare = self::harness();
-    let said = bare.invoke(by_admin(case_cmd("export"))).await.unwrap();
+    let said = bare
+        .invoke(by_admin(
+            case_cmd("search").option("export", CommandOptionValue::Boolean(true)),
+        ))
+        .await
+        .unwrap();
     assert!(
         said.last().unwrap().content.contains("export_channel"),
         "{said:?}"

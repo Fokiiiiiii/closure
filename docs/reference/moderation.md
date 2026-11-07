@@ -162,26 +162,16 @@ Look at, list and revoke cases
 
 #### `/case view`
 
-Show a case
+Show a case, or list the cases of a member
 
 - Japanese name: `表示`
-- Japanese description: ケースを表示します
+- Japanese description: ケースを表示、またはメンバーのケースを一覧します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `number` | 番号 | integer | yes | - | Number of the case |
-
-#### `/case list`
-
-List the cases of a member, newest first
-
-- Japanese name: `一覧`
-- Japanese description: メンバーのケースを新しい順に一覧表示します
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `user` | ユーザー | user | yes | - | Member |
-| `before` | 前の番号 | integer | no | - | Show only the cases numbered below this |
+| `number` | 番号 | integer | no | - | Number of the case, to see one |
+| `user` | ユーザー | user | no | - | Member, to list their cases |
+| `before` | 前の番号 | integer | no | - | With a member: show only the cases numbered below this |
 
 #### `/case revoke`
 
@@ -223,25 +213,15 @@ Change the reason of a case, or who it names as its moderator
 
 #### `/case hide`
 
-Hide a case from the lists
+Hide a case from the lists, or show it again
 
 - Japanese name: `非表示`
-- Japanese description: ケースを一覧から隠します
+- Japanese description: ケースを一覧から隠す、または再表示します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `number` | 番号 | integer | yes | - | Number of the case |
-
-#### `/case unhide`
-
-Show a hidden case in the lists again
-
-- Japanese name: `再表示`
-- Japanese description: 隠したケースを一覧に戻します
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `number` | 番号 | integer | yes | - | Number of the case |
+| `show` | 再表示 | boolean | no | - | Yes: show the case again instead of hiding it |
 
 #### `/case delete`
 
@@ -273,25 +253,7 @@ Find cases by member, moderator, kind, source, state, time or a word of the reas
 | `text` | 語 | string | no | max_length 100 | A word of the reason |
 | `hidden` | 非表示も含める | boolean | no | - | Include hidden cases (needs the permission to hide cases) |
 | `before` | 前の番号 | integer | no | - | Show only the cases numbered below this |
-
-#### `/case export`
-
-Send what a search finds as a CSV file to the staff channel for exports
-
-- Japanese name: `出力`
-- Japanese description: 検索の結果を CSV ファイルとして、出力用のスタッフチャンネルに送ります
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `user` | ユーザー | user | no | - | Cases against this member |
-| `moderator` | 担当者 | user | no | - | Cases made by this moderator |
-| `kind` | 種類 | string | no | max_length 32 | The kind: warn, note, ban, kick, timeout, softban, ... |
-| `source` | 発生元 | string | no | max_length 16 | Where it came from: command, button, automod, manual, dashboard, script, appeal |
-| `state` | 状態 | string | no | max_length 16 | Where it stands: active, expired or revoked |
-| `within` | 期間 | string | no | max_length 32 | Made within this long, such as 7d |
-| `text` | 語 | string | no | max_length 100 | A word of the reason |
-| `hidden` | 非表示も含める | boolean | no | - | Include hidden cases (needs the permission to hide cases) |
-| `before` | 前の番号 | integer | no | - | Show only the cases numbered below this |
+| `export` | 出力 | boolean | no | - | Yes: send the result as a CSV file to the export channel |
 
 ### `/slowmode`
 
@@ -340,19 +302,6 @@ Show a user's membership and case history
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | user | user | yes | - | User to inspect |
-
-### `/massban`
-
-Ban up to 50 users
-
-- Japanese name: `massban`
-- Japanese description: 最大50人をBAN
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `users` | users | string | yes | - | User IDs or mentions separated by spaces or commas |
-| `reason` | reason | string | yes | max_length 512 | Why |
-| `delete_days` | delete_days | integer | no | min 0; max 7 | Days of messages to delete, 0 to 7 |
 
 ### `/timeout`
 
@@ -404,6 +353,7 @@ Ban a member, for good or for a while
 | `reason` | 理由 | string | no | max_length 512 | Why |
 | `duration` | 期間 | string | no | - | How long (7d) or until (2026-11-01 18:00); forever if left out |
 | `delete_days` | 削除日数 | integer | no | min 0; max 7 | Days of the member's messages to delete, 0 to 7 |
+| `soft` | ソフト | boolean | no | - | Yes: a softban, the ban is lifted at once and only the messages are gone |
 
 ### `/appeal`
 
@@ -416,19 +366,6 @@ Ask for a punishment to be lifted
 |---|---|---|---|---|---|
 | `text` | 理由 | string | yes | max_length 1000 | Why the punishment should be lifted |
 | `user` | ユーザー | user | no | - | The member, for an appeal that came another way (moderators) |
-
-### `/softban`
-
-Ban a member and delete their recent messages, then lift the ban at once
-
-- Japanese name: `ソフトバン`
-- Japanese description: メンバーを BAN して直近のメッセージを消し、すぐに BAN を解除します
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `user` | ユーザー | user | yes | - | Member to softban |
-| `reason` | 理由 | string | no | max_length 512 | Why |
-| `delete_days` | 削除日数 | integer | no | min 1; max 7 | Days of the member's messages to delete, 1 to 7 |
 
 ### `/unban`
 

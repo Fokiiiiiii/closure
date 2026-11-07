@@ -31,7 +31,6 @@ mod channel_controls;
 mod clear;
 mod history;
 mod manual;
-mod massban;
 mod rejoin;
 mod restrict;
 mod softban;
@@ -265,16 +264,12 @@ struct Target {
 }
 
 #[derive(CommandArgs)]
-struct Number {
-    /// Number of the case
-    number: i64,
-}
-
-#[derive(CommandArgs)]
-struct Listing {
-    /// Member
-    user: UserId,
-    /// Show only the cases numbered below this
+struct ViewArgs {
+    /// Number of the case, to see one
+    number: Option<i64>,
+    /// Member, to list their cases
+    user: Option<UserId>,
+    /// With a member: show only the cases numbered below this
     before: Option<i64>,
 }
 
@@ -320,6 +315,8 @@ struct BanArgs {
     /// How many days of the member's messages to delete, 0 to 7
     #[arg(min = 0, max = 7)]
     delete_days: Option<i64>,
+    /// Yes: a softban, the ban is lifted at once and only the messages are gone
+    soft: Option<bool>,
 }
 
 /// Where a case stands at a given time.
@@ -742,10 +739,18 @@ async fn warnings(cx: CommandCx, args: Target) -> Result<(), UserError> {
     cx.reply_private(text).await
 }
 
-/// Shows a case the way the log does.
-async fn case_view(cx: CommandCx, args: Number) -> Result<(), UserError> {
-    let Some(case) = cx.cases().get(args.number).await? else {
-        return Err(not_found(args.number));
+/// Shows a case the way the log does, or lists the cases of a member.
+async fn case_view(cx: CommandCx, args: ViewArgs) -> Result<(), UserError> {
+    match (args.number, args.user) {
+        (Some(number), _) => show_case(cx, number).await,
+        (None, Some(user)) => case_list(cx, user, args.before).await,
+        (None, None) => Err(UserError::message("case-view-needs-one")),
+    }
+}
+
+async fn show_case(cx: CommandCx, number: i64) -> Result<(), UserError> {
+    let Some(case) = cx.cases().get(number).await? else {
+        return Err(not_found(number));
     };
     let embed = modlog::embed(cx.ctx(), &case).build()?;
     cx.reply_with(InteractionReply {
@@ -757,26 +762,17 @@ async fn case_view(cx: CommandCx, args: Number) -> Result<(), UserError> {
 }
 
 /// Lists the cases of a member, newest first, `before` a number if given.
-async fn case_list(cx: CommandCx, args: Listing) -> Result<(), UserError> {
-    let mut cases = cx
-        .cases()
-        .for_target(args.user, args.before, LISTED)
-        .await?;
+async fn case_list(cx: CommandCx, user: UserId, before: Option<i64>) -> Result<(), UserError> {
+    let mut cases = cx.cases().for_target(user, before, LISTED).await?;
     // A hidden case is shown by its number only.
     cases.retain(|case| !case.hidden);
     if cases.is_empty() {
         return cx
-            .reply_private_t(
-                "case-list-none",
-                &Args::new().with("user", mention(args.user)),
-            )
+            .reply_private_t("case-list-none", &Args::new().with("user", mention(user)))
             .await;
     }
     let now = cx.now();
-    let mut text = cx.t(
-        "case-list-header",
-        &Args::new().with("user", mention(args.user)),
-    );
+    let mut text = cx.t("case-list-header", &Args::new().with("user", mention(user)));
     for case in &cases {
         let line = cx.t(
             "case-list-line",
@@ -879,6 +875,12 @@ async fn kick(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 /// up. The direct message comes first, as with a kick. Without a reason, or a duration on a ban
 /// that a template may give, a template is asked for.
 async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
+    if args.soft == Some(true) {
+        if args.duration.is_some() {
+            return Err(UserError::message("ban-soft-no-duration"));
+        }
+        return softban::softban(cx, args.user, args.reason, args.delete_days).await;
+    }
     cx.defer(true).await?;
     if let Some(span) = &args.duration {
         span.resolve(&cx)?;
@@ -1161,12 +1163,6 @@ fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
                 .handler(appeals::file),
         )
         .command(
-            Command::<softban::SoftbanArgs>::new("softban")
-                .requires("moderation.ban")
-                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
-                .handler(softban::softban),
-        )
-        .command(
             Command::<MemberReason>::new("unban")
                 .requires("moderation.ban")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
@@ -1336,12 +1332,6 @@ fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(userinfo::userinfo),
         )
-        .command(
-            Command::<massban::Massban>::new("massban")
-                .requires("moderation.massban")
-                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
-                .handler(massban::massban),
-        )
 }
 
 /// The module, still open for a test to build on.
@@ -1432,12 +1422,9 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .group(
             "case",
             [
-                Command::<Number>::new("view")
+                Command::<ViewArgs>::new("view")
                     .requires("moderation.cases")
                     .handler(case_view),
-                Command::<Listing>::new("list")
-                    .requires("moderation.cases")
-                    .handler(case_list),
                 Command::<Revoke>::new("revoke")
                     .requires("moderation.revoke")
                     .handler(case_revoke),
@@ -1447,21 +1434,15 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 Command::<casetools::Update>::new("update")
                     .requires("moderation.addcase")
                     .handler(casetools::update),
-                Command::<casetools::Number>::new("hide")
+                Command::<casetools::Hide>::new("hide")
                     .requires("moderation.hidecase")
                     .handler(casetools::hide),
-                Command::<casetools::Number>::new("unhide")
-                    .requires("moderation.hidecase")
-                    .handler(casetools::unhide),
                 Command::<casetools::Delete>::new("delete")
                     .requires("moderation.deletecase")
                     .handler(casetools::delete),
                 Command::<casetools::Find>::new("search")
                     .requires("moderation.cases")
                     .handler(casetools::search),
-                Command::<casetools::Find>::new("export")
-                    .requires("moderation.export")
-                    .handler(casetools::export),
             ],
         );
     Ok(permissions(punishments(moderator_tools(builder)))?

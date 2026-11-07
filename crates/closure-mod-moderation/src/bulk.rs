@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Component;
 use twilight_model::channel::message::component::ButtonStyle;
 
-use crate::{Config, delete_seconds, massban};
+use crate::{Config, delete_seconds};
 
 /// The route of the buttons, and the name of the job.
 pub(crate) const ROUTE: &str = "bulk";
@@ -256,7 +256,7 @@ pub(crate) async fn start(cx: CommandCx, args: Start) -> Result<(), UserError> {
         .split(|c: char| c.is_whitespace() || c == ',')
         .filter(|s| !s.is_empty())
     {
-        if let Some(user) = massban::parse_user(token)
+        if let Some(user) = parse_user(token)
             && !users.contains(&user)
         {
             users.push(user);
@@ -930,4 +930,20 @@ pub(crate) async fn request_ban(
         &Args::new().with("number", id),
     )
     .await
+}
+
+/// A user from an id or a mention.
+fn parse_user(token: &str) -> Option<UserId> {
+    let value = if let Some(value) = token.strip_prefix("<@") {
+        value
+            .strip_suffix('>')?
+            .strip_prefix('!')
+            .unwrap_or(value.strip_suffix('>')?)
+    } else {
+        token
+    };
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<u64>().ok().and_then(UserId::new_checked)
 }

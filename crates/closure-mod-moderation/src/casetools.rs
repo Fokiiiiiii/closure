@@ -41,9 +41,11 @@ pub(crate) struct Update {
 }
 
 #[derive(CommandArgs)]
-pub(crate) struct Number {
+pub(crate) struct Hide {
     /// Number of the case
     number: i64,
+    /// Yes: show the case again instead of hiding it
+    show: Option<bool>,
 }
 
 #[derive(CommandArgs)]
@@ -80,6 +82,8 @@ pub(crate) struct Find {
     hidden: Option<bool>,
     /// Show only the cases numbered below this
     before: Option<i64>,
+    /// Yes: send the result as a CSV file to the export channel (needs the permission to export)
+    export: Option<bool>,
 }
 
 fn kind_of(text: &str) -> Result<CaseKind, UserError> {
@@ -171,12 +175,9 @@ async fn hide_or_show(cx: &CommandCx, number: i64, hidden: bool) -> Result<(), U
     .await
 }
 
-pub(crate) async fn hide(cx: CommandCx, args: Number) -> Result<(), UserError> {
-    hide_or_show(&cx, args.number, true).await
-}
-
-pub(crate) async fn unhide(cx: CommandCx, args: Number) -> Result<(), UserError> {
-    hide_or_show(&cx, args.number, false).await
+/// Hides a case from the lists, or shows it again.
+pub(crate) async fn hide(cx: CommandCx, args: Hide) -> Result<(), UserError> {
+    hide_or_show(&cx, args.number, !args.show.unwrap_or(false)).await
 }
 
 /// Removes a case for good, when the moderator says yes.
@@ -245,6 +246,10 @@ async fn filter_of(cx: &CommandCx, find: &Find) -> Result<CaseFilter, UserError>
 
 /// Lists the cases a search finds, a page at a time.
 pub(crate) async fn search(cx: CommandCx, args: Find) -> Result<(), UserError> {
+    if args.export == Some(true) {
+        cx.require("moderation.export").await?;
+        return export(cx, args).await;
+    }
     let filter = filter_of(&cx, &args).await?;
     let now = cx.now();
     // One more than a page: whether there is a next one.
@@ -332,7 +337,7 @@ pub(crate) fn csv(cases: &[Case], now: i64) -> String {
 }
 
 /// Writes what a search finds as a CSV file to the staff channel for exports.
-pub(crate) async fn export(cx: CommandCx, args: Find) -> Result<(), UserError> {
+async fn export(cx: CommandCx, args: Find) -> Result<(), UserError> {
     cx.defer(true).await?;
     let config: Config = cx.config()?;
     let Some(channel) = config.export_target() else {

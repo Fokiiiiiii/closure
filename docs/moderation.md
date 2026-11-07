@@ -20,7 +20,6 @@ them, keeps notes, and records every one of these as a case. The code is in
 | `/untimeout user [reason]` | Lifts the timeout of a member. | `moderation.timeout` (moderator) |
 | `/kick user [reason]` | Kicks a member from the server. | `moderation.kick` (moderator) |
 | `/ban user [reason] [duration] [delete_days]` | Bans a member, for good or for `duration`. `delete_days` (0 to 7) is how many days of their messages are deleted. | `moderation.ban` (admin) |
-| `/massban users reason [delete_days]` | Bans up to 50 IDs or mentions separated by spaces, newlines or commas. Duplicates are processed once; results include exclusions and failures. | `moderation.massban` (owner) |
 | `/unban user [reason]` | Lifts the ban of a member. | `moderation.ban` (admin) |
 | `/vcmute user [duration] [reason]` | Mutes a member in voice channels, for `duration` (or until a date and time) or until `/vcunmute`. | `moderation.voice` (moderator) |
 | `/vcunmute user [reason]` | Lifts the voice mute of a member. | `moderation.voice` (moderator) |
