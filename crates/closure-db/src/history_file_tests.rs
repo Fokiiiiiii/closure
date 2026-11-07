@@ -177,6 +177,31 @@ async fn concurrent_saves_leave_the_guild_within_its_limit(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn the_usage_of_a_guild_follows_what_is_saved_replaced_trimmed_and_purged(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    db.migrate().await.unwrap();
+    let usage = |db: Db| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(bytes), 0)::bigint FROM message_file_usage WHERE guild_id = $1",
+        )
+        .bind(i64::try_from(GUILD).unwrap())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    };
+    keep(&db, &picture(4), Some(b"aaaa"), 1_700_000_100).await;
+    keep(&db, &picture(5), Some(b"bbbbbb"), 1_700_000_200).await;
+    assert_eq!(usage(db.clone()).await, 10);
+    // A file kept again takes the place of the first.
+    keep(&db, &picture(4), Some(b"aa"), 1_700_000_300).await;
+    assert_eq!(usage(db.clone()).await, 8);
+    db.trim_files(Id::new(GUILD), 6).await.unwrap();
+    assert_eq!(usage(db.clone()).await, 2);
+    db.purge_before(1_700_001_000).await.unwrap();
+    assert_eq!(usage(db.clone()).await, 0);
+}
+
+#[sqlx::test]
 async fn purging_drops_the_files_kept_before_the_cutoff(pool: PgPool) {
     let db = Db::from_pool(pool);
     db.migrate().await.unwrap();

@@ -111,7 +111,7 @@ a plain module):
   (or ran out) and made again never matches the new entry; keys are 1-128 printable ASCII characters, values at most 32 KiB of JSON, at most
   10 000 entries per module and guild;
 - counters: `counter_add(name, subject, delta)` returns the total, `counter_total`,
-  `counter_recent(name, subject, window)` (what was added in the last minutes, up to 90 days;
+  `counter_recent(name, subject, window)` (what was added in the last minutes, up to 7 days;
   a window is whole minutes, rounded up, the current minute included), `counter_reset`; at most
   100 000 counters per module and guild.
 

@@ -125,6 +125,8 @@ fn roles_to_db(roles: &[RoleId]) -> Result<Vec<i64>, HistoryError> {
 
 /// How many rows one purge statement removes at most.
 const PURGE_BATCH: u64 = 1_000;
+/// A save that finds its guild over the limit drops down to the limit less this fraction of it.
+const TRIM_SLACK: u64 = 16;
 
 /// Runs the purge `statement` (which takes the cutoff and a batch size) until a batch removes fewer rows
 /// than the batch size, and returns how many rows it removed in all. One statement that removes all of
@@ -323,8 +325,6 @@ impl HistoryBackend for Db {
         at: i64,
         max_bytes: u64,
     ) -> Result<(), HistoryError> {
-        let mut tx = self.pool.begin().await.map_err(backend)?;
-        lock_files(&mut tx, guild).await?;
         sqlx::query(
             "INSERT INTO message_files
                 (guild_id, message_id, attachment_id, channel_id, filename, size, content_type,
@@ -347,11 +347,24 @@ impl HistoryBackend for Db {
         .bind(data.is_some())
         .bind(data)
         .bind(at)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
         .map_err(backend)?;
-        trim_stored(&mut tx, guild, max_bytes).await?;
-        tx.commit().await.map_err(backend)
+        // The table keeps each guild's stored bytes, so only a guild over its limit adds its
+        // files up, and then it goes a little under the limit so the next saves need not.
+        let used: Option<i64> =
+            sqlx::query_scalar("SELECT bytes FROM message_file_usage WHERE guild_id = $1")
+                .bind(to_db(guild).map_err(backend)?)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(backend)?;
+        if u64::try_from(used.unwrap_or(0)).unwrap_or(0) > max_bytes {
+            let mut tx = self.pool.begin().await.map_err(backend)?;
+            lock_files(&mut tx, guild).await?;
+            trim_stored(&mut tx, guild, max_bytes - max_bytes / TRIM_SLACK).await?;
+            tx.commit().await.map_err(backend)?;
+        }
+        Ok(())
     }
 
     async fn files_of(

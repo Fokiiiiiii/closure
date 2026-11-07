@@ -28,6 +28,10 @@ fn subject_id(subject: u64) -> Result<i64, StorageError> {
         .map_err(|_| StorageError::InvalidCounter("the subject does not fit 63 bits".into()))
 }
 
+/// How many minute rows one purge statement deletes, and how long a purge keeps going.
+const PURGE_BATCH: i64 = 10_000;
+const PURGE_BUDGET: Duration = Duration::from_secs(5);
+
 /// Adds to a counter row (the total is bucket 0), making it if there is none.
 const ADD_TO_COUNTER: &str =
     "INSERT INTO module_counters (module, guild_id, name, subject, bucket, value)
@@ -48,6 +52,27 @@ async fn lock(
         .execute(&mut **tx)
         .await
         .map_err(backend)?;
+    Ok(())
+}
+
+/// One key's writes take turns. An update or a delete waits for nothing else, so a guild that writes
+/// many keys does not queue them all behind one lock; only a new key also takes [`lock`], for the
+/// quota. The key lock is always taken first.
+async fn lock_key(
+    tx: &mut Transaction<'_, Postgres>,
+    module: &ModuleId,
+    guild: i64,
+    key: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2::text || ':' || $3, 1))",
+    )
+    .bind(module.as_str())
+    .bind(guild)
+    .bind(key)
+    .execute(&mut **tx)
+    .await
+    .map_err(backend)?;
     Ok(())
 }
 
@@ -84,7 +109,7 @@ impl StorageBackend for Db {
     ) -> Result<i64, StorageError> {
         let guild = guild_id(guild)?;
         let mut tx = self.pool.begin().await.map_err(backend)?;
-        lock(&mut tx, module, guild).await?;
+        lock_key(&mut tx, module, guild, key).await?;
         // An expired entry is as good as none.
         sqlx::query(
             "DELETE FROM module_kv
@@ -112,8 +137,9 @@ impl StorageBackend for Db {
             _ => return Err(StorageError::Conflict),
         }
         if current.is_none() {
-            // Counted up to the quota and no further, so the cost of a new entry does not grow
-            // with what is kept.
+            // New keys take turns, so the count is exact; it goes up to the quota and no
+            // further, so the cost of a new entry does not grow with what is kept.
+            lock(&mut tx, module, guild).await?;
             let kept: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM (
                      SELECT 1 FROM module_kv
@@ -162,10 +188,11 @@ impl StorageBackend for Db {
         guild: GuildId,
         key: &str,
     ) -> Result<bool, StorageError> {
-        // Takes its turn with the writes, so one in the middle of its check cannot be undone by it.
+        // Takes its turn with the writes of the key. A new key being counted at the same time sees
+        // one entry more than there is, which only makes the quota stricter for that moment.
         let guild = guild_id(guild)?;
         let mut tx = self.pool.begin().await.map_err(backend)?;
-        lock(&mut tx, module, guild).await?;
+        lock_key(&mut tx, module, guild, key).await?;
         let live: Option<bool> = sqlx::query_scalar(
             "DELETE FROM module_kv WHERE module = $1 AND guild_id = $2 AND key = $3
              RETURNING (expires_at IS NULL OR expires_at > now())",
@@ -637,15 +664,34 @@ impl Db {
             .execute(&self.pool)
             .await?
             .rows_affected();
-        let minutes = sqlx::query(
-            "DELETE FROM module_counters
-             WHERE bucket > 0 AND bucket < (extract(epoch FROM now())::bigint / 60) - $1",
-        )
-        .bind(window_minutes(MAX_WINDOW))
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
+        let minutes = self.purge_counter_minutes().await?;
         Ok((entries, minutes))
+    }
+
+    /// Deletes the per-minute history past the widest window in batches, for a bounded time: a
+    /// backlog of any size is worked off over several runs instead of in one statement that the
+    /// timeout would cancel and the next run would start over.
+    async fn purge_counter_minutes(&self) -> Result<u64, DbError> {
+        let started = std::time::Instant::now();
+        let mut deleted = 0;
+        while started.elapsed() < PURGE_BUDGET {
+            let batch = sqlx::query(
+                "DELETE FROM module_counters WHERE ctid IN (
+                     SELECT ctid FROM module_counters
+                     WHERE bucket > 0 AND bucket < (extract(epoch FROM now())::bigint / 60) - $1
+                     LIMIT $2)",
+            )
+            .bind(window_minutes(MAX_WINDOW))
+            .bind(PURGE_BATCH)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            deleted += batch;
+            if batch < u64::try_from(PURGE_BATCH).unwrap_or(u64::MAX) {
+                break;
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -787,15 +833,19 @@ mod tests {
         );
     }
 
-    /// Whether `call` waits while a writer of the module holds its turn, and then finishes.
-    async fn waits_for_the_writers_turn<F, T>(db: &Db, call: F)
+    /// Whether `call` waits while a writer holds its turn (of the key when one is given, else of
+    /// the module), and then finishes.
+    async fn waits_for_the_writers_turn<F, T>(db: &Db, key: Option<&str>, call: F)
     where
         F: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
         let module = ModuleId::new("warn").unwrap();
         let mut tx = db.pool.begin().await.unwrap();
-        lock(&mut tx, &module, 1).await.unwrap();
+        match key {
+            Some(key) => lock_key(&mut tx, &module, 1, key).await.unwrap(),
+            None => lock(&mut tx, &module, 1).await.unwrap(),
+        }
         let task = tokio::spawn(call);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!task.is_finished(), "it did not wait for the writer");
@@ -814,13 +864,35 @@ mod tests {
         store.set("n", &1).await.unwrap();
         store.counter_add("c", 1_u64, 1).await.unwrap();
         let (deleter, resetter) = (store.clone(), store.clone());
-        waits_for_the_writers_turn(&db, async move { deleter.delete("n").await.unwrap() }).await;
-        waits_for_the_writers_turn(&db, async move {
+        waits_for_the_writers_turn(
+            &db,
+            Some("n"),
+            async move { deleter.delete("n").await.unwrap() },
+        )
+        .await;
+        waits_for_the_writers_turn(&db, None, async move {
             resetter.counter_reset("c", 1_u64).await.unwrap();
         })
         .await;
         assert_eq!(store.get::<i64>("n").await.unwrap(), None);
         assert_eq!(store.counter_total("c", 1_u64).await.unwrap(), 0);
+    }
+
+    #[sqlx::test]
+    async fn an_entry_is_updated_while_the_module_counts_a_new_key(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let store = store(&db, "warn", 1);
+        store.set("n", &1).await.unwrap();
+        let module = ModuleId::new("warn").unwrap();
+        let mut tx = db.pool.begin().await.unwrap();
+        lock(&mut tx, &module, 1).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), store.set("n", &2))
+            .await
+            .expect("an update does not wait for the module's turn")
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(store.get::<i64>("n").await.unwrap(), Some(2));
     }
 
     #[sqlx::test]
@@ -981,6 +1053,29 @@ mod tests {
         );
         store.counter_reset("warns", 7_u64).await.unwrap();
         assert_eq!(store.counter_total("warns", 7_u64).await.unwrap(), 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM module_counters")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_backlog_of_old_minutes_is_purged_in_batches(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let rows = i64::from(2 * 10_000 + 5);
+        sqlx::query(
+            "INSERT INTO module_counters (module, guild_id, name, subject, bucket, value)
+             SELECT 'warn', 1, 'old', 1, g, 1 FROM generate_series(1, $1) AS g",
+        )
+        .bind(rows)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(db.purge_module_storage().await.unwrap().1, 20_005);
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM module_counters")
                 .fetch_one(&db.pool)

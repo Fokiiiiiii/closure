@@ -161,7 +161,8 @@ pub trait HistoryBackend: Send + Sync {
     /// fetched. Keeping the same attachment again replaces its file,
     /// unless `data` is `None` and a file is already stored: then nothing changes.
     /// Then the oldest stored files of the guild go past `max_bytes`, as [`Self::trim_files`] drops
-    /// them, all in the same step: a save never leaves the guild over its limit.
+    /// them: a save returns with the guild within its limit (a backend may drop a little more, so
+    /// the saves after it need not trim at once).
     #[allow(clippy::too_many_arguments)]
     async fn save_file(
         &self,

@@ -154,6 +154,7 @@ mod tests {
                 "guild_config_history",
                 "guild_member_activity",
                 "guilds",
+                "message_file_usage",
                 "message_files",
                 "module_counters",
                 "module_kv",

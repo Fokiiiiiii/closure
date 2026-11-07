@@ -27,7 +27,7 @@ pub const MAX_ENTRIES: usize = 10_000;
 /// How many counters (a name and a subject) a module may keep in one guild.
 pub const MAX_COUNTERS: usize = 100_000;
 /// The widest window of [`Store::counter_recent`], and how long the minutes behind it are kept.
-pub const MAX_WINDOW: Duration = Duration::from_hours(90 * 24);
+pub const MAX_WINDOW: Duration = Duration::from_hours(7 * 24);
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StorageError {
@@ -575,7 +575,7 @@ impl Store {
             .await
     }
 
-    /// What was added in the last `window` (at most 90 days), counted in whole minutes rounded
+    /// What was added in the last `window` (at most 7 days), counted in whole minutes rounded
     /// up, the current one included: five minutes is this minute and the four before it.
     pub async fn counter_recent(
         &self,
