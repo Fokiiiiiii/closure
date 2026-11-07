@@ -96,7 +96,25 @@ pub async fn run_due(backend: &dyn SchedulerBackend, dispatcher: &Dispatcher) ->
 async fn run_one(backend: &dyn SchedulerBackend, dispatcher: &Dispatcher, job: ScheduledJob) {
     let (id, token, attempt) = (job.id, job.token, job.attempt);
     let (module, name) = (job.module.clone(), job.name.clone());
-    let outcome = dispatcher.run_job(job).await;
+    // While the job runs, its lease is kept up: one that waits long in a busy guild's queue, or
+    // runs long, is not handed out again, and a removal that cannot reach it is told so.
+    let outcome = {
+        let run = dispatcher.run_job(job);
+        tokio::pin!(run);
+        let mut beat = tokio::time::interval(LEASE / 3);
+        beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        beat.tick().await;
+        loop {
+            tokio::select! {
+                outcome = &mut run => break outcome,
+                _ = beat.tick() => match backend.renew(id, token, LEASE).await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::warn!(%module, job = %name, "a running job is no longer the one held"),
+                    Err(error) => tracing::warn!(%module, job = %name, %error, "could not keep the lease of a job"),
+                },
+            }
+        }
+    };
     metrics::counter!("closure_jobs_total", "module" => module.to_string(), "result" => match &outcome {
         JobOutcome::Done => "done",
         JobOutcome::Failed(_) => "failed",

@@ -506,6 +506,9 @@ async fn find_name(cx: CommandCx, name: String) -> Result<(), UserError> {
             .unwrap_or_default();
         if let Some(hit) = seen.iter().rev().find(|s| s.text.to_lowercase() == wanted) {
             lines.push(format!("<@{user}> — <t:{}:R>", hit.at));
+        } else {
+            // The index names a member who has not had that name for a while: it is cleaned.
+            let _ = cx.store().set_remove(&name_index(&wanted), user).await;
         }
     }
     if lines.is_empty() {
@@ -723,7 +726,20 @@ async fn remember(
             .map_err(|e| stored(&e))?;
     }
     let excess = seen.len().saturating_sub(MAX_NAMES);
-    seen.drain(..excess);
+    let dropped: Vec<Seen> = seen.drain(..excess).collect();
+    // A name that scrolled out of the list leaves the index too (unless the member still has it
+    // in another place of the list), so the index does not outgrow what it indexes.
+    for old in dropped {
+        if !seen
+            .iter()
+            .any(|s| s.text.to_lowercase() == old.text.to_lowercase())
+        {
+            ctx.store()
+                .set_remove(&name_index(&old.text), user.id.get())
+                .await
+                .map_err(|e| stored(&e))?;
+        }
+    }
     ctx.store()
         .set_for(&key, &seen, KEEP)
         .await

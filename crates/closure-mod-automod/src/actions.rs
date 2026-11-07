@@ -307,7 +307,12 @@ async fn punish(
             let expires_at = ctx.now() + i64::from(deps.config.warn_expire_days) * 86_400;
             each(targets, |target| {
                 let text = reason(target, template.as_deref());
-                async move { punished(punisher.warn(target, Some(text), Some(expires_at)).await) }
+                async move {
+                    // A warning waits for the turn of the member, as a moderator's does: two that
+                    // are written at once would otherwise both count past the same threshold.
+                    let _turn = closure_sdk::punish::member_turn(ctx, target).await;
+                    punished(punisher.warn(target, Some(text), Some(expires_at)).await)
+                }
             })
             .await
         }

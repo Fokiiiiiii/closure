@@ -1172,7 +1172,8 @@ impl<'a> Punisher<'a> {
         role: RoleId,
         after: Duration,
     ) -> Result<(), ScheduleError> {
-        let _ = self.ctx.scheduler().cancel(&voice_key(target)).await;
+        // The job is set under the same key: it replaces the old one in one step, so there is no
+        // moment between a cancel and a new job in which a stop leaves the member with no timer.
         self.schedule_voice_lift(target, case, Some(role), after)
             .await
     }
@@ -1184,8 +1185,8 @@ impl<'a> Punisher<'a> {
         role: RoleId,
         after: Duration,
     ) -> Result<(), ScheduleError> {
-        // A timer set earlier for the member would take the role off too early.
-        let _ = self.ctx.scheduler().cancel(&untimeout_key(target)).await;
+        // A timer set earlier for the member would take the role off too early: this one has its
+        // key, and replaces it in one step.
         let lift = RoleTimeout {
             user: target.get(),
             case,

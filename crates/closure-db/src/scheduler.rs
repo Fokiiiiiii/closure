@@ -352,6 +352,21 @@ impl SchedulerBackend for Db {
         Ok(())
     }
 
+    async fn renew(&self, id: i64, token: i64, lease: Duration) -> Result<bool, ScheduleError> {
+        let renewed = sqlx::query(
+            "UPDATE scheduled_jobs SET leased_until = now() + $3 * interval '1 second'
+             WHERE id = $1 AND claim_token = $2",
+        )
+        .bind(id)
+        .bind(token)
+        .bind(seconds(lease))
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?
+        .rows_affected();
+        Ok(renewed > 0)
+    }
+
     async fn discard(&self, id: i64, token: i64) -> Result<(), ScheduleError> {
         sqlx::query("DELETE FROM scheduled_jobs WHERE id = $1 AND claim_token = $2")
             .bind(id)
@@ -613,6 +628,29 @@ mod tests {
             db.withdraw_post(guild, "broken").await.unwrap(),
             Withdrawn::Removed
         );
+    }
+
+    #[sqlx::test]
+    async fn a_running_job_keeps_its_lease_and_only_the_runner_that_holds_it_may(pool: PgPool) {
+        let db = database(pool.clone()).await;
+        scheduler(&db, "post", 1)
+            .job("send", &1)
+            .unwrap()
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        let claimed = db.claim_due(5, Duration::from_secs(1)).await.unwrap();
+        let job = &claimed[0];
+        // The lease is made longer, and the job is not handed out while the first would have run out.
+        assert!(
+            db.renew(job.id, job.token, Duration::from_secs(600))
+                .await
+                .unwrap()
+        );
+        age(&db, 5).await;
+        assert!(db.claim_due(5, LEASE).await.unwrap().is_empty());
+        // A runner that does not hold the job (another token) cannot keep it.
+        assert!(!db.renew(job.id, job.token + 1, LEASE).await.unwrap());
     }
 
     #[sqlx::test]

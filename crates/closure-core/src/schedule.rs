@@ -134,6 +134,13 @@ pub trait SchedulerBackend: Send + Sync {
 
     /// Removes a job that can never run (its module is gone).
     async fn discard(&self, id: i64, token: i64) -> Result<(), ScheduleError>;
+
+    /// Holds the job for this runner for `lease` more, while it still runs: a job that takes
+    /// longer than its first lease is not handed out a second time, nor taken for one that
+    /// nobody runs. Whether the runner still holds it (`false`: it was replaced or removed).
+    async fn renew(&self, _id: i64, _token: i64, _lease: Duration) -> Result<bool, ScheduleError> {
+        Ok(true)
+    }
 }
 
 /// The wait before the next try of a job that has been tried `attempt` times.
