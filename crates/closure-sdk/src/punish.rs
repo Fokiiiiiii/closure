@@ -485,6 +485,18 @@ impl<'a> Punisher<'a> {
             return Ok(undone);
         }
         let guild = self.ctx.guild_id;
+        let role = match self.settings.timeout {
+            Method::Role => Some(self.timeout_role()?),
+            Method::Discord => None,
+        };
+        let kept = self
+            .remember_action(
+                "untimeout",
+                target,
+                reason.as_deref(),
+                Some((self.settings.timeout, role)),
+            )
+            .await?;
         match self.settings.timeout {
             Method::Discord => {
                 self.ctx
@@ -523,6 +535,12 @@ impl<'a> Punisher<'a> {
             ),
         )
         .await?;
+        if kept {
+            self.ctx
+                .store()
+                .delete(&action_intent_key("untimeout", target))
+                .await?;
+        }
         Ok(case)
     }
 
@@ -538,7 +556,7 @@ impl<'a> Punisher<'a> {
             .await;
         let _turn = member_turn(self.ctx, target).await;
         let kept = self
-            .remember_action("kick", target, reason.as_deref())
+            .remember_action("kick", target, reason.as_deref(), None)
             .await?;
         self.ctx
             .api
@@ -673,6 +691,7 @@ impl<'a> Punisher<'a> {
         kind: &str,
         target: UserId,
         reason: Option<&str>,
+        how: Option<(Method, Option<RoleId>)>,
     ) -> Result<bool, UserError> {
         let case_before = match self.ctx.cases().for_target(target, None, 1).await {
             Ok(cases) => cases.first().map_or(0, |case| case.number),
@@ -686,6 +705,8 @@ impl<'a> Punisher<'a> {
             reason: reason.map(str::to_owned),
             case_before,
             undoing: self.undoing,
+            method: how.map(|(method, _)| method),
+            role: how.and_then(|(_, role)| role).map(RoleId::get),
         };
         match self
             .ctx
@@ -770,7 +791,7 @@ impl<'a> Punisher<'a> {
             return Ok(undone);
         }
         let kept = self
-            .remember_action("unban", target, reason.as_deref())
+            .remember_action("unban", target, reason.as_deref(), None)
             .await?;
         self.ctx
             .api
@@ -911,6 +932,18 @@ impl<'a> Punisher<'a> {
             return Ok(undone);
         }
         let guild = self.ctx.guild_id;
+        let role = match self.settings.voice {
+            Method::Role => Some(self.voice_role()?),
+            Method::Discord => None,
+        };
+        let kept = self
+            .remember_action(
+                "vcunmute",
+                target,
+                reason.as_deref(),
+                Some((self.settings.voice, role)),
+            )
+            .await?;
         match self.settings.voice {
             Method::Discord => {
                 self.ctx
@@ -950,6 +983,12 @@ impl<'a> Punisher<'a> {
             ),
         )
         .await?;
+        if kept {
+            self.ctx
+                .store()
+                .delete(&action_intent_key("vcunmute", target))
+                .await?;
+        }
         Ok(case)
     }
 
@@ -1418,8 +1457,13 @@ struct ActionIntent {
     moderator: u64,
     reason: Option<String>,
     case_before: i64,
-    /// The case an undo button names, for an unban.
+    /// The case an undo button names, for a lift.
     undoing: Option<i64>,
+    /// How a timeout or a voice mute was given, and with which role, for their lifts.
+    #[serde(default)]
+    method: Option<Method>,
+    #[serde(default)]
+    role: Option<u64>,
 }
 
 fn action_intent_key(kind: &str, user: UserId) -> String {
@@ -1646,7 +1690,15 @@ async fn reconcile_intents(ctx: &EventContext) -> Result<(), ModuleError> {
         .await
         .map_err(|error| ModuleError::other(error.to_string()))?
         .unwrap_or(0);
-    let kinds = ["ban", "timeout", "vcmute", "kick", "unban"];
+    let kinds = [
+        "ban",
+        "timeout",
+        "vcmute",
+        "kick",
+        "unban",
+        "untimeout",
+        "vcunmute",
+    ];
     let mut remaining = RECONCILE_BATCH;
     for offset in 0..kinds.len() {
         if remaining == 0 {
@@ -1713,7 +1765,7 @@ async fn reconcile_batch(
             let _turn = member_turn(ctx, user).await;
             match kind {
                 "ban" => reconcile_ban(ctx, &key).await,
-                "kick" | "unban" => reconcile_action(ctx, &key).await,
+                "kick" | "unban" | "untimeout" | "vcunmute" => reconcile_action(ctx, &key).await,
                 _ => reconcile_restriction(ctx, &key).await,
             }
         }
@@ -1808,6 +1860,68 @@ async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
     Ok(())
 }
 
+/// Whether the action of an intent was done: the member is gone (kick), no longer banned (unban),
+/// or no longer restricted (a lift of a timeout or a voice mute).
+async fn action_done(
+    ctx: &EventContext,
+    intent: &ActionIntent,
+    target: UserId,
+) -> Result<bool, UserError> {
+    Ok(
+        if matches!(intent.kind.as_str(), "untimeout" | "vcunmute") {
+            match ctx
+                .api
+                .execute(Action::GetMember {
+                    guild_id: ctx.guild_id,
+                    user_id: target,
+                })
+                .await
+            {
+                Ok(Outcome::Member(member)) => {
+                    let role = intent.role.and_then(RoleId::new_checked);
+                    match (intent.method, role) {
+                        (Some(Method::Role), Some(role)) => !member.roles.contains(&role),
+                        _ if intent.kind == "untimeout" => member
+                            .communication_disabled_until
+                            .is_none_or(|until| until.as_secs() <= ctx.now()),
+                        _ => !member.mute,
+                    }
+                }
+                // A member who left has nothing left to lift.
+                Err(DiscordError::NotFound) => false,
+                Err(error) => return Err(error.into()),
+                Ok(_) => return Err(ModuleError::other("the member was not read").into()),
+            }
+        } else if intent.kind == "kick" {
+            match ctx
+                .api
+                .execute(Action::GetMember {
+                    guild_id: ctx.guild_id,
+                    user_id: target,
+                })
+                .await
+            {
+                Err(DiscordError::NotFound) => true,
+                Err(error) => return Err(error.into()),
+                Ok(_) => false,
+            }
+        } else {
+            let outcome = ctx
+                .api
+                .execute(Action::ListBans {
+                    guild_id: ctx.guild_id,
+                    after: UserId::new_checked(intent.target.saturating_sub(1)),
+                    limit: 1,
+                })
+                .await?;
+            let Outcome::Bans(bans) = outcome else {
+                return Err(ModuleError::other("unexpected ban list outcome").into());
+            };
+            !bans.iter().any(|ban| ban.user.id == target)
+        },
+    )
+}
+
 /// Finishes a kick or an unban that stopped between Discord and its case: when the member is gone
 /// (kick) or no longer banned (unban) the action was done, so its case is made if it is missing.
 async fn reconcile_action(ctx: &EventContext, key: &str) -> Result<(), UserError> {
@@ -1818,33 +1932,7 @@ async fn reconcile_action(ctx: &EventContext, key: &str) -> Result<(), UserError
         .ok_or_else(|| ModuleError::other("invalid intent target"))?;
     let moderator = UserId::new_checked(intent.moderator)
         .ok_or_else(|| ModuleError::other("invalid intent moderator"))?;
-    let done = if intent.kind == "kick" {
-        match ctx
-            .api
-            .execute(Action::GetMember {
-                guild_id: ctx.guild_id,
-                user_id: target,
-            })
-            .await
-        {
-            Err(DiscordError::NotFound) => true,
-            Err(error) => return Err(error.into()),
-            Ok(_) => false,
-        }
-    } else {
-        let outcome = ctx
-            .api
-            .execute(Action::ListBans {
-                guild_id: ctx.guild_id,
-                after: UserId::new_checked(intent.target.saturating_sub(1)),
-                limit: 1,
-            })
-            .await?;
-        let Outcome::Bans(bans) = outcome else {
-            return Err(ModuleError::other("unexpected ban list outcome").into());
-        };
-        !bans.iter().any(|ban| ban.user.id == target)
-    };
+    let done = action_done(ctx, &intent, target).await?;
     if !done {
         ctx.store().delete(key).await?;
         return Ok(());
@@ -1879,7 +1967,12 @@ async fn reconcile_action(ctx: &EventContext, key: &str) -> Result<(), UserError
         }
         before = cases.last().map(|case| case.number);
     };
-    if intent.kind == "unban" {
+    if let Some(lifted) = match intent.kind.as_str() {
+        "unban" => Some("ban"),
+        "untimeout" => Some("timeout"),
+        "vcunmute" => Some("vcmute"),
+        _ => None,
+    } {
         let mut punisher = Punisher::new(
             ctx,
             Moderator {
@@ -1893,11 +1986,15 @@ async fn reconcile_action(ctx: &EventContext, key: &str) -> Result<(), UserError
         }
         let reason = ctx.t_core(
             ctx.locale,
-            "reason-unbanned-by-case",
+            if lifted == "ban" {
+                "reason-unbanned-by-case"
+            } else {
+                "reason-removed-by-case"
+            },
             &Args::new().with("case", case.number),
         );
         punisher
-            .revoke_lifted(target, "ban", case.number, reason)
+            .revoke_lifted(target, lifted, case.number, reason)
             .await?;
     }
     ctx.store().delete(key).await?;
