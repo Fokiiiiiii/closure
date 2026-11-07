@@ -318,11 +318,30 @@ async fn reconcile(cx: closure_sdk::JobCx) -> Result<(), closure_sdk::ModuleErro
         .get("reconcile-cursor")
         .await
         .map_err(module_error)?;
-    let start = cursor.map_or(0, |cursor| {
-        items.partition_point(|item| (item.user.get(), item.id) <= cursor)
+    // The ones that are overdue come first: a delivery that was missed is not kept waiting by the
+    // reminders that are not due yet and have their jobs.
+    let late = cx.now().saturating_sub(90);
+    let (overdue, waiting): (Vec<&Reminder>, Vec<&Reminder>) =
+        items.iter().partition(|item| item.at <= late);
+    let skip = cursor.map_or(0, |cursor| {
+        waiting.partition_point(|item| (item.user.get(), item.id) <= cursor)
     });
-    let len = items.len();
-    for item in items.iter().cycle().skip(start).take(len.min(50)) {
+    let room = 50_usize.saturating_sub(overdue.len().min(50));
+    let rest = waiting.len();
+    let batch: Vec<&Reminder> = overdue
+        .iter()
+        .copied()
+        .take(50)
+        .chain(
+            waiting
+                .iter()
+                .copied()
+                .cycle()
+                .skip(skip)
+                .take(rest.min(room)),
+        )
+        .collect();
+    for item in batch {
         let future = item.at > cx.now();
         let result = if item.at <= cx.now().saturating_sub(90) {
             deliver_item(&cx, item.user, item.id).await

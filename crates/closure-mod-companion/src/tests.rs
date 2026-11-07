@@ -76,6 +76,39 @@ async fn other_voice_channels_and_staying_put_change_nothing() {
     assert!(harness.actions().is_empty());
 }
 
+#[tokio::test]
+async fn what_the_member_had_of_their_own_is_given_back_and_not_deleted() {
+    let harness = harness();
+    // The member has an overwrite of their own on the text channel: it allows 64 (add reactions).
+    let channel = serde_json::from_value(serde_json::json!({
+        "id": "31", "guild_id": "1", "type": 0, "name": "voice-text",
+        "permission_overwrites": [{ "id": "7", "type": 1, "allow": "64", "deny": "0" }]
+    }))
+    .unwrap();
+    harness.api().set_channels(GuildId::new(1), vec![channel]);
+    harness.emit(voice(7, None, Some(30))).await.unwrap();
+    harness.emit(voice(7, Some(30), None)).await.unwrap();
+    assert!(
+        hidden(&harness).is_empty(),
+        "their own overwrite is not deleted"
+    );
+    let set: Vec<u64> = harness
+        .actions()
+        .iter()
+        .filter_map(|a| match a {
+            Action::SetPermissionOverwrite { overwrite, .. } => Some(overwrite.allow.bits()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(set.len(), 2);
+    assert_eq!(set[1], 64, "given back as it was");
+    assert_ne!(
+        set[0] & 64,
+        0,
+        "and kept while they are in the voice channel"
+    );
+}
+
 #[test]
 fn both_catalogs_define_the_same_messages() {
     assert_eq!(
