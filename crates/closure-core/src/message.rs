@@ -23,6 +23,7 @@ const FOOTER_LIMIT: usize = 2048;
 const AUTHOR_LIMIT: usize = 256;
 const TOTAL_LIMIT: usize = 6000;
 const BUTTON_LABEL_LIMIT: usize = 80;
+const URL_LIMIT: usize = 2048;
 /// Discord takes five rows of five buttons.
 pub const MAX_BUTTONS: usize = 25;
 /// Where a role button leads: the `roles` module, its `toggle` route, for anyone, with the role.
@@ -32,7 +33,7 @@ const ROLE_BUTTON_ID: &str = "roles:toggle:*:";
 #[must_use]
 pub fn schema() -> serde_json::Value {
     use serde_json::json;
-    let link = json!({"type": ["string", "null"], "pattern": "^https?://", "maxLength": 2048});
+    let link = json!({"type": ["string", "null"], "pattern": "^https?://", "maxLength": URL_LIMIT});
     let text = |limit: usize| json!({"type": ["string", "null"], "maxLength": limit});
     json!({
         "type": "object",
@@ -211,10 +212,18 @@ fn text(
 }
 
 fn web(part: &'static str, value: Option<String>) -> Result<Option<String>, MessageError> {
-    match value.filter(|v| !v.trim().is_empty()) {
-        Some(url) if url.starts_with("https://") || url.starts_with("http://") => Ok(Some(url)),
-        Some(_) => Err(MessageError::InvalidUrl(part)),
-        None => Ok(None),
+    let Some(address) = value.filter(|v| !v.trim().is_empty()) else {
+        return Ok(None);
+    };
+    // The same address the schema takes: http or https, with a host, and at most 2048 characters.
+    let valid = address.chars().count() <= URL_LIMIT
+        && (address.starts_with("https://") || address.starts_with("http://"))
+        && url::Url::parse(&address)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host());
+    if valid {
+        Ok(Some(address))
+    } else {
+        Err(MessageError::InvalidUrl(part))
     }
 }
 
@@ -540,5 +549,64 @@ mod tests {
     fn an_unknown_key_is_refused_on_reading() {
         assert!(serde_json::from_value::<MessageSpec>(json!({"embed": {}})).is_err());
         assert!(serde_json::from_value::<MessageSpec>(json!({"embeds": [{"colour": 1}]})).is_err());
+    }
+
+    /// What the writer is allowed to save is what the bot is allowed to send: a message that
+    /// `into_post` accepts passes the checks of the action that posts it, at the edges too.
+    #[test]
+    fn a_message_that_is_accepted_is_one_that_can_be_posted() {
+        let embed = json!({
+            "title": "t".repeat(256), "description": "d".repeat(1000),
+            "url": "https://example.com/a?b=c", "color": "#ffffff",
+            "author": {"name": "a", "url": "http://example.com", "icon_url": "https://example.com/i.png"},
+            "footer": {"text": "f"}, "timestamp": true,
+            "fields": [{"name": "n", "value": "v", "inline": true}]
+        });
+        let buttons: Vec<_> = (1..=MAX_BUTTONS)
+            .map(|n| json!({"label": "r", "role": n.to_string()}))
+            .collect();
+        let messages = [
+            json!({"content": "c".repeat(CONTENT_LIMIT)}),
+            json!({"embeds": [embed.clone(), embed.clone(), embed]}),
+            json!({"content": "pick", "buttons": buttons}),
+            json!({"embeds": (0..MAX_EMBEDS).map(|n| json!({"title": format!("e{n}")})).collect::<Vec<_>>()}),
+        ];
+        for message in messages {
+            let (content, embeds, components) =
+                spec(message).into_post(1_700_000_000, &same).unwrap();
+            let action = crate::action::Action::PostMessage {
+                channel_id: twilight_model::id::Id::new(1),
+                message_id: None,
+                reply_to: None,
+                content,
+                embeds,
+                components,
+                files: Vec::new(),
+            };
+            assert_eq!(action.validate(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn an_address_is_http_or_https_with_a_host() {
+        for good in ["https://example.com", "http://example.com/a?b=c#d"] {
+            let result =
+                spec(json!({"embeds": [{"title": "t", "url": good}]})).into_parts(0, &same);
+            assert!(result.is_ok(), "{good}");
+        }
+        for bad in [
+            "https://",
+            "http:// bad",
+            "ftp://example.com",
+            "https:example",
+            "javascript:alert(1)",
+        ] {
+            let result = spec(json!({"embeds": [{"title": "t", "url": bad}]})).into_parts(0, &same);
+            assert_eq!(
+                result.unwrap_err(),
+                MessageError::InvalidUrl("the title link"),
+                "{bad}"
+            );
+        }
     }
 }

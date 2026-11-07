@@ -1920,7 +1920,8 @@ impl Action {
                 file,
                 ..
             } => {
-                check_new_message(content.as_deref(), embeds)?;
+                // The file is the message: it needs no text beside it.
+                check_message_body(content.as_deref(), embeds)?;
                 ensure(
                     !file.filename.is_empty()
                         && file.filename.chars().count() <= MAX_FILENAME_CHARS,
@@ -1944,7 +1945,12 @@ impl Action {
                 files,
                 ..
             } => {
-                check_new_message(content.as_deref(), embeds)?;
+                // A message of files alone is one Discord takes.
+                if files.is_empty() {
+                    check_new_message(content.as_deref(), embeds)?;
+                } else {
+                    check_message_body(content.as_deref(), embeds)?;
+                }
                 check_components(components)?;
                 ensure(files.len() <= MAX_FILES, || {
                     format!("a message has at most {MAX_FILES} files")
@@ -2253,6 +2259,20 @@ mod tests {
         };
         assert!(post(vec![]).validate().is_ok());
         assert!(post(vec![file(10)]).validate().is_ok());
+        let bare = |files: Vec<FileUpload>| Action::PostMessage {
+            channel_id: id::<1, _>(),
+            message_id: None,
+            reply_to: None,
+            content: None,
+            embeds: vec![],
+            components: vec![],
+            files,
+        };
+        assert!(
+            bare(vec![file(10)]).validate().is_ok(),
+            "files alone are a message"
+        );
+        assert!(bare(vec![]).validate().is_err(), "nothing at all is not");
         assert!(
             post(vec![file(MAX_UPLOAD_BYTES), file(1)])
                 .validate()

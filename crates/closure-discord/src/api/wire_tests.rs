@@ -1162,8 +1162,13 @@ async fn an_evicted_private_deferral_cannot_become_a_public_reply() {
 }
 
 #[tokio::test]
-async fn an_ephemeral_text_command_reply_goes_to_the_channel_without_components() {
-    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON)]).await;
+async fn an_ephemeral_text_command_reply_goes_to_the_invokers_direct_messages_without_components() {
+    let discord = FakeDiscord::start(vec![
+        (200, MESSAGE_JSON),
+        (200, DM_CHANNEL_JSON),
+        (200, MESSAGE_JSON),
+    ])
+    .await;
     let mut response = ephemeral_reply("only you");
     if let InteractionResponse::Message { reply } = &mut response {
         reply
@@ -1186,16 +1191,68 @@ async fn an_ephemeral_text_command_reply_goes_to_the_channel_without_components(
         .unwrap();
 
     let requests = discord.requests();
-    assert_eq!(method_paths(&discord), ["POST /channels/1/messages"]);
-    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
-    assert_eq!(body["message_reference"]["message_id"], "44");
+    assert_eq!(
+        method_paths(&discord),
+        [
+            "GET /channels/1/messages/44",
+            "POST /users/@me/channels",
+            "POST /channels/300/messages"
+        ]
+    );
+    let body: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+    assert_eq!(body["content"], "only you");
+    assert!(body.get("message_reference").is_none());
     assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
     assert!(body.get("components").is_none());
 }
 
 #[tokio::test]
-async fn deferred_ephemeral_text_edit_and_followup_stay_in_the_channel() {
-    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (200, MESSAGE_JSON)]).await;
+async fn a_private_text_command_reply_is_never_posted_in_the_channel_when_messages_are_closed() {
+    let discord = FakeDiscord::start(vec![
+        (200, MESSAGE_JSON),
+        (
+            403,
+            r#"{"code":50007,"message":"Cannot send messages to this user"}"#,
+        ),
+        (204, ""),
+    ])
+    .await;
+    let result = discord
+        .api()
+        .execute(Action::Respond {
+            interaction_id: Id::new(44),
+            token: text_token(),
+            response: ephemeral_reply("only you"),
+        })
+        .await;
+
+    assert!(result.is_err(), "{result:?}");
+    let paths = method_paths(&discord);
+    assert_eq!(
+        paths[..2],
+        ["GET /channels/1/messages/44", "POST /users/@me/channels"]
+    );
+    assert!(
+        paths[2].starts_with("PUT /channels/1/messages/44/reactions/"),
+        "{paths:?}"
+    );
+    assert!(
+        paths.iter().all(|path| path != "POST /channels/1/messages"),
+        "{paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn deferred_ephemeral_text_edit_and_followup_go_to_direct_messages() {
+    let discord = FakeDiscord::start(vec![
+        (200, MESSAGE_JSON),
+        (200, DM_CHANNEL_JSON),
+        (200, MESSAGE_JSON),
+        (200, MESSAGE_JSON),
+        (200, DM_CHANNEL_JSON),
+        (200, MESSAGE_JSON),
+    ])
+    .await;
     let api = discord.api();
     api.execute(Action::Respond {
         interaction_id: Id::new(44),
@@ -1220,13 +1277,18 @@ async fn deferred_ephemeral_text_edit_and_followup_stay_in_the_channel() {
     })
     .await
     .unwrap();
-    assert_eq!(
-        method_paths(&discord),
-        ["POST /channels/1/messages", "POST /channels/1/messages"]
+    assert!(
+        method_paths(&discord)
+            .iter()
+            .all(|path| path != "POST /channels/1/messages"),
+        "nothing private is posted in the channel"
     );
-    for request in discord.requests() {
+    for request in discord
+        .requests()
+        .iter()
+        .filter(|request| request.path.ends_with("/channels/300/messages"))
+    {
         let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
-        assert_eq!(body["message_reference"]["message_id"], "44");
         assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
         assert!(body.get("components").is_none());
     }

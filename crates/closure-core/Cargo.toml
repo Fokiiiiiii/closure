@@ -17,6 +17,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 twilight-model.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

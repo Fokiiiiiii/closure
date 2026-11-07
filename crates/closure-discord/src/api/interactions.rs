@@ -6,6 +6,7 @@ use closure_core::action::{InteractionReply, InteractionResponse, Outcome};
 use closure_core::error::DiscordError;
 use closure_core::event::{ChannelId, InteractionId, InteractionToken};
 use closure_core::module::{ChoiceValue, OptionChoice};
+use twilight_http::request::channel::reaction::RequestReactionType;
 use twilight_model::application::command::{CommandOptionChoice, CommandOptionChoiceValue};
 use twilight_model::channel::Message;
 use twilight_model::channel::message::{AllowedMentions, MessageFlags};
@@ -298,14 +299,52 @@ impl TwilightApi {
         invoker: Id<MessageMarker>,
         reply: &InteractionReply,
     ) -> Result<Message, DiscordError> {
+        if reply.ephemeral {
+            return self.send_private_text_reply(channel, invoker, reply).await;
+        }
+        self.post_text_reply(channel, Some(invoker), reply).await
+    }
+
+    /// A private reply goes to the direct messages of whoever wrote the command: the channel is
+    /// read by everyone in it, and a message that is deleted later has been readable until then.
+    /// When their messages are closed, the command is marked with a reaction and nothing else is
+    /// said.
+    async fn send_private_text_reply(
+        &self,
+        channel: ChannelId,
+        invoker: Id<MessageMarker>,
+        reply: &InteractionReply,
+    ) -> Result<Message, DiscordError> {
+        let author = read(self.http.message(channel, invoker)).await?.author.id;
+        let sent = async {
+            let dm = read(self.http.create_private_channel(author)).await?;
+            self.post_text_reply(dm.id, None, reply).await
+        }
+        .await;
+        if sent.is_err() {
+            let refused = RequestReactionType::Unicode { name: "❌" };
+            let _ = self.http.create_reaction(channel, invoker, &refused).await;
+        }
+        sent
+    }
+
+    /// Sends `reply` to `channel`, as a reply to `invoker` when there is one. No one is pinged: a
+    /// reply does not notify the author it answers, and neither do mentions in it.
+    async fn post_text_reply(
+        &self,
+        channel: ChannelId,
+        invoker: Option<Id<MessageMarker>>,
+        reply: &InteractionReply,
+    ) -> Result<Message, DiscordError> {
         let allowed = AllowedMentions::default();
         let mut request = self
             .http
             .create_message(channel)
-            .allowed_mentions(Some(&allowed))
+            .allowed_mentions(Some(&allowed));
+        if let Some(invoker) = invoker {
             // The invoking message may be gone by now; the reply is then sent as a plain message.
-            .reply(invoker)
-            .fail_if_not_exists(false);
+            request = request.reply(invoker).fail_if_not_exists(false);
+        }
         if let Some(content) = &reply.content {
             request = request.content(content);
         }
