@@ -729,6 +729,16 @@ impl Harness {
         )
     }
 
+    /// The state the modules of the bot share in the guild of the invocations (the restriction
+    /// roles are registered in it).
+    #[must_use]
+    pub fn restrictions(&self) -> Store {
+        Store::restrictions(
+            Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
+            Id::new(GUILD),
+        )
+    }
+
     /// The module's moderation cases in the guild of the invocations.
     #[must_use]
     pub fn cases(&self) -> Cases {

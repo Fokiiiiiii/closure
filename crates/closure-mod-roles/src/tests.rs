@@ -105,6 +105,7 @@ async fn a_role_that_is_not_listed_is_refused() {
 #[tokio::test]
 async fn a_moderator_hands_out_only_roles_below_their_own() {
     let harness = harness();
+    harness.api().set_member(Id::new(1), member(9));
     let give = |role: u64| {
         Invocation::new("role")
             .subcommand("give")
@@ -251,4 +252,40 @@ async fn a_listed_role_can_be_pinged_for_a_minute_and_then_is_closed_again() {
     assert!(editing(false));
     let refused = harness.invoke(ping(HIGH_ROLE)).await.unwrap();
     assert!(refused[0].content.contains("can be pinged this way"));
+}
+
+#[tokio::test]
+async fn the_role_of_a_punishment_is_not_handed_out_or_taken_by_hand_or_picked() {
+    let harness = harness();
+    harness.api().set_member(Id::new(1), member(9));
+    harness.set_config(serde_json::json!({
+        "self_roles": [SELF_ROLE.to_string()],
+        "reaction_roles": []
+    }));
+    harness
+        .restrictions()
+        .set(&format!("restriction-role:{SELF_ROLE}"), &SELF_ROLE)
+        .await
+        .unwrap();
+    let hand = |sub: &str| {
+        Invocation::new("role")
+            .subcommand(sub)
+            .option("user", user_option(9))
+            .option("role", role_option(SELF_ROLE))
+            .roles([MODERATOR])
+            .user(50)
+    };
+    let given = harness.invoke(hand("give")).await.unwrap();
+    assert!(
+        given[0].content.contains("belongs to a punishment"),
+        "{given:?}"
+    );
+    harness.invoke(hand("take")).await.unwrap();
+    let own = Invocation::new("role")
+        .subcommand("join")
+        .option("role", role_option(SELF_ROLE))
+        .user(51);
+    harness.invoke(own).await.unwrap();
+    assert!(!gave(&harness, 9, SELF_ROLE) && !took(&harness, 9, SELF_ROLE));
+    assert!(!gave(&harness, 51, SELF_ROLE));
 }

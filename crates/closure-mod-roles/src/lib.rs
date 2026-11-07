@@ -86,11 +86,22 @@ fn mention(role: RoleId) -> String {
     format!("<@&{role}>")
 }
 
+/// Whether `role` is the role of a punishment. A role that cannot be looked up counts as one:
+/// nothing is handed out on a guess.
+async fn restricted(ctx: &EventContext, role: RoleId) -> bool {
+    closure_sdk::punish::is_restriction_role(ctx, role)
+        .await
+        .unwrap_or(true)
+}
+
 /// Gives or takes a role the server listed for its members.
 async fn self_service(cx: &CommandCx, role: RoleId, give: bool) -> Result<(), UserError> {
     let config: Config = cx.config()?;
     if !config.allows(role) {
         return Err(UserError::message("roles-not-listed"));
+    }
+    if restricted(cx.ctx(), role).await {
+        return Err(UserError::message("roles-restricted"));
     }
     let reason = Reason::new(cx.t("roles-reason-self", &Args::new())).map_err(|e| problem(&e))?;
     let (guild, user) = (cx.guild_id(), cx.user().id);
@@ -161,6 +172,14 @@ async fn may_hand_out(cx: &CommandCx, role: RoleId) -> Result<(), UserError> {
 
 async fn hand_out(cx: &CommandCx, args: MemberRole, give: bool) -> Result<(), UserError> {
     may_hand_out(cx, args.role).await?;
+    // A punishment's role is its own to give and take off, not a moderator's.
+    if restricted(cx.ctx(), args.role).await {
+        return Err(UserError::message("roles-restricted"));
+    }
+    // The member is held to the same hierarchy as for a punishment, except for oneself.
+    if args.user != cx.user().id {
+        cx.check_target(args.user).await?;
+    }
     let reason = Reason::new(cx.t(
         "roles-reason-moderator",
         &Args::new().with("moderator", cx.user().name.clone()),
@@ -208,6 +227,9 @@ async fn toggle(cx: ComponentCx) -> Result<(), UserError> {
     let config: Config = cx.config()?;
     if !config.allows(role) {
         return Err(UserError::message("roles-not-listed"));
+    }
+    if restricted(cx.ctx(), role).await {
+        return Err(UserError::message("roles-restricted"));
     }
     let has = cx.click().roles.contains(&role);
     let reason = Reason::new(cx.t("roles-reason-self", &Args::new())).map_err(|e| problem(&e))?;
@@ -349,7 +371,7 @@ async fn reaction(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     else {
         return Ok(Flow::Continue);
     };
-    if !config.allows(role) {
+    if !config.allows(role) || restricted(&ctx, role).await {
         return Ok(Flow::Continue);
     }
     // The same permission as the command and the button: a member it is denied to gets nothing

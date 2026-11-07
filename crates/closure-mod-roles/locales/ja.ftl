@@ -50,3 +50,4 @@ roles-reason-ping = メンバーがロールのメンションを求めた
 roles-reason-ping-end = ロールをメンションできる1分間が終わった
 roles-pingable = { $role } を、これから1分間メンションできます。
 roles-not-pingable = そのロールは、この方法でメンションできるロールではありません。
+roles-restricted = そのロールは処罰が付け外しするものです。手動で付与したり外したりはできません。

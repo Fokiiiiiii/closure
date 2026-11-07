@@ -1108,6 +1108,20 @@ async fn bot_top_position(ctx: &EventContext, roles: &[Role]) -> Result<i64, Dis
     }
 }
 
+/// Whether `role` is a restriction role of any module: the role of a timeout, a voice mute or a
+/// quarantine. Such a role is given and taken off by its punishment, never by hand. The shared
+/// registry that every module writes is read, which any module may do.
+///
+/// # Errors
+/// The shared state of the restrictions cannot be read.
+pub async fn is_restriction_role(ctx: &EventContext, role: RoleId) -> Result<bool, StorageError> {
+    Ok(ctx
+        .restrictions()
+        .get::<u64>(&format!("restriction-role:{}", role.get()))
+        .await?
+        .is_some())
+}
+
 /// Restriction roles are never taken off a member and never given back.
 async fn restriction_ids(
     ctx: &EventContext,

@@ -30,7 +30,8 @@ use crate::{
     UserInfo,
 };
 pub use roles::{
-    MemberTurn, RestrictionRole, RoleError, channel_created, ensure_role, member_turn,
+    MemberTurn, RestrictionRole, RoleError, channel_created, ensure_role, is_restriction_role,
+    member_turn,
 };
 use roles::{remove_legacy, restore_when_free, strip};
 
