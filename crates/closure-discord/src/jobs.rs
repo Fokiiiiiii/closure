@@ -28,10 +28,13 @@ pub async fn run_jobs(
     stop: CancellationToken,
 ) {
     loop {
-        let taken = tokio::select! {
-            () = stop.cancelled() => return,
-            taken = run_due(backend.as_ref(), &dispatcher) => taken,
-        };
+        if stop.is_cancelled() {
+            return;
+        }
+        // Not raced against `stop`: a batch that is cut off after its side effects but before they
+        // are reported would run again after the restart. The caller aborts a runner that takes
+        // too long to stop.
+        let taken = run_due(backend.as_ref(), &dispatcher).await;
         if taken >= BATCH {
             continue;
         }
