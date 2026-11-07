@@ -68,6 +68,40 @@ struct Saved {
     target: OverwriteTarget,
     original: Option<OverwriteSpec>,
     until: i64,
+    /// Whether the change was made on Discord. A change that was saved and not made (it failed) is
+    /// made at the next try, not only given more time.
+    #[serde(default = "yes")]
+    applied: bool,
+    /// The permission bits this module changed, so that putting back touches those only. Entries
+    /// from before this was kept stand for every bit the module can change.
+    #[serde(default = "all_bits")]
+    bits: u64,
+}
+
+const fn yes() -> bool {
+    true
+}
+
+fn all_bits() -> u64 {
+    [
+        Permission::SendMessages,
+        Permission::SendMessagesInThreads,
+        Permission::AddReactions,
+        Permission::AttachFiles,
+        Permission::EmbedLinks,
+        Permission::CreatePublicThreads,
+        Permission::CreatePrivateThreads,
+        Permission::Speak,
+        Permission::Connect,
+        Permission::UseExternalEmojis,
+        Permission::MentionEveryone,
+        Permission::SendTtsMessages,
+    ]
+    .iter()
+    .fold(Permissions::empty(), |all, permission| {
+        all | permission.bit()
+    })
+    .bits()
 }
 
 fn lock(guild: GuildId) -> Arc<tokio::sync::Mutex<()>> {
@@ -147,6 +181,10 @@ async fn target(ctx: &EventContext, id: Option<&str>) -> Result<OverwriteTarget,
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flow: find the overwrite, save the change, make it, mark it made"
+)]
 pub async fn change(
     ctx: &EventContext,
     channel: ChannelId,
@@ -162,47 +200,75 @@ pub async fn change(
     let key = key(channel, target);
     let store = ctx.store();
     let until = ctx.now() + i64::try_from(duration.as_secs()).map_err(failure)?;
-    if let Some(mut saved) = store.get::<Saved>(&key).await.map_err(failure)? {
+    let existing = store.get::<Saved>(&key).await.map_err(failure)?;
+    if let Some(saved) = existing.as_ref().filter(|saved| saved.applied) {
+        // Made already: only more time is given.
         let until = until.max(saved.until);
         schedule(ctx, &key, until).await?;
-        saved.until = until;
-        store.set(&key, &saved).await.map_err(failure)?;
+        let extended = Saved {
+            until,
+            channel: saved.channel,
+            target: saved.target,
+            original: saved.original.clone(),
+            applied: true,
+            bits: saved.bits,
+        };
+        store.set(&key, &extended).await.map_err(failure)?;
         return Ok(());
     }
-    let Outcome::Channel(channel_info) = ctx
-        .api
-        .execute(Action::GetChannel {
-            channel_id: channel,
-        })
-        .await?
-    else {
-        return Err(failure("unexpected outcome for get_channel"));
+    // A change that is new, or one that was saved and not made: the overwrite it started from is
+    // the one that was saved, if there is one.
+    let original = if let Some(saved) = &existing {
+        saved.original.clone()
+    } else {
+        let Outcome::Channel(channel_info) = ctx
+            .api
+            .execute(Action::GetChannel {
+                channel_id: channel,
+            })
+            .await?
+        else {
+            return Err(failure("unexpected outcome for get_channel"));
+        };
+        channel_info
+            .permission_overwrites
+            .as_deref()
+            .ok_or_else(|| failure("channel overwrites are unavailable"))?
+            .iter()
+            .find(|overwrite| match target {
+                OverwriteTarget::Role(id) => {
+                    overwrite.kind == PermissionOverwriteType::Role
+                        && overwrite.id.get() == id.get()
+                }
+                OverwriteTarget::Member(id) => {
+                    overwrite.kind == PermissionOverwriteType::Member
+                        && overwrite.id.get() == id.get()
+                }
+            })
+            .map(|overwrite| OverwriteSpec {
+                target,
+                allow: overwrite.allow,
+                deny: overwrite.deny,
+            })
     };
-    let original = channel_info
-        .permission_overwrites
-        .as_deref()
-        .ok_or_else(|| failure("channel overwrites are unavailable"))?
+    let touched = clear
         .iter()
-        .find(|overwrite| match target {
-            OverwriteTarget::Role(id) => {
-                overwrite.kind == PermissionOverwriteType::Role && overwrite.id.get() == id.get()
-            }
-            OverwriteTarget::Member(id) => {
-                overwrite.kind == PermissionOverwriteType::Member && overwrite.id.get() == id.get()
-            }
-        })
-        .map(|overwrite| OverwriteSpec {
-            target,
-            allow: overwrite.allow,
-            deny: overwrite.deny,
+        .chain(deny)
+        .chain(allow)
+        .fold(Permissions::empty(), |bits, permission| {
+            bits | permission.bit()
         });
-    let saved = Saved {
+    let mut saved = Saved {
         channel,
         target,
         original: original.clone(),
-        until,
+        until: existing
+            .as_ref()
+            .map_or(until, |saved| until.max(saved.until)),
+        applied: false,
+        bits: touched.bits() | existing.as_ref().map_or(0, |saved| saved.bits),
     };
-    schedule(ctx, &key, until).await?;
+    schedule(ctx, &key, saved.until).await?;
     store.set(&key, &saved).await.map_err(failure)?;
     let mut overwrite = original.unwrap_or(OverwriteSpec {
         target,
@@ -226,6 +292,8 @@ pub async fn change(
             reason: Reason::truncated(reason),
         })
         .await?;
+    saved.applied = true;
+    store.set(&key, &saved).await.map_err(failure)?;
     Ok(())
 }
 
@@ -261,17 +329,64 @@ pub async fn restore(cx: JobCx) -> Result<(), ModuleError> {
         target(ctx, Some(&role.get().to_string())).await?;
     }
     let reason = Reason::truncated(&ctx.t("permission-restore-reason"));
-    let action = match saved.original {
-        Some(overwrite) => Action::SetPermissionOverwrite {
+    // Only the bits this module changed are put back: what somebody set by hand since is left.
+    let mask = Permissions::from_bits_truncate(saved.bits);
+    let current = match ctx
+        .api
+        .execute(Action::GetChannel {
             channel_id: saved.channel,
-            overwrite,
-            reason,
-        },
-        None => Action::DeletePermissionOverwrite {
+        })
+        .await
+    {
+        Ok(Outcome::Channel(info)) => info.permission_overwrites.as_deref().and_then(|list| {
+            list.iter()
+                .find(|item| match saved.target {
+                    OverwriteTarget::Role(id) => {
+                        item.kind == PermissionOverwriteType::Role && item.id.get() == id.get()
+                    }
+                    OverwriteTarget::Member(id) => {
+                        item.kind == PermissionOverwriteType::Member && item.id.get() == id.get()
+                    }
+                })
+                .map(|item| (item.allow, item.deny))
+        }),
+        Ok(_) => None,
+        Err(DiscordError::NotFound) => {
+            store.delete(&key).await.map_err(failure)?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let (original_allow, original_deny) = saved
+        .original
+        .as_ref()
+        .map_or((Permissions::empty(), Permissions::empty()), |original| {
+            (original.allow, original.deny)
+        });
+    let (allow, deny) = match current {
+        Some((allow, deny)) => (
+            (allow - mask) | (original_allow & mask),
+            (deny - mask) | (original_deny & mask),
+        ),
+        // Nothing there now: the overwrite goes back as it was.
+        None => (original_allow, original_deny),
+    };
+    let action = if allow.is_empty() && deny.is_empty() {
+        Action::DeletePermissionOverwrite {
             channel_id: saved.channel,
             target: saved.target,
             reason,
-        },
+        }
+    } else {
+        Action::SetPermissionOverwrite {
+            channel_id: saved.channel,
+            overwrite: OverwriteSpec {
+                target: saved.target,
+                allow,
+                deny,
+            },
+            reason,
+        }
     };
     match ctx.api.execute(action).await {
         Ok(_) | Err(DiscordError::NotFound) => {
