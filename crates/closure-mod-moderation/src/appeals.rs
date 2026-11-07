@@ -26,7 +26,8 @@ const SHOWN: usize = 900;
 #[derive(CommandArgs)]
 pub(crate) struct Appeal {
     /// Why the punishment should be lifted
-    #[arg(max_length = 1000)]
+    // The note keeps the text whole, and a case reason holds 512 characters with the words around it.
+    #[arg(max_length = 400)]
     text: String,
     /// The member, for a moderator who files an appeal that came another way
     user: Option<UserId>,
@@ -52,6 +53,10 @@ async fn newest_standing(
     Ok(newest)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flow: check, mark, write the note, ask for approval"
+)]
 pub(crate) async fn file(cx: CommandCx, args: Appeal) -> Result<(), UserError> {
     let config: Config = cx.config()?;
     let Some(channel) = config.approval_target() else {
@@ -88,17 +93,30 @@ pub(crate) async fn file(cx: CommandCx, args: Appeal) -> Result<(), UserError> {
             kind: CaseKind::new("note").map_err(|_| UserError::message("appeal-nothing"))?,
             target,
             moderator: cx.user().id,
-            reason: Some(
-                cx.t(
+            reason: Some(truncate(
+                &cx.t(
                     "appeal-note",
                     &Args::new()
                         .with("number", case.number)
                         .with("text", text.clone()),
                 ),
-            ),
+                closure_core::cases::MAX_REASON_CHARS,
+            )),
             expires_at: None,
         })
-        .await?;
+        .await;
+    let note = match note {
+        Ok(note) => note,
+        Err(error) => {
+            // The appeal was not written down: the punishment may be appealed again.
+            let _ = cx
+                .ctx()
+                .store()
+                .set_remove(APPEALED, u64::try_from(case.number).unwrap_or(0))
+                .await;
+            return Err(error.into());
+        }
+    };
     let _ = cx.modlog(&note).await;
     let deny = CustomId::new(ROUTE)
         .data(format!("deny:{}:{}", target.get(), case.number))

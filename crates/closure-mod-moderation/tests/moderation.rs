@@ -5296,6 +5296,43 @@ async fn a_bulk_ban_shows_what_it_would_do_and_does_nothing_until_run_is_pressed
 }
 
 #[tokio::test]
+async fn a_bulk_timeout_follows_the_timeout_method_of_the_server() {
+    let harness = harness();
+    harness.set_config(json!({ "timeout_method": "role", "timeout_role": "30" }));
+    harness.api().add_channel(Id::new(5), Some(Id::new(GUILD)));
+    for member in [2300_u64, 2301] {
+        harness
+            .api()
+            .set_not_a_member(Id::new(GUILD), Id::new(member));
+    }
+    harness
+        .invoke(
+            bulk("start")
+                .option("action", opt_text("timeout"))
+                .option("users", opt_text("2300 2301"))
+                .option("reason", opt_text("raid"))
+                .option("duration", opt_text("1h"))
+                .user(MODERATOR)
+                .owner(),
+        )
+        .await
+        .unwrap();
+    let press = Click::new("moderation:bulk:*:run:1")
+        .user(MODERATOR)
+        .roles([ADMIN_ROLE]);
+    harness.click(press).await.unwrap();
+    harness.run_due_jobs().await;
+    assert!(
+        !harness
+            .api()
+            .actions()
+            .iter()
+            .any(|action| matches!(action, Action::Timeout { .. })),
+        "Discord's own timeout is not used when the server chose the role"
+    );
+}
+
+#[tokio::test]
 async fn a_cancel_while_a_batch_runs_is_not_taken_back_by_the_batch() {
     let harness = harness();
     harness.api().add_channel(Id::new(5), Some(Id::new(GUILD)));

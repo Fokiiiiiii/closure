@@ -390,6 +390,9 @@ impl HookQueue {
         };
         let events = spill.take();
         if events.is_empty() {
+            // What was taken held nothing that can be read (or nothing): it is not kept, or the
+            // worker would come back to it for ever.
+            spill.finish();
             // Nothing is left: events go to the queue again. Checked under the queue's lock, so
             // none is written to the file between the check and the change.
             let mut state = self.state();
@@ -399,10 +402,17 @@ impl HookQueue {
             state.spilling = false;
             return false;
         }
+        let mut again = Vec::new();
         for event in events {
-            run_member_activity(hooks.as_ref(), &event).await;
+            if run_member_activity(hooks.as_ref(), &event).await {
+                again.push(event);
+            }
         }
         spill.finish();
+        // The ones that timed out wait for the next turn, after the ones written meanwhile.
+        for event in &again {
+            spill.append(event);
+        }
         true
     }
 
@@ -543,7 +553,15 @@ impl Spill {
         }
         let text = std::fs::read_to_string(&self.replay).unwrap_or_default();
         text.lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter_map(|line| {
+                let event = serde_json::from_str(line).ok();
+                if event.is_none() {
+                    tracing::warn!(
+                        "a member event in the spool file could not be read; it is dropped"
+                    );
+                }
+                event
+            })
             .collect()
     }
 
@@ -555,12 +573,20 @@ impl Spill {
 }
 
 /// Runs the member-activity hook for one event; a hook that panics or takes too long is logged.
-async fn run_member_activity(hooks: &dyn GuildHooks, event: &ModuleEvent) {
+/// Whether the event should be tried again: it timed out, which a slow database may do and a
+/// panic does not mend.
+async fn run_member_activity(hooks: &dyn GuildHooks, event: &ModuleEvent) -> bool {
     let hook = AssertUnwindSafe(hooks.member_activity(event)).catch_unwind();
     match tokio::time::timeout(HOOK_TIMEOUT, hook).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => tracing::error!("member activity hook panicked"),
-        Err(_) => tracing::warn!("member activity hook timed out"),
+        Ok(Ok(())) => false,
+        Ok(Err(_)) => {
+            tracing::error!("member activity hook panicked");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("member activity hook timed out");
+            true
+        }
     }
 }
 
@@ -592,7 +618,7 @@ async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
         }
         for (mut event, recorded) in taken.messages {
             if recorded.is_none() {
-                run_member_activity(hooks.as_ref(), &event).await;
+                let _ = run_member_activity(hooks.as_ref(), &event).await;
                 continue;
             }
             // A panicking hook counts as not kept; the worker goes on with the next message.
@@ -1367,6 +1393,25 @@ mod tests {
         queue.close();
         run_hook_worker(Arc::clone(&log) as Arc<dyn GuildHooks>, Arc::clone(&queue)).await;
         assert_eq!(*log.0.lock().unwrap(), [7, 8, 9]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_spool_file_with_nothing_readable_is_dropped_and_not_replayed_for_ever() {
+        let dir = spool_dir("garbage");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lane.jsonl"), "not json\n{broken\n").unwrap();
+        let queue = Arc::new(HookQueue::with_spill(dir.join("lane.jsonl")));
+        let log = Arc::new(ActivityLog::default());
+        queue.close();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_hook_worker(Arc::clone(&log) as Arc<dyn GuildHooks>, Arc::clone(&queue)),
+        )
+        .await
+        .expect("the worker ends");
+        assert!(log.0.lock().unwrap().is_empty());
+        assert!(!queue.spill.as_ref().unwrap().has_events());
         let _ = std::fs::remove_dir_all(dir);
     }
 

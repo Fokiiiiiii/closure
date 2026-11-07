@@ -14,7 +14,7 @@ use closure_core::action::{Action, MentionPolicy};
 use closure_core::error::DiscordError;
 use closure_core::permission::Actor;
 use closure_sdk::duration::parse as parse_duration;
-use closure_sdk::punish::{Moderator, Punisher, Settings};
+use closure_sdk::punish::{Moderator, Punisher};
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{
     Args, ChannelId, CommandArgs, CommandCx, ComponentCx, EventContext, InteractionReply, JobCx,
@@ -748,10 +748,10 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
     }
     let config: Config = closure_sdk::parse_module_config(ctx)?;
     let actor = actor_of(&operation);
-    let settings = Settings {
-        dm: config.dm_on_action,
-        ..Settings::default()
-    };
+    // The same settings as the single commands: a timeout by role is a role here too.
+    let settings = crate::punish_settings(ctx, &config)
+        .await
+        .map_err(|error| ModuleError::other(format!("{error:?}")))?;
     let moderator = Moderator {
         id: actor.user,
         name: operation.by_name.clone(),

@@ -416,7 +416,10 @@ async fn punisher_for<'a, I: InteractionRef + 'static>(
 
 /// What the server chose for the punishments, as the SDK takes it. A role method's role is the
 /// configured one, or the one Closure finds or creates (see [`ensure_role`]).
-async fn punish_settings(ctx: &EventContext, config: &Config) -> Result<Settings, UserError> {
+pub(crate) async fn punish_settings(
+    ctx: &EventContext,
+    config: &Config,
+) -> Result<Settings, UserError> {
     let timeout_role = match config.timeout_method {
         Method::Role => Some(
             ensure_role(

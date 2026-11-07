@@ -120,7 +120,13 @@ impl TwilightApi {
         reply: &InteractionReply,
     ) -> Result<Outcome, DiscordError> {
         if let Some((channel, message)) = token.text_command_message() {
-            let sent = self.send_text_reply(channel, message, reply).await?;
+            // A command that answered in private goes on answering in private.
+            let private = self.text.fresh(token).is_some_and(|(_, private)| private);
+            let reply = InteractionReply {
+                ephemeral: private || reply.ephemeral,
+                ..reply.clone()
+            };
+            let sent = self.send_text_reply(channel, message, &reply).await?;
             return Ok(Outcome::Message(Box::new(sent)));
         }
         let interaction = self.http.interaction(self.application_id);
@@ -283,8 +289,13 @@ impl TwilightApi {
             )),
             // A deferral or a private reply, which is sent again rather than edited.
             Some((_, private)) => {
+                // What was deferred as private stays private, whatever the reply itself says.
                 let ephemeral = private || reply.ephemeral;
-                let sent = self.send_text_reply(channel, invoker, reply).await?;
+                let reply = InteractionReply {
+                    ephemeral,
+                    ..reply.clone()
+                };
+                let sent = self.send_text_reply(channel, invoker, &reply).await?;
                 self.text.remember(token, Some(sent.id), ephemeral);
                 Ok(Outcome::Message(Box::new(sent)))
             }

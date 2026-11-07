@@ -1069,25 +1069,33 @@ fn channel_changed_entry(
         card = card.field(label(ctx, "logs-nsfw"), shown, false);
         any = true;
     }
-    // An embed holds 25 fields: the changes past a number are counted, not lost with the entry.
+    // An embed holds 25 fields and 6000 characters: the changes past a number, or past what fits,
+    // are counted, not lost with the entry.
     let changes = permissions::overwrite_changes(&before.overwrites, &after.overwrites);
-    let more = changes.len().saturating_sub(MAX_OVERWRITE_FIELDS);
+    let total = changes.len();
+    let mut shown = 0;
+    let mut chars = 0;
     for change in changes.into_iter().take(MAX_OVERWRITE_FIELDS) {
-        card = card.field(
-            label(ctx, "logs-overwrite"),
-            permissions::overwrite_value(ctx, &change),
-            false,
-        );
+        let value = permissions::overwrite_value(ctx, &change);
+        chars += value.chars().count();
+        if chars > OVERWRITE_CHARS {
+            break;
+        }
+        card = card.field(label(ctx, "logs-overwrite"), value, false);
+        shown += 1;
         any = true;
     }
+    let more = total - shown;
     if more > 0 {
         card = card.field(label(ctx, "logs-overwrite"), format!("+{more}"), false);
     }
     if any { plain(card).map(Some) } else { Ok(None) }
 }
 
-/// The most permission changes of a channel that one entry shows.
+/// The most permission changes of a channel that one entry shows, and the most characters of them
+/// (the rest of the embed has its own share of the 6000 an embed may hold).
 const MAX_OVERWRITE_FIELDS: usize = 15;
+const OVERWRITE_CHARS: usize = 3_500;
 
 fn thread_entry(
     ctx: &EventContext,

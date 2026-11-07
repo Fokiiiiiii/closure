@@ -1089,6 +1089,31 @@ async fn a_change_of_a_permission_overwrite_shows_what_the_role_allows_and_denie
 }
 
 #[tokio::test]
+async fn many_overwrite_changes_with_long_texts_still_make_an_entry_that_fits_an_embed() {
+    let harness = harness();
+    let mut after = channel_info("general", None);
+    // Every role gets every permission: the longest value an overwrite has.
+    after.overwrites = (1..=15)
+        .map(|role| role_overwrite(role, Permissions::all(), Permissions::empty()))
+        .collect();
+    harness
+        .emit(Event::ChannelChanged {
+            before: channel_info("general", None),
+            after,
+        })
+        .await
+        .unwrap();
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "the entry is delivered");
+    assert!(
+        posted[0].embeds.chars().count() < 6_000,
+        "it fits the 6000 characters of an embed: {}",
+        posted[0].embeds.chars().count()
+    );
+    assert!(posted[0].embeds.contains('+'), "the rest is counted");
+}
+
+#[tokio::test]
 async fn a_role_whose_permissions_changed_shows_the_permissions_added_and_removed() {
     let harness = harness();
     let role = |permissions: Permissions| RoleInfo {

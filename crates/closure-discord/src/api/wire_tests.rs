@@ -1295,6 +1295,47 @@ async fn deferred_ephemeral_text_edit_and_followup_go_to_direct_messages() {
 }
 
 #[tokio::test]
+async fn a_private_deferral_keeps_a_later_reply_private_even_when_the_reply_says_otherwise() {
+    let discord = FakeDiscord::start(vec![
+        (200, MESSAGE_JSON),
+        (200, DM_CHANNEL_JSON),
+        (200, MESSAGE_JSON),
+        (200, MESSAGE_JSON),
+        (200, DM_CHANNEL_JSON),
+        (200, MESSAGE_JSON),
+    ])
+    .await;
+    let api = discord.api();
+    api.execute(Action::Respond {
+        interaction_id: Id::new(44),
+        token: text_token(),
+        response: InteractionResponse::Defer { ephemeral: true },
+    })
+    .await
+    .unwrap();
+    // Neither reply is marked private itself.
+    api.execute(Action::EditResponse {
+        token: text_token(),
+        reply: text_reply("first"),
+    })
+    .await
+    .unwrap();
+    api.execute(Action::Followup {
+        token: text_token(),
+        reply: text_reply("second"),
+    })
+    .await
+    .unwrap();
+    assert!(
+        method_paths(&discord)
+            .iter()
+            .all(|path| path != "POST /channels/1/messages"),
+        "{:?}",
+        method_paths(&discord)
+    );
+}
+
+#[tokio::test]
 async fn messages_are_read_one_by_one_and_as_history_from_a_cursor() {
     let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (200, "[]")]).await;
     let api = discord.api();
