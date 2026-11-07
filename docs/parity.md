@@ -117,3 +117,10 @@ These are in the reference bot and are left out on purpose, for now:
   row); a rule cannot switch them off.
 - `match_visible_names` and `match_custom_status`: the gateway does not give the names shown in a
   server, or the custom statuses, to the module.
+
+## Moderation of the reference bot that closure does not have yet
+
+The owner asked for all of it. The plan, with the owner's own list (manual punishments as cases,
+the staff alert on a return, bulk punishment with a preview, name search, softban, voice
+management, long slowmode, case search with CSV, appeals, approval of heavy punishments) and a
+ticket module, is in the [roadmap](roadmap.md#moderation-next-work-the-owners-list-and-the-rest-of-the-reference-bot-planned-not-started).
