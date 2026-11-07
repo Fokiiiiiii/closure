@@ -830,7 +830,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_a_timeout_at_three_warni
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "manual_cases": true, "templates_enabled": true, "templates": {} })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "manual_cases": true, "alert_on_rejoin": false, "alert_channel": null, "templates_enabled": true, "templates": {} })
     );
 }
 
@@ -4976,4 +4976,57 @@ async fn manual_cases_can_be_turned_off() {
         .await
         .unwrap();
     assert!(cases_of(&harness, MEMBER).await.is_empty());
+}
+
+// ---- the staff are told when a member with a history is back ----
+
+fn sent_to(harness: &Harness, channel: u64) -> Vec<String> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::SendMessage {
+                channel_id,
+                content: Some(text),
+                ..
+            } if channel_id.get() == channel => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_member_with_cases_who_comes_back_is_told_to_the_staff_channel() {
+    let harness = harness();
+    harness.api().add_channel(Id::new(60), Some(Id::new(GUILD)));
+    harness.set_config(json!({"alert_on_rejoin": true, "alert_channel": "60"}));
+    harness
+        .invoke(warn(MEMBER, Some("spamming links")))
+        .await
+        .unwrap();
+    harness.invoke(note(MEMBER, "was rude")).await.unwrap();
+    rejoin(&harness, MEMBER).await.unwrap();
+    let alerts = sent_to(&harness, 60);
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert!(
+        alerts[0].contains(&format!("<@{MEMBER}>")) && alerts[0].contains('2'),
+        "{alerts:?}"
+    );
+    assert!(
+        alerts[0].contains("spamming links") && alerts[0].contains("was rude"),
+        "{alerts:?}"
+    );
+    // A member with no case is not announced, and an alert that is off is not sent.
+    let clean = self::harness();
+    clean.api().add_channel(Id::new(60), Some(Id::new(GUILD)));
+    clean.set_config(json!({"alert_on_rejoin": true, "alert_channel": "60"}));
+    rejoin(&clean, 8).await.unwrap();
+    assert!(sent_to(&clean, 60).is_empty());
+    let off = self::harness();
+    off.api().add_channel(Id::new(60), Some(Id::new(GUILD)));
+    off.set_config(json!({"alert_channel": "60"}));
+    off.invoke(warn(MEMBER, None)).await.unwrap();
+    rejoin(&off, MEMBER).await.unwrap();
+    assert!(sent_to(&off, 60).is_empty());
 }

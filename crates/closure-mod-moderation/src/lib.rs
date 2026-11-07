@@ -93,11 +93,26 @@ pub(crate) struct Config {
     restore_roles_on_mute: RoleSetting,
     /// Whether a ban, kick or timeout made by hand in Discord becomes a case.
     manual_cases: bool,
+    /// Whether the staff are told when a member with cases comes back.
+    alert_on_rejoin: bool,
+    /// The staff channel of that alert.
+    alert_channel: Option<String>,
     /// Whether the templates are offered. Off keeps them, and offers none.
     templates_enabled: bool,
     /// The templates a moderator picks from when a timeout, kick, ban or voice mute lacks a reason
     /// or a duration.
     templates: templates::Templates,
+}
+
+impl Config {
+    /// The staff channel of the alert on a rejoin.
+    fn alert_target(&self) -> Option<closure_sdk::ChannelId> {
+        self.alert_channel
+            .as_deref()
+            .and_then(|text| text.parse::<u64>().ok())
+            .filter(|id| *id > 0)
+            .map(closure_sdk::ChannelId::new)
+    }
 }
 
 impl Default for Config {
@@ -128,6 +143,8 @@ impl Default for Config {
             remove_roles_on_mute: RoleSetting::Flag(false),
             restore_roles_on_mute: RoleSetting::Flag(true),
             manual_cases: true,
+            alert_on_rejoin: false,
+            alert_channel: None,
             templates_enabled: true,
             templates: templates::Templates::default(),
         }
@@ -918,6 +935,17 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "description": "config-moderation-manual_cases",
                     "x-ui": { "level": "basic" }
                 },
+                "alert_on_rejoin": {
+                    "type": "boolean",
+                    "description": "config-moderation-alert_on_rejoin",
+                    "x-ui": { "level": "basic" }
+                },
+                "alert_channel": {
+                    "type": ["string", "null"],
+                    "pattern": "^[0-9]{1,20}$",
+                    "description": "config-moderation-alert_channel",
+                    "x-ui": { "level": "basic", "widget": "channel" }
+                },
                 "templates_enabled": {
                     "type": "boolean",
                     "description": "config-moderation-templates_enabled",
@@ -996,6 +1024,8 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "voice_mute_role": null,
             "escalation_enabled": true,
             "manual_cases": true,
+            "alert_on_rejoin": false,
+            "alert_channel": null,
             "templates_enabled": true,
             "remove_roles_on_mute": false,
             "restore_roles_on_mute": true,

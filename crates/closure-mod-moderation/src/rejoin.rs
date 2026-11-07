@@ -34,8 +34,69 @@ pub(crate) async fn on_join(ctx: EventContext, event: Event) -> Result<Flow, Mod
         Some(case) => give_voice_mute_again(&ctx, &config, user, &case).await,
         None => Ok(()),
     };
+    // The staff are told whatever happened above: a refused role does not hide the history.
+    if let Err(error) = alert_staff(&ctx, &config, &member.user).await {
+        tracing::debug!(%error, guild = %ctx.guild_id, "the staff alert on a rejoin was not posted");
+    }
     timeout.and(voice)?;
     Ok(Flow::Continue)
+}
+
+/// How many cases of the member the alert reads and how many it lists.
+const ALERT_READ: usize = 25;
+const ALERT_LISTED: usize = 5;
+
+/// Tells the staff channel that a member with a history is back: how many cases they have, and the
+/// newest ones. Nothing is posted for a member with no case, or when the alert is off.
+async fn alert_staff(
+    ctx: &EventContext,
+    config: &Config,
+    user: &closure_sdk::UserInfo,
+) -> Result<(), ModuleError> {
+    let Some(channel) = config.alert_target().filter(|_| config.alert_on_rejoin) else {
+        return Ok(());
+    };
+    let cases = ctx
+        .cases()
+        .for_target(user.id, None, ALERT_READ)
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    if cases.is_empty() {
+        return Ok(());
+    }
+    let say = |key: &str, args: &Args| ctx.t_in(ctx.locale, key, args);
+    let more = if cases.len() >= ALERT_READ { "+" } else { "" };
+    let mut text = say(
+        "rejoin-alert",
+        &Args::new()
+            .with("user", format!("<@{}>", user.id))
+            .with("count", format!("{}{more}", cases.len())),
+    );
+    for case in cases.iter().take(ALERT_LISTED) {
+        let reason = case.reason.as_deref().map_or_else(
+            || say("rejoin-alert-no-reason", &Args::new()),
+            crate::shorten,
+        );
+        text.push('\n');
+        text.push_str(&say(
+            "rejoin-alert-case",
+            &Args::new()
+                .with("number", case.number)
+                .with("kind", case.kind.as_str().to_owned())
+                .with("moderator", format!("<@{}>", case.moderator))
+                .with("reason", reason),
+        ));
+    }
+    ctx.api
+        .execute(closure_core::action::Action::SendMessage {
+            channel_id: channel,
+            content: Some(text),
+            embeds: Vec::new(),
+            reply_to: None,
+            mentions: closure_core::action::MentionPolicy::None,
+        })
+        .await?;
+    Ok(())
 }
 
 /// The newest case of `kind` that still stands against `user`.

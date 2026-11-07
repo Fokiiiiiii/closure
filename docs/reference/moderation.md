@@ -288,6 +288,8 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 
 | Key | Type | Default | Widget | Description |
 |---|---|---|---|---|
+| `alert_channel` | string or null | `null` | channel | The staff channel of the alert on a rejoin. |
+| `alert_on_rejoin` | boolean | `false` | - | Tell the staff channel when a member who has cases comes back to the server. |
 | `ban_delete_days` | integer | `0` | - | How many days of the messages of a banned member are deleted. |
 | `dm_messages` | object | `{}` | - | Custom direct-message templates by punishment kind. |
 | `dm_on_action` | boolean | `true` | - | Whether the warned member gets a direct message. |
@@ -311,6 +313,8 @@ Default configuration:
 
 ```json
 {
+  "alert_channel": null,
+  "alert_on_rejoin": false,
   "ban_delete_days": 0,
   "dm_messages": {},
   "dm_on_action": true,
