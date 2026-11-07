@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use closure_core::schedule::{ScheduledJob, SchedulerBackend, backoff};
 use futures_util::future::join_all;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::dispatcher::{Dispatcher, JobOutcome};
@@ -21,28 +23,56 @@ const LEASE: Duration = Duration::from_secs(300);
 /// How long a job that could not be run for no fault of its own waits.
 const POSTPONE: Duration = Duration::from_secs(30);
 
-/// Takes the jobs that are due and runs them until `stop` is cancelled.
+/// Takes the jobs that are due and runs them until `stop` is cancelled. A job runs as a task of its
+/// own, so a slow one does not hold the next ones back: at most [`BATCH`] run at once, and a job is
+/// claimed only when there is a place for it, so its lease does not run while it waits. When `stop`
+/// is cancelled the jobs in flight are finished and reported first.
 pub async fn run_jobs(
     backend: Arc<dyn SchedulerBackend>,
     dispatcher: Dispatcher,
     stop: CancellationToken,
 ) {
+    let places = Arc::new(Semaphore::new(BATCH));
+    let mut running = JoinSet::new();
     loop {
         if stop.is_cancelled() {
-            return;
+            break;
         }
-        // Not raced against `stop`: a batch that is cut off after its side effects but before they
-        // are reported would run again after the restart. The caller aborts a runner that takes
-        // too long to stop.
-        let taken = run_due(backend.as_ref(), &dispatcher).await;
-        if taken >= BATCH {
+        while running.try_join_next().is_some() {}
+        let free = places.available_permits();
+        let taken = if free == 0 {
+            0
+        } else {
+            match backend.claim_due(free, LEASE).await {
+                Ok(jobs) => {
+                    let count = jobs.len();
+                    for job in jobs {
+                        let (backend, dispatcher) = (Arc::clone(&backend), dispatcher.clone());
+                        let Ok(place) = Arc::clone(&places).acquire_owned().await else {
+                            break;
+                        };
+                        running.spawn(async move {
+                            run_one(backend.as_ref(), &dispatcher, job).await;
+                            drop(place);
+                        });
+                    }
+                    count
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not look for due jobs");
+                    0
+                }
+            }
+        };
+        if free > 0 && taken >= free {
             continue;
         }
         tokio::select! {
-            () = stop.cancelled() => return,
+            () = stop.cancelled() => break,
             () = tokio::time::sleep(POLL) => {}
         }
     }
+    while running.join_next().await.is_some() {}
 }
 
 /// Runs the jobs that are due now, together, and records how each went. How many were taken.
