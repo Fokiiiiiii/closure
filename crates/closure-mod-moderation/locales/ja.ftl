@@ -1,7 +1,7 @@
 
 module-description = メンバーに警告し、メモを残し、サーバーのケースを確認・取り消しします。
 command-slowmode = slowmode
-    .description = チャンネルの低速モードを設定
+    .description = チャンネルの低速モードを設定。6 時間を超える場合は、早すぎる投稿を Bot が削除して実現します
 option-slowmode-seconds = seconds
     .description = 0 から 21600 秒
 option-slowmode-channel = channel
@@ -459,13 +459,7 @@ appeal-note = ケース #{ $number } への異議: { $text }
 appeal-asked = { $user } からケース #{ $number } への異議: { $text }
 appeal-deny = 却下
 appeal-denied = { $user } のケース #{ $number } への異議は { $moderator } が却下しました。処罰はそのままです。
-command-longslowmode = 長時間スローモード
-    .description = Discord の 6 時間を超えるスローモードを、早すぎる投稿の削除で実現します
-option-longslowmode-seconds = 秒数
-    .description = 同じメンバーの投稿の間隔（秒）。21601 から 2592000 まで、0 で解除
-option-longslowmode-channel = チャンネル
-    .description = 対象のチャンネル。省略すると、このチャンネル
-longslow-range = 長時間スローモードは 21600 秒を超える値です。短い場合は /slowmode を、解除するには 0 を指定してください。
 longslow-done = <#{ $channel }> のスローモードを、Bot が管理する { $seconds } 秒にしました。
 longslow-reason = チャンネルのスローモードが許す前に送られた投稿
 config-moderation-slowmode_exempt_roles = Bot が管理するスローモードの対象外にするロール。
+slowmode-long-no-duration = 6 時間を超えるスローモードは、期間を指定できません。

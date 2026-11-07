@@ -5747,7 +5747,7 @@ fn deleted_in(harness: &Harness, channel: u64) -> usize {
 
 fn long_slowmode(seconds: i64) -> Invocation {
     by_moderator(
-        Invocation::new("longslowmode")
+        Invocation::new("slowmode")
             .option("seconds", CommandOptionValue::Integer(seconds))
             .option(
                 "channel",
@@ -5793,21 +5793,30 @@ async fn a_long_slowmode_keeps_discords_longest_and_removes_a_message_that_comes
 }
 
 #[tokio::test]
-async fn a_long_slowmode_spares_the_exempt_roles_and_a_short_one_is_refused() {
+async fn a_long_slowmode_spares_the_exempt_roles_and_a_short_one_replaces_it() {
     let harness = harness();
     harness
         .api()
         .add_channel(Id::new(SLOW_CHANNEL), Some(Id::new(GUILD)));
+    harness.api().set_channels(
+        Id::new(GUILD),
+        vec![
+            serde_json::from_value(json!({
+                "id": SLOW_CHANNEL.to_string(), "guild_id": "1", "type": 0,
+                "name": "slow", "rate_limit_per_user": 0
+            }))
+            .unwrap(),
+        ],
+    );
     harness.set_config(json!({ "slowmode_exempt_roles": [MODERATOR_ROLE.to_string()] }));
-    let refused = harness.invoke(long_slowmode(600)).await.unwrap();
-    assert!(text(&refused).contains("/slowmode"), "{refused:?}");
     harness.invoke(long_slowmode(86_400)).await.unwrap();
     let staff = || Message::new(MODERATOR, SLOW_CHANNEL).roles([MODERATOR_ROLE]);
     harness.message(staff()).await.unwrap();
     harness.message(staff()).await.unwrap();
     assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 0);
-    // Turned off, nothing is held back any more.
-    harness.invoke(long_slowmode(0)).await.unwrap();
+    // A shorter one is Discord's own, and nothing is held back by the bot any more.
+    harness.advance(Duration::from_secs(3));
+    harness.invoke(long_slowmode(600)).await.unwrap();
     let say = || Message::new(MEMBER, SLOW_CHANNEL).content("hi");
     harness.message(say()).await.unwrap();
     harness.message(say()).await.unwrap();

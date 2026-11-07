@@ -53,7 +53,7 @@ building is in the [roadmap](roadmap.md#moderation-next-work-the-owners-list-and
 | Reference | closure |
 | --- | --- |
 | `slowmode set/get/disable` (native) | here: `/slowmode` |
-| bot-managed slowmode beyond 6 hours, `list`, `clear` | here: `/longslowmode` (0 clears it); no list |
+| bot-managed slowmode beyond 6 hours, `list`, `clear` | here: `/slowmode` above 21600 seconds (0 clears it); no list |
 
 ## Censor and Spam
 

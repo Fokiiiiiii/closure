@@ -1310,15 +1310,9 @@ fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
             Command::<channel_controls::Slowmode>::new("slowmode")
                 .requires("moderation.slowmode")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
-                .handler(channel_controls::slowmode),
-        )
-        .command(
-            Command::<channel_controls::LongSlowmode>::new("longslowmode")
-                .requires("moderation.slowmode")
-                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler({
                     let long = Arc::clone(&long);
-                    move |cx, args| channel_controls::long_slowmode(Arc::clone(&long), cx, args)
+                    move |cx, args| channel_controls::slowmode(Arc::clone(&long), cx, args)
                 }),
         )
         .on(Subscription::new(EventKind::MessageCreated), {

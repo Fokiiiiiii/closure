@@ -15,22 +15,13 @@ use twilight_model::id::Id;
 
 #[derive(CommandArgs)]
 pub(crate) struct Slowmode {
-    /// Slowmode seconds, from 0 to 21600
-    #[arg(min = 0, max = 21600)]
+    /// Slowmode seconds, from 0 to 2592000; above 21600 the bot keeps it
+    #[arg(min = 0, max = 2_592_000)]
     seconds: i64,
     /// Channel, or the current channel
     channel: Option<ChannelId>,
     /// How long before restoring the previous value
     duration: Option<Span>,
-}
-
-#[derive(CommandArgs)]
-pub(crate) struct LongSlowmode {
-    /// Seconds between two messages of a member: 21601 to 2592000, or 0 to turn it off
-    #[arg(min = 0, max = 2_592_000)]
-    seconds: i64,
-    /// Channel, or the current channel
-    channel: Option<ChannelId>,
 }
 
 #[derive(CommandArgs)]
@@ -178,7 +169,18 @@ async fn edit(
     Ok(())
 }
 
-pub(crate) async fn slowmode(cx: CommandCx, args: Slowmode) -> Result<(), UserError> {
+pub(crate) async fn slowmode(
+    state: Arc<LongState>,
+    cx: CommandCx,
+    args: Slowmode,
+) -> Result<(), UserError> {
+    // Above Discord's longest the bot keeps the slowmode itself.
+    if args.seconds > i64::from(DISCORD_MAX) {
+        if args.duration.is_some() {
+            return Err(UserError::message("slowmode-long-no-duration"));
+        }
+        return long_slowmode(&state, cx, args.channel, args.seconds).await;
+    }
     let seconds = u16::try_from(args.seconds)
         .ok()
         .filter(|n| *n <= 21600)
@@ -189,6 +191,7 @@ pub(crate) async fn slowmode(cx: CommandCx, args: Slowmode) -> Result<(), UserEr
     let name = display_name(&cx).await;
     let gate = gate(cx.guild_id());
     let _guard = gate.lock().await;
+    forget_long(&state, &cx, id).await?;
     let info = channel(cx.ctx(), id).await?;
     let key = key("slowmode", id);
     let until = duration
@@ -483,39 +486,32 @@ impl LongState {
 
 /// Sets a slowmode longer than Discord's: Discord keeps its longest, and the bot removes a message
 /// that comes too soon after the member's last one.
-pub(crate) async fn long_slowmode(
-    state: Arc<LongState>,
+async fn long_slowmode(
+    state: &LongState,
     cx: CommandCx,
-    args: LongSlowmode,
+    channel: Option<ChannelId>,
+    seconds: i64,
 ) -> Result<(), UserError> {
-    if (1..=i64::from(DISCORD_MAX)).contains(&args.seconds) {
-        return Err(UserError::message("longslow-range"));
-    }
-    let id = args.channel.unwrap_or(cx.invocation().channel_id);
+    let id = channel.unwrap_or(cx.invocation().channel_id);
     cx.defer(true).await?;
     let name = display_name(&cx).await;
     let gate = gate(cx.guild_id());
     let _guard = gate.lock().await;
     let mut channels = (*state.channels(cx.ctx()).await?).clone();
-    let was_kept = if args.seconds == 0 {
-        channels.remove(&id.get()).is_some()
-    } else {
-        channels.insert(id.get(), args.seconds);
-        true
-    };
+    channels.insert(id.get(), seconds);
     cx.store().set(LONG_KEY, &channels).await?;
     state.hold(cx.guild_id(), Arc::new(channels));
-    if was_kept {
-        let native = if args.seconds == 0 { 0 } else { DISCORD_MAX };
-        edit(cx.ctx(), id, native, audit_reason(&cx, &name, None)).await?;
-    }
+    // A slowmode of one temporary kind can be under it: the new one replaces it.
+    cx.scheduler().cancel(&key("slowmode", id)).await?;
+    cx.store().delete(&key("slowmode", id)).await?;
+    edit(cx.ctx(), id, DISCORD_MAX, audit_reason(&cx, &name, None)).await?;
     log(
         cx.ctx(),
         &actor(&cx, &name),
         id,
         &cx.ctx().t_args(
             "channel-log-slowmode",
-            &Args::new().with("seconds", args.seconds),
+            &Args::new().with("seconds", seconds),
         ),
         None,
     )
@@ -525,9 +521,19 @@ pub(crate) async fn long_slowmode(
         "longslow-done",
         &Args::new()
             .with("channel", id.get().to_string())
-            .with("seconds", args.seconds),
+            .with("seconds", seconds),
     )
     .await
+}
+
+/// A channel is no longer held by the bot: the slowmode that is set now is Discord's.
+async fn forget_long(state: &LongState, cx: &CommandCx, id: ChannelId) -> Result<(), UserError> {
+    let mut channels = (*state.channels(cx.ctx()).await?).clone();
+    if channels.remove(&id.get()).is_some() {
+        cx.store().set(LONG_KEY, &channels).await?;
+        state.hold(cx.guild_id(), Arc::new(channels));
+    }
+    Ok(())
 }
 
 /// A message in a channel with a long slowmode: removed when the member's last one is too near.

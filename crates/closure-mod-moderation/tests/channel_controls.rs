@@ -48,11 +48,10 @@ async fn slowmode_bounds_and_timed_restore() {
     h.invoke(invocation("slowmode").option("seconds", CommandOptionValue::Integer(21601)))
         .await
         .unwrap();
-    assert!(
-        !h.api().actions()[before..]
-            .iter()
-            .any(|a| matches!(a, Action::EditChannel { .. }))
-    );
+    // Above Discord's longest, Discord keeps its longest and the bot keeps the rest.
+    assert!(h.api().actions()[before..].iter().any(
+        |a| matches!(a, Action::EditChannel { patch, .. } if patch.slowmode_seconds == Some(21600))
+    ));
     h.advance(Duration::from_secs(3));
     h.invoke(
         invocation("slowmode")

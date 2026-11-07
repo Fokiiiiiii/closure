@@ -295,28 +295,16 @@ Send what a search finds as a CSV file to the staff channel for exports
 
 ### `/slowmode`
 
-Set channel slowmode
+Set channel slowmode; above 6 hours the bot keeps it by removing messages that come too soon
 
 - Japanese name: `slowmode`
-- Japanese description: チャンネルの低速モードを設定
+- Japanese description: チャンネルの低速モードを設定。6 時間を超える場合は、早すぎる投稿を Bot が削除して実現します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `seconds` | seconds | integer | yes | min 0; max 21600 | Seconds from 0 to 21600 |
+| `seconds` | seconds | integer | yes | min 0; max 2592000 | Seconds from 0 to 21600 |
 | `channel` | channel | channel | no | - | Channel to change |
 | `duration` | duration | string | no | - | Time before restoring the previous value |
-
-### `/longslowmode`
-
-Keep a slowmode longer than Discord's six hours, by removing messages that come too soon
-
-- Japanese name: `長時間スローモード`
-- Japanese description: Discord の 6 時間を超えるスローモードを、早すぎる投稿の削除で実現します
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `seconds` | 秒数 | integer | yes | min 0; max 2592000 | Seconds between two messages of a member: 21601 to 2592000, or 0 to turn it off |
-| `channel` | チャンネル | channel | no | - | Channel, or the current channel |
 
 ### `/lock`
 
