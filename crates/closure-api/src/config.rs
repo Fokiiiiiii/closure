@@ -404,6 +404,8 @@ pub(crate) async fn effective(
 #[derive(Debug, Deserialize)]
 pub(crate) struct HistoryQuery {
     limit: Option<u32>,
+    /// Only the revisions older than this one: the next page of a walk back.
+    before: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -423,7 +425,7 @@ pub(crate) async fn history(
     let entries = state
         .inner
         .db
-        .config_history(guild, query.limit.unwrap_or(20))
+        .config_history_before(guild, query.before, query.limit.unwrap_or(20))
         .await?;
     let body: Vec<HistoryEntry> = entries
         .into_iter()

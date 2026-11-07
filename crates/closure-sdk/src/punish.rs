@@ -308,6 +308,7 @@ pub struct Punisher<'a> {
     settings: Settings,
     locale: Locale,
     undoing: Option<i64>,
+    source: crate::CaseSource,
 }
 
 impl<'a> Punisher<'a> {
@@ -319,7 +320,16 @@ impl<'a> Punisher<'a> {
             settings,
             locale: ctx.locale,
             undoing: None,
+            source: crate::CaseSource::Command,
         }
+    }
+
+    /// Where the cases it makes came from (a command by default), so that a search by source
+    /// finds what automod or a button did.
+    #[must_use]
+    pub fn source(mut self, source: crate::CaseSource) -> Self {
+        self.source = source;
+        self
     }
 
     /// The language of the notes.
@@ -1238,7 +1248,7 @@ impl<'a> Punisher<'a> {
             .ctx
             .cases()
             .create(NewCase {
-                source: crate::CaseSource::Command,
+                source: self.source,
                 kind: CaseKind::new(kind)?,
                 target,
                 moderator: self.moderator.id,

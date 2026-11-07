@@ -37,6 +37,10 @@ struct Config {
 struct Note {
     roles: Vec<u64>,
     nick: Option<String>,
+    /// A giving back that did not finish: what the member has now is not all they had, and the
+    /// note is not made smaller by it.
+    #[serde(default)]
+    restoring: bool,
 }
 
 fn stored(error: &closure_core::storage::StorageError) -> ModuleError {
@@ -61,11 +65,32 @@ impl Config {
 
 async fn changed(ctx: &EventContext, member: &MemberInfo) -> Result<(), ModuleError> {
     let config: Config = ctx.parse_config()?;
-    let note = Note {
+    let mut note = Note {
         roles: config.kept_roles(member),
         nick: member.nick.clone().filter(|_| config.nickname),
+        restoring: false,
     };
     let key = key(member.user.id.get());
+    // While a giving back is not finished, the note keeps what was to be given, and adds what the
+    // member has now: the roles that were given back would otherwise make the rest forgotten.
+    if let Some(old) = ctx
+        .store()
+        .get::<Note>(&key)
+        .await
+        .map_err(|e| stored(&e))?
+        .filter(|old| old.restoring)
+        && old.roles.iter().any(|role| !note.roles.contains(role))
+    {
+        let mut roles = old.roles;
+        for role in &note.roles {
+            if !roles.contains(role) {
+                roles.push(*role);
+            }
+        }
+        note.roles = roles;
+        note.nick = note.nick.or(old.nick);
+        note.restoring = true;
+    }
     if note == Note::default() {
         ctx.store().delete(&key).await.map_err(|e| stored(&e))?;
     } else {
@@ -102,6 +127,11 @@ async fn joined(ctx: &EventContext, member: &MemberInfo) -> Result<(), ModuleErr
         .map_err(|e| stored(&e))?
     else {
         return Ok(());
+    };
+    let note_back = Note {
+        roles: note.roles.clone(),
+        nick: note.nick.clone(),
+        restoring: false,
     };
     let reason = Reason::new(ctx.t_in(ctx.locale, "persist-reason", &Args::new()))?;
     let allowed: Vec<u64> = config.roles.iter().filter_map(|r| r.parse().ok()).collect();
@@ -145,6 +175,15 @@ async fn joined(ctx: &EventContext, member: &MemberInfo) -> Result<(), ModuleErr
         }
     }
     if let Some(error) = pending {
+        // Kept for the next time, and marked: what the member has now must not shrink it.
+        let unfinished = Note {
+            restoring: true,
+            ..note_back
+        };
+        ctx.store()
+            .set_for(&key, &unfinished, KEEP)
+            .await
+            .map_err(|e| stored(&e))?;
         return Err(error.into());
     }
     ctx.store().delete(&key).await.map_err(|e| stored(&e))?;

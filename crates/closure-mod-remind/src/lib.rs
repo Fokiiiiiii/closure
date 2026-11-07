@@ -292,6 +292,10 @@ async fn deliver_item(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flow: read all, pick the overdue and the waiting, act on each"
+)]
 async fn reconcile(cx: closure_sdk::JobCx) -> Result<(), closure_sdk::ModuleError> {
     let mut prefixes = vec!["remind:".to_owned()];
     let mut items = Vec::new();
@@ -326,12 +330,27 @@ async fn reconcile(cx: closure_sdk::JobCx) -> Result<(), closure_sdk::ModuleErro
     let skip = cursor.map_or(0, |cursor| {
         waiting.partition_point(|item| (item.user.get(), item.id) <= cursor)
     });
-    let room = 50_usize.saturating_sub(overdue.len().min(50));
-    let rest = waiting.len();
-    let batch: Vec<&Reminder> = overdue
+    // The overdue ones are walked with a cursor of their own: a few that never get delivered do
+    // not keep the others behind them from their turn.
+    let late_cursor: Option<(u64, u64)> = cx
+        .store()
+        .get("reconcile-late-cursor")
+        .await
+        .map_err(module_error)?;
+    let skip_late = late_cursor.map_or(0, |cursor| {
+        overdue.partition_point(|item| (item.user.get(), item.id) <= cursor)
+    });
+    let overdue_batch: Vec<&Reminder> = overdue
         .iter()
         .copied()
-        .take(50)
+        .cycle()
+        .skip(skip_late)
+        .take(overdue.len().min(50))
+        .collect();
+    let room = 50_usize.saturating_sub(overdue_batch.len());
+    let rest = waiting.len();
+    let batch: Vec<&Reminder> = overdue_batch
+        .into_iter()
         .chain(
             waiting
                 .iter()
@@ -374,8 +393,13 @@ async fn reconcile(cx: closure_sdk::JobCx) -> Result<(), closure_sdk::ModuleErro
         if let Err(error) = result {
             tracing::warn!(?error, "reminder reconciliation failed");
         }
+        let cursor = if item.at <= late {
+            "reconcile-late-cursor"
+        } else {
+            "reconcile-cursor"
+        };
         cx.store()
-            .set("reconcile-cursor", &(item.user.get(), item.id))
+            .set(cursor, &(item.user.get(), item.id))
             .await
             .map_err(module_error)?;
     }

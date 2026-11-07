@@ -255,6 +255,47 @@ async fn a_channel_the_invoker_cannot_see_is_not_described() {
 }
 
 #[tokio::test]
+async fn a_thread_takes_the_view_of_its_parent_and_not_its_own_empty_overwrites() {
+    let channelinfo = || {
+        Invocation::new("info")
+            .option("channel", CommandOptionValue::Channel(Id::new(31)))
+            .user(50)
+    };
+    let thread: twilight_model::channel::Channel = serde_json::from_value(serde_json::json!({
+        "id": "31", "type": 11, "guild_id": "1", "name": "secret-thread",
+        "parent_id": "30", "permission_overwrites": [],
+    }))
+    .unwrap();
+    let parent_that_hides: twilight_model::channel::Channel =
+        serde_json::from_value(serde_json::json!({
+            "id": "30", "type": 0, "guild_id": "1", "name": "hidden",
+            "permission_overwrites": [{ "id": "1", "type": 0, "allow": "0", "deny": "1024" }],
+        }))
+        .unwrap();
+    let hidden = harness();
+    hidden
+        .api()
+        .set_channels(Id::new(1), vec![parent_that_hides, thread.clone()]);
+    hidden
+        .api()
+        .set_roles(Id::new(1), vec![everyone_with("1024")]);
+    let refused = hidden.invoke(channelinfo()).await.unwrap();
+    assert!(
+        refused[0].embeds.is_empty() || refused[0].embeds[0].title.is_none(),
+        "{refused:?}"
+    );
+    assert!(!refused[0].content.contains("secret-thread"), "{refused:?}");
+    // With a parent everybody sees, the thread is described.
+    let open = harness();
+    open.api()
+        .set_channels(Id::new(1), vec![text_channel(30), thread]);
+    open.api()
+        .set_roles(Id::new(1), vec![everyone_with("1024")]);
+    let shown = open.invoke(channelinfo()).await.unwrap();
+    assert_eq!(shown[0].embeds[0].title.as_deref(), Some("secret-thread"));
+}
+
+#[tokio::test]
 async fn members_are_found_by_a_name_they_went_by_and_only_by_a_moderator() {
     let harness = harness();
     for (id, nick) in [(7, "Old Name"), (8, "old name"), (9, "Other")] {

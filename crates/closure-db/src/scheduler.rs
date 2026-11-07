@@ -48,6 +48,9 @@ pub struct ScheduledPost {
     /// Unix seconds.
     pub run_at: i64,
     pub payload: serde_json::Value,
+    /// It was tried as often as it may be and did not get through: it waits for nobody, and can
+    /// be taken back.
+    pub failed: bool,
 }
 
 /// How taking back a scheduled post went.
@@ -94,8 +97,8 @@ impl Db {
 
     /// The posts of `guild` that wait for their time, soonest first.
     pub async fn scheduled_posts(&self, guild: GuildId) -> Result<Vec<ScheduledPost>, DbError> {
-        let rows: Vec<(String, i64, serde_json::Value)> = sqlx::query_as(
-            "SELECT dedupe_key, extract(epoch FROM run_at)::bigint, payload
+        let rows: Vec<(String, i64, serde_json::Value, bool)> = sqlx::query_as(
+            "SELECT dedupe_key, extract(epoch FROM run_at)::bigint, payload, state = 'failed'
              FROM scheduled_jobs
              WHERE module = 'post' AND guild_id = $1 AND name = 'send' AND dedupe_key IS NOT NULL
              ORDER BY run_at, id LIMIT 100",
@@ -105,10 +108,11 @@ impl Db {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(key, run_at, payload)| ScheduledPost {
+            .map(|(key, run_at, payload, failed)| ScheduledPost {
                 key,
                 run_at,
                 payload,
+                failed,
             })
             .collect())
     }
@@ -579,6 +583,35 @@ mod tests {
         assert_eq!(
             db.withdraw_post(guild, "p2").await.unwrap(),
             Withdrawn::Missing
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_post_that_failed_for_good_is_listed_as_failed_and_taken_back_like_any(pool: PgPool) {
+        let db = database(pool.clone()).await;
+        let post = scheduler(&db, "post", 1);
+        for key in ["waits", "broken"] {
+            post.job("send", &1)
+                .unwrap()
+                .key(key)
+                .after(Duration::from_secs(100))
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE scheduled_jobs SET state = 'failed' WHERE dedupe_key = 'broken'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let guild = closure_core::event::GuildId::new(1);
+        let listed = db.scheduled_posts(guild).await.unwrap();
+        let failed: Vec<(&str, bool)> = listed
+            .iter()
+            .map(|post| (post.key.as_str(), post.failed))
+            .collect();
+        assert!(failed.contains(&("waits", false)) && failed.contains(&("broken", true)));
+        assert_eq!(
+            db.withdraw_post(guild, "broken").await.unwrap(),
+            Withdrawn::Removed
         );
     }
 

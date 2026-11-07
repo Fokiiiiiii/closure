@@ -109,12 +109,41 @@ impl State {
     }
 }
 
+/// The link as it is asked about: without a user name and a password in front of the host, and, if
+/// it is still too long, with its path cut and never its host (a cut in front of the host asks
+/// about another address). A link whose host alone is too long is not asked about.
+fn shortened(link: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(link).ok()?;
+    if parsed.username().is_empty()
+        && parsed.password().is_none()
+        && link.chars().count() <= MAX_QUESTION
+    {
+        // As it was written: nothing to take off, nothing to cut.
+        return Some(link.to_owned());
+    }
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    let whole = parsed.to_string();
+    if whole.chars().count() <= MAX_QUESTION {
+        return Some(whole);
+    }
+    let origin = parsed.origin().ascii_serialization();
+    if origin.chars().count() >= MAX_QUESTION {
+        return None;
+    }
+    let room = MAX_QUESTION - origin.chars().count();
+    let path: String = parsed.path().chars().take(room).collect();
+    Some(format!("{origin}{path}"))
+}
+
 /// The links of a message, as the texts the service is asked about: as many links as fit in one
 /// question, never cut in the middle of a link.
 fn questions(content: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for link in text::links(content).into_iter().map(|l| l.url) {
-        let link: String = link.chars().take(MAX_QUESTION).collect();
+    for link in text::links(content)
+        .into_iter()
+        .filter_map(|l| shortened(&l.url))
+    {
         match out.last_mut() {
             Some(last) if last.chars().count() + 1 + link.chars().count() <= MAX_QUESTION => {
                 last.push(' ');
@@ -225,3 +254,33 @@ pub fn module(checker: Arc<dyn LinkChecker>) -> Result<SdkModule, CoreError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod question_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_user_name_in_front_of_the_host_does_not_hide_the_host() {
+        let link = format!("https://{}@evil.example/login", "a".repeat(2_000));
+        let asked = shortened(&link).unwrap();
+        assert!(asked.contains("evil.example"), "{asked}");
+        assert!(!asked.contains("aaaa"));
+        assert!(asked.chars().count() <= MAX_QUESTION);
+    }
+
+    #[test]
+    fn a_long_path_is_cut_and_the_host_stays() {
+        let link = format!("https://evil.example/{}", "p".repeat(3_000));
+        let asked = shortened(&link).unwrap();
+        assert!(asked.starts_with("https://evil.example/"), "{asked}");
+        assert_eq!(asked.chars().count(), MAX_QUESTION);
+    }
+
+    #[test]
+    fn a_plain_link_is_asked_about_as_it_was_written() {
+        assert_eq!(
+            shortened("https://example.com/a?b=c").as_deref(),
+            Some("https://example.com/a?b=c")
+        );
+    }
+}

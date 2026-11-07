@@ -235,6 +235,20 @@ async fn a_member_who_may_not_pick_roles_gets_none_from_a_button_or_a_reaction()
 }
 
 #[tokio::test]
+async fn a_zero_id_in_the_settings_does_not_stop_the_list() {
+    let harness = harness();
+    harness.set_config(serde_json::json!({ "self_roles": ["0", SELF_ROLE.to_string()] }));
+    let listed = harness
+        .invoke(Invocation::new("role").subcommand("list").user(7))
+        .await
+        .unwrap();
+    assert!(
+        listed[0].content.contains(&format!("<@&{SELF_ROLE}>")),
+        "{listed:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_button_toggles_a_listed_role() {
     let harness = harness();
     let custom_id = format!("roles:toggle:*:{SELF_ROLE}");

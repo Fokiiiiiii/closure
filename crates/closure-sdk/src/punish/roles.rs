@@ -291,28 +291,41 @@ pub async fn ensure_role(
     configured: Option<RoleId>,
 ) -> Result<RoleId, RoleError> {
     let key = (ctx.guild_id.get(), which.key());
-    let gate = {
-        let mut map = gates().lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+    // The entry of the gate is given up when this call ends, however it ends: one that is cut off
+    // while it waits for the gate or for Discord must not leave its guild's entry behind.
+    let entry = GateEntry {
+        key,
+        gate: {
+            let mut map = gates().lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+        },
     };
-    let result = {
-        let _turn = gate.lock().await;
-        match ensure_role_now(ctx, which, configured).await {
-            Ok(role) => ctx
-                .restrictions()
-                .set(&format!("restriction-role:{}", role.get()), &role.get())
-                .await
-                .map(|()| role)
-                .map_err(RoleError::from),
-            Err(error) => Err(error),
-        }
-    };
-    // Only the map and this call hold the gate when nobody waits for it: it is dropped then.
-    let mut map = gates().lock().unwrap_or_else(PoisonError::into_inner);
-    if Arc::strong_count(&gate) <= 2 {
-        map.remove(&key);
+    let _turn = entry.gate.lock().await;
+    match ensure_role_now(ctx, which, configured).await {
+        Ok(role) => ctx
+            .restrictions()
+            .set(&format!("restriction-role:{}", role.get()), &role.get())
+            .await
+            .map(|()| role)
+            .map_err(RoleError::from),
+        Err(error) => Err(error),
     }
-    result
+}
+
+/// A holder of the gate of one restriction role of a guild. Only the map and this holder have the
+/// gate when nobody waits for it: the entry is dropped from the map then.
+struct GateEntry {
+    key: (u64, &'static str),
+    gate: Arc<Mutex<()>>,
+}
+
+impl Drop for GateEntry {
+    fn drop(&mut self) {
+        let mut map = gates().lock().unwrap_or_else(PoisonError::into_inner);
+        if Arc::strong_count(&self.gate) <= 2 {
+            map.remove(&self.key);
+        }
+    }
 }
 
 /// Gives a remembered role the name and the colour of now, when they differ: a role made before the names

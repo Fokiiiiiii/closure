@@ -301,6 +301,7 @@ async fn on_event(
             )
             .await
             .map_err(|e| ModuleError::other(e.to_string()))?;
+        start_cursor(&state, &ctx, message.channel_id.get(), bucket_of(due)).await?;
         ensure_sweep(&state, &ctx).await?;
     }
     let mut reactions = config
@@ -344,6 +345,44 @@ const SWEEP_STEPS: i64 = 720;
 #[derive(Default)]
 struct Sweeps {
     ensured: Mutex<HashSet<u64>>,
+    /// The channels whose sweep cursor was put in place by this process.
+    started: Mutex<HashSet<u64>>,
+}
+
+/// Puts the cursor of a channel's sweep just before its first set when there is none yet, so that
+/// a sweep that comes late (or after a restart) starts from the oldest message that waits and not
+/// from now.
+async fn start_cursor(
+    state: &Sweeps,
+    ctx: &EventContext,
+    channel: u64,
+    bucket: i64,
+) -> Result<(), ModuleError> {
+    if state
+        .started
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&channel)
+    {
+        return Ok(());
+    }
+    let store = ctx.store();
+    let held: Option<i64> = store
+        .get(&cursor_key(channel))
+        .await
+        .map_err(|e| ModuleError::other(e.to_string()))?;
+    if held.is_none() {
+        store
+            .set(&cursor_key(channel), &(bucket - 1))
+            .await
+            .map_err(|e| ModuleError::other(e.to_string()))?;
+    }
+    state
+        .started
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(channel);
+    Ok(())
 }
 
 /// The number of the set a deletion at `due` (Unix seconds) belongs to: the first whose end is not
@@ -396,8 +435,12 @@ async fn sweep(cx: JobCx) -> Result<(), ModuleError> {
         return Ok(());
     }
     let now_bucket = ctx.now().div_euclid(BUCKET_SECONDS);
-    let mut budget = SWEEP_BUDGET;
+    // Each channel has its share of the run, so the first of the list cannot use all of it.
+    let share = SWEEP_BUDGET
+        .div_ceil(config.auto_delete.len().max(1))
+        .max(1);
     for rule in &config.auto_delete {
+        let mut budget = share;
         let Ok(channel) = rule.channel.parse::<u64>() else {
             continue;
         };

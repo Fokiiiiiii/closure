@@ -97,6 +97,44 @@ async fn nothing_is_kept_of_a_member_without_kept_roles_and_bots_are_ignored() {
     assert!(harness.actions().is_empty());
 }
 
+#[tokio::test]
+async fn a_role_not_given_back_is_not_forgotten_when_the_ones_that_were_make_the_member_update() {
+    let harness = harness(false);
+    harness
+        .emit(Event::MemberUpdated(member(7, &[10, 11], None)))
+        .await
+        .unwrap();
+    harness.api().fail_role(
+        closure_core::event::RoleId::new(11),
+        closure_core::error::DiscordError::Transient("busy".into()),
+    );
+    let _ = harness
+        .emit(Event::MemberJoined(member(7, &[], None)))
+        .await;
+    // The role 10 was given: the member is updated with it, and has not 11.
+    harness
+        .emit(Event::MemberUpdated(member(7, &[10], None)))
+        .await
+        .unwrap();
+    harness.api().recover_roles();
+    harness
+        .emit(Event::MemberJoined(member(7, &[10], None)))
+        .await
+        .unwrap();
+    let given: Vec<u64> = harness
+        .actions()
+        .iter()
+        .filter_map(|a| match a {
+            Action::AddRole { role_id, .. } => Some(role_id.get()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        given.contains(&11),
+        "the role that was not given back is still to be given: {given:?}"
+    );
+}
+
 #[test]
 fn both_catalogs_define_the_same_messages() {
     assert_eq!(

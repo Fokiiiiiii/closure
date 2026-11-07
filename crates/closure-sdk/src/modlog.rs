@@ -100,6 +100,8 @@ async fn post_to(
 
 /// The set of the numbers of the cases whose log post is not done.
 const PENDING_SET: &str = "modlog-pending";
+/// Where the walk through the set stopped the last time.
+const CURSOR_KEY: &str = "modlog-cursor";
 
 fn case_number(case: &Case) -> u64 {
     u64::try_from(case.number).unwrap_or(0)
@@ -128,7 +130,18 @@ pub(crate) async fn retry_pending(ctx: &EventContext, limit: usize) -> Result<()
             tracing::warn!(%key, "a pending case log has no case number");
         }
     }
-    for number in ctx.store().set_take(PENDING_SET, limit).await? {
+    // A walk through the set by a cursor that is kept: the posts that fail stay in it, and the next
+    // run goes on behind them, so a few that never get through do not hold the others back. A
+    // post that is done leaves the set when it is settled.
+    let cursor: u64 = ctx.store().get(CURSOR_KEY).await?.unwrap_or(0);
+    let mut batch = ctx.store().set_after(PENDING_SET, cursor, limit).await?;
+    if batch.is_empty() && cursor != 0 {
+        // The end of the set: the walk starts again at its beginning.
+        batch = ctx.store().set_after(PENDING_SET, 0_u64, limit).await?;
+    }
+    let next = batch.last().copied().unwrap_or(0);
+    ctx.store().set(CURSOR_KEY, &next).await?;
+    for number in batch {
         let key = format!("modlog-pending:{number}");
         let result: Result<(), UserError> = async {
             let Some(entry) = ctx.store().entry(&key).await? else {
@@ -156,9 +169,10 @@ pub(crate) async fn retry_pending(ctx: &EventContext, limit: usize) -> Result<()
         }
         .await;
         if let Err(error) = result {
+            // It stays in the set: it is tried again when the walk comes round to it.
             tracing::warn!(%key, ?error, "could not retry a case log");
-            // Put back: it is tried again on a later run, after the others.
-            ctx.store().set_add(PENDING_SET, number).await?;
+        } else if ctx.store().entry(&key).await?.is_none() {
+            ctx.store().set_remove(PENDING_SET, number).await?;
         }
     }
     Ok(())

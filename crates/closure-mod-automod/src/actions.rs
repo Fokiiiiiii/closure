@@ -89,7 +89,8 @@ pub async fn apply(deps: &Deps<'_>, rule: &Rule, hit: &Hit, context: &Context) -
             return applied;
         }
     };
-    let punisher = Punisher::new(ctx, bot.clone(), settings);
+    let punisher =
+        Punisher::new(ctx, bot.clone(), settings).source(closure_sdk::CaseSource::Automod);
     let mut ran = false;
     let mut did_punish = false;
     for action in &rule.actions {

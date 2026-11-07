@@ -26,6 +26,8 @@ const TOGGLE: &str = "toggle";
 const UNPING: &str = "unping";
 /// How long a role can be pinged after `/pingrole`.
 const PING_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// The score that holds, for a role made pingable, when it is to be quiet again (unix seconds).
+const PING_UNTIL: &str = "ping-until";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -135,8 +137,8 @@ async fn list(cx: CommandCx, (): ()) -> Result<(), UserError> {
     let roles: Vec<String> = config
         .self_roles
         .iter()
-        .filter_map(|r| r.parse::<u64>().ok())
-        .map(|r| mention(RoleId::new(r)))
+        .filter_map(|r| RoleId::new_checked(r.parse::<u64>().ok()?))
+        .map(mention)
         .collect();
     cx.reply_private(roles.join("\n")).await
 }
@@ -278,6 +280,16 @@ async fn ping_role(cx: CommandCx, args: OneRole) -> Result<(), UserError> {
     let schedule = |e: closure_core::schedule::ScheduleError| {
         UserError::from(ModuleError::other(e.to_string()))
     };
+    cx.ctx()
+        .store()
+        .score_put(
+            PING_UNTIL,
+            args.role.get(),
+            cx.now()
+                .saturating_add(i64::try_from(PING_WINDOW.as_secs()).unwrap_or(0)),
+        )
+        .await
+        .map_err(|e| UserError::from(ModuleError::other(e.to_string())))?;
     cx.scheduler()
         .job(
             UNPING,
@@ -312,12 +324,25 @@ async fn ping_role(cx: CommandCx, args: OneRole) -> Result<(), UserError> {
 
 async fn unping(cx: closure_sdk::JobCx) -> Result<(), ModuleError> {
     let job: Unping = cx.payload()?;
+    let role = RoleId::new_checked(job.role)
+        .ok_or_else(|| ModuleError::other("an unping job names no role"))?;
+    // A later ping of the same role moved the end: that one's job makes it quiet, not this one,
+    // which may have been taken before the ping was made again.
+    let until = cx
+        .ctx()
+        .store()
+        .score(PING_UNTIL, role.get())
+        .await
+        .map_err(|e| ModuleError::other(e.to_string()))?;
+    if until > cx.ctx().now() {
+        return Ok(());
+    }
     let reason = Reason::new(cx.t("roles-reason-ping-end", &Args::new()))?;
     let result = cx
         .api()
         .execute(Action::EditRole {
             guild_id: cx.guild_id(),
-            role_id: RoleId::new(job.role),
+            role_id: role,
             patch: RolePatch {
                 mentionable: Some(false),
                 ..RolePatch::default()
@@ -459,6 +484,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
     Ok(
         ModuleBuilder::new("roles", "Roles", env!("CARGO_PKG_VERSION"))?
             .capability(closure_sdk::Capability::ManageRoles)
+            .capability(closure_sdk::Capability::Storage)
             .capability(closure_sdk::Capability::SendMessages)
             .capability(closure_sdk::Capability::ReadGuild)
             .capability(closure_sdk::Capability::RespondToInteractions)

@@ -114,6 +114,24 @@ async fn schedules_and_deletes_after_delay() {
 }
 
 #[tokio::test]
+async fn a_first_sweep_that_comes_late_still_deletes_what_fell_due_before_it() {
+    let h = harness(delete_config());
+    h.message(Message::new(7, 5)).await.unwrap();
+    // The sweep job is not run until a minute has passed: the message fell due long before.
+    h.advance(Duration::from_secs(60));
+    for _ in 0..4 {
+        assert!(h.run_due_jobs().await.iter().all(Result::is_ok));
+        h.advance(Duration::from_secs(10));
+    }
+    let deleted = h
+        .actions()
+        .iter()
+        .filter(|a| matches!(a, Action::DeleteMessage { .. }))
+        .count();
+    assert_eq!(deleted, 1);
+}
+
+#[tokio::test]
 async fn missing_and_log_channel_are_protected() {
     let h = harness(delete_config());
     h.message(Message::new(7, 5)).await.unwrap();

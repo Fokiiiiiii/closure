@@ -239,4 +239,44 @@ mod tests {
             "the entries of the three plugins are gone, the rest stays"
         );
     }
+
+    /// 0017 sets the counts of kept files and entries right where a write slipped past them.
+    #[sqlx::test(migrations = false)]
+    async fn the_counts_of_usage_are_made_right_again_by_0017(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        sqlx::query(
+            "INSERT INTO module_kv (module, guild_id, key, value, revision)
+             VALUES ('warn', 1, 'a', '1'::jsonb, 1), ('warn', 1, 'b', '1'::jsonb, 2)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // What a write that slipped past the triggers leaves: numbers that are not the rows'.
+        sqlx::query("UPDATE module_kv_usage SET entries = 99 WHERE module = 'warn'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO message_file_usage VALUES (7, 1234)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0017_recount_usage.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let entries: i64 = sqlx::query_scalar(
+            "SELECT entries FROM module_kv_usage WHERE module = 'warn' AND guild_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(entries, 2);
+        let bytes: i64 =
+            sqlx::query_scalar("SELECT bytes FROM message_file_usage WHERE guild_id = 7")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bytes, 0, "a guild with no stored files has none counted");
+    }
 }

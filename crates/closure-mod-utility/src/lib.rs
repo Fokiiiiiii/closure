@@ -373,9 +373,32 @@ async fn invoker_sees(cx: &CommandCx, channel: &Channel) -> Result<bool, UserErr
     if let Some(owner) = cx.api().guild_owner().await.map_err(|e| failed(&e))? {
         calculator = calculator.owner_id(owner);
     }
-    let overwrites = channel.permission_overwrites.as_deref().unwrap_or(&[]);
+    // A thread takes its permissions from its parent, which is where they are looked up; a private
+    // thread is for its members, whom the bot does not list here.
+    let parent;
+    let (kind, overwrites) = if channel.kind.is_thread() {
+        if channel.kind == twilight_model::channel::ChannelType::PrivateThread {
+            return Ok(false);
+        }
+        let Some(parent_id) = channel.parent_id else {
+            return Ok(false);
+        };
+        let Ok(Outcome::Channel(found)) = cx
+            .api()
+            .execute(Action::GetChannel {
+                channel_id: parent_id,
+            })
+            .await
+        else {
+            return Ok(false);
+        };
+        parent = *found;
+        (parent.kind, parent.permission_overwrites.as_deref())
+    } else {
+        (channel.kind, channel.permission_overwrites.as_deref())
+    };
     Ok(calculator
-        .in_channel(channel.kind, overwrites)
+        .in_channel(kind, overwrites.unwrap_or(&[]))
         .contains(Permissions::VIEW_CHANNEL))
 }
 

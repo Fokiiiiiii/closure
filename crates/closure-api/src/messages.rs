@@ -217,7 +217,16 @@ async fn schedule(
         ));
     }
     let _one_at_a_time = SCHEDULING.lock().await;
-    if state.inner.db.scheduled_posts(guild).await?.len() >= MAX_SCHEDULED {
+    // Those that failed wait for nobody: they do not take a place of the limit.
+    let waiting = state
+        .inner
+        .db
+        .scheduled_posts(guild)
+        .await?
+        .iter()
+        .filter(|post| !post.failed)
+        .count();
+    if waiting >= MAX_SCHEDULED {
         return Err(ApiError::BadRequest(format!(
             "at most {MAX_SCHEDULED} posts can wait at once"
         )));
@@ -275,6 +284,7 @@ pub(crate) async fn scheduled(
             json!({
                 "key": post.key,
                 "send_at": post.run_at,
+                "state": if post.failed { "failed" } else { "pending" },
                 "channel_id": post.payload["channel"],
                 "edit": post.payload["edit"],
                 "message": post.payload["message"],

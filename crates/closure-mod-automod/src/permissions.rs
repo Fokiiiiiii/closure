@@ -181,6 +181,41 @@ async fn target(ctx: &EventContext, id: Option<&str>) -> Result<OverwriteTarget,
     }
 }
 
+/// The overwrite of `target` in the channel as it is now, when it has one.
+async fn current_overwrite(
+    ctx: &EventContext,
+    channel: ChannelId,
+    target: OverwriteTarget,
+) -> Result<Option<OverwriteSpec>, ModuleError> {
+    let Outcome::Channel(channel_info) = ctx
+        .api
+        .execute(Action::GetChannel {
+            channel_id: channel,
+        })
+        .await?
+    else {
+        return Err(failure("unexpected outcome for get_channel"));
+    };
+    Ok(channel_info
+        .permission_overwrites
+        .as_deref()
+        .ok_or_else(|| failure("channel overwrites are unavailable"))?
+        .iter()
+        .find(|overwrite| match target {
+            OverwriteTarget::Role(id) => {
+                overwrite.kind == PermissionOverwriteType::Role && overwrite.id.get() == id.get()
+            }
+            OverwriteTarget::Member(id) => {
+                overwrite.kind == PermissionOverwriteType::Member && overwrite.id.get() == id.get()
+            }
+        })
+        .map(|overwrite| OverwriteSpec {
+            target,
+            allow: overwrite.allow,
+            deny: overwrite.deny,
+        }))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "one flow: find the overwrite, save the change, make it, mark it made"
@@ -216,40 +251,14 @@ pub async fn change(
         store.set(&key, &extended).await.map_err(failure)?;
         return Ok(());
     }
-    // A change that is new, or one that was saved and not made: the overwrite it started from is
-    // the one that was saved, if there is one.
+    // What the channel has now is what the change is made on: an overwrite changed by somebody
+    // since an earlier try keeps its other bits. A change that is new starts from it; one that
+    // was saved and not made keeps the overwrite it started from, for the restore.
+    let current = current_overwrite(ctx, channel, target).await?;
     let original = if let Some(saved) = &existing {
         saved.original.clone()
     } else {
-        let Outcome::Channel(channel_info) = ctx
-            .api
-            .execute(Action::GetChannel {
-                channel_id: channel,
-            })
-            .await?
-        else {
-            return Err(failure("unexpected outcome for get_channel"));
-        };
-        channel_info
-            .permission_overwrites
-            .as_deref()
-            .ok_or_else(|| failure("channel overwrites are unavailable"))?
-            .iter()
-            .find(|overwrite| match target {
-                OverwriteTarget::Role(id) => {
-                    overwrite.kind == PermissionOverwriteType::Role
-                        && overwrite.id.get() == id.get()
-                }
-                OverwriteTarget::Member(id) => {
-                    overwrite.kind == PermissionOverwriteType::Member
-                        && overwrite.id.get() == id.get()
-                }
-            })
-            .map(|overwrite| OverwriteSpec {
-                target,
-                allow: overwrite.allow,
-                deny: overwrite.deny,
-            })
+        current.clone()
     };
     let touched = clear
         .iter()
@@ -270,7 +279,7 @@ pub async fn change(
     };
     schedule(ctx, &key, saved.until).await?;
     store.set(&key, &saved).await.map_err(failure)?;
-    let mut overwrite = original.unwrap_or(OverwriteSpec {
+    let mut overwrite = current.unwrap_or(OverwriteSpec {
         target,
         allow: Permissions::empty(),
         deny: Permissions::empty(),

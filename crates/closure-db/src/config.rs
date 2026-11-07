@@ -175,12 +175,24 @@ impl Db {
         guild: GuildId,
         limit: u32,
     ) -> Result<Vec<ConfigHistoryEntry>, DbError> {
+        self.config_history_before(guild, None, limit).await
+    }
+
+    /// Past revisions of `guild` older than `before` (all of them when it is `None`), newest
+    /// first: the pages of a walk back through the history.
+    pub async fn config_history_before(
+        &self,
+        guild: GuildId,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<ConfigHistoryEntry>, DbError> {
         let rows = sqlx::query_as::<_, (i64, serde_json::Value, Option<i64>, OffsetDateTime)>(
             "SELECT revision, doc, actor, created_at
-             FROM guild_config_history WHERE guild_id = $1
-             ORDER BY revision DESC LIMIT $2",
+             FROM guild_config_history WHERE guild_id = $1 AND revision < $2
+             ORDER BY revision DESC LIMIT $3",
         )
         .bind(to_db(guild)?)
+        .bind(before.unwrap_or(i64::MAX))
         .bind(i64::from(limit.clamp(1, MAX_HISTORY)))
         .fetch_all(&self.pool)
         .await?;
@@ -448,6 +460,9 @@ mod tests {
             history.iter().map(|h| h.revision).collect::<Vec<_>>(),
             [4, 3]
         );
+        // The next page: what is older than the oldest of the last.
+        let older = db.config_history_before(guild, Some(3), 2).await.unwrap();
+        assert_eq!(older.iter().map(|h| h.revision).collect::<Vec<_>>(), [2, 1]);
     }
 
     #[sqlx::test]
