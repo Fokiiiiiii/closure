@@ -265,6 +265,13 @@ fn sandbox(budget: Budget) -> mlua::Result<Sandbox> {
     globals
         .get::<mlua::Table>("string")?
         .set("dump", LuaValue::Nil)?;
+    // The pattern functions run in C, where the instruction hook does not reach: a pattern that
+    // backtracks for long cannot be stopped. Text and pattern are kept short enough to end soon.
+    lua.load(
+        "local s = string; for _, name in ipairs({'find', 'match', 'gmatch', 'gsub'}) do local f = s[name]; s[name] = function(subject, pattern, ...) if type(subject) == 'string' and #subject > 16384 then error('the text is too long for a pattern', 2) end if type(pattern) == 'string' and #pattern > 128 then error('the pattern is too long', 2) end return f(subject, pattern, ...) end end",
+    )
+    .set_mode(ChunkMode::Text)
+    .exec()?;
     let math = globals.get::<mlua::Table>("math")?;
     math.set("random", LuaValue::Nil)?;
     math.set("randomseed", LuaValue::Nil)?;

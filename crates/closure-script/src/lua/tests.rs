@@ -325,3 +325,24 @@ fn lua_host_wait_is_excluded_from_cpu_budget() {
         json!([])
     );
 }
+
+#[test]
+fn a_pattern_over_a_long_text_or_with_a_long_pattern_is_refused_and_short_ones_work() {
+    let source = br#"function on_event()
+        assert(("hello world"):find("wor") == 7)
+        assert(("a-b"):gsub("-", "+") == "a+b")
+        local long = string.rep("a", 20000)
+        assert(not pcall(string.find, long, "b"))
+        assert(not pcall(string.gsub, "x", string.rep("a", 200), ""))
+        return {}
+    end"#;
+    let mut wide = budget();
+    wide.memory_bytes = 8 * 1024 * 1024;
+    assert_eq!(
+        LuaRuntime::new(source)
+            .unwrap()
+            .call(json!({}), Arc::new(Host::default()), wide)
+            .unwrap(),
+        json!([])
+    );
+}

@@ -77,6 +77,11 @@ struct HostState {
     failure: Option<String>,
 }
 
+/// What an entry of a list is counted as, in bytes, when the number of entries is bounded.
+const LIST_ENTRY_ALLOWANCE: usize = 4096;
+/// A list holds at least this many entries, whatever the output limit.
+const MIN_LISTED: usize = 16;
+
 impl Host {
     fn failure(&self, message: &str) -> String {
         let mut state = self
@@ -209,6 +214,9 @@ impl HostApi for Host {
     }
     fn list(&self, prefix: &str, limit: usize) -> Result<Value, String> {
         self.storage_allowed()?;
+        // What is read must fit what the script may be given back: an entry holds up to 32 KiB, so
+        // a list longer than the output allows is not built to be refused afterwards.
+        let limit = limit.min((self.output_limit / LIST_ENTRY_ALLOWANCE).max(MIN_LISTED));
         let entries = self.run(async {
             self.ctx
                 .store()
