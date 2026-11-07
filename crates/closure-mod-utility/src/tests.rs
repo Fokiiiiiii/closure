@@ -285,3 +285,100 @@ async fn members_are_found_by_a_name_they_went_by_and_only_by_a_moderator() {
     let refused = harness.invoke(plain).await.unwrap();
     assert!(!refused[0].content.contains("<@7>"), "{refused:?}");
 }
+
+fn voice_move(user: u64, before: Option<u64>, after: Option<u64>) -> Event {
+    Event::VoiceStateChanged {
+        guild_id: GuildId::new(1),
+        user: info(user, None).user,
+        before: before.map(ChannelId::new),
+        after: after.map(ChannelId::new),
+    }
+}
+
+fn disconnected(harness: &Harness, user: u64) -> usize {
+    harness
+        .actions()
+        .iter()
+        .filter(|a| matches!(a, Action::DisconnectMember { user_id, .. } if user_id.get() == user))
+        .count()
+}
+
+#[tokio::test]
+async fn everyone_in_a_voice_channel_is_moved_at_once_and_only_those_still_there() {
+    let harness = harness();
+    harness
+        .api()
+        .add_channel(ChannelId::new(32), Some(GuildId::new(1)));
+    for user in [7, 8, 9] {
+        harness.api().set_member(Id::new(1), member_of(user));
+        harness
+            .emit(voice_move(user, None, Some(30)))
+            .await
+            .unwrap();
+    }
+    // 9 left for another channel; 8 stays in 30.
+    harness
+        .emit(voice_move(9, Some(30), Some(31)))
+        .await
+        .unwrap();
+    let all = Invocation::new("vcmoveall")
+        .option("from", CommandOptionValue::Channel(Id::new(30)))
+        .option("to", CommandOptionValue::Channel(Id::new(32)))
+        .roles([MODERATOR])
+        .user(50);
+    harness.invoke(all).await.unwrap();
+    let mut moved: Vec<u64> = harness
+        .actions()
+        .iter()
+        .filter_map(|a| match a {
+            Action::MoveMember {
+                user_id,
+                channel_id,
+                ..
+            } if channel_id.get() == 32 => Some(user_id.get()),
+            _ => None,
+        })
+        .collect();
+    moved.sort_unstable();
+    assert_eq!(moved, [7, 8]);
+    let same = Invocation::new("vcmoveall")
+        .option("from", CommandOptionValue::Channel(Id::new(30)))
+        .option("to", CommandOptionValue::Channel(Id::new(30)))
+        .roles([MODERATOR])
+        .user(50);
+    assert!(
+        harness.invoke(same).await.unwrap()[0]
+            .content
+            .contains("different")
+    );
+}
+
+#[tokio::test]
+async fn a_member_who_hops_between_voice_channels_too_often_is_disconnected() {
+    let harness = harness();
+    harness.set_config(serde_json::json!({ "voice_hop_limit": 3, "voice_hop_seconds": 60 }));
+    let hop = |to: u64| voice_move(7, None, Some(to));
+    for to in [30, 31, 30] {
+        harness.emit(hop(to)).await.unwrap();
+    }
+    assert_eq!(disconnected(&harness, 7), 0, "three is the limit");
+    harness.emit(hop(31)).await.unwrap();
+    assert_eq!(disconnected(&harness, 7), 1);
+    // The count starts again, and a slow member is never caught.
+    harness.emit(hop(30)).await.unwrap();
+    assert_eq!(disconnected(&harness, 7), 1);
+    for to in [31, 30, 31] {
+        harness.advance(std::time::Duration::from_secs(61));
+        harness.emit(hop(to)).await.unwrap();
+    }
+    assert_eq!(disconnected(&harness, 7), 1);
+}
+
+#[tokio::test]
+async fn without_a_limit_voice_hops_are_not_counted() {
+    let harness = harness();
+    for to in [30, 31, 30, 31, 30, 31, 30] {
+        harness.emit(voice_move(7, None, Some(to))).await.unwrap();
+    }
+    assert_eq!(disconnected(&harness, 7), 0);
+}

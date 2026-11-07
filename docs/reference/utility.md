@@ -109,6 +109,18 @@ Move a member to another voice channel
 | `user` | user | user | yes | - | The member, who has to be in voice |
 | `channel` | channel | channel | yes | - | The voice channel to move them to |
 
+### `/vcmoveall`
+
+Move everyone in a voice channel to another
+
+- Japanese name: `全員移動`
+- Japanese description: ボイスチャンネルにいる全員を別のチャンネルへ移動します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `from` | 移動元 | channel | yes | - | The voice channel to empty |
+| `to` | 移動先 | channel | yes | - | The voice channel to move them to |
+
 ### `/vckick`
 
 Disconnect a member from voice
@@ -128,9 +140,14 @@ Set under `modules.utility.config` in a server's configuration; see [configurati
 |---|---|---|---|---|
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
+| `voice_hop_limit` | integer | `0` | - | How many times a member may go into a voice channel within the window before they are disconnected; 0 sets no limit. |
+| `voice_hop_seconds` | integer | `60` | - | The window of the limit on voice channel moves, in seconds. |
 
 Default configuration:
 
 ```json
-{}
+{
+  "voice_hop_limit": 0,
+  "voice_hop_seconds": 60
+}
 ```

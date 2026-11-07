@@ -17,6 +17,7 @@ use closure_sdk::{
     RoleId, SdkModule, Subscription, UserError, UserId,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use twilight_model::channel::Channel;
 use twilight_model::guild::{Member, Permissions};
 use twilight_util::permission_calculator::PermissionCalculator;
@@ -25,6 +26,8 @@ const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 /// How long the names and the voice place of a member are kept.
 const KEEP: Duration = Duration::from_hours(8760);
+/// The most members one move of a channel takes: the most a voice channel holds.
+const MAX_MOVED: usize = 99;
 /// The most members a search by name lists.
 const MAX_FOUND: usize = 25;
 /// The most names kept of one member.
@@ -71,6 +74,32 @@ struct MoveArgs {
     channel: ChannelId,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct Config {
+    /// How many times a member may go into a voice channel within the window; 0 sets no limit.
+    voice_hop_limit: u32,
+    /// The window of that limit, in seconds.
+    voice_hop_seconds: u32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            voice_hop_limit: 0,
+            voice_hop_seconds: 60,
+        }
+    }
+}
+
+#[derive(CommandArgs)]
+struct MoveAll {
+    /// The voice channel to empty.
+    from: ChannelId,
+    /// The voice channel to move them to.
+    to: ChannelId,
+}
+
 /// A name a member went by.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Seen {
@@ -94,6 +123,11 @@ fn name_index(text: &str) -> String {
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     format!("name-{hash:016x}")
+}
+
+/// The set of the members who are in a voice channel, as far as the bot has seen.
+fn voice_set(channel: ChannelId) -> String {
+    format!("voice-in-{}", channel.get())
 }
 
 fn voice_key(user: u64) -> String {
@@ -468,6 +502,56 @@ async fn vcmove(cx: CommandCx, args: MoveArgs) -> Result<(), UserError> {
     .await
 }
 
+/// Moves the members in a voice channel to another. The bot knows who is in a channel from the
+/// voice changes it has seen, so each one is checked against where they are before the move.
+async fn vcmoveall(cx: CommandCx, args: MoveAll) -> Result<(), UserError> {
+    if args.from == args.to {
+        return Err(UserError::message("utility-moveall-same"));
+    }
+    cx.defer(true).await?;
+    let members = cx
+        .store()
+        .set_sample(&voice_set(args.from), MAX_MOVED)
+        .await
+        .map_err(|e| internal(&e))?;
+    let (mut moved, mut left_out) = (0_i64, 0_i64);
+    for user in members {
+        let there = cx
+            .store()
+            .get::<u64>(&voice_key(user))
+            .await
+            .map_err(|e| internal(&e))?;
+        let Some(id) = UserId::new_checked(user).filter(|_| there == Some(args.from.get())) else {
+            cx.store()
+                .set_remove(&voice_set(args.from), user)
+                .await
+                .map_err(|e| internal(&e))?;
+            continue;
+        };
+        let reason =
+            Reason::new(cx.t("utility-reason-move", &Args::new())).map_err(|e| failed(&e))?;
+        let done = cx.check_target(id).await.is_ok()
+            && cx
+                .api()
+                .move_member(cx.guild_id(), id, args.to, reason)
+                .await
+                .is_ok();
+        if done {
+            moved += 1;
+        } else {
+            left_out += 1;
+        }
+    }
+    cx.reply_private_t(
+        "utility-moved-all",
+        &Args::new()
+            .with("moved", moved)
+            .with("left", left_out)
+            .with("channel", format!("<#{}>", args.to)),
+    )
+    .await
+}
+
 async fn vckick(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let reason = Reason::new(cx.t("utility-reason-kick", &Args::new())).map_err(|e| failed(&e))?;
@@ -537,18 +621,82 @@ async fn on_member(ctx: EventContext, event: Event) -> Result<Flow, ModuleError>
 }
 
 async fn on_voice(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
-    if let Event::VoiceStateChanged { user, after, .. } = &event {
-        let key = voice_key(user.id.get());
-        if let Some(channel) = after {
-            ctx.store()
-                .set_for(&key, &channel.get(), KEEP)
-                .await
-                .map_err(|e| stored(&e))?;
-        } else {
-            ctx.store().delete(&key).await.map_err(|e| stored(&e))?;
+    let Event::VoiceStateChanged {
+        user,
+        before,
+        after,
+        ..
+    } = &event
+    else {
+        return Ok(Flow::Continue);
+    };
+    let key = voice_key(user.id.get());
+    if let Some(channel) = after {
+        ctx.store()
+            .set_for(&key, &channel.get(), KEEP)
+            .await
+            .map_err(|e| stored(&e))?;
+    } else {
+        ctx.store().delete(&key).await.map_err(|e| stored(&e))?;
+    }
+    if before == after {
+        return Ok(Flow::Continue);
+    }
+    // Who is in a channel, so that all of them can be moved at once.
+    if let Some(channel) = before {
+        ctx.store()
+            .set_remove(&voice_set(*channel), user.id.get())
+            .await
+            .map_err(|e| stored(&e))?;
+    }
+    if let Some(channel) = after {
+        ctx.store()
+            .set_add(&voice_set(*channel), user.id.get())
+            .await
+            .map_err(|e| stored(&e))?;
+        if !user.bot {
+            hopped(&ctx, user).await?;
         }
     }
     Ok(Flow::Continue)
+}
+
+/// A member went into a voice channel: too many times within the window, and they are
+/// disconnected. The moves are kept for the window only.
+async fn hopped(ctx: &EventContext, user: &UserInfo) -> Result<(), ModuleError> {
+    let config: Config = ctx.parse_config()?;
+    if config.voice_hop_limit == 0 {
+        return Ok(());
+    }
+    let window = i64::from(config.voice_hop_seconds);
+    let key = format!("hops:{}", user.id);
+    let now = ctx.now();
+    let mut moves: Vec<i64> = ctx
+        .store()
+        .get(&key)
+        .await
+        .map_err(|e| stored(&e))?
+        .unwrap_or_default();
+    moves.retain(|at| now - at < window);
+    moves.push(now);
+    if moves.len() <= usize::try_from(config.voice_hop_limit).unwrap_or(usize::MAX) {
+        let keep = Duration::from_secs(config.voice_hop_seconds.into());
+        return ctx
+            .store()
+            .set_for(&key, &moves, keep)
+            .await
+            .map_err(|e| stored(&e));
+    }
+    ctx.store().delete(&key).await.map_err(|e| stored(&e))?;
+    let reason = Reason::truncated(&ctx.t_args("utility-reason-hop", &Args::new()));
+    if let Err(error) = ctx
+        .api
+        .disconnect_member(ctx.guild_id, user.id, reason)
+        .await
+    {
+        tracing::debug!(?error, guild = %ctx.guild_id, "could not disconnect a member who hops");
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -616,6 +764,11 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                     .handler(vcmove),
             )
             .command(
+                Command::<MoveAll>::new("vcmoveall")
+                    .requires("utility.voice")
+                    .handler(vcmoveall),
+            )
+            .command(
                 Command::<OneUser>::new("vckick")
                     .requires("utility.voice")
                     .handler(vckick),
@@ -624,6 +777,29 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 ContextCommand::user("Info")
                     .requires("utility.info")
                     .handler(userinfo_menu),
+            )
+            .config(
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "voice_hop_limit": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "config-utility-voice_hop_limit",
+                            "x-ui": { "level": "basic" }
+                        },
+                        "voice_hop_seconds": {
+                            "type": "integer",
+                            "minimum": 10,
+                            "maximum": 3600,
+                            "description": "config-utility-voice_hop_seconds",
+                            "x-ui": { "level": "basic" }
+                        }
+                    }
+                }),
+                json!({ "voice_hop_limit": 0, "voice_hop_seconds": 60 }),
             )
             .on(Subscription::new(EventKind::MemberJoined), on_member)
             .on(Subscription::new(EventKind::MemberUpdated), on_member)
