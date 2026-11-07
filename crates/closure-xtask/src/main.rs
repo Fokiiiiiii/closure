@@ -138,17 +138,26 @@ fn new_module(id: &str, dry_run: bool) -> Result<bool> {
         print!("{}", scaffold::listing(&files));
         return Ok(true);
     }
-    let mut written = Vec::new();
-    for (path, content) in &files {
-        let target = crate_dir.join(path);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
+    // A failure leaves nothing behind: the directory did not exist, so it is taken away again and
+    // the same command can be run once more.
+    let made = (|| -> Result<()> {
+        let mut written = Vec::new();
+        for (path, content) in &files {
+            let target = crate_dir.join(path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&target, content)?;
+            written.push(target);
         }
-        fs::write(&target, content)?;
-        written.push(target);
+        scaffold::format_sources(&written)?;
+        fs::write(&cargo_path, workspace)?;
+        Ok(())
+    })();
+    if let Err(error) = made {
+        let _ = fs::remove_dir_all(&crate_dir);
+        return Err(error);
     }
-    scaffold::format_sources(&written)?;
-    fs::write(&cargo_path, workspace)?;
     eprintln!("created {}", crate_dir.display());
     eprintln!(
         "next: add `{}.workspace = true` to crates/closure/Cargo.toml",

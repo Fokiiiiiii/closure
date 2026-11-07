@@ -274,25 +274,9 @@ mod turn_tests {
 /// Runs `work` while no other strip or restore of `target` runs. Each of them reads the plan of the
 /// member, makes Discord calls and writes the plan back, so they must not interleave.
 async fn one_at_a_time<T>(ctx: &EventContext, target: UserId, work: impl Future<Output = T>) -> T {
-    let key = (ctx.guild_id.get(), target.get());
-    let gate = {
-        let mut map = member_gates()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
-    };
-    let result = {
-        let _turn = gate.lock().await;
-        work.await
-    };
-    // Only the map and this call hold the gate when nobody waits for it: it is dropped then.
-    let mut map = member_gates()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    if Arc::strong_count(&gate) <= 2 {
-        map.remove(&key);
-    }
-    result
+    // The turn takes its gate away again when it is dropped, a work that is cut off included.
+    let _turn = turn_of((ctx.guild_id.get(), target.get()), member_gates()).await;
+    work.await
 }
 
 /// The role a restriction gives. A configured role that exists is used as it is. Otherwise the

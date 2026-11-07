@@ -14,6 +14,8 @@ const REPORT_GAP_SECONDS: i64 = 60;
 /// The same slowmode is not set again within this time: Discord limits how often a channel is edited.
 const SLOWMODE_REPEAT_SECONDS: i64 = 600;
 const MAX_REMEMBERED: usize = 1_024;
+/// How many threads are followed, for all the guilds together.
+const MAX_THREADS_REMEMBERED: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OwnRoleChange {
@@ -31,7 +33,8 @@ pub struct Memory {
     reported: Mutex<HashMap<String, i64>>,
     /// The slowmode last set for a channel, and when.
     slowmodes: Mutex<HashMap<ChannelId, (u16, i64)>>,
-    thread_parents: Mutex<VecDeque<(GuildId, ChannelId, ChannelId)>>,
+    /// The parent of each thread seen, by guild and thread: a lookup, not a scan.
+    thread_parents: Mutex<HashMap<(GuildId, ChannelId), ChannelId>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -42,20 +45,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Memory {
     pub fn remember_thread(&self, guild: GuildId, thread: ChannelId, parent: Option<ChannelId>) {
         let mut threads = lock(&self.thread_parents);
-        threads.retain(|(g, t, _)| *g != guild || *t != thread);
-        if let Some(parent) = parent {
-            if threads.len() >= MAX_REMEMBERED {
-                threads.pop_front();
-            }
-            threads.push_back((guild, thread, parent));
+        let Some(parent) = parent else {
+            threads.remove(&(guild, thread));
+            return;
+        };
+        // Past the bound the table starts again, and a thread it forgot is learned at its next event.
+        if threads.len() >= MAX_THREADS_REMEMBERED && !threads.contains_key(&(guild, thread)) {
+            threads.clear();
         }
+        threads.insert((guild, thread), parent);
     }
 
     pub fn parent_or_channel(&self, guild: GuildId, channel: ChannelId) -> ChannelId {
         lock(&self.thread_parents)
-            .iter()
-            .find(|(g, thread, _)| *g == guild && *thread == channel)
-            .map_or(channel, |(_, _, parent)| *parent)
+            .get(&(guild, channel))
+            .copied()
+            .unwrap_or(channel)
     }
 
     /// Remembers that the bot is about to give or take `role` from `user`.
