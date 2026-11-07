@@ -1137,6 +1137,7 @@ impl<'a> Punisher<'a> {
             .ctx
             .cases()
             .create(NewCase {
+                source: crate::CaseSource::Command,
                 kind: CaseKind::new(kind)?,
                 target,
                 moderator: self.moderator.id,
@@ -1693,6 +1694,7 @@ async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
             break ctx
                 .cases()
                 .create(NewCase {
+                    source: crate::CaseSource::Command,
                     kind: CaseKind::new("ban")?,
                     target,
                     moderator,
@@ -1804,6 +1806,7 @@ async fn reconcile_restriction(ctx: &EventContext, key: &str) -> Result<(), User
             break ctx
                 .cases()
                 .create(NewCase {
+                    source: crate::CaseSource::Command,
                     kind: CaseKind::new(&intent.kind)?,
                     target,
                     moderator,

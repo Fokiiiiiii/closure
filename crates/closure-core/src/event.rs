@@ -1092,6 +1092,7 @@ mod tests {
             created_at: 0,
             expires_at: None,
             revoked: None,
+            source: crate::cases::CaseSource::Command,
         };
         let event = Event::CaseCreated(case);
         assert_eq!(event.kind(), EventKind::CaseCreated);

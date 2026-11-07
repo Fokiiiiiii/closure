@@ -36,6 +36,7 @@ unlock-done = <#{ $channel }> の権限を復元しました。
 lock-not-found = このチャンネルに復元できるロックはありません。
 config-moderation-warn_expire_days = 警告が失効するまでの日数。
 config-moderation-dm_on_action = 警告されたメンバーにダイレクトメッセージを送るかどうか。
+config-moderation-manual_cases = Discord 上で直接行った Ban・Kick・Timeout を、監査ログの実行者つきで Case として記録する。
 config-moderation-require_reason = 警告に理由が必要かどうか。
 config-moderation-ban_delete_days = BAN したメンバーのメッセージを、何日分削除するか。
 config-moderation-escalation = アクティブな警告の数が、ある数に達したときに行う処分。

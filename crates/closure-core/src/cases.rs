@@ -88,9 +88,65 @@ impl From<CaseKind> for String {
     }
 }
 
+/// Where a case came from: what a search by origin and the audit of the bot's own actions need.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaseSource {
+    /// A slash or prefix command of a moderator.
+    #[default]
+    Command,
+    /// A button (an undo, a confirmation, an approval).
+    Button,
+    /// An automod rule.
+    Automod,
+    /// Done by hand in Discord itself, not through the bot, and taken in from the audit log.
+    Manual,
+    /// The dashboard.
+    Dashboard,
+    /// A script.
+    Script,
+    /// An appeal that was accepted.
+    Appeal,
+}
+
+impl CaseSource {
+    /// The name kept in the database and shown in searches.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Command => "command",
+            Self::Button => "button",
+            Self::Automod => "automod",
+            Self::Manual => "manual",
+            Self::Dashboard => "dashboard",
+            Self::Script => "script",
+            Self::Appeal => "appeal",
+        }
+    }
+
+    /// The source named `name`, or `None`.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        [
+            Self::Command,
+            Self::Button,
+            Self::Automod,
+            Self::Manual,
+            Self::Dashboard,
+            Self::Script,
+            Self::Appeal,
+        ]
+        .into_iter()
+        .find(|source| source.as_str() == name)
+    }
+}
+
 /// A case to record. Its module and guild come from the [`Cases`] handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewCase {
+    /// Where the case comes from; a command unless the recorder says otherwise.
+    #[serde(default)]
+    pub source: CaseSource,
     pub kind: CaseKind,
     pub target: UserId,
     pub moderator: UserId,
@@ -123,6 +179,7 @@ pub struct Case {
     pub created_at: i64,
     pub expires_at: Option<i64>,
     pub revoked: Option<Revoked>,
+    pub source: CaseSource,
 }
 
 /// Where cases are kept. Every call is for one guild; the checks of [`Cases`] come first.
@@ -480,6 +537,7 @@ impl CaseBackend for MemoryCases {
             created_at: now,
             expires_at: case.expires_at,
             revoked: None,
+            source: case.source,
         };
         cases.by_number.insert(number, stored.clone());
         Ok(stored)
@@ -556,6 +614,7 @@ mod tests {
 
     fn new_case(target: u64, reason: Option<&str>) -> NewCase {
         NewCase {
+            source: CaseSource::Command,
             kind: kind(),
             target: Id::new(target),
             moderator: Id::new(9),
@@ -622,6 +681,7 @@ mod tests {
         let warn = f.cases("warn", 1);
         let created = warn
             .create(NewCase {
+                source: CaseSource::Command,
                 kind: CaseKind::new("timeout").unwrap(),
                 target: Id::new(5),
                 moderator: Id::new(9),
@@ -643,6 +703,7 @@ mod tests {
                 created_at: 1_700_000_000,
                 expires_at: Some(1_700_600_000),
                 revoked: None,
+                source: CaseSource::Command,
             }
         );
         assert_eq!(warn.get(1).await.unwrap(), Some(created));
@@ -863,6 +924,7 @@ mod tests {
         let f = fixture();
         let warn = f.cases("warn", 1);
         let ban = |expires_at: Option<i64>| NewCase {
+            source: CaseSource::Command,
             kind: CaseKind::new("ban").unwrap(),
             target: Id::new(5),
             moderator: Id::new(9),

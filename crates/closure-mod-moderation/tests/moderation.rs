@@ -18,6 +18,7 @@ use serde_json::json;
 use twilight_model::channel::message::Component;
 use twilight_model::channel::message::component::SelectMenu;
 use twilight_model::gateway::Intents;
+use twilight_model::guild::audit_log::{AuditLogEntry, AuditLogEventType};
 use twilight_model::guild::{Member, Role};
 use twilight_model::id::Id;
 
@@ -829,7 +830,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_a_timeout_at_three_warni
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "templates_enabled": true, "templates": {} })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "manual_cases": true, "templates_enabled": true, "templates": {} })
     );
 }
 
@@ -4127,6 +4128,7 @@ async fn a_bot_is_not_given_anything_again() {
     harness
         .cases()
         .create(NewCase {
+            source: closure_sdk::CaseSource::Command,
             kind: CaseKind::new("timeout").unwrap(),
             target: Id::new(BOT),
             moderator: Id::new(MODERATOR),
@@ -4790,4 +4792,188 @@ mod rejoin_expiry_race {
             assert!(removed(&harness).contains(&31));
         }
     }
+}
+
+// ---- punishments made by hand in Discord ----
+
+/// An audit log entry of `kind` on `target`, made by `by` with `reason`, five seconds ago.
+fn made_by_hand(
+    kind: AuditLogEventType,
+    target: u64,
+    by: u64,
+    reason: Option<&str>,
+) -> AuditLogEntry {
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    let now_ms = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    AuditLogEntry {
+        action_type: kind,
+        changes: Vec::new(),
+        guild_id: None,
+        id: Id::new((now_ms - 5_000 - DISCORD_EPOCH_MS) << 22),
+        options: None,
+        reason: reason.map(str::to_owned),
+        target_id: Some(Id::new(target)),
+        user_id: Some(Id::new(by)),
+    }
+}
+
+fn user_info(id: u64) -> UserInfo {
+    UserInfo {
+        id: Id::new(id),
+        name: "member".to_owned(),
+        bot: false,
+    }
+}
+
+#[tokio::test]
+async fn a_ban_made_by_hand_is_a_case_with_the_moderator_the_audit_log_names_and_an_unban_ends_it()
+{
+    let harness = harness();
+    harness.api().add_audit_entry(made_by_hand(
+        AuditLogEventType::MemberBanAdd,
+        MEMBER,
+        55,
+        Some("raiding"),
+    ));
+    harness
+        .emit(Event::BanAdded {
+            guild_id: Id::new(GUILD),
+            user: user_info(MEMBER),
+        })
+        .await
+        .unwrap();
+    let cases = cases_of(&harness, MEMBER).await;
+    assert_eq!(cases.len(), 1, "{cases:?}");
+    let case = &cases[0];
+    assert_eq!(case.kind.as_str(), "ban");
+    assert_eq!(case.moderator, Id::new(55));
+    assert_eq!(case.reason.as_deref(), Some("raiding"));
+    assert_eq!(case.source, closure_sdk::CaseSource::Manual);
+    assert!(case.revoked.is_none());
+    // The unban, also by hand, ends the case that stands.
+    harness.api().add_audit_entry(made_by_hand(
+        AuditLogEventType::MemberBanRemove,
+        MEMBER,
+        56,
+        Some("appeal"),
+    ));
+    harness
+        .emit(Event::BanRemoved {
+            guild_id: Id::new(GUILD),
+            user: user_info(MEMBER),
+        })
+        .await
+        .unwrap();
+    let cases = cases_of(&harness, MEMBER).await;
+    assert_eq!(cases.len(), 1, "an unban is no case of its own");
+    let revoked = cases[0].revoked.as_ref().unwrap();
+    assert_eq!(revoked.by, Id::new(56));
+    assert_eq!(revoked.reason.as_deref(), Some("appeal"));
+}
+
+#[tokio::test]
+async fn a_timeout_made_by_hand_is_a_case_until_the_time_it_was_given_and_taking_it_off_ends_it() {
+    let harness = harness();
+    let until = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+        + 3600;
+    harness.api().add_audit_entry(made_by_hand(
+        AuditLogEventType::MemberUpdate,
+        MEMBER,
+        55,
+        None,
+    ));
+    harness
+        .emit(Event::TimeoutChanged {
+            guild_id: Id::new(GUILD),
+            user: user_info(MEMBER),
+            before: None,
+            after: Some(until),
+        })
+        .await
+        .unwrap();
+    let cases = cases_of(&harness, MEMBER).await;
+    assert_eq!(cases.len(), 1, "{cases:?}");
+    assert_eq!(cases[0].kind.as_str(), "timeout");
+    assert_eq!(cases[0].expires_at, Some(until));
+    assert_eq!(cases[0].source, closure_sdk::CaseSource::Manual);
+    harness
+        .emit(Event::TimeoutChanged {
+            guild_id: Id::new(GUILD),
+            user: user_info(MEMBER),
+            before: Some(until),
+            after: None,
+        })
+        .await
+        .unwrap();
+    let cases = cases_of(&harness, MEMBER).await;
+    assert!(
+        cases[0].revoked.is_some(),
+        "taking the timeout off ends the case"
+    );
+}
+
+#[tokio::test]
+async fn what_the_module_did_itself_and_what_the_audit_log_cannot_place_are_not_recorded_twice() {
+    // The module bans, and Discord reports the ban: one case, not two.
+    let harness = harness();
+    harness
+        .invoke(ban(MEMBER, Some("spam"), None, None))
+        .await
+        .unwrap();
+    harness.api().add_audit_entry(made_by_hand(
+        AuditLogEventType::MemberBanAdd,
+        MEMBER,
+        100,
+        None,
+    ));
+    harness
+        .emit(Event::BanAdded {
+            guild_id: Id::new(GUILD),
+            user: user_info(MEMBER),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cases_of_kind(&harness, MEMBER, "ban").await, 1);
+    // No entry of the audit log that names the change: nobody is blamed.
+    let unknown = self::harness();
+    unknown
+        .emit(Event::BanAdded {
+            guild_id: Id::new(GUILD),
+            user: user_info(MEMBER),
+        })
+        .await
+        .unwrap();
+    assert!(cases_of(&unknown, MEMBER).await.is_empty());
+}
+
+#[tokio::test]
+async fn manual_cases_can_be_turned_off() {
+    let harness = harness();
+    harness.set_config(json!({"manual_cases": false}));
+    harness.api().add_audit_entry(made_by_hand(
+        AuditLogEventType::MemberBanAdd,
+        MEMBER,
+        55,
+        None,
+    ));
+    harness
+        .emit(Event::BanAdded {
+            guild_id: Id::new(GUILD),
+            user: user_info(MEMBER),
+        })
+        .await
+        .unwrap();
+    assert!(cases_of(&harness, MEMBER).await.is_empty());
 }

@@ -261,6 +261,7 @@ impl Probe {
         let case = ctx
             .cases()
             .create(closure_core::cases::NewCase {
+                source: closure_core::cases::CaseSource::Command,
                 kind: closure_core::cases::CaseKind::new("warn").unwrap(),
                 target: Id::new(9),
                 moderator: Id::new(8),
@@ -3124,6 +3125,7 @@ fn case_announced() -> Event {
         created_at: 0,
         expires_at: None,
         revoked: None,
+        source: closure_core::cases::CaseSource::Command,
     })
 }
 

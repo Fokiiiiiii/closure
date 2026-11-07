@@ -416,6 +416,7 @@ async fn timed_ban_recovery_does_not_duplicate_case() {
     api.banned.store(true, Ordering::SeqCst);
     ctx.cases()
         .create(closure_sdk::NewCase {
+            source: closure_sdk::CaseSource::Command,
             kind: closure_sdk::CaseKind::new("ban").unwrap(),
             target: Id::new(7),
             moderator: ctx.bot().unwrap(),
@@ -437,6 +438,7 @@ async fn timed_ban_recovery_ignores_a_matching_case_from_before_the_intent() {
     let expires = ctx.now() + 3600;
     ctx.cases()
         .create(closure_sdk::NewCase {
+            source: closure_sdk::CaseSource::Command,
             kind: closure_sdk::CaseKind::new("ban").unwrap(),
             target: Id::new(7),
             moderator: ctx.bot().unwrap(),
@@ -792,6 +794,7 @@ async fn restriction_recovery_handles_absent_duplicate_expired_and_lookup_errors
         api.present.store(true, Ordering::SeqCst);
         ctx.cases()
             .create(closure_sdk::NewCase {
+                source: closure_sdk::CaseSource::Command,
                 kind: closure_sdk::CaseKind::new(mode.kind()).unwrap(),
                 target: Id::new(7),
                 moderator: Id::new(8),
@@ -858,6 +861,7 @@ async fn restriction_recovery_ignores_a_case_from_before_the_intent() {
         let expires = ctx.now() + 3600;
         ctx.cases()
             .create(closure_sdk::NewCase {
+                source: closure_sdk::CaseSource::Command,
                 kind: closure_sdk::CaseKind::new(mode.kind()).unwrap(),
                 target: Id::new(7),
                 moderator: ctx.bot().unwrap(),

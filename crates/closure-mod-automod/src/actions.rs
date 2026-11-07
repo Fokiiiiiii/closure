@@ -742,6 +742,7 @@ async fn record(
     let case = ctx
         .cases()
         .create(NewCase {
+            source: closure_sdk::CaseSource::Automod,
             kind,
             target,
             moderator: bot.id,

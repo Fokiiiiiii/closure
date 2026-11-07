@@ -15,6 +15,7 @@ fn module() -> ModuleBuilder {
             let case = cx
                 .cases()
                 .create(NewCase {
+                    source: closure_sdk::CaseSource::Command,
                     kind: CaseKind::new("warn")?,
                     target: cx.user().id,
                     moderator: cx.user().id,
@@ -37,6 +38,7 @@ fn module_without_the_capability() -> ModuleBuilder {
         .command(Command::<()>::new("warn").handler(|cx, ()| async move {
             cx.cases()
                 .create(NewCase {
+                    source: closure_sdk::CaseSource::Command,
                     kind: CaseKind::new("warn")?,
                     target: cx.user().id,
                     moderator: cx.user().id,

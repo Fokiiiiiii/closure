@@ -26,6 +26,7 @@ use twilight_model::gateway::Intents;
 mod channel_controls;
 mod clear;
 mod history;
+mod manual;
 mod massban;
 mod rejoin;
 mod restrict;
@@ -90,6 +91,8 @@ pub(crate) struct Config {
     /// Which of the roles taken off come back when the punishment ends: the same forms, `true`
     /// by default.
     restore_roles_on_mute: RoleSetting,
+    /// Whether a ban, kick or timeout made by hand in Discord becomes a case.
+    manual_cases: bool,
     /// Whether the templates are offered. Off keeps them, and offers none.
     templates_enabled: bool,
     /// The templates a moderator picks from when a timeout, kick, ban or voice mute lacks a reason
@@ -124,6 +127,7 @@ impl Default for Config {
             voice_mute_role: None,
             remove_roles_on_mute: RoleSetting::Flag(false),
             restore_roles_on_mute: RoleSetting::Flag(true),
+            manual_cases: true,
             templates_enabled: true,
             templates: templates::Templates::default(),
         }
@@ -471,6 +475,7 @@ async fn record<I: InteractionRef + 'static>(
     let case = cx
         .cases()
         .create(NewCase {
+            source: closure_sdk::CaseSource::Command,
             kind: CaseKind::new(kind)?,
             target,
             moderator: cx.user().id,
@@ -908,6 +913,11 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "description": "config-moderation-escalation_enabled",
                     "x-ui": { "level": "basic" }
                 },
+                "manual_cases": {
+                    "type": "boolean",
+                    "description": "config-moderation-manual_cases",
+                    "x-ui": { "level": "basic" }
+                },
                 "templates_enabled": {
                     "type": "boolean",
                     "description": "config-moderation-templates_enabled",
@@ -985,6 +995,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "voice_mute_method": "discord",
             "voice_mute_role": null,
             "escalation_enabled": true,
+            "manual_cases": true,
             "templates_enabled": true,
             "remove_roles_on_mute": false,
             "restore_roles_on_mute": true,
@@ -1162,6 +1173,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .capability(Capability::KickMembers)
         .capability(Capability::BanMembers)
         .capability(Capability::ReadBans)
+        .capability(Capability::ReadAuditLog)
         .capability(Capability::TimeoutMembers)
         .capability(Capability::ManageRoles)
         .capability(Capability::ManageMessages)
@@ -1172,8 +1184,16 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .capability(Capability::Storage)
         // A privileged intent: it must be switched on for the bot in the Discord developer portal,
         // or Discord refuses the gateway connection altogether.
-        .intents(Intents::GUILD_MEMBERS)
+        // Members for joins, leaves and timeouts; moderation for the bans.
+        .intents(Intents::GUILD_MEMBERS | Intents::GUILD_MODERATION)
         .on(Subscription::new(EventKind::MemberJoined), rejoin::on_join)
+        .on(Subscription::new(EventKind::BanAdded), manual::on_change)
+        .on(Subscription::new(EventKind::BanRemoved), manual::on_change)
+        .on(Subscription::new(EventKind::MemberLeft), manual::on_change)
+        .on(
+            Subscription::new(EventKind::TimeoutChanged),
+            manual::on_change,
+        )
         .on(Subscription::new(EventKind::ConfigChanged), config_changed)
         .on(
             Subscription::new(EventKind::ChannelCreated),

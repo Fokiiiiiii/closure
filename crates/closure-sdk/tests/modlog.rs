@@ -37,6 +37,7 @@ fn log_command(name: &str) -> BoundCommand {
         let case = cx
             .cases()
             .create(NewCase {
+                source: closure_sdk::CaseSource::Command,
                 kind: CaseKind::new(&args.kind)?,
                 target: args.user,
                 moderator: cx.user().id,
@@ -81,6 +82,7 @@ fn module_without_send_messages() -> ModuleBuilder {
             let case = cx
                 .cases()
                 .create(NewCase {
+                    source: closure_sdk::CaseSource::Command,
                     kind: CaseKind::new(&args.kind)?,
                     target: args.user,
                     moderator: cx.user().id,

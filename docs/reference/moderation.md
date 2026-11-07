@@ -17,6 +17,7 @@ Warn members, note about them, and look at and revoke the cases of a server.
 - `mute_members`
 - `manage_roles`
 - `manage_channels`
+- `read_audit_log`
 - `respond_to_interactions`
 - `storage`
 - `schedule`
@@ -292,6 +293,7 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | `dm_on_action` | boolean | `true` | - | Whether the warned member gets a direct message. |
 | `escalation` | array | `[{"action":"timeout","duration":"1d","warns":3},{"action":"kick","warns":5}]` | - | What a warning brings about when a member reaches a number of active warnings. |
 | `escalation_enabled` | boolean | `true` | - | Whether a warning can bring about a punishment. Off keeps the rules. |
+| `manual_cases` | boolean | `true` | - | Record a ban, a kick or a timeout made by hand in Discord as a case, with the moderator the audit log names. |
 | `remove_roles_on_mute` | any | `false` | flag-or-roles | Which roles a role timeout or voice mute takes off the member: false, true for every role that can be taken off, or a list of role ids. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `require_reason` | boolean | `false` | - | Whether a warning needs a reason. |
@@ -324,6 +326,7 @@ Default configuration:
     }
   ],
   "escalation_enabled": true,
+  "manual_cases": true,
   "remove_roles_on_mute": false,
   "require_reason": false,
   "restore_roles_on_mute": true,

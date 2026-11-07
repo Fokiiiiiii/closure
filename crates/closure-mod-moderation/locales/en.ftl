@@ -77,6 +77,7 @@ massban-rate-limited = { $user }: Discord rate limit.
 massban-discord-failed = { $user }: Discord request failed.
 config-moderation-warn_expire_days = After how many days a warning expires.
 config-moderation-dm_on_action = Whether the warned member gets a direct message.
+config-moderation-manual_cases = Record a ban, a kick or a timeout made by hand in Discord as a case, with the moderator the audit log names.
 config-moderation-require_reason = Whether a warning needs a reason.
 config-moderation-ban_delete_days = How many days of the messages of a banned member are deleted.
 config-moderation-escalation = What a warning brings about when a member reaches a number of active warnings.

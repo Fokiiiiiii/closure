@@ -1890,6 +1890,7 @@ async fn other_module_case(
     harness
         .cases()
         .create(NewCase {
+            source: closure_sdk::CaseSource::Command,
             kind: CaseKind::new(kind).unwrap(),
             target: Id::new(user),
             moderator: Id::new(BOT),

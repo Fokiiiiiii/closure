@@ -58,7 +58,7 @@ pub mod ui;
 pub use args::{ArgError, ArgProblem, Attachment, CommandArgs, OptionType};
 pub use closure_core::action::{Action, InteractionReply, InteractionResponse, Reason};
 pub use closure_core::capability::Capability;
-pub use closure_core::cases::{Case, CaseError, CaseKind, Cases, NewCase, Revoked};
+pub use closure_core::cases::{Case, CaseError, CaseKind, CaseSource, Cases, NewCase, Revoked};
 pub use closure_core::error::{CoreError, DiscordError, ModuleError};
 pub use closure_core::event::{AttachmentInfo, Event, EventKind, InteractionRef, MessageInfo};
 pub use closure_core::event::{

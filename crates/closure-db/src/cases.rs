@@ -1,7 +1,9 @@
 //! Moderation cases (see `closure_core::cases`).
 
 use async_trait::async_trait;
-use closure_core::cases::{Case, CaseBackend, CaseError, CaseKind, MAX_CASES, NewCase, Revoked};
+use closure_core::cases::{
+    Case, CaseBackend, CaseError, CaseKind, CaseSource, MAX_CASES, NewCase, Revoked,
+};
 use closure_core::event::{GuildId, UserId};
 use closure_core::module::ModuleId;
 
@@ -13,7 +15,7 @@ macro_rules! case_columns {
     () => {
         "guild_id, number, module, kind, target, moderator, reason,
          extract(epoch FROM created_at)::bigint, extract(epoch FROM expires_at)::bigint,
-         revoked_by, extract(epoch FROM revoked_at)::bigint, revoked_reason"
+         revoked_by, extract(epoch FROM revoked_at)::bigint, revoked_reason, source"
     };
 }
 
@@ -30,6 +32,7 @@ type CaseRow = (
     Option<i64>,
     Option<i64>,
     Option<String>,
+    String,
 );
 
 /// Takes the next number of a guild. The row stays locked until the transaction ends, so two
@@ -56,6 +59,7 @@ fn case_from_row(
         revoked_by,
         revoked_at,
         revoked_reason,
+        source,
     ): CaseRow,
 ) -> Result<Case, CaseError> {
     let revoked = match (revoked_by, revoked_at) {
@@ -78,6 +82,8 @@ fn case_from_row(
         created_at,
         expires_at,
         revoked,
+        source: CaseSource::named(&source)
+            .ok_or_else(|| backend(format!("an unknown source of a case: {source}")))?,
     })
 }
 
@@ -101,8 +107,8 @@ impl CaseBackend for Db {
             return Err(CaseError::QuotaExceeded { limit: MAX_CASES });
         }
         let row: CaseRow = sqlx::query_as(concat!(
-            "INSERT INTO cases (guild_id, number, module, kind, target, moderator, reason, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8::bigint))
+            "INSERT INTO cases (guild_id, number, module, kind, target, moderator, reason, expires_at, source)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8::bigint), $9)
              RETURNING ",
             case_columns!()
         ))
@@ -114,6 +120,7 @@ impl CaseBackend for Db {
         .bind(to_db(case.moderator).map_err(backend)?)
         .bind(case.reason.as_deref())
         .bind(case.expires_at)
+        .bind(case.source.as_str())
         .fetch_one(&mut *tx)
         .await
         .map_err(backend)?;
@@ -274,6 +281,7 @@ mod tests {
 
     fn new_case(target: u64, reason: Option<&str>) -> NewCase {
         NewCase {
+            source: CaseSource::Command,
             kind: CaseKind::new("warn").unwrap(),
             target: Id::new(target),
             moderator: Id::new(9),
@@ -303,6 +311,7 @@ mod tests {
         let warn = cases(&db, "warn", 1);
         let created = warn
             .create(NewCase {
+                source: CaseSource::Command,
                 kind: CaseKind::new("timeout").unwrap(),
                 target: Id::new(5),
                 moderator: Id::new(9),
@@ -473,6 +482,7 @@ mod tests {
         db.migrate().await.unwrap();
         let warn = cases(&db, "warn", 1);
         let ban = |expires_at: Option<i64>| NewCase {
+            source: CaseSource::Command,
             kind: CaseKind::new("ban").unwrap(),
             target: Id::new(5),
             moderator: Id::new(9),
@@ -582,5 +592,32 @@ mod tests {
         );
         let in_db = cases(&db, "warn", 1);
         assert_eq!(script(&in_memory).await, script(&in_db).await);
+    }
+
+    #[sqlx::test]
+    async fn a_case_keeps_where_it_came_from(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let cases = cases(&db, "moderation", 1);
+        for (target, source) in [
+            (1, CaseSource::Command),
+            (2, CaseSource::Manual),
+            (3, CaseSource::Automod),
+            (4, CaseSource::Appeal),
+        ] {
+            let mut case = new_case(target, None);
+            case.source = source;
+            let made = cases.create(case).await.unwrap();
+            assert_eq!(made.source, source);
+            assert_eq!(
+                cases.get(made.number).await.unwrap().unwrap().source,
+                source
+            );
+        }
+        // Without a word about it, a case is a command.
+        assert_eq!(
+            cases.create(new_case(5, None)).await.unwrap().source,
+            CaseSource::Command
+        );
     }
 }
