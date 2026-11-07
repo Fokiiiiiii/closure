@@ -12,7 +12,7 @@ use closure_core::module::Module;
 use closure_core::registry::ModuleRegistry;
 use closure_i18n::missing_keys;
 use closure_mod_moderation::{builder, module};
-use closure_sdk::testing::{Click, Harness, Invocation, Reply, ReplyKind};
+use closure_sdk::testing::{Click, Harness, Invocation, Message, Reply, ReplyKind};
 use closure_sdk::{CaseKind, Event, EventKind, Level, Locale, ModuleError, NewCase};
 use serde_json::json;
 use twilight_model::channel::message::Component;
@@ -830,7 +830,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_a_timeout_at_three_warni
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "manual_cases": true, "export_channel": null, "approval_channel": null, "approval_bulk_from": 0, "approval_permanent_ban": false, "alert_on_rejoin": false, "alert_channel": null, "templates_enabled": true, "templates": {} })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "manual_cases": true, "export_channel": null, "approval_channel": null, "approval_bulk_from": 0, "approval_permanent_ban": false, "slowmode_exempt_roles": [], "alert_on_rejoin": false, "alert_channel": null, "templates_enabled": true, "templates": {} })
     );
 }
 
@@ -5728,4 +5728,88 @@ async fn refusing_an_appeal_leaves_the_punishment_and_says_who_decided() {
             .revoked
             .is_none()
     );
+}
+
+// ---- a slowmode longer than Discord's ----
+
+const SLOW_CHANNEL: u64 = 77;
+
+fn deleted_in(harness: &Harness, channel: u64) -> usize {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter(|action| {
+            matches!(action, Action::DeleteMessage { channel_id, .. } if channel_id.get() == channel)
+        })
+        .count()
+}
+
+fn long_slowmode(seconds: i64) -> Invocation {
+    by_moderator(
+        Invocation::new("longslowmode")
+            .option("seconds", CommandOptionValue::Integer(seconds))
+            .option(
+                "channel",
+                CommandOptionValue::Channel(Id::new(SLOW_CHANNEL)),
+            ),
+    )
+    .roles([ADMIN_ROLE])
+}
+
+#[tokio::test]
+async fn a_long_slowmode_keeps_discords_longest_and_removes_a_message_that_comes_too_soon() {
+    let harness = harness();
+    harness
+        .api()
+        .add_channel(Id::new(SLOW_CHANNEL), Some(Id::new(GUILD)));
+    harness.invoke(long_slowmode(86_400)).await.unwrap();
+    let native: Vec<Option<u16>> = harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::EditChannel { patch, .. } => Some(patch.slowmode_seconds),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(native, [Some(21_600)]);
+    let say = |author| Message::new(author, SLOW_CHANNEL).content("hi");
+    harness.message(say(MEMBER)).await.unwrap();
+    assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 0, "the first one stays");
+    harness.message(say(MEMBER)).await.unwrap();
+    assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 1, "too soon");
+    // Somebody else has a slowmode of their own, and another channel has none.
+    harness.message(say(FREE)).await.unwrap();
+    harness
+        .message(Message::new(MEMBER, 5).content("hi"))
+        .await
+        .unwrap();
+    assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 1);
+    assert_eq!(deleted_in(&harness, 5), 0);
+    harness.advance(Duration::from_secs(86_401));
+    harness.message(say(MEMBER)).await.unwrap();
+    assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 1, "after the time");
+}
+
+#[tokio::test]
+async fn a_long_slowmode_spares_the_exempt_roles_and_a_short_one_is_refused() {
+    let harness = harness();
+    harness
+        .api()
+        .add_channel(Id::new(SLOW_CHANNEL), Some(Id::new(GUILD)));
+    harness.set_config(json!({ "slowmode_exempt_roles": [MODERATOR_ROLE.to_string()] }));
+    let refused = harness.invoke(long_slowmode(600)).await.unwrap();
+    assert!(text(&refused).contains("/slowmode"), "{refused:?}");
+    harness.invoke(long_slowmode(86_400)).await.unwrap();
+    let staff = || Message::new(MODERATOR, SLOW_CHANNEL).roles([MODERATOR_ROLE]);
+    harness.message(staff()).await.unwrap();
+    harness.message(staff()).await.unwrap();
+    assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 0);
+    // Turned off, nothing is held back any more.
+    harness.invoke(long_slowmode(0)).await.unwrap();
+    let say = || Message::new(MEMBER, SLOW_CHANNEL).content("hi");
+    harness.message(say()).await.unwrap();
+    harness.message(say()).await.unwrap();
+    assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 0);
 }

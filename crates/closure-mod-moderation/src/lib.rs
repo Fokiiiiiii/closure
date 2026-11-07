@@ -4,6 +4,7 @@
 //! the SDK's cases, numbered per server and shared by the modules. A warning counts until it is
 //! revoked or its expiry is due, so nothing has to run later to expire one.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use closure_sdk::duration::{TimeStyle, ends_at, parse as parse_duration, timestamp};
@@ -105,6 +106,8 @@ pub(crate) struct Config {
     approval_bulk_from: u32,
     /// A ban for good needs approval.
     approval_permanent_ban: bool,
+    /// The roles a slowmode kept by the bot (longer than Discord's) does not hold back.
+    slowmode_exempt_roles: Vec<String>,
     /// Whether the staff are told when a member with cases comes back.
     alert_on_rejoin: bool,
     /// The staff channel of that alert.
@@ -177,6 +180,7 @@ impl Default for Config {
             approval_channel: None,
             approval_bulk_from: 0,
             approval_permanent_ban: false,
+            slowmode_exempt_roles: Vec::new(),
             alert_on_rejoin: false,
             alert_channel: None,
             templates_enabled: true,
@@ -1007,6 +1011,13 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                     "description": "config-moderation-approval_permanent_ban",
                     "x-ui": { "level": "basic" }
                 },
+                "slowmode_exempt_roles": {
+                    "type": "array",
+                    "maxItems": 50,
+                    "items": { "type": "string", "pattern": "^[0-9]{1,20}$" },
+                    "description": "config-moderation-slowmode_exempt_roles",
+                    "x-ui": { "level": "basic" }
+                },
                 "export_channel": {
                     "type": ["string", "null"],
                     "pattern": "^[0-9]{1,20}$",
@@ -1106,6 +1117,7 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "approval_channel": null,
             "approval_bulk_from": 0,
             "approval_permanent_ban": false,
+            "slowmode_exempt_roles": [],
             "alert_on_rejoin": false,
             "alert_channel": null,
             "templates_enabled": true,
@@ -1286,6 +1298,7 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
 
 /// The commands that act on a channel and the ones that look at, or act on, many members.
 fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
+    let long = Arc::new(channel_controls::LongState::default());
     builder
         .job(bulk::JOB, bulk::step)
         .job(
@@ -1299,6 +1312,18 @@ fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(channel_controls::slowmode),
         )
+        .command(
+            Command::<channel_controls::LongSlowmode>::new("longslowmode")
+                .requires("moderation.slowmode")
+                .cooldown(Cooldown::per_user(Duration::from_secs(2)))
+                .handler({
+                    let long = Arc::clone(&long);
+                    move |cx, args| channel_controls::long_slowmode(Arc::clone(&long), cx, args)
+                }),
+        )
+        .on(Subscription::new(EventKind::MessageCreated), {
+            move |ctx, event| channel_controls::enforce_long_slowmode(Arc::clone(&long), ctx, event)
+        })
         .command(
             Command::<channel_controls::Lock>::new("lock")
                 .requires("moderation.lock")
@@ -1352,7 +1377,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         // A privileged intent: it must be switched on for the bot in the Discord developer portal,
         // or Discord refuses the gateway connection altogether.
         // Members for joins, leaves and timeouts; moderation for the bans.
-        .intents(Intents::GUILD_MEMBERS | Intents::GUILD_MODERATION)
+        .intents(Intents::GUILD_MEMBERS | Intents::GUILD_MODERATION | Intents::GUILD_MESSAGES)
         .on(Subscription::new(EventKind::MemberJoined), rejoin::on_join)
         .on(Subscription::new(EventKind::BanAdded), manual::on_change)
         .on(Subscription::new(EventKind::BanRemoved), manual::on_change)

@@ -306,6 +306,18 @@ Set channel slowmode
 | `channel` | channel | channel | no | - | Channel to change |
 | `duration` | duration | string | no | - | Time before restoring the previous value |
 
+### `/longslowmode`
+
+Keep a slowmode longer than Discord's six hours, by removing messages that come too soon
+
+- Japanese name: `長時間スローモード`
+- Japanese description: Discord の 6 時間を超えるスローモードを、早すぎる投稿の削除で実現します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `seconds` | 秒数 | integer | yes | min 0; max 2592000 | Seconds between two messages of a member: 21601 to 2592000, or 0 to turn it off |
+| `channel` | チャンネル | channel | no | - | Channel, or the current channel |
+
 ### `/lock`
 
 Lock a channel
@@ -489,6 +501,7 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `require_reason` | boolean | `false` | - | Whether a warning needs a reason. |
 | `restore_roles_on_mute` | any | `true` | flag-or-roles | Which of the roles taken off come back when the punishment ends: the same forms as remove_roles_on_mute. true by default. |
+| `slowmode_exempt_roles` | array | `[]` | - | The roles that a slowmode kept by the bot does not hold back. |
 | `templates` | object | `{}` | - | Templates a moderator picks from when a command leaves out the reason or the duration. |
 | `templates_enabled` | boolean | `true` | - | Whether the templates are offered. Off keeps them. |
 | `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
@@ -527,6 +540,7 @@ Default configuration:
   "remove_roles_on_mute": false,
   "require_reason": false,
   "restore_roles_on_mute": true,
+  "slowmode_exempt_roles": [],
   "templates": {},
   "templates_enabled": true,
   "timeout_method": "discord",

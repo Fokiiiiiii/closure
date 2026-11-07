@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use closure_core::action::{Action, ChannelPatch, Outcome, OverwriteSpec, OverwriteTarget};
 use closure_sdk::duration::{TimeStyle, timestamp};
 use closure_sdk::{
-    Args, ChannelId, CommandArgs, CommandCx, EventContext, GuildId, JobCx, ModuleError, Reason,
-    Span, Tone, UserError,
+    Args, ChannelId, CommandArgs, CommandCx, Event, EventContext, Flow, GuildId, JobCx,
+    ModuleError, Reason, Span, Tone, UserError,
 };
 use closure_sdk::{embed, modlog};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,15 @@ pub(crate) struct Slowmode {
     channel: Option<ChannelId>,
     /// How long before restoring the previous value
     duration: Option<Span>,
+}
+
+#[derive(CommandArgs)]
+pub(crate) struct LongSlowmode {
+    /// Seconds between two messages of a member: 21601 to 2592000, or 0 to turn it off
+    #[arg(min = 0, max = 2_592_000)]
+    seconds: i64,
+    /// Channel, or the current channel
+    channel: Option<ChannelId>,
 }
 
 #[derive(CommandArgs)]
@@ -426,4 +435,146 @@ pub(crate) async fn restore_lock(cx: JobCx) -> Result<(), ModuleError> {
         .await;
     }
     Ok(())
+}
+
+/// The channels whose slowmode is longer than Discord allows, with its seconds.
+type LongChannels = HashMap<u64, i64>;
+const LONG_KEY: &str = "longslow";
+/// The longest slowmode Discord itself keeps; the bot keeps the rest.
+const DISCORD_MAX: u16 = 21600;
+
+/// What each server has set, kept in memory so a message costs no read.
+#[derive(Default)]
+pub(crate) struct LongState {
+    servers: Mutex<HashMap<GuildId, Arc<LongChannels>>>,
+}
+
+impl LongState {
+    fn held(&self, guild: GuildId) -> Option<Arc<LongChannels>> {
+        self.servers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&guild)
+            .cloned()
+    }
+
+    fn hold(&self, guild: GuildId, channels: Arc<LongChannels>) {
+        self.servers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(guild, channels);
+    }
+
+    async fn channels(&self, ctx: &EventContext) -> Result<Arc<LongChannels>, ModuleError> {
+        if let Some(held) = self.held(ctx.guild_id) {
+            return Ok(held);
+        }
+        let loaded: LongChannels = ctx
+            .store()
+            .get(LONG_KEY)
+            .await
+            .map_err(failure)?
+            .unwrap_or_default();
+        let loaded = Arc::new(loaded);
+        self.hold(ctx.guild_id, Arc::clone(&loaded));
+        Ok(loaded)
+    }
+}
+
+/// Sets a slowmode longer than Discord's: Discord keeps its longest, and the bot removes a message
+/// that comes too soon after the member's last one.
+pub(crate) async fn long_slowmode(
+    state: Arc<LongState>,
+    cx: CommandCx,
+    args: LongSlowmode,
+) -> Result<(), UserError> {
+    if (1..=i64::from(DISCORD_MAX)).contains(&args.seconds) {
+        return Err(UserError::message("longslow-range"));
+    }
+    let id = args.channel.unwrap_or(cx.invocation().channel_id);
+    cx.defer(true).await?;
+    let name = display_name(&cx).await;
+    let gate = gate(cx.guild_id());
+    let _guard = gate.lock().await;
+    let mut channels = (*state.channels(cx.ctx()).await?).clone();
+    let was_kept = if args.seconds == 0 {
+        channels.remove(&id.get()).is_some()
+    } else {
+        channels.insert(id.get(), args.seconds);
+        true
+    };
+    cx.store().set(LONG_KEY, &channels).await?;
+    state.hold(cx.guild_id(), Arc::new(channels));
+    if was_kept {
+        let native = if args.seconds == 0 { 0 } else { DISCORD_MAX };
+        edit(cx.ctx(), id, native, audit_reason(&cx, &name, None)).await?;
+    }
+    log(
+        cx.ctx(),
+        &actor(&cx, &name),
+        id,
+        &cx.ctx().t_args(
+            "channel-log-slowmode",
+            &Args::new().with("seconds", args.seconds),
+        ),
+        None,
+    )
+    .await;
+    cx.say_t(
+        Tone::Success,
+        "longslow-done",
+        &Args::new()
+            .with("channel", id.get().to_string())
+            .with("seconds", args.seconds),
+    )
+    .await
+}
+
+/// A message in a channel with a long slowmode: removed when the member's last one is too near.
+pub(crate) async fn enforce_long_slowmode(
+    state: Arc<LongState>,
+    ctx: EventContext,
+    event: Event,
+) -> Result<Flow, ModuleError> {
+    let Event::MessageCreated(message) = &event else {
+        return Ok(Flow::Continue);
+    };
+    if message.author.bot {
+        return Ok(Flow::Continue);
+    }
+    let channels = state.channels(&ctx).await?;
+    let Some(&seconds) = channels.get(&message.channel_id.get()) else {
+        return Ok(Flow::Continue);
+    };
+    let config: crate::Config = ctx.parse_config()?;
+    if message.author_roles.iter().any(|role| {
+        config
+            .slowmode_exempt_roles
+            .contains(&role.get().to_string())
+    }) {
+        return Ok(Flow::Continue);
+    }
+    let name = format!("longslow-{}", message.channel_id.get());
+    let now = ctx.now();
+    let last = ctx
+        .store()
+        .score(&name, message.author.id)
+        .await
+        .map_err(failure)?;
+    if last > 0 && now - last < seconds {
+        let reason = Reason::truncated(&ctx.t_args("longslow-reason", &Args::new()));
+        if let Err(error) = ctx
+            .api
+            .delete_message(message.channel_id, message.id, reason)
+            .await
+        {
+            tracing::debug!(?error, guild = %ctx.guild_id, "could not remove a message sent too soon");
+        }
+    } else {
+        ctx.store()
+            .score_put(&name, message.author.id, now)
+            .await
+            .map_err(failure)?;
+    }
+    Ok(Flow::Continue)
 }
