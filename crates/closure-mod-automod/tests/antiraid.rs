@@ -1031,7 +1031,7 @@ async fn a_join_of_a_member_who_is_still_recorded_gives_the_role_again() {
 }
 
 #[tokio::test]
-async fn the_quarantine_refuses_a_join_past_the_capacity_of_its_chunks() {
+async fn a_quarantine_of_many_thousands_still_takes_a_join_a_leave_and_a_release() {
     let harness = raid(json!({
         "levels": LEVELS,
         "effects": { "high": { "quarantine": { "role": ROLE.to_string() } } }
@@ -1040,23 +1040,98 @@ async fn the_quarantine_refuses_a_join_past_the_capacity_of_its_chunks() {
         .api()
         .set_roles(Id::new(GUILD), vec![role(ROLE, "Quarantine")]);
     set(&harness, "high").await;
-    // 17 chunks of 294 members is the whole capacity: no chunk has room left.
-    for index in 0..17_u64 {
-        let members: Vec<Value> = (0..294_u64)
-            .map(|n| json!({ "user": 1_000_000 + index * 1_000 + n, "role": ROLE, "marker": 0 }))
-            .collect();
+    join(&harness, MEMBER).await;
+    // Far past what the first format held (4,998): the members are rows of a set.
+    for n in 0..6_000_u64 {
         harness
             .store()
-            .set(&format!("antiraid:quarantined:{index}"), &members)
+            .set_add("antiraid-held-0", 1_000_000 + n)
             .await
             .unwrap();
     }
-
+    join(&harness, OTHER_MEMBER).await;
+    assert!(role_changes(&harness).contains(&(true, OTHER_MEMBER, ROLE)));
+    leave(&harness, OTHER_MEMBER).await;
     assert!(
-        harness.emit(joining(MEMBER)).await.is_err(),
-        "a join past the capacity is refused"
+        !harness
+            .store()
+            .set_has("antiraid-held-0", OTHER_MEMBER)
+            .await
+            .unwrap()
     );
-    assert!(!role_changes(&harness).contains(&(true, MEMBER, ROLE)));
+    harness
+        .invoke(sub("antiraid release").option("user", CommandOptionValue::User(Id::new(MEMBER))))
+        .await
+        .unwrap();
+    assert!(role_changes(&harness).contains(&(false, MEMBER, ROLE)));
+    assert_eq!(
+        harness.store().set_count("antiraid-held-0").await.unwrap(),
+        6_000
+    );
+}
+
+#[tokio::test]
+async fn release_all_goes_through_every_member_of_a_big_quarantine_and_keeps_those_that_fail() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": { "role": ROLE.to_string() } } }
+    }));
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(ROLE, "Quarantine")]);
+    set(&harness, "high").await;
+    join(&harness, MEMBER).await;
+    for n in 0..250_u64 {
+        harness
+            .store()
+            .set_add("antiraid-held-0", 2_000_000 + n)
+            .await
+            .unwrap();
+    }
+    harness
+        .invoke(sub("antiraid release").option("all", CommandOptionValue::Boolean(true)))
+        .await
+        .unwrap();
+    let released = role_changes(&harness)
+        .iter()
+        .filter(|(added, _, role)| !added && *role == ROLE)
+        .count();
+    assert_eq!(released, 251);
+    assert_eq!(
+        harness.store().set_count("antiraid-held-0").await.unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_quarantine_written_in_the_first_format_is_moved_and_released() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": { "role": ROLE.to_string() } } }
+    }));
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(ROLE, "Quarantine")]);
+    set(&harness, "high").await;
+    let members = vec![json!({ "user": MEMBER, "role": ROLE, "marker": 0 })];
+    harness
+        .store()
+        .set("antiraid:quarantined:0", &members)
+        .await
+        .unwrap();
+    harness
+        .invoke(sub("antiraid release").option("user", CommandOptionValue::User(Id::new(MEMBER))))
+        .await
+        .unwrap();
+    assert!(role_changes(&harness).contains(&(false, MEMBER, ROLE)));
+    assert!(
+        harness
+            .store()
+            .get::<Vec<Value>>("antiraid:quarantined:0")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

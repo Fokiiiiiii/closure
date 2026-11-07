@@ -38,11 +38,9 @@ const MAX_SLOWMODE_SECONDS: u16 = 21_600;
 const MAX_EFFECT_CHANNELS: usize = 100;
 /// The text channels a slowmode with no channel list reaches; the rest of the guild is left alone.
 const MAX_CHANNELS: usize = 200;
-/// The quarantined members are kept in chunks, each well inside one store value. The capacity is
-/// `CHUNKS * CHUNK_MEMBERS` (4,998 members): a chunk takes a member only while it has room, so no
-/// count of all the members is kept.
-const CHUNK_MEMBERS: usize = 294;
-const CHUNKS: usize = 17;
+/// The first format of the ledger kept the members in chunks of a store value; they are read once
+/// to move them into sets.
+const LEGACY_CHUNKS: usize = 17;
 /// How often a write that lost a race to another write is tried again.
 const CAS_TRIES: usize = 5;
 /// The job that returns a timed level to the calm one.
@@ -1188,83 +1186,123 @@ async fn chunk(store: &Store, index: usize) -> Result<(Vec<Held>, Expect), Modul
     }
 }
 
-/// Every quarantined member.
-pub async fn held_all(store: &Store) -> Result<Vec<Held>, ModuleError> {
-    let mut all = Vec::new();
-    for index in 0..CHUNKS {
-        all.extend(chunk(store, index).await?.0);
+/// What a pair of roles (the quarantine role and the marker) holds is a set of members of the
+/// store, so a quarantine of any size costs a row for each member, and joining, leaving and looking
+/// a member up cost the same however many are held. The pairs are a short list: a pair is added
+/// when a level names new roles, and its place in the list is the name of its set.
+const PAIRS_KEY: &str = "antiraid:pairs";
+const MIGRATED_KEY: &str = "antiraid:ledger";
+/// The most pairs of roles the levels may use over the life of the server.
+const MAX_PAIRS: usize = 64;
+/// How many members one step of a release takes from a set.
+const RELEASE_BATCH: usize = 100;
+
+fn set_of(index: usize) -> String {
+    format!("antiraid-held-{index}")
+}
+
+async fn pairs(store: &Store) -> Result<(Vec<[u64; 2]>, Expect), ModuleError> {
+    match store
+        .entry(PAIRS_KEY)
+        .await
+        .map_err(|error| store_error(&error))?
+    {
+        Some(entry) => Ok((
+            serde_json::from_value(entry.value).map_err(|error| to_error(&error))?,
+            Expect::Revision(entry.revision),
+        )),
+        None => Ok((Vec::new(), Expect::Missing)),
     }
-    Ok(all)
 }
 
-async fn held_for(store: &Store, user: u64) -> Result<Vec<Held>, ModuleError> {
-    Ok(held_all(store)
-        .await?
-        .into_iter()
-        .filter(|held| held.user == user)
-        .collect())
-}
-
-/// Records a quarantined member in the first chunk with room. Each write is checked against the
-/// revision it was read at, so two joins do not lose each other. A chunk that keeps changing under
-/// the write is a conflict to try again, not a full quarantine.
-async fn hold(store: &Store, held: Held) -> Result<(), ModuleError> {
-    let mut contended = false;
-    for index in 0..CHUNKS {
-        for _ in 0..CAS_TRIES {
-            let (mut members, expect) = chunk(store, index).await?;
-            if members.len() >= CHUNK_MEMBERS {
-                break;
-            }
-            members.push(held);
-            match store
-                .replace(&chunk_key(index), &members, expect, None)
-                .await
-            {
-                Ok(_) => return Ok(()),
-                Err(StorageError::Conflict) => contended = true,
-                Err(error) => return Err(store_error(&error)),
-            }
+/// The place of a pair of roles in the list, added when it is new. The list is written against the
+/// revision it was read at, so two joins with a new pair do not lose each other.
+async fn pair_index(store: &Store, role: u64, marker: u64) -> Result<usize, ModuleError> {
+    for _ in 0..CAS_TRIES {
+        let (mut all, expect) = pairs(store).await?;
+        if let Some(index) = all.iter().position(|pair| *pair == [role, marker]) {
+            return Ok(index);
+        }
+        if all.len() >= MAX_PAIRS {
+            return Err(full());
+        }
+        all.push([role, marker]);
+        match store.replace(PAIRS_KEY, &all, expect, None).await {
+            Ok(_) => return Ok(all.len() - 1),
+            Err(StorageError::Conflict) => {}
+            Err(error) => return Err(store_error(&error)),
         }
     }
-    Err(if contended { busy() } else { full() })
+    Err(busy())
+}
+
+/// Moves a ledger written as chunks (the first format) into the sets, once.
+async fn migrate(store: &Store) -> Result<(), ModuleError> {
+    if store
+        .get::<bool>(MIGRATED_KEY)
+        .await
+        .map_err(|error| store_error(&error))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    for index in 0..LEGACY_CHUNKS {
+        let (members, _) = chunk(store, index).await?;
+        for held in &members {
+            hold(store, *held).await?;
+        }
+        if !members.is_empty() {
+            store
+                .delete(&chunk_key(index))
+                .await
+                .map_err(|error| store_error(&error))?;
+        }
+    }
+    // Only a shortcut for the next call: a full store that cannot take it just reads the chunks again.
+    let _ = store.set(MIGRATED_KEY, &true).await;
+    Ok(())
+}
+
+/// The pairs a member is held under.
+async fn held_for(store: &Store, user: u64) -> Result<Vec<Held>, ModuleError> {
+    let mut found = Vec::new();
+    for (index, [role, marker]) in pairs(store).await?.0.into_iter().enumerate() {
+        if store
+            .set_has(&set_of(index), user)
+            .await
+            .map_err(|error| store_error(&error))?
+        {
+            found.push(Held { user, role, marker });
+        }
+    }
+    Ok(found)
+}
+
+/// Records a quarantined member under the pair of roles it was given.
+async fn hold(store: &Store, held: Held) -> Result<(), ModuleError> {
+    let index = pair_index(store, held.role, held.marker).await?;
+    store
+        .set_add(&set_of(index), held.user)
+        .await
+        .map(drop)
+        .map_err(|error| store_error(&error))
 }
 
 fn full() -> ModuleError {
-    ModuleError::other("the antiraid quarantine is full")
+    ModuleError::other("the levels have named too many pairs of quarantine roles")
 }
 
 fn busy() -> ModuleError {
     ModuleError::other("the antiraid quarantine changed at the same time, try again")
 }
 
-/// Forgets a member, wherever it is recorded. A chunk that keeps changing under the write is an error
-/// to try again: the member may still be recorded, so it is not reported as forgotten.
+/// Forgets a member, wherever it is recorded.
 async fn forget(store: &Store, user: u64) -> Result<(), ModuleError> {
-    for index in 0..CHUNKS {
-        let mut settled = false;
-        for _ in 0..CAS_TRIES {
-            let (members, expect) = chunk(store, index).await?;
-            if !members.iter().any(|held| held.user == user) {
-                settled = true;
-                break;
-            }
-            let rest: Vec<Held> = members
-                .into_iter()
-                .filter(|held| held.user != user)
-                .collect();
-            match store.replace(&chunk_key(index), &rest, expect, None).await {
-                Ok(_) => {
-                    settled = true;
-                    break;
-                }
-                Err(StorageError::Conflict) => {}
-                Err(error) => return Err(store_error(&error)),
-            }
-        }
-        if !settled {
-            return Err(busy());
-        }
+    for index in 0..pairs(store).await?.0.len() {
+        store
+            .set_remove(&set_of(index), user)
+            .await
+            .map_err(|error| store_error(&error))?;
     }
     Ok(())
 }
@@ -1283,6 +1321,7 @@ async fn quarantine_join(
     // would leave a role that no record names.
     let _turn = member_turn(ctx, user).await;
     let store = ctx.store();
+    migrate(store).await?;
     let (current, _) = level(store, cfg.calm()).await?;
     let Some(quarantine) = cfg
         .effects
@@ -1335,6 +1374,29 @@ async fn give(
         .map_err(ModuleError::from)
 }
 
+/// Takes the roles of one pair off a member; whether both are off.
+async fn take_off(
+    ctx: &EventContext,
+    memory: &Memory,
+    user: UserId,
+    [role, marker]: [u64; 2],
+    tally: &mut Tally,
+) -> bool {
+    let mut all_taken = true;
+    for role in [role, marker].into_iter().filter_map(RoleId::new_checked) {
+        memory.ignore_role(ctx.guild_id, user, role, ctx.now());
+        let reason = Reason::truncated(&text(ctx, "antiraid-reason", &Args::new()));
+        match ctx.api.remove_role(ctx.guild_id, user, role, reason).await {
+            Ok(()) | Err(DiscordError::NotFound) => {}
+            Err(_) => {
+                all_taken = false;
+                tally.failed += 1;
+            }
+        }
+    }
+    all_taken
+}
+
 /// Takes the quarantine role and the marker role off a member, and forgets it once both are off.
 pub async fn release(
     ctx: &EventContext,
@@ -1343,49 +1405,59 @@ pub async fn release(
 ) -> Result<Tally, ModuleError> {
     let _turn = member_turn(ctx, user).await;
     let store = ctx.store();
+    migrate(store).await?;
     let mut tally = Tally::default();
-    let held = held_for(store, user.get()).await?;
-    if held.is_empty() {
-        return Ok(tally);
-    }
-    let mut all_taken = true;
-    for record in held {
-        for role in [record.role, record.marker]
-            .into_iter()
-            .filter_map(RoleId::new_checked)
+    let all = pairs(store).await?.0;
+    for (index, pair) in all.into_iter().enumerate() {
+        if !store
+            .set_has(&set_of(index), user.get())
+            .await
+            .map_err(|error| store_error(&error))?
         {
-            memory.ignore_role(ctx.guild_id, user, role, ctx.now());
-            let reason = Reason::truncated(&text(ctx, "antiraid-reason", &Args::new()));
-            match ctx.api.remove_role(ctx.guild_id, user, role, reason).await {
-                Ok(()) | Err(DiscordError::NotFound) => {}
-                Err(_) => {
-                    all_taken = false;
-                    tally.failed += 1;
-                }
-            }
+            continue;
         }
-    }
-    if all_taken {
-        forget(store, user.get()).await?;
-        tally.changed += 1;
+        if take_off(ctx, memory, user, pair, &mut tally).await {
+            store
+                .set_remove(&set_of(index), user.get())
+                .await
+                .map_err(|error| store_error(&error))?;
+            tally.changed += 1;
+        }
     }
     Ok(tally)
 }
 
-/// Releases every quarantined member.
-// shortcut: each member reads every chunk again, so N members cost N × CHUNKS store reads. An index from
-// member to chunk would avoid it but changes the stored format; upgrade it when a quarantine holds thousands.
+/// Releases every quarantined member, a batch of each set at a time. A member that could not be
+/// released is put back in its set, and the others go on.
 pub async fn release_all(ctx: &EventContext, memory: &Memory) -> Result<Tally, ModuleError> {
-    let users: BTreeSet<u64> = held_all(ctx.store())
-        .await?
-        .iter()
-        .map(|held| held.user)
-        .collect();
+    let store = ctx.store();
+    migrate(store).await?;
     let mut total = Tally::default();
-    for user in users.into_iter().filter_map(UserId::new_checked) {
-        let tally = release(ctx, memory, user).await?;
-        total.changed += tally.changed;
-        total.failed += tally.failed;
+    for (index, pair) in pairs(store).await?.0.into_iter().enumerate() {
+        let mut failed = Vec::new();
+        loop {
+            let batch = store
+                .set_take(&set_of(index), RELEASE_BATCH)
+                .await
+                .map_err(|error| store_error(&error))?;
+            if batch.is_empty() {
+                break;
+            }
+            for user in batch.into_iter().filter_map(UserId::new_checked) {
+                let _turn = member_turn(ctx, user).await;
+                if take_off(ctx, memory, user, pair, &mut total).await {
+                    total.changed += 1;
+                } else {
+                    failed.push(user.get());
+                }
+            }
+        }
+        for user in failed {
+            store
+                .set_add(&set_of(index), user)
+                .await
+                .map_err(|error| store_error(&error))?;
+        }
     }
     Ok(total)
 }
@@ -1405,14 +1477,25 @@ pub async fn member_event(
         Event::MemberJoined(info) if !info.user.bot && !dry_run => {
             quarantine_join(ctx, memory, cfg, info.user.id).await
         }
-        Event::MemberLeft { user, .. } => forget(ctx.store(), user.id.get()).await,
+        Event::MemberLeft { user, .. } => {
+            migrate(ctx.store()).await?;
+            forget(ctx.store(), user.id.get()).await
+        }
         _ => Ok(()),
     }
 }
 
 /// How many members are quarantined now.
 pub async fn quarantined_count(store: &Store) -> Result<usize, ModuleError> {
-    Ok(held_all(store).await?.len())
+    migrate(store).await?;
+    let mut total = 0;
+    for index in 0..pairs(store).await?.0.len() {
+        total += store
+            .set_count(&set_of(index))
+            .await
+            .map_err(|error| store_error(&error))?;
+    }
+    Ok(usize::try_from(total).unwrap_or(usize::MAX))
 }
 
 fn count(value: usize) -> i64 {
