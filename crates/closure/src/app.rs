@@ -672,11 +672,14 @@ async fn serve(
 
 const HAND_OVER_ATTEMPTS: usize = 4;
 const HAND_OVER_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// How long a change that was refused every time waits before it is queued again.
+const HAND_OVER_TRY_LATER: Duration = Duration::from_secs(2);
 
 /// Hands the modules of a guild that its configuration changed, until shutdown. The event is
 /// dispatched like any other, so it reaches only the modules that are enabled in the guild.
 /// A refused hand-over (the dispatcher is full or closing) is retried a few times; after that the
-/// change is dropped with a warning, so a busy dispatcher never holds up the reload.
+/// change is queued again a little later, so a busy dispatcher never holds up the reload and no
+/// change is lost.
 async fn forward_config_changes(
     changes: Arc<ConfigChanges>,
     mut hand_over: impl FnMut(GuildId) -> bool + Send + 'static,
@@ -692,7 +695,14 @@ async fn forward_config_changes(
                 break;
             }
             if attempt == HAND_OVER_ATTEMPTS {
-                tracing::warn!(%guild_id, "the dispatcher refused a configuration change; the modules were not told");
+                // Not dropped: it is put in the queue again after a while, behind the others, so
+                // the modules are told in the end.
+                tracing::warn!(%guild_id, "the dispatcher refused a configuration change; it is tried again later");
+                let again = Arc::clone(&changes);
+                tokio::spawn(async move {
+                    tokio::time::sleep(HAND_OVER_TRY_LATER).await;
+                    again.push(guild_id);
+                });
                 break;
             }
             tokio::select! {
