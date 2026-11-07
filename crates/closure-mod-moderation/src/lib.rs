@@ -98,6 +98,12 @@ pub(crate) struct Config {
     manual_cases: bool,
     /// The staff channel the case exports (CSV files) are sent to.
     export_channel: Option<String>,
+    /// The channel where what needs a second moderator is put for approval.
+    approval_channel: Option<String>,
+    /// A bulk operation of this many members or more needs approval; 0 asks for none.
+    approval_bulk_from: u32,
+    /// A ban for good needs approval.
+    approval_permanent_ban: bool,
     /// Whether the staff are told when a member with cases comes back.
     alert_on_rejoin: bool,
     /// The staff channel of that alert.
@@ -110,6 +116,15 @@ pub(crate) struct Config {
 }
 
 impl Config {
+    /// The channel where requests for approval are put.
+    fn approval_target(&self) -> Option<closure_sdk::ChannelId> {
+        self.approval_channel
+            .as_deref()
+            .and_then(|text| text.parse::<u64>().ok())
+            .filter(|id| *id > 0)
+            .map(closure_sdk::ChannelId::new)
+    }
+
     /// The channel the exports of cases go to.
     fn export_target(&self) -> Option<closure_sdk::ChannelId> {
         self.export_channel
@@ -158,6 +173,9 @@ impl Default for Config {
             restore_roles_on_mute: RoleSetting::Flag(true),
             manual_cases: true,
             export_channel: None,
+            approval_channel: None,
+            approval_bulk_from: 0,
+            approval_permanent_ban: false,
             alert_on_rejoin: false,
             alert_channel: None,
             templates_enabled: true,
@@ -867,6 +885,24 @@ async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
         args.delete_days
             .unwrap_or(i64::from(config.ban_delete_days)),
     )?;
+    // A ban for good may need a second moderator, unless the one who asks may approve it.
+    if config.approval_permanent_ban
+        && args.duration.is_none()
+        && cx.require("moderation.approve").await.is_err()
+    {
+        let Some(reason) = reason_of(args.reason.clone()) else {
+            return Err(UserError::message("bulk-approval-needs-reason"));
+        };
+        return bulk::request_ban(
+            &cx,
+            &config,
+            args.user,
+            reason,
+            args.delete_days
+                .unwrap_or(i64::from(config.ban_delete_days)),
+        )
+        .await;
+    }
     let punishment = templates::Punishment::new(
         templates::Kind::Ban,
         args.user,
@@ -950,6 +986,24 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
                 "manual_cases": {
                     "type": "boolean",
                     "description": "config-moderation-manual_cases",
+                    "x-ui": { "level": "basic" }
+                },
+                "approval_channel": {
+                    "type": ["string", "null"],
+                    "pattern": "^[0-9]{1,20}$",
+                    "description": "config-moderation-approval_channel",
+                    "x-ui": { "level": "basic", "widget": "channel" }
+                },
+                "approval_bulk_from": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 300,
+                    "description": "config-moderation-approval_bulk_from",
+                    "x-ui": { "level": "basic" }
+                },
+                "approval_permanent_ban": {
+                    "type": "boolean",
+                    "description": "config-moderation-approval_permanent_ban",
                     "x-ui": { "level": "basic" }
                 },
                 "export_channel": {
@@ -1048,6 +1102,9 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
             "escalation_enabled": true,
             "manual_cases": true,
             "export_channel": null,
+            "approval_channel": null,
+            "approval_bulk_from": 0,
+            "approval_permanent_ban": false,
             "alert_on_rejoin": false,
             "alert_channel": null,
             "templates_enabled": true,
@@ -1159,6 +1216,11 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
             "moderation.deletecase",
             Level::ADMIN,
             "permission-moderation-deletecase",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.approve",
+            Level::ADMIN,
+            "permission-moderation-approve",
         )?)
         .permission(PermissionSpec::new(
             "moderation.export",

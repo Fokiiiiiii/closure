@@ -1,3 +1,4 @@
+
 module-description = メンバーに警告し、メモを残し、サーバーのケースを確認・取り消しします。
 command-slowmode = slowmode
     .description = チャンネルの低速モードを設定
@@ -424,3 +425,19 @@ bulk-header = 一括処罰 #{ $number }: { $action } — { $state }
 bulk-counts = { $total } 人: 完了 { $done }、待機 { $waiting }、対象外 { $skipped }、失敗 { $failed }。
 bulk-estimate = 約 { $minutes } 分かかります。実行を押すまで何も行いません。
 bulk-problem = ・{ $user }: { $why }
+bulk-approval-target = 対象: { $user }
+bulk-approval-needs-reason = 承認が必要な無期限 BAN には、理由が必要です。
+bulk-state-awaiting = 承認待ち
+bulk-approval-asked = { $user } が実行を求めています。理由: { $reason }
+bulk-approval-expired = この依頼は 1 日以上前のため失効しました。もう一度始めてください。
+bulk-approval-no-channel = 承認用のチャンネルが未設定です。先に approval_channel を設定してください。
+bulk-approve = 承認
+bulk-deny = 却下
+bulk-approve-own = 自分が求めた操作は、自分では承認できません。
+bulk-approved-by = 操作 #{ $number } は { $user } が承認し、開始します。
+bulk-denied-by = 操作 #{ $number } は { $user } が却下しました。何も実行しません。
+bulk-awaiting-approval = 操作 #{ $number } は、別のモデレーターの承認を待っています。
+config-moderation-approval_channel = 承認の依頼を送るスタッフチャンネル。
+config-moderation-approval_bulk_from = この人数以上の一括処罰は、別のモデレーターの承認が必要です（0 で無効）。
+config-moderation-approval_permanent_ban = 承認の権限がない人による無期限 BAN は、別のモデレーターの承認が必要です。
+permission-moderation-approve = 別のモデレーターが求めた操作を承認する

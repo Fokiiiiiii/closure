@@ -1,3 +1,4 @@
+
 module-description = Warn members, note about them, and look at and revoke the cases of a server.
 command-slowmode = slowmode
     .description = Set channel slowmode
@@ -433,3 +434,19 @@ bulk-header = Bulk operation #{ $number }: { $action } — { $state }
 bulk-counts = { $total } members: { $done } done, { $waiting } waiting, { $skipped } left out, { $failed } failed.
 bulk-estimate = About { $minutes } minutes. Nothing is done until you press Run.
 bulk-problem = · { $user }: { $why }
+bulk-approval-target = The member: { $user }
+bulk-approval-needs-reason = A ban for good that needs approval needs a reason.
+bulk-state-awaiting = waiting for approval
+bulk-approval-asked = { $user } asks to do this. Reason: { $reason }
+bulk-approval-expired = This request is older than a day and has lapsed. Start it again.
+bulk-approval-no-channel = There is no channel for approvals. Set approval_channel first.
+bulk-approve = Approve
+bulk-deny = Deny
+bulk-approve-own = You cannot approve what you asked for yourself.
+bulk-approved-by = Operation #{ $number } is approved by { $user } and starts.
+bulk-denied-by = Operation #{ $number } is denied by { $user }. Nothing is done.
+bulk-awaiting-approval = Operation #{ $number } waits for approval from another moderator.
+config-moderation-approval_channel = The staff channel where requests for approval are posted.
+config-moderation-approval_bulk_from = A bulk operation of this many members or more needs another moderator to approve it (0 turns this off).
+config-moderation-approval_permanent_ban = A ban for good by someone who may not approve needs another moderator to approve it.
+permission-moderation-approve = Approve what another moderator asked for

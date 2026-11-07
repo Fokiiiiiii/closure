@@ -38,6 +38,7 @@ Warn members, note about them, and look at and revoke the cases of a server.
 | `moderation.addcase` | 50 | Record and change cases by hand |
 | `moderation.hidecase` | 75 | Hide cases from the lists |
 | `moderation.deletecase` | 75 | Delete cases for good |
+| `moderation.approve` | 75 | Approve what another moderator asked for |
 | `moderation.export` | 75 | Export cases as a file |
 | `moderation.timeout` | 50 | Time members out and lift timeouts |
 | `moderation.kick` | 50 | Kick members |
@@ -460,6 +461,9 @@ Set under `modules.moderation.config` in a server's configuration; see [configur
 |---|---|---|---|---|
 | `alert_channel` | string or null | `null` | channel | The staff channel of the alert on a rejoin. |
 | `alert_on_rejoin` | boolean | `false` | - | Tell the staff channel when a member who has cases comes back to the server. |
+| `approval_bulk_from` | integer | `0` | - | A bulk operation of this many members or more needs another moderator to approve it (0 turns this off). |
+| `approval_channel` | string or null | `null` | channel | The staff channel where requests for approval are posted. |
+| `approval_permanent_ban` | boolean | `false` | - | A ban for good by someone who may not approve needs another moderator to approve it. |
 | `ban_delete_days` | integer | `0` | - | How many days of the messages of a banned member are deleted. |
 | `dm_messages` | object | `{}` | - | Custom direct-message templates by punishment kind. |
 | `dm_on_action` | boolean | `true` | - | Whether the warned member gets a direct message. |
@@ -486,6 +490,9 @@ Default configuration:
 {
   "alert_channel": null,
   "alert_on_rejoin": false,
+  "approval_bulk_from": 0,
+  "approval_channel": null,
+  "approval_permanent_ban": false,
   "ban_delete_days": 0,
   "dm_messages": {},
   "dm_on_action": true,

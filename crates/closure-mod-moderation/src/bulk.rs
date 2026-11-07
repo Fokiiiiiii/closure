@@ -86,6 +86,8 @@ impl What {
 enum State {
     /// Shown, not started.
     Preview,
+    /// Asked for, and waiting for a second moderator to approve it.
+    Awaiting,
     Running,
     Cancelled,
     Done,
@@ -95,6 +97,7 @@ impl State {
     fn key(self) -> &'static str {
         match self {
             Self::Preview => "bulk-state-preview",
+            Self::Awaiting => "bulk-state-awaiting",
             Self::Running => "bulk-state-running",
             Self::Cancelled => "bulk-state-cancelled",
             Self::Done => "bulk-state-done",
@@ -128,6 +131,9 @@ struct Operation {
     skipped: u32,
     failed: u32,
     problems: Vec<Problem>,
+    /// When it was asked for (unix seconds): an approval is not good for ever.
+    #[serde(default)]
+    created: i64,
 }
 
 fn key(id: i64) -> String {
@@ -300,6 +306,7 @@ pub(crate) async fn start(cx: CommandCx, args: Start) -> Result<(), UserError> {
         skipped: 0,
         failed: 0,
         problems: Vec::new(),
+        created: cx.now(),
     };
     // The first members are checked now, so the moderator sees who cannot be done; the others
     // are checked as their turn comes.
@@ -421,21 +428,65 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
     let Some(mut operation) = load(ctx, id).await.map_err(|e| user_error(&e))? else {
         return Err(UserError::message("bulk-not-found"));
     };
-    // The one who started it is who may press: the checks are theirs (the button says so too).
-    if operation.by != cx.user().id.get() {
+    // The one who started it is who may press Run, Cancel and Retry: the checks are theirs (the
+    // button says so too). Approving and denying are for somebody else.
+    let approving = matches!(action.as_str(), "approve" | "deny");
+    if !approving && operation.by != cx.user().id.get() {
         return Err(UserError::message("bulk-not-yours"));
     }
     match (action.as_str(), operation.state) {
         ("run", State::Preview) => {
             // The permission is asked again at the moment of the press.
             cx.require(operation.what.permission()).await?;
+            let config: Config = cx.config()?;
+            if needs_approval(&cx, &config, &operation).await {
+                return ask_for_approval(&cx, &config, id, &mut operation).await;
+            }
             operation.state = State::Running;
             save(ctx, id, &operation)
                 .await
                 .map_err(|e| user_error(&e))?;
             schedule(&cx, id, Duration::ZERO).await?;
         }
-        ("cancel", State::Preview | State::Running) => {
+        ("approve" | "deny", State::Awaiting) => {
+            cx.require("moderation.approve").await?;
+            if operation.by == cx.user().id.get() {
+                return Err(UserError::message("bulk-approve-own"));
+            }
+            if cx.now() - operation.created > APPROVAL_VALID.as_secs().cast_signed() {
+                operation.state = State::Cancelled;
+                save(ctx, id, &operation)
+                    .await
+                    .map_err(|e| user_error(&e))?;
+                return Err(UserError::message("bulk-approval-expired"));
+            }
+            let approved = action == "approve";
+            operation.state = if approved {
+                State::Running
+            } else {
+                State::Cancelled
+            };
+            save(ctx, id, &operation)
+                .await
+                .map_err(|e| user_error(&e))?;
+            if approved {
+                // What it does is checked against the one who asked: their roles, then.
+                schedule(&cx, id, Duration::ZERO).await?;
+            }
+            return cx
+                .reply_private_t(
+                    if approved {
+                        "bulk-approved-by"
+                    } else {
+                        "bulk-denied-by"
+                    },
+                    &Args::new()
+                        .with("number", id)
+                        .with("user", cx.user().name.clone()),
+                )
+                .await;
+        }
+        ("cancel", State::Preview | State::Awaiting | State::Running) => {
             operation.state = State::Cancelled;
             save(ctx, id, &operation)
                 .await
@@ -520,7 +571,10 @@ pub(crate) async fn cancel(cx: CommandCx, args: OfOperation) -> Result<(), UserE
     let Some(mut operation) = load(ctx, args.number).await.map_err(|e| user_error(&e))? else {
         return Err(UserError::message("bulk-not-found"));
     };
-    if !matches!(operation.state, State::Preview | State::Running) {
+    if !matches!(
+        operation.state,
+        State::Preview | State::Awaiting | State::Running
+    ) {
         return Err(UserError::message("bulk-wrong-state"));
     }
     operation.state = State::Cancelled;
@@ -702,4 +756,178 @@ async fn announce(ctx: &EventContext, id: i64, operation: &Operation) -> Result<
         tracing::debug!(?error, "the result of a bulk operation was not posted");
     }
     Ok(())
+}
+
+/// How long an approval can be given after it was asked for.
+const APPROVAL_VALID: Duration = Duration::from_hours(24);
+
+/// Whether this operation waits for a second moderator: it is big enough, or it is a ban for good,
+/// and the one who asked cannot approve it themselves.
+async fn needs_approval(cx: &ComponentCx, config: &Config, operation: &Operation) -> bool {
+    let big = config.approval_bulk_from > 0 && operation.total >= config.approval_bulk_from;
+    let for_good =
+        config.approval_permanent_ban && operation.what == What::Ban && operation.seconds.is_none();
+    if !(big || for_good) {
+        return false;
+    }
+    // Who may approve may do it without asking another.
+    cx.require("moderation.approve").await.is_err()
+}
+
+/// Puts the request in the channel for approvals, with Approve and Deny for the others.
+async fn ask_for_approval(
+    cx: &ComponentCx,
+    config: &Config,
+    id: i64,
+    operation: &mut Operation,
+) -> Result<(), UserError> {
+    let Some(channel) = config.approval_target() else {
+        return Err(UserError::message("bulk-approval-no-channel"));
+    };
+    operation.state = State::Awaiting;
+    save(cx.ctx(), id, operation)
+        .await
+        .map_err(|e| user_error(&e))?;
+    let left = waiting(cx.ctx(), id).await;
+    let say = |key: &str, args: &Args| cx.t(key, args);
+    let mut text = describe(&say, id, operation, left);
+    text.push('\n');
+    text.push_str(
+        &cx.t(
+            "bulk-approval-asked",
+            &Args::new()
+                .with("user", format!("<@{}>", operation.by))
+                .with(
+                    "reason",
+                    closure_sdk::embed::truncate(&operation.reason, 200),
+                ),
+        ),
+    );
+    post_request(
+        cx.api(),
+        cx.module(),
+        channel,
+        id,
+        text,
+        cx.t("bulk-approve", &Args::new()),
+        cx.t("bulk-deny", &Args::new()),
+    )
+    .await?;
+    cx.reply_private_t("bulk-awaiting-approval", &Args::new().with("number", id))
+        .await
+}
+
+/// Posts the request, with Approve and Deny for the others, in the channel for approvals.
+async fn post_request(
+    api: &closure_core::client::ApiClient,
+    module: &closure_core::module::ModuleId,
+    channel: ChannelId,
+    id: i64,
+    text: String,
+    approve: String,
+    deny: String,
+) -> Result<(), DiscordError> {
+    let button = |route: &str, label: String, style| {
+        ui::button(
+            style,
+            label,
+            CustomId::new(ROUTE)
+                .data(format!("{route}:{id}"))
+                .encode(module),
+        )
+    };
+    let components = vec![ui::row(vec![
+        button("approve", approve, ButtonStyle::Success),
+        button("deny", deny, ButtonStyle::Danger),
+    ])];
+    api.execute(Action::PostMessage {
+        channel_id: channel,
+        message_id: None,
+        reply_to: None,
+        content: Some(text),
+        embeds: Vec::new(),
+        components,
+        files: Vec::new(),
+    })
+    .await
+    .map(drop)
+}
+
+/// A ban for good that needs a second moderator: asked for in the channel for approvals, and done
+/// by the bulk machinery once somebody else approves it.
+pub(crate) async fn request_ban(
+    cx: &CommandCx,
+    config: &Config,
+    user: UserId,
+    reason: String,
+    days: i64,
+) -> Result<(), UserError> {
+    let Some(channel) = config.approval_target() else {
+        return Err(UserError::message("bulk-approval-no-channel"));
+    };
+    delete_seconds(days)?;
+    let actor = cx.actor().await;
+    let ctx = cx.ctx();
+    let id = ctx
+        .store()
+        .score_add("bulk-seq", 0_u64, 1)
+        .await
+        .map_err(|e| user_error(&e))?;
+    let operation = Operation {
+        what: What::Ban,
+        state: State::Awaiting,
+        by: actor.user.get(),
+        by_name: cx.user().name.clone(),
+        by_roles: actor.roles.iter().map(|r| r.get()).collect(),
+        by_owner: actor.owner,
+        reason: reason.clone(),
+        seconds: None,
+        delete_days: u32::try_from(days).unwrap_or(0),
+        channel: cx.invocation().channel_id.get(),
+        total: 1,
+        done: 0,
+        skipped: 0,
+        failed: 0,
+        problems: Vec::new(),
+        created: cx.now(),
+    };
+    ctx.store()
+        .set_add(&queue(id), user.get())
+        .await
+        .map_err(|e| user_error(&e))?;
+    save(ctx, id, &operation)
+        .await
+        .map_err(|e| user_error(&e))?;
+    let say = |key: &str, args: &Args| cx.t(key, args);
+    let mut text = describe(&say, id, &operation, 1);
+    text.push('\n');
+    text.push_str(
+        &cx.t(
+            "bulk-approval-asked",
+            &Args::new()
+                .with("user", format!("<@{}>", operation.by))
+                .with("reason", closure_sdk::embed::truncate(&reason, 200)),
+        ),
+    );
+    text.push('\n');
+    text.push_str(&cx.t(
+        "bulk-approval-target",
+        &Args::new().with("user", format!("<@{user}>")),
+    ));
+    post_request(
+        cx.api(),
+        cx.module(),
+        channel,
+        id,
+        text,
+        cx.t("bulk-approve", &Args::new()),
+        cx.t("bulk-deny", &Args::new()),
+    )
+    .await?;
+    cx.say_private_t(
+        closure_sdk::Tone::Success,
+        "bulk-awaiting-approval",
+        &Args::new().with("number", id),
+    )
+    .await
 }

@@ -830,7 +830,7 @@ fn the_settings_default_to_thirty_days_a_direct_message_a_timeout_at_three_warni
     let manifest = module().unwrap().manifest().clone();
     assert_eq!(
         manifest.default_config,
-        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "manual_cases": true, "export_channel": null, "alert_on_rejoin": false, "alert_channel": null, "templates_enabled": true, "templates": {} })
+        json!({ "warn_expire_days": 30, "dm_on_action": true, "dm_messages": {}, "require_reason": false, "ban_delete_days": 0, "escalation_enabled": true, "escalation": [{ "warns": 3, "action": "timeout", "duration": "1d" }, { "warns": 5, "action": "kick" }], "timeout_method": "discord", "timeout_role": null, "voice_mute_method": "discord", "voice_mute_role": null, "remove_roles_on_mute": false, "restore_roles_on_mute": true, "manual_cases": true, "export_channel": null, "approval_channel": null, "approval_bulk_from": 0, "approval_permanent_ban": false, "alert_on_rejoin": false, "alert_channel": null, "templates_enabled": true, "templates": {} })
     );
 }
 
@@ -5478,4 +5478,165 @@ async fn a_member_who_failed_is_taken_again_by_retry() {
         said[0].content.contains("1 done") && said[0].content.contains("0 failed"),
         "{said:?}"
     );
+}
+
+// ---- approval of what is big or for good ----
+
+fn needs_approval_config() -> serde_json::Value {
+    json!({
+        "approval_channel": "62",
+        "approval_bulk_from": 3,
+        "approval_permanent_ban": true,
+    })
+}
+
+fn messages_to(harness: &Harness, channel: u64) -> Vec<(String, usize)> {
+    harness
+        .api()
+        .actions()
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::PostMessage {
+                channel_id,
+                content: Some(text),
+                components,
+                ..
+            } if channel_id.get() == channel => Some((text, components.len())),
+            _ => None,
+        })
+        .collect()
+}
+
+const OTHER_ADMIN: u64 = 101;
+
+#[tokio::test]
+async fn a_big_bulk_operation_waits_for_another_moderator_who_approves_it() {
+    let harness = harness();
+    harness.api().add_channel(Id::new(62), Some(Id::new(GUILD)));
+    harness.set_config(needs_approval_config());
+    for member in 3000..3004 {
+        harness
+            .api()
+            .set_not_a_member(Id::new(GUILD), Id::new(member));
+    }
+    // Started by an admin who may not approve: the owner level is what `massban` needs, so a
+    // second moderator is asked for with a size of three or more.
+    harness
+        .invoke(bulk_start("ban", "3000 3001 3002 3003"))
+        .await
+        .unwrap();
+    let run = Click::new("moderation:bulk:*:run:1")
+        .user(MODERATOR)
+        .roles([ADMIN_ROLE]);
+    // This admin may approve too (moderation.approve is an admin permission): no second one.
+    harness.click(run).await.unwrap();
+    harness.run_due_jobs().await;
+    assert!(
+        !bans_of(&harness).is_empty(),
+        "an admin who may approve needs none"
+    );
+    // A moderator below that asks, and somebody else approves.
+    let low = self::harness();
+    low.api().add_channel(Id::new(62), Some(Id::new(GUILD)));
+    low.set_config(needs_approval_config());
+    for member in 3000..3004 {
+        low.api().set_not_a_member(Id::new(GUILD), Id::new(member));
+    }
+    low.permissions(|permissions| {
+        permissions
+            .keys
+            .entry(closure_core::permission::PermissionKey::new("moderation.massban").unwrap())
+            .or_default()
+            .allow_roles
+            .push(Id::new(MODERATOR_ROLE));
+        permissions
+            .keys
+            .entry(closure_core::permission::PermissionKey::new("moderation.ban").unwrap())
+            .or_default()
+            .allow_roles
+            .push(Id::new(MODERATOR_ROLE));
+    });
+    low.invoke(
+        bulk("start")
+            .option("action", opt_text("ban"))
+            .option("users", opt_text("3000 3001 3002 3003"))
+            .option("reason", opt_text("raid"))
+            .roles([MODERATOR_ROLE])
+            .user(MODERATOR),
+    )
+    .await
+    .unwrap();
+    let press = Click::new("moderation:bulk:*:run:1")
+        .user(MODERATOR)
+        .roles([MODERATOR_ROLE]);
+    low.click(press).await.unwrap();
+    low.run_due_jobs().await;
+    assert!(bans_of(&low).is_empty(), "nothing before an approval");
+    let asked = messages_to(&low, 62);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(asked[0].0.contains("asks to do this") && asked[0].1 == 1);
+    // The one who asked cannot approve their own.
+    let own = Click::new("moderation:bulk:*:approve:1")
+        .user(MODERATOR)
+        .roles([ADMIN_ROLE]);
+    assert!(low.click(own).await.is_err() || bans_of(&low).is_empty());
+    low.run_due_jobs().await;
+    assert!(bans_of(&low).is_empty());
+    // Somebody else, who may approve, does.
+    let other = Click::new("moderation:bulk:*:approve:1")
+        .user(OTHER_ADMIN)
+        .roles([ADMIN_ROLE]);
+    low.click(other).await.unwrap();
+    low.run_due_jobs().await;
+    assert_eq!(bans_of(&low).len(), 4);
+}
+
+#[tokio::test]
+async fn a_ban_for_good_asks_for_an_approval_and_a_deny_cancels_it() {
+    let harness = harness();
+    harness.api().add_channel(Id::new(62), Some(Id::new(GUILD)));
+    harness.set_config(needs_approval_config());
+    harness.permissions(|permissions| {
+        permissions
+            .keys
+            .entry(closure_core::permission::PermissionKey::new("moderation.ban").unwrap())
+            .or_default()
+            .allow_roles
+            .push(Id::new(MODERATOR_ROLE));
+    });
+    let ban_as_moderator = |duration: Option<&str>| {
+        let invocation = with_reason(
+            Invocation::new("ban").option("user", user(MEMBER)),
+            Some("evading"),
+        )
+        .roles([MODERATOR_ROLE])
+        .user(MODERATOR);
+        match duration {
+            Some(duration) => invocation.option("duration", opt_text(duration)),
+            None => invocation,
+        }
+    };
+    // A ban for a while is done at once; one for good waits.
+    harness.invoke(ban_as_moderator(Some("7d"))).await.unwrap();
+    assert_eq!(bans_of(&harness), [MEMBER]);
+    let waiting = self::harness();
+    waiting.api().add_channel(Id::new(62), Some(Id::new(GUILD)));
+    waiting.set_config(needs_approval_config());
+    waiting.permissions(|permissions| {
+        permissions
+            .keys
+            .entry(closure_core::permission::PermissionKey::new("moderation.ban").unwrap())
+            .or_default()
+            .allow_roles
+            .push(Id::new(MODERATOR_ROLE));
+    });
+    waiting.invoke(ban_as_moderator(None)).await.unwrap();
+    assert!(bans_of(&waiting).is_empty());
+    assert_eq!(messages_to(&waiting, 62).len(), 1);
+    let deny = Click::new("moderation:bulk:*:deny:1")
+        .user(OTHER_ADMIN)
+        .roles([ADMIN_ROLE]);
+    waiting.click(deny).await.unwrap();
+    waiting.run_due_jobs().await;
+    assert!(bans_of(&waiting).is_empty(), "denied: nothing is done");
 }
