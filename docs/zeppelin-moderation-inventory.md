@@ -14,18 +14,18 @@ building is in the [roadmap](roadmap.md#moderation-next-work-the-owners-list-and
 | `mute`, `unmute` | here: `/timeout`, `/untimeout`, `/vcmute`, `/vcunmute` (by Discord or by a role) |
 | `forcemute`, `forceunmute` | missing: for a member who is not in the server; closure's timeout needs a member. A mute by role could be written to apply on the next join (the rejoin re-application is here) |
 | `kick`, `ban`, `unban` | here: `/kick`, `/ban`, `/unban` (timed bans) |
-| `forceban` (ban an id that is not a member) | to confirm: whether `/ban` takes a user who is not in the server; if not, missing |
-| `massban` | partly: `/massban` (at most 50, one handler, no preview) → P1-3 |
-| `massunban`, `massmute` | missing → P1-3 |
-| `addcase` (a case with no action) | missing |
+| `forceban` (ban an id that is not a member) | here: `/ban` takes a user who is not in the server |
+| `massban` | here: `/bulk start ban` (preview, run, cancel, retry) |
+| `massunban`, `massmute` | here: `/bulk start unban` and `/bulk start timeout` |
+| `addcase` (a case with no action) | here: `/case add` |
 | `case`, `cases` | partly: `/case`, `/warnings`; no `cases` list with filters or `--expand` → P2-5 |
-| `hidecase`, `unhidecase`, `deletecase` | missing |
-| `update` (change the reason of a case) | missing |
+| `hidecase`, `unhidecase`, `deletecase` | here: `/case hide`, `/case unhide`, `/case delete` |
+| `update` (change the reason of a case) | here: `/case update` |
 | config: `dm_on_warn/kick/ban`, `message_on_*`, `message_channel`, `warn_message` and the like | partly: fixed texts and templates for reason and duration; the DM and channel notice texts are not settings |
-| config: `alert_on_rejoin`, `alert_channel` | missing → P1-2 |
+| config: `alert_on_rejoin`, `alert_channel` | here |
 | config: `warn_notify_enabled`, `warn_notify_threshold` | partly: escalation of warnings (kick, ban, timeout) is here; a notice at a count is not |
 | config: `ban_delete_message_days` | to confirm in `/ban` |
-| config: `create_cases_for_manual_actions` | missing → P1-1 |
+| config: `create_cases_for_manual_actions` | here: `manual_cases` |
 | config: `can_*` (note, warn, mute, kick, ban, unban, view, addcase, massunban, massban, massmute, hidecase, deletecase, act_as_other) | here as permission keys and levels; the new commands need their own keys |
 | `warn` with `--mod` (act as another moderator) | missing (`can_act_as_other`) |
 
@@ -33,7 +33,7 @@ building is in the [roadmap](roadmap.md#moderation-next-work-the-owners-list-and
 
 | Reference | closure |
 | --- | --- |
-| `mutes` (list of the mutes in force, with expiry and age) | missing; `Cases::standing` per member exists, a list for the guild does not |
+| `mutes` (list of the mutes in force, with expiry and age) | here: `/case search kind:timeout state:active` |
 | `clear_mutes`, `clear_banned_mutes`, `clear_mutes_without_role` | missing |
 | mute role with `remove_roles_on_mute`, `restore_roles_on_mute`, mute on rejoin, `kick_from_voice_channel_on_mute`, `move_to_voice_channel_on_mute` | here: the role method and the rejoin re-application; the voice move on mute is missing |
 | mute message template with `{reason}` and `{time}` | partly |
@@ -53,7 +53,7 @@ building is in the [roadmap](roadmap.md#moderation-next-work-the-owners-list-and
 | Reference | closure |
 | --- | --- |
 | `slowmode set/get/disable` (native) | here: `/slowmode` |
-| bot-managed slowmode beyond 6 hours, `list`, `clear` | missing → P2-4 |
+| bot-managed slowmode beyond 6 hours, `list`, `clear` | here: `/longslowmode` (0 clears it); no list |
 
 ## Censor and Spam
 
@@ -69,10 +69,10 @@ runtime path.
 | --- | --- |
 | `avatar`, `channelinfo`, `roleinfo`, `serverinfo`, `userinfo`, `vcmove`, `vcdisconnect` | here |
 | `clean` (with filters: all, bots, user, has links or invites) | partly: `/clear` |
-| `bansearch` | missing |
+| `bansearch` | here in part: `/case search kind:ban` finds the bans of the cases; a ban made outside the bot is a case when `manual_cases` is on |
 | `search` (members by name, role, join date) | missing |
-| `nickname`, `nicknamereset` | missing |
-| `context` (jump link of a message), `messageinfo`, `snowflakeinfo`, `emojiinfo`, `inviteinfo` | missing |
+| `nickname`, `nicknamereset` | here: `/nickname` (left out, it takes the nickname off) |
+| `context` (jump link of a message), `messageinfo`, `snowflakeinfo`, `emojiinfo`, `inviteinfo` | `snowflakeinfo` is here as `/snowflake`; the rest is missing |
 | `level` (a member's level of permission) | missing (`/permissions explain` is planned in M14) |
 | `roles` (list of the roles) | missing |
 | `jumbo`, `help`, `about`, `ping`, `source` | missing, low value (`help` is Discord's own command list) |
@@ -84,7 +84,7 @@ runtime path.
 | --- | --- |
 | `where` | here: `/locate` |
 | `follow`, `listfollow` (a notice when a member joins a voice channel) | missing |
-| `names` | here: `/names`; search across members missing → P2-1 |
+| `names` | here: `/names`, and `/findname` for a search across members |
 | context menus: Ban, Mute, Warn, Note, Clean message, Mod menu | missing; closure has the Info menu on a user and the message and user context command support in the platform |
 
 ## Automod

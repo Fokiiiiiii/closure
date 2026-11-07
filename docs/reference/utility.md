@@ -8,6 +8,7 @@ Commands that tell about the server, a role, a channel or a member, the names a 
 ## Capabilities
 
 - `read_guild`
+- `manage_nicknames`
 - `respond_to_interactions`
 - `storage`
 - `move_members`
@@ -17,6 +18,7 @@ Commands that tell about the server, a role, a channel or a member, the names a 
 | Key | Default level | Description |
 |---|---|---|
 | `utility.info` | 1 | Use the commands that show information |
+| `utility.nickname` | 50 | Change the nickname of a member |
 | `utility.search` | 50 | Find members by the names they went by |
 | `utility.voice` | 50 | Move and disconnect members in voice |
 
@@ -74,6 +76,29 @@ Show the names a member went by
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | user | user | yes | - | The member |
+
+### `/nickname`
+
+Change the nickname of a member, or take it off
+
+- Japanese name: `ニックネーム`
+- Japanese description: メンバーのニックネームを変更、または削除します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `user` | ユーザー | user | yes | - | The member |
+| `nickname` | ニックネーム | string | no | max_length 32 | The new nickname; left out, the nickname is taken off |
+
+### `/snowflake`
+
+Tell when a Discord id was made
+
+- Japanese name: `スノーフレーク`
+- Japanese description: Discord の ID が作られた日時を調べます
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `id` | id | string | yes | max_length 20 | The id of a user, channel, role, message or the like |
 
 ### `/findname`
 

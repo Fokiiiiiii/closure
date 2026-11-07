@@ -382,3 +382,54 @@ async fn without_a_limit_voice_hops_are_not_counted() {
     }
     assert_eq!(disconnected(&harness, 7), 0);
 }
+
+#[tokio::test]
+async fn a_moderator_changes_and_resets_a_nickname_and_an_id_tells_its_age() {
+    let harness = harness();
+    harness.api().set_member(Id::new(1), member_of(7));
+    let set = |nick: Option<&str>, roles: &[u64]| {
+        let invocation = Invocation::new("nickname")
+            .option("user", user_option(7))
+            .roles(roles.iter().copied())
+            .user(50);
+        match nick {
+            Some(nick) => {
+                invocation.option("nickname", CommandOptionValue::String(nick.to_owned()))
+            }
+            None => invocation,
+        }
+    };
+    let nicknames = |h: &Harness| -> Vec<Option<String>> {
+        h.actions()
+            .iter()
+            .filter_map(|a| match a {
+                Action::SetNickname { nickname, .. } => Some(nickname.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let _ = harness.invoke(set(Some("Nope"), &[])).await;
+    assert!(nicknames(&harness).is_empty());
+    harness
+        .invoke(set(Some("Fresh"), &[MODERATOR]))
+        .await
+        .unwrap();
+    harness.invoke(set(None, &[MODERATOR])).await.unwrap();
+    assert_eq!(nicknames(&harness), [Some("Fresh".to_owned()), None]);
+    let id = Invocation::new("snowflake")
+        .option(
+            "id",
+            CommandOptionValue::String("175928847299117063".to_owned()),
+        )
+        .user(50);
+    let reply = harness.invoke(id).await.unwrap();
+    assert!(reply[0].content.contains("<t:1462015105:F>"), "{reply:?}");
+    let bad = Invocation::new("snowflake")
+        .option("id", CommandOptionValue::String("abc".to_owned()))
+        .user(50);
+    assert!(
+        harness.invoke(bad).await.unwrap()[0]
+            .content
+            .contains("not an id")
+    );
+}

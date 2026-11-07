@@ -93,6 +93,22 @@ impl Default for Config {
 }
 
 #[derive(CommandArgs)]
+struct Nickname {
+    /// The member.
+    user: UserId,
+    /// The new nickname; left out, the nickname is taken off.
+    #[arg(max_length = 32)]
+    nickname: Option<String>,
+}
+
+#[derive(CommandArgs)]
+struct Snowflake {
+    /// The id of a user, channel, role, message or the like.
+    #[arg(max_length = 20)]
+    id: String,
+}
+
+#[derive(CommandArgs)]
 struct MoveAll {
     /// The voice channel to empty.
     from: ChannelId,
@@ -552,6 +568,59 @@ async fn vcmoveall(cx: CommandCx, args: MoveAll) -> Result<(), UserError> {
     .await
 }
 
+/// Changes the nickname of a member, or takes it off.
+async fn nickname(cx: CommandCx, args: Nickname) -> Result<(), UserError> {
+    cx.check_target(args.user).await?;
+    let nickname = args
+        .nickname
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty());
+    let reason =
+        Reason::new(cx.t("utility-reason-nickname", &Args::new())).map_err(|e| failed(&e))?;
+    cx.api()
+        .execute(Action::SetNickname {
+            guild_id: cx.guild_id(),
+            user_id: args.user,
+            nickname: nickname.clone(),
+            reason,
+        })
+        .await
+        .map_err(|e| failed(&e))?;
+    let user = format!("<@{}>", args.user);
+    match nickname {
+        Some(nickname) => {
+            cx.reply_private_t(
+                "utility-nickname-set",
+                &Args::new()
+                    .with("user", user)
+                    .with("nickname", closure_sdk::embed::escape(&nickname)),
+            )
+            .await
+        }
+        None => {
+            cx.reply_private_t("utility-nickname-reset", &Args::new().with("user", user))
+                .await
+        }
+    }
+}
+
+/// When an id was made, which is all an id tells.
+async fn snowflake(cx: CommandCx, args: Snowflake) -> Result<(), UserError> {
+    let Ok(id) = args.id.trim().parse::<u64>() else {
+        return Err(UserError::message("utility-snowflake-bad"));
+    };
+    if id < (1 << 22) {
+        return Err(UserError::message("utility-snowflake-bad"));
+    }
+    cx.reply_private_t(
+        "utility-snowflake",
+        &Args::new()
+            .with("id", id.to_string())
+            .with("created", moment(created_at(id))),
+    )
+    .await
+}
+
 async fn vckick(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let reason = Reason::new(cx.t("utility-reason-kick", &Args::new())).map_err(|e| failed(&e))?;
@@ -705,6 +774,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         ModuleBuilder::new("utility", "Utility", env!("CARGO_PKG_VERSION"))?
             .capability(closure_sdk::Capability::ReadGuild)
             .capability(closure_sdk::Capability::MoveMembers)
+            .capability(closure_sdk::Capability::ManageNicknames)
             .capability(closure_sdk::Capability::Storage)
             .capability(closure_sdk::Capability::RespondToInteractions)
             .intents(Intents::GUILD_MEMBERS | Intents::GUILD_VOICE_STATES)
@@ -712,6 +782,11 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 "utility.info",
                 Level::GENERAL,
                 "permission-utility-info",
+            )?)
+            .permission(PermissionSpec::new(
+                "utility.nickname",
+                Level::MODERATOR,
+                "permission-utility-nickname",
             )?)
             .permission(PermissionSpec::new(
                 "utility.search",
@@ -747,6 +822,16 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 Command::<OneUser>::new("names")
                     .requires("utility.info")
                     .handler(names),
+            )
+            .command(
+                Command::<Nickname>::new("nickname")
+                    .requires("utility.nickname")
+                    .handler(nickname),
+            )
+            .command(
+                Command::<Snowflake>::new("snowflake")
+                    .requires("utility.info")
+                    .handler(snowflake),
             )
             .command(
                 Command::<FindName>::new("findname")
