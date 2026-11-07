@@ -257,19 +257,8 @@ async fn ping_role(cx: CommandCx, args: OneRole) -> Result<(), UserError> {
     {
         return Err(UserError::message("roles-not-pingable"));
     }
-    let reason = Reason::new(cx.t("roles-reason-ping", &Args::new())).map_err(|e| problem(&e))?;
-    cx.api()
-        .execute(Action::EditRole {
-            guild_id: cx.guild_id(),
-            role_id: args.role,
-            patch: RolePatch {
-                mentionable: Some(true),
-                ..RolePatch::default()
-            },
-            reason,
-        })
-        .await
-        .map_err(|e| problem(&e))?;
+    // The job that takes the permission back is kept first: a role that can be pinged must always
+    // have one waiting to make it quiet again.
     let schedule = |e: closure_core::schedule::ScheduleError| {
         UserError::from(ModuleError::other(e.to_string()))
     };
@@ -285,6 +274,19 @@ async fn ping_role(cx: CommandCx, args: OneRole) -> Result<(), UserError> {
         .after(PING_WINDOW)
         .await
         .map_err(schedule)?;
+    let reason = Reason::new(cx.t("roles-reason-ping", &Args::new())).map_err(|e| problem(&e))?;
+    cx.api()
+        .execute(Action::EditRole {
+            guild_id: cx.guild_id(),
+            role_id: args.role,
+            patch: RolePatch {
+                mentionable: Some(true),
+                ..RolePatch::default()
+            },
+            reason,
+        })
+        .await
+        .map_err(|e| problem(&e))?;
     cx.reply_private_t(
         "roles-pingable",
         &Args::new().with("role", mention(args.role)),

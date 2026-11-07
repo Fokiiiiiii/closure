@@ -8,7 +8,7 @@ use closure_sdk::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 use twilight_model::id::Id;
 
@@ -133,13 +133,40 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
 
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
     let (schema, defaults) = settings();
+    let state = Arc::new(Sweeps::default());
     Ok(
         ModuleBuilder::new("channels", "Channels", env!("CARGO_PKG_VERSION"))?
             .capability(Capability::ManageMessages)
             .capability(Capability::ReadMessages)
             .capability(Capability::AddReactions)
+            .capability(Capability::Storage)
+            .capability(Capability::Schedule)
             .intents(Intents::GUILD_MESSAGES)
-            .on(Subscription::new(EventKind::MessageCreated), on_event)
+            .on(Subscription::new(EventKind::MessageCreated), {
+                let state = Arc::clone(&state);
+                move |ctx, event| on_event(Arc::clone(&state), ctx, event)
+            })
+            .on(Subscription::new(EventKind::GuildAvailable), {
+                let state = Arc::clone(&state);
+                move |ctx, _| {
+                    let state = Arc::clone(&state);
+                    async move {
+                        ensure_sweep(&state, &ctx).await?;
+                        Ok(Flow::Continue)
+                    }
+                }
+            })
+            .on(Subscription::new(EventKind::ConfigChanged), {
+                let state = Arc::clone(&state);
+                move |ctx, _| {
+                    let state = Arc::clone(&state);
+                    async move {
+                        ensure_sweep(&state, &ctx).await?;
+                        Ok(Flow::Continue)
+                    }
+                }
+            })
+            .job(SWEEP, sweep)
             .job("delete", delete)
             .config(schema, defaults)
             .catalog(Locale::En, include_str!("../locales/en.ftl"))
@@ -227,7 +254,11 @@ async fn protected(ctx: &EventContext, channel: closure_core::event::ChannelId) 
     channels.contains(&channel)
 }
 
-async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
+async fn on_event(
+    state: Arc<Sweeps>,
+    ctx: EventContext,
+    event: Event,
+) -> Result<Flow, ModuleError> {
     let Event::MessageCreated(message) = event else {
         return Ok(Flow::Continue);
     };
@@ -258,20 +289,19 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             tracing::warn!("duplicate auto_delete channel; using first rule");
         }
         let delay = duration::parse(&rule.after).map_err(|e| ModuleError::Config(e.to_string()))?;
-        ctx.scheduler()
-            .job(
-                "delete",
-                &DeleteJob {
-                    channel: message.channel_id.get(),
-                    message: message.id.get(),
-                    skip_pinned: rule.skip_pinned,
-                },
+        // Kept in a set for the minute it falls due in, not as a job of its own: a busy channel
+        // would use up the jobs of the whole guild.
+        let due = ctx
+            .now()
+            .saturating_add(i64::try_from(delay.as_secs()).unwrap_or(i64::MAX));
+        ctx.store()
+            .set_add(
+                &bucket_set(message.channel_id.get(), bucket_of(due)),
+                message.id.get(),
             )
-            .map_err(|e| ModuleError::other(e.to_string()))?
-            .key(&format!("message:{}", message.id))
-            .after(delay)
             .await
             .map_err(|e| ModuleError::other(e.to_string()))?;
+        ensure_sweep(&state, &ctx).await?;
     }
     let mut reactions = config
         .auto_react
@@ -301,6 +331,140 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     Ok(Flow::Continue)
 }
 
+/// The job that deletes the messages that are due, and how often it runs.
+const SWEEP: &str = "sweep";
+const SWEEP_EVERY: Duration = Duration::from_secs(10);
+/// Messages that fall due within the same few seconds share a set.
+const BUCKET_SECONDS: i64 = 10;
+/// How many messages one run deletes at most, and how many empty sets it steps over.
+const SWEEP_BUDGET: usize = 100;
+const SWEEP_STEPS: i64 = 720;
+
+/// The guilds whose sweep job this process has made sure of.
+#[derive(Default)]
+struct Sweeps {
+    ensured: Mutex<HashSet<u64>>,
+}
+
+/// The number of the set a deletion at `due` (Unix seconds) belongs to: the first whose end is not
+/// before it.
+fn bucket_of(due: i64) -> i64 {
+    due.div_euclid(BUCKET_SECONDS) + i64::from(due.rem_euclid(BUCKET_SECONDS) != 0)
+}
+
+fn bucket_set(channel: u64, bucket: i64) -> String {
+    format!("del-{channel}-{bucket}")
+}
+
+fn cursor_key(channel: u64) -> String {
+    format!("del-cursor:{channel}")
+}
+
+/// Makes sure the guild has its sweep job, once for each run of the bot.
+async fn ensure_sweep(state: &Sweeps, ctx: &EventContext) -> Result<(), ModuleError> {
+    if state
+        .ensured
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&ctx.guild_id.get())
+    {
+        return Ok(());
+    }
+    ctx.scheduler()
+        .job(SWEEP, &())
+        .map_err(|e| ModuleError::other(e.to_string()))?
+        .key(SWEEP)
+        .if_absent()
+        .every(SWEEP_EVERY, Duration::ZERO)
+        .await
+        .map_err(|e| ModuleError::other(e.to_string()))?;
+    state
+        .ensured
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(ctx.guild_id.get());
+    Ok(())
+}
+
+/// Deletes the messages of the sets that are due, channel by channel, with a budget for the run.
+/// A deletion that fails for a reason that passes puts its message back and ends the run: the next
+/// one tries again.
+async fn sweep(cx: JobCx) -> Result<(), ModuleError> {
+    let ctx = cx.ctx();
+    let config: Config = parse_module_config(ctx)?;
+    if !config.auto_delete_enabled {
+        return Ok(());
+    }
+    let now_bucket = ctx.now().div_euclid(BUCKET_SECONDS);
+    let mut budget = SWEEP_BUDGET;
+    for rule in &config.auto_delete {
+        let Ok(channel) = rule.channel.parse::<u64>() else {
+            continue;
+        };
+        if protected(ctx, Id::new(channel)).await {
+            continue;
+        }
+        let store = ctx.store();
+        let mut cursor: i64 = store
+            .get(&cursor_key(channel))
+            .await
+            .map_err(|e| ModuleError::other(e.to_string()))?
+            .unwrap_or(now_bucket - 1);
+        let mut steps = 0;
+        while cursor < now_bucket && steps < SWEEP_STEPS && budget > 0 {
+            let bucket = cursor + 1;
+            let name = bucket_set(channel, bucket);
+            loop {
+                let batch = store
+                    .set_take(&name, budget.min(SWEEP_BUDGET))
+                    .await
+                    .map_err(|e| ModuleError::other(e.to_string()))?;
+                if batch.is_empty() {
+                    break;
+                }
+                let mut retry_from = None;
+                for (at, message) in batch.iter().enumerate() {
+                    match delete_message(ctx, Id::new(channel), *message, rule.skip_pinned).await {
+                        Ok(()) => budget = budget.saturating_sub(1),
+                        Err(error) => {
+                            tracing::warn!(?error, "could not delete a message that is due; later");
+                            retry_from = Some(at);
+                            break;
+                        }
+                    }
+                }
+                if let Some(at) = retry_from {
+                    for message in &batch[at..] {
+                        store
+                            .set_add(&name, *message)
+                            .await
+                            .map_err(|e| ModuleError::other(e.to_string()))?;
+                    }
+                    return Ok(());
+                }
+                if budget == 0 {
+                    break;
+                }
+            }
+            let left = store
+                .set_count(&name)
+                .await
+                .map_err(|e| ModuleError::other(e.to_string()))?;
+            if left > 0 {
+                break;
+            }
+            cursor = bucket;
+            steps += 1;
+            store
+                .set(&cursor_key(channel), &cursor)
+                .await
+                .map_err(|e| ModuleError::other(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// A job of the first format, one for a message: still deleted, if one is left from before.
 async fn delete(cx: JobCx) -> Result<(), ModuleError> {
     let job: DeleteJob = cx.payload()?;
     let channel = Id::new(job.channel);
@@ -312,7 +476,18 @@ async fn delete(cx: JobCx) -> Result<(), ModuleError> {
         }
         return Ok(());
     }
-    let message = match cx.api().get_message(channel, Id::new(job.message)).await {
+    delete_message(cx.ctx(), channel, job.message, job.skip_pinned).await
+}
+
+/// Deletes a message unless it is pinned and pins are kept. A message that is gone is done; a
+/// failure that passes is an error to try again, any other is only logged.
+async fn delete_message(
+    ctx: &EventContext,
+    channel: closure_core::event::ChannelId,
+    message_id: u64,
+    skip_pinned: bool,
+) -> Result<(), ModuleError> {
+    let message = match ctx.api.get_message(channel, Id::new(message_id)).await {
         Ok(message) => message,
         Err(DiscordError::NotFound) => return Ok(()),
         Err(error) if error.is_retryable() => return Err(error.into()),
@@ -321,13 +496,13 @@ async fn delete(cx: JobCx) -> Result<(), ModuleError> {
             return Ok(());
         }
     };
-    if should_delete(job.skip_pinned, message.pinned)
-        && let Err(error) = cx
-            .api()
+    if should_delete(skip_pinned, message.pinned)
+        && let Err(error) = ctx
+            .api
             .delete_message(
                 channel,
-                Id::new(job.message),
-                Reason::new(cx.ctx().t("delete-reason"))?,
+                Id::new(message_id),
+                Reason::new(ctx.t("delete-reason"))?,
             )
             .await
     {

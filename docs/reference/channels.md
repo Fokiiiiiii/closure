@@ -10,6 +10,7 @@ Automatically delete messages or add reactions in selected channels.
 - `add_reactions`
 - `manage_messages`
 - `respond_to_interactions`
+- `storage`
 - `schedule`
 - `read_messages`
 

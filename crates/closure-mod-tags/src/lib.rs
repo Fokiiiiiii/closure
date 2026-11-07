@@ -53,6 +53,8 @@ async fn show(cx: CommandCx, args: TagName) -> Result<(), UserError> {
     cx.reply(text).await
 }
 
+static ADDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn add(cx: CommandCx, args: AddTag) -> Result<(), UserError> {
     let name = normalized_name(&args.name)?;
     if args.text.is_empty() || args.text.chars().count() > MAX_TEXT_LENGTH {
@@ -62,7 +64,9 @@ async fn add(cx: CommandCx, args: AddTag) -> Result<(), UserError> {
     if cx.store().get::<String>(&key).await?.is_some() {
         return Err(UserError::message("tag-exists"));
     }
-    // shortcut: concurrent adds can race this count; use a guild-scoped CAS reservation if observed.
+    // Counting and keeping are one step, so two adds at once cannot both pass the limit. One lock is
+    // enough: the module runs in one process and a tag is added rarely.
+    let _one_at_a_time = ADDING.lock().await;
     if cx.store().list(TAG_PREFIX, MAX_TAGS + 1).await?.len() >= MAX_TAGS {
         return Err(UserError::message("tag-limit"));
     }

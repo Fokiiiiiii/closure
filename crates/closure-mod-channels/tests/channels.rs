@@ -55,8 +55,13 @@ async fn log_destinations_are_protected_before_and_after_scheduling() {
                 }
             }
             if change_after_schedule {
-                h.advance(Duration::from_secs(5));
-                assert!(h.run_due_jobs().await[0].is_ok(), "{destination}");
+                for _ in 0..3 {
+                    h.advance(Duration::from_secs(10));
+                    assert!(
+                        h.run_due_jobs().await.iter().all(Result::is_ok),
+                        "{destination}"
+                    );
+                }
                 assert!(
                     !h.actions()
                         .iter()
@@ -76,8 +81,10 @@ async fn unresolved_webhook_blocks_already_scheduled_deletion() {
     let h = harness(delete_config());
     h.message(Message::new(7, 5)).await.unwrap();
     h.set_log_webhook("missing");
-    h.advance(Duration::from_secs(5));
-    assert!(h.run_due_jobs().await[0].is_ok());
+    for _ in 0..3 {
+        h.advance(Duration::from_secs(10));
+        assert!(h.run_due_jobs().await.iter().all(Result::is_ok));
+    }
     assert!(h.actions().is_empty());
 }
 
@@ -85,16 +92,25 @@ async fn unresolved_webhook_blocks_already_scheduled_deletion() {
 async fn schedules_and_deletes_after_delay() {
     let h = harness(delete_config());
     h.message(Message::new(7, 5)).await.unwrap();
+    // One job sweeps the guild, whatever the number of messages.
+    h.message(Message::new(8, 5)).await.unwrap();
     assert_eq!(h.jobs(), 1);
-    h.advance(Duration::from_secs(4));
-    assert!(h.run_due_jobs().await.is_empty());
-    h.advance(Duration::from_secs(1));
-    assert!(h.run_due_jobs().await[0].is_ok());
-    assert!(
+    let deleted = |h: &Harness| {
         h.actions()
             .iter()
-            .any(|a| matches!(a, Action::DeleteMessage { .. }))
-    );
+            .filter(|a| matches!(a, Action::DeleteMessage { .. }))
+            .count()
+    };
+    assert!(h.run_due_jobs().await.iter().all(Result::is_ok));
+    h.advance(Duration::from_secs(4));
+    assert!(h.run_due_jobs().await.iter().all(Result::is_ok));
+    assert_eq!(deleted(&h), 0, "not before the delay");
+    // The sets are ten seconds wide and the sweep runs every ten, so a message goes within a few turns.
+    for _ in 0..3 {
+        h.advance(Duration::from_secs(10));
+        assert!(h.run_due_jobs().await.iter().all(Result::is_ok));
+    }
+    assert_eq!(deleted(&h), 2);
 }
 
 #[tokio::test]
@@ -102,8 +118,10 @@ async fn missing_and_log_channel_are_protected() {
     let h = harness(delete_config());
     h.message(Message::new(7, 5)).await.unwrap();
     h.api().fail_nth(1, DiscordError::NotFound);
-    h.advance(Duration::from_secs(5));
-    assert!(h.run_due_jobs().await[0].is_ok());
+    for _ in 0..3 {
+        h.advance(Duration::from_secs(10));
+        assert!(h.run_due_jobs().await.iter().all(Result::is_ok));
+    }
     assert!(
         !h.actions()
             .iter()
@@ -112,11 +130,17 @@ async fn missing_and_log_channel_are_protected() {
     let h = harness(delete_config());
     h.message(Message::new(7, 5)).await.unwrap();
     h.set_log_channel(5);
-    h.advance(Duration::from_secs(5));
-    assert!(h.run_due_jobs().await[0].is_ok());
+    for _ in 0..3 {
+        h.advance(Duration::from_secs(10));
+        assert!(h.run_due_jobs().await.iter().all(Result::is_ok));
+    }
     assert!(h.actions().is_empty());
     h.message(Message::new(7, 5)).await.unwrap();
-    assert_eq!(h.jobs(), 0);
+    assert_eq!(
+        h.jobs(),
+        1,
+        "only the sweep, nothing is kept for the log channel"
+    );
 }
 
 #[tokio::test]
@@ -176,6 +200,6 @@ async fn invalid_limits_and_duplicate_first_rule() {
     let h =
         harness(json!({"auto_delete":[{"channel":"5","after":"5s"},{"channel":"5","after":"1h"}]}));
     h.message(Message::new(7, 5)).await.unwrap();
-    h.advance(Duration::from_secs(5));
+    h.advance(Duration::from_secs(10));
     assert_eq!(h.run_due_jobs().await.len(), 1);
 }
