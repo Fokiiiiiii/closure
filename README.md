@@ -6,8 +6,11 @@ closure is a moderation bot built around a small, strict core. Everything a feat
 events, Discord actions, per-server configuration, translations — is provided by that core, so
 new features are modules that cannot weaken it.
 
-**Status:** the foundation is in place (core, configuration, Discord layer, HTTP API), and four
-modules are built on it: moderation, automod, logs and diagnostics.
+**Status:** the foundation is in place (core, configuration, Discord layer, HTTP API, Lua and
+WebAssembly script host), and fifteen modules are built on it: moderation, automod, logs,
+diagnostics, welcome, roles, tags, remind, channels, companion, persist, phishing, post, utility
+and dashboard. The dashboard itself is a separate project,
+[closure-dashboard](https://github.com/Fokiiiiiii/closure-dashboard).
 
 ## What the foundation gives you
 
@@ -61,8 +64,8 @@ The HTTP API listens on `127.0.0.1:8080` by default. If you expose it, put TLS i
 ## Plugins
 
 Extra modules live in [closure-plugins](https://github.com/Fokiiiiiii/closure-plugins): link
-expansion (messages of the server, posts on X) and a starboard. They are built in with a Cargo
-feature, which the release builds turn on:
+expansion (messages of the server, posts on X), a starboard, leveling, giveaways, tickets and
+translation. They are built in with a Cargo feature, which the release builds turn on:
 
 ```sh
 cargo build --release --features plugins
@@ -84,11 +87,11 @@ test application and server you provide (see the header of
 
 ## Limitations
 
-- Modules are Rust crates compiled in. The contract (manifests, serialisable events and actions,
-  capabilities) is designed so Lua and WebAssembly modules can be added later, but they are not
-  implemented.
+- Native modules are Rust crates compiled in. Lua and WebAssembly modules are loaded from the
+  `scripts/` directory by the host owner (see [docs/scripting.md](docs/scripting.md)); a server
+  cannot add one by itself.
 - One process per bot. Running several shard groups in separate processes is not supported yet.
 - The HTTP API is protected by a single admin token; sign-in for server administrators (Discord
-  OAuth2) belongs to the future dashboard.
+  OAuth2) belongs to the dashboard, which is a separate program.
 - Configuration problems are reported with stable codes and English messages; translating them
   is not done yet.

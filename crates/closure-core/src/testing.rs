@@ -10,7 +10,7 @@ use twilight_model::guild::invite::Invite;
 use twilight_model::guild::{Guild, Member, Role};
 
 use crate::action::{
-    Action, AuditLogQuery, InteractionResponse, NewChannel, Outcome, OverwriteTarget,
+    Action, AuditLogQuery, InteractionResponse, MessageCursor, NewChannel, Outcome, OverwriteTarget,
 };
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
@@ -157,6 +157,8 @@ pub struct MockApi {
     audit_log: Mutex<Vec<AuditLogEntry>>,
     /// The messages of each channel, as the pretend Discord holds them.
     channel_messages: Mutex<HashMap<ChannelId, Vec<Message>>>,
+    /// The ids of what the pretend Discord makes, handed out one by one whatever else is going on.
+    sequence: std::sync::atomic::AtomicU64,
 }
 
 impl MockApi {
@@ -188,7 +190,7 @@ impl MockApi {
             }
             // A created role gets the next id, so a test can tell the roles it made apart.
             Action::CreateRole { guild_id, spec, .. } => {
-                let id = 500 + u64::try_from(lock(&self.actions).len()).unwrap_or(0);
+                let id = 500 + self.next_id();
                 let mut role = created_role(id, &spec.name);
                 role.colors.primary_color = spec.color;
                 lock(&self.roles)
@@ -233,6 +235,25 @@ impl MockApi {
                 Ok(Outcome::None)
             }
             Action::GetInvite { code } => self.invite(code),
+            // An edit answers with the message it changed, under the id it had.
+            Action::GetMessage {
+                channel_id,
+                message_id,
+            }
+            | Action::CrosspostMessage {
+                channel_id,
+                message_id,
+            }
+            | Action::EditMessage {
+                channel_id,
+                message_id,
+                ..
+            }
+            | Action::PostMessage {
+                channel_id,
+                message_id: Some(message_id),
+                ..
+            } => Ok(self.message_of(*channel_id, *message_id)),
             Action::SendMessage { channel_id, .. }
             | Action::PostMessage { channel_id, .. }
             | Action::SuppressEmbeds { channel_id, .. }
@@ -241,18 +262,12 @@ impl MockApi {
             Action::SendViaWebhook { .. } | Action::SendDirectMessage { .. } => {
                 Ok(self.sent(ChannelId::new(1)))
             }
-            Action::GetMessage {
-                channel_id,
-                message_id,
-            }
-            | Action::CrosspostMessage {
-                channel_id,
-                message_id,
-            } => Ok(self.message_of(*channel_id, *message_id)),
             // The pretend Discord holds nothing else: lists come back empty, counts as zero.
             Action::GetMessages {
-                channel_id, limit, ..
-            } => Ok(self.newest_messages(*channel_id, *limit)),
+                channel_id,
+                limit,
+                cursor,
+            } => Ok(self.messages_page(*channel_id, *limit, *cursor)),
             Action::GetPins { .. } => Ok(Outcome::Messages(vec![])),
             Action::GetReactionUsers { .. } => Ok(Outcome::Users(vec![])),
             Action::ListThreadMembers { .. } => Ok(Outcome::ThreadMembers(vec![])),
@@ -282,7 +297,7 @@ impl MockApi {
 
     /// A created channel gets the next id, and Discord knows it from then on.
     fn create_channel(&self, guild_id: GuildId, spec: &NewChannel) -> Outcome {
-        let id = 600 + u64::try_from(lock(&self.actions).len()).unwrap_or(0);
+        let id = 600 + self.next_id();
         let channel = created_channel(id, &spec.name, spec.parent_id);
         lock(&self.guild_channels)
             .entry(guild_id)
@@ -295,20 +310,57 @@ impl MockApi {
     /// The answer to a message sent to `channel`. Each message gets an id of its own, so a test
     /// can tell them apart. Called before the action is recorded.
     fn sent(&self, channel: ChannelId) -> Outcome {
-        let id = u64::try_from(lock(&self.actions).len()).unwrap_or(u64::MAX) + 1;
-        sent_message(channel, id)
+        sent_message(channel, self.next_id())
             .map_or(Outcome::None, |message| Outcome::Message(Box::new(message)))
     }
 
-    /// The newest messages of a channel, up to `limit`, as Discord lists them.
-    fn newest_messages(&self, channel: ChannelId, limit: u16) -> Outcome {
+    /// The next id of something the pretend Discord makes: 1, 2, 3, ... each handed out once.
+    fn next_id(&self) -> u64 {
+        self.sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    /// A page of a channel's messages, as Discord lists them: the newest first from the start or
+    /// from before the cursor, the oldest first after it, and the ones nearest to it around it.
+    fn messages_page(
+        &self,
+        channel: ChannelId,
+        limit: u16,
+        cursor: Option<MessageCursor>,
+    ) -> Outcome {
         let mut messages = lock(&self.channel_messages)
             .get(&channel)
             .cloned()
             .unwrap_or_default();
-        messages.sort_by_key(|message| std::cmp::Reverse(message.id.get()));
-        messages.truncate(usize::from(limit));
-        Outcome::Messages(messages)
+        messages.sort_by_key(|message| message.id.get());
+        let limit = usize::from(limit);
+        let page: Vec<Message> = match cursor {
+            None => messages.into_iter().rev().take(limit).collect(),
+            Some(MessageCursor::Before(id)) => messages
+                .into_iter()
+                .filter(|message| message.id < id)
+                .rev()
+                .take(limit)
+                .collect(),
+            Some(MessageCursor::After(id)) => {
+                let mut newer: Vec<Message> = messages
+                    .into_iter()
+                    .filter(|message| message.id > id)
+                    .take(limit)
+                    .collect();
+                newer.reverse();
+                newer
+            }
+            Some(MessageCursor::Around(id)) => {
+                let mut near = messages;
+                near.sort_by_key(|message| message.id.get().abs_diff(id.get()));
+                near.truncate(limit);
+                near.sort_by_key(|message| std::cmp::Reverse(message.id.get()));
+                near
+            }
+        };
+        Outcome::Messages(page)
     }
 
     /// Adds a message to a channel, as Discord holds it. The id gives the message its age.
@@ -505,13 +557,15 @@ impl DiscordApi for MockApi {
             lock(&self.actions).push(action);
             return Err(error);
         }
-        let answer = self.answer(&action);
+        // A call that fails changes nothing in the pretend Discord: it is recorded, and that is all.
+        let failure = lock(&self.failure).clone();
+        let answer = match failure {
+            Some(error) => Err(error),
+            None => self.answer(&action),
+        };
         crate::dump::record(&action);
         lock(&self.actions).push(action);
-        match lock(&self.failure).clone() {
-            Some(error) => Err(error),
-            None => answer,
-        }
+        answer
     }
 
     async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
@@ -569,5 +623,106 @@ impl SettingsProvider for StaticSettings {
 
     fn module(&self, _guild: GuildId, module: &ModuleId) -> Option<ModuleSettings> {
         self.modules.get(module).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::{MessageCursor, NewChannel};
+
+    fn ids(outcome: Outcome) -> Vec<u64> {
+        match outcome {
+            Outcome::Messages(messages) => messages.iter().map(|m| m.id.get()).collect(),
+            other => panic!("not a list of messages: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn history_is_paged_by_its_cursor_as_discord_does() {
+        let api = MockApi::default();
+        let channel = ChannelId::new(7);
+        for id in [10, 20, 30, 40, 50] {
+            api.add_channel_message(channel, id);
+        }
+        let page = |cursor, limit| {
+            let api = &api;
+            async move {
+                ids(api
+                    .execute(Action::GetMessages {
+                        channel_id: channel,
+                        cursor,
+                        limit,
+                    })
+                    .await
+                    .unwrap())
+            }
+        };
+        assert_eq!(page(None, 2).await, [50, 40]);
+        assert_eq!(
+            page(Some(MessageCursor::Before(MessageId::new(30))), 5).await,
+            [20, 10]
+        );
+        assert_eq!(
+            page(Some(MessageCursor::After(MessageId::new(20))), 2).await,
+            [40, 30]
+        );
+        assert_eq!(
+            page(Some(MessageCursor::Around(MessageId::new(30))), 3).await,
+            [40, 30, 20]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_keeps_the_id_and_new_messages_get_ids_of_their_own() {
+        let api = MockApi::default();
+        let channel = ChannelId::new(7);
+        let edit = Action::EditMessage {
+            channel_id: channel,
+            message_id: MessageId::new(99),
+            content: Some("x".into()),
+            embeds: None,
+        };
+        let Outcome::Message(edited) = api.execute(edit).await.unwrap() else {
+            panic!("an edit answers with the message")
+        };
+        assert_eq!(edited.id.get(), 99);
+        let send = || Action::SendMessage {
+            channel_id: channel,
+            content: Some("x".into()),
+            embeds: vec![],
+            reply_to: None,
+            mentions: crate::action::MentionPolicy::default(),
+        };
+        let (a, b) = tokio::join!(api.execute(send()), api.execute(send()));
+        let (Outcome::Message(a), Outcome::Message(b)) = (a.unwrap(), b.unwrap()) else {
+            panic!("a message")
+        };
+        assert_ne!(a.id, b.id, "two sends at once do not share an id");
+    }
+
+    #[tokio::test]
+    async fn a_call_that_fails_makes_nothing_in_the_pretend_discord() {
+        let api = MockApi::default();
+        let guild = GuildId::new(1);
+        api.fail_with(DiscordError::Forbidden("no".into()));
+        let create = Action::CreateChannel {
+            guild_id: guild,
+            spec: NewChannel {
+                name: "new".into(),
+                kind: crate::action::ChannelKind::Text,
+                parent_id: None,
+                topic: None,
+                nsfw: false,
+                slowmode_seconds: 0,
+                overwrites: vec![],
+            },
+            reason: crate::action::Reason::new("test").unwrap(),
+        };
+        assert!(api.execute(create).await.is_err());
+        *lock(&api.failure) = None;
+        let listed = api.execute(Action::ListChannels { guild_id: guild }).await;
+        assert_eq!(listed, Ok(Outcome::Channels(vec![])));
+        assert_eq!(api.actions().len(), 2, "the failed call is still recorded");
     }
 }

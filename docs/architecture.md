@@ -140,17 +140,18 @@ messages.
 
 ## Extending: Lua and WebAssembly
 
-Only native modules exist today, but the contract was shaped for more:
+Besides the native modules, the `closure-script` crate loads Lua and WebAssembly modules from the
+`scripts/` directory. The contract was shaped for it:
 
-- a `ModuleManifest` is plain data (it can be read from a file);
-- `Event` and `Action`/`Outcome` are serialisable, so a script host can receive events and return
+- a `ModuleManifest` is plain data (it is read from a `module.yaml`);
+- `Event` and `Action`/`Outcome` are serialisable, so a script receives events and returns
   actions without a Rust API;
 - capabilities are the sandbox boundary: a module whose runtime is not `Native` starts with *no*
   capabilities and receives only what a server administrator grants, never more than it declares.
 
-A script host would implement `Module` by serialising the event into the script and turning its
-returned actions into `ApiClient::execute` calls. Nothing else in the system would change. The
-plan, with the limits and the order of work, is in [scripting](scripting.md).
+The script host implements `Module` by serialising the event into the script and turning its
+returned actions into `ApiClient::execute` calls; nothing else in the system changes. The
+manifest, ABI and limits are in [scripting](scripting.md).
 
 ## Decisions worth knowing
 

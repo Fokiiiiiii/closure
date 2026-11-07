@@ -6,8 +6,10 @@ closure は、小さく厳格な「核」を中心に作られたモデレーシ
 （イベント、Discord 操作、サーバーごとの設定、翻訳）はすべて核が提供するので、新しい機能は
 核を弱めることなくモジュールとして追加できます。
 
-**現状:** 基盤（コア、設定、Discord 層、HTTP API）の上に、4 つのモジュール（moderation、automod、logs、diagnostics）が実装されています。
-モデレーション機能そのものは次のステップです。
+**現状:** 基盤（コア、設定、Discord 層、HTTP API、Lua と WebAssembly のスクリプト実行）の上に、
+15 のモジュール（moderation、automod、logs、diagnostics、welcome、roles、tags、remind、channels、
+companion、persist、phishing、post、utility、dashboard）が実装されています。ダッシュボード本体は別プロジェクトの
+[closure-dashboard](https://github.com/Fokiiiiiii/closure-dashboard) です。
 
 ## 基盤が提供するもの
 
@@ -72,10 +74,10 @@ cargo deny check
 
 ## 制限事項
 
-- モジュールはコンパイルして組み込む Rust crate です。将来 Lua や WebAssembly のモジュールを
-  追加できるように契約（マニフェスト、直列化できるイベントと操作、権限）は設計してありますが、
-  実装はまだです。
+- ネイティブのモジュールはコンパイルして組み込む Rust crate です。Lua と WebAssembly のモジュールは
+  ホストの管理者が `scripts/` に置いて読み込ませます（[docs/scripting.md](docs/scripting.md)）。
+  サーバー側から追加することはできません。
 - 1 Bot につき 1 プロセスです。シャードを複数プロセスに分ける構成は未対応です。
 - HTTP API は単一の管理トークンで保護されています。サーバー管理者のログイン（Discord OAuth2）は
-  今後のダッシュボードの役割です。
+  別プログラムのダッシュボードの役割です。
 - 設定の問題は安定したコードと英語のメッセージで報告されます。その翻訳は未対応です。
