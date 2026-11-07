@@ -34,8 +34,11 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
+    /// Every kind.
+    pub(crate) const ALL: [Self; 4] = [Self::Timeout, Self::Ban, Self::Vcmute, Self::Warn];
+
     /// The kind of the case the button undoes, as the custom id and the cases name it.
-    fn key(self) -> &'static str {
+    pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Timeout => "timeout",
             Self::Ban => "ban",
@@ -45,9 +48,7 @@ impl Kind {
     }
 
     fn parse(text: &str) -> Option<Self> {
-        [Self::Timeout, Self::Ban, Self::Vcmute, Self::Warn]
-            .into_iter()
-            .find(|kind| kind.key() == text)
+        Self::ALL.into_iter().find(|kind| kind.key() == text)
     }
 
     /// The permission that the un-command of the kind checks, and that a press checks again.

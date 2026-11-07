@@ -38,6 +38,8 @@ Warn members, note about them, and look at and revoke the cases of a server.
 | `moderation.addcase` | 50 | Record and change cases by hand |
 | `moderation.hidecase` | 75 | Hide cases from the lists |
 | `moderation.deletecase` | 75 | Delete cases for good |
+| `moderation.appeal` | 1 | Appeal a punishment |
+| `moderation.appeals` | 50 | Decide on appeals and file them for others |
 | `moderation.approve` | 75 | Approve what another moderator asked for |
 | `moderation.export` | 75 | Export cases as a file |
 | `moderation.timeout` | 50 | Time members out and lift timeouts |
@@ -402,6 +404,18 @@ Ban a member, for good or for a while
 | `reason` | 理由 | string | no | max_length 512 | Why |
 | `duration` | 期間 | string | no | - | How long (7d) or until (2026-11-01 18:00); forever if left out |
 | `delete_days` | 削除日数 | integer | no | min 0; max 7 | Days of the member's messages to delete, 0 to 7 |
+
+### `/appeal`
+
+Ask for a punishment to be lifted
+
+- Japanese name: `異議`
+- Japanese description: 処罰の解除を求めます
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `text` | 理由 | string | yes | max_length 1000 | Why the punishment should be lifted |
+| `user` | ユーザー | user | no | - | The member, for an appeal that came another way (moderators) |
 
 ### `/softban`
 

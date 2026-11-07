@@ -5640,3 +5640,92 @@ async fn a_ban_for_good_asks_for_an_approval_and_a_deny_cancels_it() {
     waiting.run_due_jobs().await;
     assert!(bans_of(&waiting).is_empty(), "denied: nothing is done");
 }
+
+// ---- appeals ----
+
+fn appeal(text: &str) -> Invocation {
+    Invocation::new("appeal")
+        .option("text", opt_text(text))
+        .user(MEMBER)
+}
+
+fn appeals_harness() -> Harness {
+    let harness = harness();
+    harness.api().add_channel(Id::new(62), Some(Id::new(GUILD)));
+    harness.set_config(needs_approval_config());
+    harness
+}
+
+#[tokio::test]
+async fn a_member_appeals_a_standing_punishment_once_and_the_staff_get_two_buttons() {
+    let harness = appeals_harness();
+    harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
+    let replies = harness.invoke(appeal("it was a joke")).await.unwrap();
+    assert!(text(&replies).contains("case #1"), "{replies:?}");
+    let posted = messages_to(&harness, 62);
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(posted[0].0.contains("it was a joke") && posted[0].1 == 1);
+    let note = harness.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(note.source.as_str(), "appeal");
+    assert_eq!(note.target.get(), MEMBER);
+    // A second try is turned away and posts nothing.
+    let again = harness.invoke(appeal("again")).await.unwrap();
+    assert!(text(&again).contains("appealed already"), "{again:?}");
+    assert_eq!(messages_to(&harness, 62).len(), 1);
+}
+
+#[tokio::test]
+async fn an_appeal_needs_a_standing_punishment_and_a_channel_to_send_it_to() {
+    let harness = appeals_harness();
+    let none = harness.invoke(appeal("please")).await.unwrap();
+    assert!(text(&none).contains("no punishment"), "{none:?}");
+    assert!(messages_to(&harness, 62).is_empty());
+    // Without a channel for approvals there is nowhere to send it.
+    let unset = self::harness();
+    unset.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
+    let replies = unset.invoke(appeal("please")).await.unwrap();
+    assert!(text(&replies).contains("not set up"), "{replies:?}");
+}
+
+#[tokio::test]
+async fn only_a_moderator_files_an_appeal_for_somebody_else() {
+    let harness = appeals_harness();
+    harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
+    let other = Invocation::new("appeal")
+        .option("text", opt_text("for him"))
+        .option("user", user(MEMBER))
+        .user(UNPRIVILEGED);
+    let refused = harness.invoke(other).await.unwrap();
+    assert!(messages_to(&harness, 62).is_empty(), "{refused:?}");
+    let by_staff = by_moderator(
+        Invocation::new("appeal")
+            .option("text", opt_text("he wrote by mail"))
+            .option("user", user(MEMBER)),
+    );
+    harness.invoke(by_staff).await.unwrap();
+    let posted = messages_to(&harness, 62);
+    assert_eq!(posted.len(), 1);
+    assert!(posted[0].0.contains(&format!("<@{MEMBER}>")), "{posted:?}");
+}
+
+#[tokio::test]
+async fn refusing_an_appeal_leaves_the_punishment_and_says_who_decided() {
+    let harness = appeals_harness();
+    harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
+    harness.invoke(appeal("sorry")).await.unwrap();
+    let press = Click::new(format!("moderation:appeal:*:deny:{MEMBER}:1"))
+        .user(MODERATOR)
+        .roles([MODERATOR_ROLE]);
+    let replies = harness.click(press).await.unwrap();
+    assert!(text(&replies).contains("is refused"), "{replies:?}");
+    assert!(
+        harness
+            .cases()
+            .get(1)
+            .await
+            .unwrap()
+            .unwrap()
+            .revoked
+            .is_none()
+    );
+}

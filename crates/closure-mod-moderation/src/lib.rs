@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::json;
 use twilight_model::gateway::Intents;
 
+mod appeals;
 mod bulk;
 mod casetools;
 mod channel_controls;
@@ -98,7 +99,7 @@ pub(crate) struct Config {
     manual_cases: bool,
     /// The staff channel the case exports (CSV files) are sent to.
     export_channel: Option<String>,
-    /// The channel where what needs a second moderator is put for approval.
+    /// The channel where what needs a second moderator, and the appeals, are put for a decision.
     approval_channel: Option<String>,
     /// A bulk operation of this many members or more needs approval; 0 asks for none.
     approval_bulk_from: u32,
@@ -1143,6 +1144,11 @@ fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
                 .handler(ban),
         )
         .command(
+            Command::<appeals::Appeal>::new("appeal")
+                .requires("moderation.appeal")
+                .handler(appeals::file),
+        )
+        .command(
             Command::<softban::SoftbanArgs>::new("softban")
                 .requires("moderation.ban")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
@@ -1170,6 +1176,10 @@ fn punishments(builder: ModuleBuilder) -> ModuleBuilder {
 }
 
 /// The permission keys of the module, one for each kind of action a moderator takes.
+#[allow(
+    clippy::too_many_lines,
+    reason = "a list of the permission keys, one after the other"
+)]
 fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
     Ok(builder
         .permission(PermissionSpec::new(
@@ -1216,6 +1226,16 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
             "moderation.deletecase",
             Level::ADMIN,
             "permission-moderation-deletecase",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.appeal",
+            Level::GENERAL,
+            "permission-moderation-appeal",
+        )?)
+        .permission(PermissionSpec::new(
+            "moderation.appeals",
+            Level::MODERATOR,
+            "permission-moderation-appeals",
         )?)
         .permission(PermissionSpec::new(
             "moderation.approve",
@@ -1350,6 +1370,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .component(templates::ROUTE, templates::pick)
         .component(undo::ROUTE, undo::press)
         .component(bulk::ROUTE, bulk::press)
+        .component(appeals::ROUTE, appeals::press)
         .command(
             Command::<Warn>::new("warn")
                 .requires("moderation.warn")
