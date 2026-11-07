@@ -36,11 +36,10 @@ pub(crate) async fn stats(
     let (revision, overrides) = stored(&state, guild).await?;
     // The effective timezone, with what the bot's configuration file gives under the server's own.
     let settings = state.inner.settings.compiler().compile(&overrides)?;
-    let timezone = settings
-        .effective
+    let timezone = overrides
         .timezone
         .as_deref()
-        .or(overrides.timezone.as_deref())
+        .or(settings.effective.timezone.as_deref())
         .unwrap_or("UTC");
     let offset = Timezone::parse(timezone)
         .map_err(|error| ApiError::Internal(error.to_string()))?
