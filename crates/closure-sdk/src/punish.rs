@@ -414,7 +414,7 @@ impl<'a> Punisher<'a> {
             target,
             role,
             now,
-            now.saturating_add(secs(duration)),
+            Some(now.saturating_add(secs(duration))),
             reason.as_deref(),
         )
         .await?;
@@ -536,11 +536,21 @@ impl<'a> Punisher<'a> {
                 &Args::new().with("reason", dm_reason(self.ctx, reason.as_deref())),
             )
             .await;
+        let _turn = member_turn(self.ctx, target).await;
+        let kept = self
+            .remember_action("kick", target, reason.as_deref())
+            .await?;
         self.ctx
             .api
             .kick(self.ctx.guild_id, target, self.audit(reason.as_deref()))
             .await?;
         let case = self.record("kick", target, reason, None).await?;
+        if kept {
+            self.ctx
+                .store()
+                .delete(&action_intent_key("kick", target))
+                .await?;
+        }
         Ok(Done {
             case,
             notes: note.into_iter().collect(),
@@ -561,11 +571,14 @@ impl<'a> Punisher<'a> {
             return Err(UserError::sdk("punish-ban-delete-days-range"));
         }
         let key = ban_intent_key(target);
+        // A module without storage can still ban for good; it has no intent to keep.
+        let mut kept = true;
         match self.ctx.store().entry(&key).await {
             Ok(Some(_)) => reconcile_ban(self.ctx, &key).await?,
-            Ok(None) | Err(closure_core::storage::StorageError::NotGranted)
-                if duration.is_none() => {}
             Ok(None) => {}
+            Err(closure_core::storage::StorageError::NotGranted) if duration.is_none() => {
+                kept = false;
+            }
             Err(error) => return Err(error.into()),
         }
         let note = match duration {
@@ -600,7 +613,9 @@ impl<'a> Punisher<'a> {
         };
         let started_at = self.ctx.now();
         let expires_at = duration.map(|duration| started_at.saturating_add(secs(duration)));
-        if let Some(expires_at) = expires_at {
+        // The intent comes before the ban, for good or not: a stop between the ban and its case
+        // is finished from it.
+        if kept {
             self.remember_ban(target, reason.as_deref(), started_at, expires_at)
                 .await?;
         }
@@ -640,7 +655,7 @@ impl<'a> Punisher<'a> {
             }
             None => None,
         };
-        if duration.is_some() && recorded.is_ok() && timer.is_none() {
+        if kept && recorded.is_ok() && timer.is_none() {
             self.ctx.store().delete(&key).await?;
         }
         let case = recorded?;
@@ -651,12 +666,45 @@ impl<'a> Punisher<'a> {
         })
     }
 
+    /// Saves what a kick or an unban is about to do. A module without storage keeps no intent;
+    /// whether one was kept is returned.
+    async fn remember_action(
+        &self,
+        kind: &str,
+        target: UserId,
+        reason: Option<&str>,
+    ) -> Result<bool, UserError> {
+        let case_before = match self.ctx.cases().for_target(target, None, 1).await {
+            Ok(cases) => cases.first().map_or(0, |case| case.number),
+            Err(CaseError::NotGranted) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let intent = ActionIntent {
+            kind: kind.to_owned(),
+            target: target.get(),
+            moderator: self.moderator.id.get(),
+            reason: reason.map(str::to_owned),
+            case_before,
+            undoing: self.undoing,
+        };
+        match self
+            .ctx
+            .store()
+            .set(&action_intent_key(kind, target), &intent)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(closure_core::storage::StorageError::NotGranted) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn remember_ban(
         &self,
         target: UserId,
         reason: Option<&str>,
         started_at: i64,
-        expires_at: i64,
+        expires_at: Option<i64>,
     ) -> Result<(), UserError> {
         let case_before = match self.ctx.cases().for_target(target, None, 1).await {
             Ok(cases) => Some(cases.first().map_or(0, |case| case.number)),
@@ -686,7 +734,7 @@ impl<'a> Punisher<'a> {
         target: UserId,
         role: Option<RoleId>,
         started_at: i64,
-        expires_at: i64,
+        expires_at: Option<i64>,
         reason: Option<&str>,
     ) -> Result<(), UserError> {
         let cases = self.ctx.cases().for_target(target, None, 1).await?;
@@ -721,6 +769,9 @@ impl<'a> Punisher<'a> {
         if let Some(undone) = self.superseded(target, "ban").await? {
             return Ok(undone);
         }
+        let kept = self
+            .remember_action("unban", target, reason.as_deref())
+            .await?;
         self.ctx
             .api
             .unban(self.ctx.guild_id, target, self.audit(reason.as_deref()))
@@ -743,6 +794,12 @@ impl<'a> Punisher<'a> {
             ),
         )
         .await?;
+        if kept {
+            self.ctx
+                .store()
+                .delete(&action_intent_key("unban", target))
+                .await?;
+        }
         Ok(case)
     }
 
@@ -758,7 +815,12 @@ impl<'a> Punisher<'a> {
         let key = restriction_intent_key("vcmute", target);
         reconcile_restriction(self.ctx, &key).await?;
         let now = self.ctx.now();
-        if let Some(duration) = duration {
+        // The intent comes before the mute, for good or not.
+        let kept = !matches!(
+            self.ctx.store().entry(&key).await,
+            Err(closure_core::storage::StorageError::NotGranted)
+        ) || duration.is_some();
+        if kept {
             let role = match self.settings.voice {
                 Method::Role => Some(self.voice_role()?),
                 Method::Discord => None,
@@ -768,7 +830,7 @@ impl<'a> Punisher<'a> {
                 target,
                 role,
                 now,
-                now.saturating_add(secs(duration)),
+                duration.map(|duration| now.saturating_add(secs(duration))),
                 reason.as_deref(),
             )
             .await?;
@@ -795,7 +857,7 @@ impl<'a> Punisher<'a> {
                 .then_some(Note::NoVoiceTimer),
             None => None,
         };
-        if duration.is_some() && recorded.is_ok() && timer.is_none() {
+        if kept && recorded.is_ok() && timer.is_none() {
             self.ctx.store().delete(&key).await?;
         }
         let case = recorded?;
@@ -1132,7 +1194,6 @@ impl<'a> Punisher<'a> {
         reason: Option<String>,
         expires_at: Option<i64>,
     ) -> Result<Case, UserError> {
-        // shortcut: interrupted permanent punishments can lose cases; add intents if recovery is needed.
         Ok(self
             .ctx
             .cases()
@@ -1321,7 +1382,8 @@ struct BanIntent {
     moderator: u64,
     reason: Option<String>,
     started_at: i64,
-    expires_at: i64,
+    /// `None` for a ban for good.
+    expires_at: Option<i64>,
     #[serde(default)]
     case_before: Option<i64>,
 }
@@ -1333,7 +1395,8 @@ struct RestrictionIntent {
     moderator: u64,
     reason: Option<String>,
     started_at: i64,
-    expires_at: i64,
+    /// `None` for a mute for good.
+    expires_at: Option<i64>,
     case_before: i64,
     method: Method,
     role: Option<u64>,
@@ -1343,6 +1406,23 @@ struct RestrictionIntent {
 }
 
 fn restriction_intent_key(kind: &str, user: UserId) -> String {
+    format!("{kind}-intent:{}", user.get())
+}
+
+/// A kick or an unban that is on its way: saved before Discord is called, so a stop between the
+/// action and its case is finished from it.
+#[derive(Debug, Serialize, Deserialize)]
+struct ActionIntent {
+    kind: String,
+    target: u64,
+    moderator: u64,
+    reason: Option<String>,
+    case_before: i64,
+    /// The case an undo button names, for an unban.
+    undoing: Option<i64>,
+}
+
+fn action_intent_key(kind: &str, user: UserId) -> String {
     format!("{kind}-intent:{}", user.get())
 }
 
@@ -1566,7 +1646,7 @@ async fn reconcile_intents(ctx: &EventContext) -> Result<(), ModuleError> {
         .await
         .map_err(|error| ModuleError::other(error.to_string()))?
         .unwrap_or(0);
-    let kinds = ["ban", "timeout", "vcmute"];
+    let kinds = ["ban", "timeout", "vcmute", "kick", "unban"];
     let mut remaining = RECONCILE_BATCH;
     for offset in 0..kinds.len() {
         if remaining == 0 {
@@ -1631,10 +1711,10 @@ async fn reconcile_batch(
             let user = UserId::new_checked(target)
                 .ok_or_else(|| ModuleError::other("invalid intent target"))?;
             let _turn = member_turn(ctx, user).await;
-            if kind == "ban" {
-                reconcile_ban(ctx, &key).await
-            } else {
-                reconcile_restriction(ctx, &key).await
+            match kind {
+                "ban" => reconcile_ban(ctx, &key).await,
+                "kick" | "unban" => reconcile_action(ctx, &key).await,
+                _ => reconcile_restriction(ctx, &key).await,
             }
         }
         .await;
@@ -1685,7 +1765,7 @@ async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
                 && case.kind.as_str() == "ban"
                 && case.moderator == moderator
                 && case.reason == intent.reason
-                && case.expires_at == Some(intent.expires_at)
+                && case.expires_at == intent.expires_at
                 && case.number > case_before
         }) {
             break case.clone();
@@ -1699,18 +1779,20 @@ async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
                     target,
                     moderator,
                     reason: intent.reason.clone(),
-                    expires_at: Some(intent.expires_at),
+                    expires_at: intent.expires_at,
                 })
                 .await?;
         }
         before = cases.last().map(|case| case.number);
     };
-    if intent.expires_at > ctx.now() {
-        let after = Duration::from_secs(
-            u64::try_from(intent.expires_at.saturating_sub(ctx.now())).unwrap_or_default(),
-        );
+    // A ban for good has no timer; a timed one gets its timer, or is lifted if its time is up.
+    if let Some(at) = intent.expires_at.filter(|at| *at > ctx.now()) {
+        let after =
+            Duration::from_secs(u64::try_from(at.saturating_sub(ctx.now())).unwrap_or_default());
         schedule_unban(ctx, target, case.number, after).await?;
-    } else if !another_stands(ctx, target, "ban", case.number).await? {
+    } else if intent.expires_at.is_some()
+        && !another_stands(ctx, target, "ban", case.number).await?
+    {
         let reason = Reason::truncated(&ctx.t_core(
             ctx.locale,
             "reason-ban-of-case-ran-out",
@@ -1720,6 +1802,103 @@ async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
             Ok(()) | Err(DiscordError::NotFound) => {}
             Err(error) => return Err(error.into()),
         }
+    }
+    ctx.store().delete(key).await?;
+    let _ = modlog::post(ctx, &case).await;
+    Ok(())
+}
+
+/// Finishes a kick or an unban that stopped between Discord and its case: when the member is gone
+/// (kick) or no longer banned (unban) the action was done, so its case is made if it is missing.
+async fn reconcile_action(ctx: &EventContext, key: &str) -> Result<(), UserError> {
+    let Some(intent) = ctx.store().get::<ActionIntent>(key).await? else {
+        return Ok(());
+    };
+    let target = UserId::new_checked(intent.target)
+        .ok_or_else(|| ModuleError::other("invalid intent target"))?;
+    let moderator = UserId::new_checked(intent.moderator)
+        .ok_or_else(|| ModuleError::other("invalid intent moderator"))?;
+    let done = if intent.kind == "kick" {
+        match ctx
+            .api
+            .execute(Action::GetMember {
+                guild_id: ctx.guild_id,
+                user_id: target,
+            })
+            .await
+        {
+            Err(DiscordError::NotFound) => true,
+            Err(error) => return Err(error.into()),
+            Ok(_) => false,
+        }
+    } else {
+        let outcome = ctx
+            .api
+            .execute(Action::ListBans {
+                guild_id: ctx.guild_id,
+                after: UserId::new_checked(intent.target.saturating_sub(1)),
+                limit: 1,
+            })
+            .await?;
+        let Outcome::Bans(bans) = outcome else {
+            return Err(ModuleError::other("unexpected ban list outcome").into());
+        };
+        !bans.iter().any(|ban| ban.user.id == target)
+    };
+    if !done {
+        ctx.store().delete(key).await?;
+        return Ok(());
+    }
+    let mut before = None;
+    let case = loop {
+        let cases = ctx.cases().for_target(target, before, 100).await?;
+        if let Some(case) = cases.iter().find(|case| {
+            case.module == ctx.module
+                && case.kind.as_str() == intent.kind
+                && case.moderator == moderator
+                && case.number > intent.case_before
+        }) {
+            break case.clone();
+        }
+        if cases.len() < 100
+            || cases
+                .last()
+                .is_some_and(|case| case.number <= intent.case_before)
+        {
+            break ctx
+                .cases()
+                .create(NewCase {
+                    source: crate::CaseSource::Command,
+                    kind: CaseKind::new(&intent.kind)?,
+                    target,
+                    moderator,
+                    reason: intent.reason.clone(),
+                    expires_at: None,
+                })
+                .await?;
+        }
+        before = cases.last().map(|case| case.number);
+    };
+    if intent.kind == "unban" {
+        let mut punisher = Punisher::new(
+            ctx,
+            Moderator {
+                id: moderator,
+                name: String::new(),
+            },
+            Settings::default(),
+        );
+        if let Some(number) = intent.undoing {
+            punisher = punisher.undoing(number);
+        }
+        let reason = ctx.t_core(
+            ctx.locale,
+            "reason-unbanned-by-case",
+            &Args::new().with("case", case.number),
+        );
+        punisher
+            .revoke_lifted(target, "ban", case.number, reason)
+            .await?;
     }
     ctx.store().delete(key).await?;
     let _ = modlog::post(ctx, &case).await;
@@ -1811,7 +1990,7 @@ async fn reconcile_restriction(ctx: &EventContext, key: &str) -> Result<(), User
                     target,
                     moderator,
                     reason: intent.reason.clone(),
-                    expires_at: Some(intent.expires_at),
+                    expires_at: intent.expires_at,
                 })
                 .await?;
         }
@@ -1847,7 +2026,10 @@ async fn finish_restriction(
         },
         settings,
     );
-    let mut due = intent.expires_at;
+    // A mute for good has no timer to set.
+    let Some(mut due) = intent.expires_at else {
+        return Ok(());
+    };
     if due <= ctx.now() {
         match held_by_others(ctx, target, &intent.kind, case.number).await? {
             Hold::Forever => return Ok(()),

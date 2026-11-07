@@ -268,6 +268,7 @@ struct BanApi {
     inner: Arc<MockApi>,
     banned: AtomicBool,
     pause: AtomicBool,
+    pause_unban: AtomicBool,
     fail_list: AtomicBool,
     lookups: AtomicUsize,
     entered: Notify,
@@ -307,6 +308,10 @@ impl DiscordApi for BanApi {
                 let result = self.inner.execute(action).await;
                 if result.is_ok() {
                     self.banned.store(false, Ordering::SeqCst);
+                    if self.pause_unban.load(Ordering::SeqCst) {
+                        self.entered.notify_one();
+                        std::future::pending::<()>().await;
+                    }
                 }
                 result
             }
@@ -336,6 +341,7 @@ async fn ban_recovery_fixture() -> (Harness, EventContext, Arc<BanApi>) {
         inner: Arc::clone(harness.api()),
         banned: AtomicBool::new(false),
         pause: AtomicBool::new(false),
+        pause_unban: AtomicBool::new(false),
         fail_list: AtomicBool::new(false),
         lookups: AtomicUsize::new(0),
         entered: Notify::new(),
@@ -395,6 +401,72 @@ async fn timed_ban_recovery_after_abort_restores_case_and_timer() {
     );
     assert_eq!(harness.jobs(), 1);
     assert!(ctx.store().entry("ban-intent:7").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_ban_for_good_that_stopped_before_its_case_is_finished_from_its_intent() {
+    let _guard = TEST_LOCK.lock().await;
+    let (harness, ctx, api) = ban_recovery_fixture().await;
+    api.pause.store(true, Ordering::SeqCst);
+    let task_ctx = ctx.clone();
+    let task = tokio::spawn(async move {
+        let settings = Settings {
+            dm: false,
+            ..Settings::default()
+        };
+        let moderator = Moderator::bot(&task_ctx, "test").unwrap();
+        Punisher::new(&task_ctx, moderator, settings)
+            .ban(Id::new(7), None, 0, Some("raid".to_owned()))
+            .await
+    });
+    api.entered.notified().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(ctx.cases().get(1).await.unwrap().is_none());
+    assert!(ctx.store().entry("ban-intent:7").await.unwrap().is_some());
+    run_ban_recovery(&ctx).await;
+    let case = ctx.cases().get(1).await.unwrap().unwrap();
+    assert_eq!(case.kind.as_str(), "ban");
+    assert_eq!(case.expires_at, None);
+    assert_eq!(case.reason.as_deref(), Some("raid"));
+    assert_eq!(harness.jobs(), 0, "a ban for good has no timer");
+    assert!(ctx.store().entry("ban-intent:7").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_unban_that_stopped_before_its_case_is_finished_and_the_ban_case_is_revoked() {
+    let _guard = TEST_LOCK.lock().await;
+    let (_, ctx, api) = ban_recovery_fixture().await;
+    api.banned.store(true, Ordering::SeqCst);
+    ctx.cases()
+        .create(closure_sdk::NewCase {
+            source: closure_sdk::CaseSource::Command,
+            kind: closure_sdk::CaseKind::new("ban").unwrap(),
+            target: Id::new(7),
+            moderator: ctx.bot().unwrap(),
+            reason: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    api.pause_unban.store(true, Ordering::SeqCst);
+    let task_ctx = ctx.clone();
+    let task = tokio::spawn(async move {
+        let moderator = Moderator::bot(&task_ctx, "test").unwrap();
+        Punisher::new(&task_ctx, moderator, Settings::default())
+            .unban(Id::new(7), Some("sorry".to_owned()))
+            .await
+    });
+    api.entered.notified().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(ctx.cases().get(2).await.unwrap().is_none());
+    api.pause_unban.store(false, Ordering::SeqCst);
+    run_ban_recovery(&ctx).await;
+    let unban = ctx.cases().get(2).await.unwrap().unwrap();
+    assert_eq!(unban.kind.as_str(), "unban");
+    assert!(ctx.cases().get(1).await.unwrap().unwrap().revoked.is_some());
+    assert!(ctx.store().entry("unban-intent:7").await.unwrap().is_none());
 }
 
 #[tokio::test]
