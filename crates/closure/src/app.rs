@@ -431,7 +431,7 @@ async fn publish_commands(
         .await
         .context("could not publish slash commands")?;
     tracing::info!(published, ?scope, "slash commands published");
-    if matches!(scope, CommandScope::Global) {
+    if matches!(scope, CommandScope::Global) && args.clear_guild_commands {
         clear_guild_commands(http, application_id).await;
     }
     Ok(())

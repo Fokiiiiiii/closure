@@ -71,6 +71,12 @@ pub struct Args {
     #[arg(long)]
     pub skip_command_registration: bool,
 
+    /// With global publishing, also empty the commands each server has of its own (a run that used
+    /// `--command-guild` left them, and every command would show twice). It is one request for
+    /// every server the bot is in, so ask for it once after such a run, not at every start.
+    #[arg(long, env = "CLEAR_GUILD_COMMANDS")]
+    pub clear_guild_commands: bool,
+
     /// How many days messages stay in the history that modules with `message_history` read.
     /// `0` keeps none: nothing is recorded, and kept messages are removed at the next purge.
     #[arg(long, env = "MESSAGE_HISTORY_DAYS", default_value_t = 7)]
@@ -88,6 +94,7 @@ impl fmt::Debug for Args {
             .field("api_enabled", &self.api_admin_token.is_some())
             .field("command_guild", &self.command_guild)
             .field("skip_command_registration", &self.skip_command_registration)
+            .field("clear_guild_commands", &self.clear_guild_commands)
             .field("message_history_days", &self.message_history_days)
             .field("log_format", &self.log_format)
             .finish_non_exhaustive()
