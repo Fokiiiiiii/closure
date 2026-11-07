@@ -655,10 +655,17 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
     // The warning is stored already: a member who cannot be messaged keeps it, and the reply says
     // that the message did not arrive instead of failing.
     let punisher = punisher_for(&cx, &config).await?;
-    let done = punisher.warn(args.user, reason, Some(expires_at)).await?;
-    let active = active_cases(cx.cases(), args.user, "warn", now, usize::MAX)
-        .await?
-        .len();
+    // The warning and the count of the warnings are one step for the member: two warnings at once
+    // each see the number they made, so a rule's number is reached exactly once. The turn is let go
+    // before the rule acts, since a punishment takes the member's turn itself.
+    let (done, active) = {
+        let _turn = closure_sdk::punish::member_turn(cx.ctx(), args.user).await;
+        let done = punisher.warn(args.user, reason, Some(expires_at)).await?;
+        let active = active_cases(cx.cases(), args.user, "warn", now, usize::MAX)
+            .await?
+            .len();
+        (done, active)
+    };
     let (case, notes) = case_and_notes(&punisher, done);
     let escalation = escalation_line(&cx, &config, args.user, active, case.number).await;
     let mut text = with_notes(
