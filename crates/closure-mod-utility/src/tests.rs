@@ -253,3 +253,35 @@ async fn a_channel_the_invoker_cannot_see_is_not_described() {
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn members_are_found_by_a_name_they_went_by_and_only_by_a_moderator() {
+    let harness = harness();
+    for (id, nick) in [(7, "Old Name"), (8, "old name"), (9, "Other")] {
+        harness
+            .emit(Event::MemberUpdated(info(id, Some(nick))))
+            .await
+            .unwrap();
+    }
+    harness
+        .emit(Event::MemberUpdated(info(7, Some("New Name"))))
+        .await
+        .unwrap();
+    let find = |name: &str| {
+        Invocation::new("findname")
+            .option("name", CommandOptionValue::String(name.to_owned()))
+            .roles([MODERATOR])
+            .user(50)
+    };
+    let reply = harness.invoke(find("OLD NAME")).await.unwrap();
+    let text = &reply[0].content;
+    assert!(text.contains("<@7>") && text.contains("<@8>"), "{text}");
+    assert!(!text.contains("<@9>"), "{text}");
+    let none = harness.invoke(find("never used")).await.unwrap();
+    assert!(none[0].content.contains("No member is known"));
+    let plain = Invocation::new("findname")
+        .option("name", CommandOptionValue::String("old name".to_owned()))
+        .user(51);
+    let refused = harness.invoke(plain).await.unwrap();
+    assert!(!refused[0].content.contains("<@7>"), "{refused:?}");
+}

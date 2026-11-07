@@ -25,6 +25,8 @@ const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 /// How long the names and the voice place of a member are kept.
 const KEEP: Duration = Duration::from_hours(8760);
+/// The most members a search by name lists.
+const MAX_FOUND: usize = 25;
 /// The most names kept of one member.
 const MAX_NAMES: usize = 20;
 /// Discord's epoch, in Unix milliseconds.
@@ -40,6 +42,13 @@ struct OneUser {
 struct MaybeUser {
     /// The member; yourself when left out.
     user: Option<UserId>,
+}
+
+#[derive(CommandArgs)]
+struct FindName {
+    /// A name, exactly as the member had it (case does not matter).
+    #[arg(max_length = 64)]
+    name: String,
 }
 
 #[derive(CommandArgs)]
@@ -74,6 +83,17 @@ struct Seen {
 
 fn names_key(user: u64) -> String {
     format!("names:{user}")
+}
+
+/// The key of the set of the members who went by `text`. The hash is FNV-1a so that it never
+/// changes with the Rust version; a clash only shows up as a member who is then filtered out.
+fn name_index(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.trim().to_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("name-{hash:016x}")
 }
 
 fn voice_key(user: u64) -> String {
@@ -377,6 +397,36 @@ async fn names(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
         .await
 }
 
+/// The members who went by a name, found by the index of names. Each is checked against their own
+/// list, which drops a clash of the hash and a name that has since scrolled out of the list.
+async fn findname(cx: CommandCx, args: FindName) -> Result<(), UserError> {
+    let wanted = args.name.trim().to_lowercase();
+    let found = cx
+        .store()
+        .set_sample(&name_index(&wanted), MAX_FOUND)
+        .await
+        .map_err(|e| internal(&e))?;
+    let mut lines = Vec::new();
+    for user in found {
+        let seen = cx
+            .store()
+            .get::<Vec<Seen>>(&names_key(user))
+            .await
+            .map_err(|e| internal(&e))?
+            .unwrap_or_default();
+        if let Some(hit) = seen.iter().rev().find(|s| s.text.to_lowercase() == wanted) {
+            lines.push(format!("<@{user}> — <t:{}:R>", hit.at));
+        }
+    }
+    if lines.is_empty() {
+        return cx
+            .reply_private_t("utility-findname-none", &Args::new())
+            .await;
+    }
+    cx.reply_private(closure_sdk::embed::truncate(&lines.join("\n"), 1900))
+        .await
+}
+
 async fn locate(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
     let place = cx
         .store()
@@ -462,6 +512,13 @@ async fn remember(
     if seen.len() == before {
         return Ok(());
     }
+    // shortcut: only the names seen from now on are found, not the ones before this index.
+    for added in &seen[before..] {
+        ctx.store()
+            .set_add(&name_index(&added.text), user.id.get())
+            .await
+            .map_err(|e| stored(&e))?;
+    }
     let excess = seen.len().saturating_sub(MAX_NAMES);
     seen.drain(..excess);
     ctx.store()
@@ -509,6 +566,11 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 "permission-utility-info",
             )?)
             .permission(PermissionSpec::new(
+                "utility.search",
+                Level::MODERATOR,
+                "permission-utility-search",
+            )?)
+            .permission(PermissionSpec::new(
                 "utility.voice",
                 Level::MODERATOR,
                 "permission-utility-voice",
@@ -537,6 +599,11 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 Command::<OneUser>::new("names")
                     .requires("utility.info")
                     .handler(names),
+            )
+            .command(
+                Command::<FindName>::new("findname")
+                    .requires("utility.search")
+                    .handler(findname),
             )
             .command(
                 Command::<OneUser>::new("locate")

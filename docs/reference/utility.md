@@ -17,6 +17,7 @@ Commands that tell about the server, a role, a channel or a member, the names a 
 | Key | Default level | Description |
 |---|---|---|
 | `utility.info` | 1 | Use the commands that show information |
+| `utility.search` | 50 | Find members by the names they went by |
 | `utility.voice` | 50 | Move and disconnect members in voice |
 
 ## Commands
@@ -73,6 +74,17 @@ Show the names a member went by
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | user | user | yes | - | The member |
+
+### `/findname`
+
+Find the members who went by a name
+
+- Japanese name: `名前検索`
+- Japanese description: ある名前で過ごしたことのあるメンバーを探します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `name` | 名前 | string | yes | max_length 64 | A name, exactly as the member had it (case does not matter) |
 
 ### `/locate`
 
