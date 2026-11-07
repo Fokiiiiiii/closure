@@ -228,14 +228,6 @@ fn antiraid_group(state: &Arc<engine::State>) -> SubcommandGroup {
                     move |cx, args| commands::antiraid_release(Arc::clone(&state), cx, args)
                 }),
         )
-        .subcommand(
-            Command::<()>::new("release-all")
-                .requires("automod.antiraid.release")
-                .handler({
-                    let state = Arc::clone(state);
-                    move |cx, args| commands::antiraid_release_all(Arc::clone(&state), cx, args)
-                }),
-        )
 }
 
 /// The module as the host loads it.

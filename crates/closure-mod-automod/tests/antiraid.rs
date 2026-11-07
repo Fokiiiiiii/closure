@@ -469,7 +469,10 @@ async fn release_removes_the_quarantine_of_one_member_or_of_all() {
     assert!(role_changes(&harness).contains(&(false, MEMBER, ROLE)));
     assert!(!role_changes(&harness).contains(&(false, OTHER_MEMBER, ROLE)));
 
-    harness.invoke(sub("antiraid release-all")).await.unwrap();
+    harness
+        .invoke(sub("antiraid release").option("all", CommandOptionValue::Boolean(true)))
+        .await
+        .unwrap();
     assert!(role_changes(&harness).contains(&(false, OTHER_MEMBER, ROLE)));
 }
 
@@ -485,7 +488,10 @@ async fn a_member_who_leaves_is_forgotten_by_the_quarantine() {
     set(&harness, "high").await;
     join(&harness, MEMBER).await;
     leave(&harness, MEMBER).await;
-    harness.invoke(sub("antiraid release-all")).await.unwrap();
+    harness
+        .invoke(sub("antiraid release").option("all", CommandOptionValue::Boolean(true)))
+        .await
+        .unwrap();
     assert!(
         !role_changes(&harness).contains(&(false, MEMBER, ROLE)),
         "a member who left is not released again"

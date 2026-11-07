@@ -44,7 +44,9 @@ pub struct AntiraidSet {
 #[derive(CommandArgs)]
 pub struct AntiraidRelease {
     /// The member to take out of the quarantine
-    pub user: UserId,
+    pub user: Option<UserId>,
+    /// Yes: take every member out of the quarantine
+    pub all: Option<bool>,
 }
 
 /// `/automod counter`: looks at, sets, adds to, or resets a counter, as the action says.
@@ -358,30 +360,30 @@ pub async fn antiraid_clear(state: Arc<State>, cx: CommandCx, (): ()) -> Result<
     set_and_reply(&state, &cx, &calm, by, None).await
 }
 
+/// Takes one member out of the quarantine, or every member when `all` says so.
 pub async fn antiraid_release(
     state: Arc<State>,
     cx: CommandCx,
     args: AntiraidRelease,
 ) -> Result<(), UserError> {
+    let everyone = args.all == Some(true);
+    // Either one member or all of them, and all only when it is said.
+    if everyone == args.user.is_some() {
+        return Err(UserError::message("antiraid-release-one"));
+    }
     // Acknowledged first: the change may outlast Discord's three seconds.
     cx.defer(true).await?;
-    let tally = antiraid::release(cx.ctx(), &state.memory, args.user)
-        .await
-        .map_err(UserError::Module)?;
-    reply_tally(&cx, "antiraid-released", tally).await
-}
-
-pub async fn antiraid_release_all(
-    state: Arc<State>,
-    cx: CommandCx,
-    (): (),
-) -> Result<(), UserError> {
-    // Acknowledged first: the change may outlast Discord's three seconds.
-    cx.defer(true).await?;
-    let tally = antiraid::release_all(cx.ctx(), &state.memory)
-        .await
-        .map_err(UserError::Module)?;
-    reply_tally(&cx, "antiraid-released-all", tally).await
+    let (tally, key) = match args.user {
+        Some(user) => (
+            antiraid::release(cx.ctx(), &state.memory, user).await,
+            "antiraid-released",
+        ),
+        None => (
+            antiraid::release_all(cx.ctx(), &state.memory).await,
+            "antiraid-released-all",
+        ),
+    };
+    reply_tally(&cx, key, tally.map_err(UserError::Module)?).await
 }
 
 /// Changes the level and runs the change through the rules, then says what it did.

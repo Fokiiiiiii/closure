@@ -24,36 +24,17 @@ Commands that tell about the server, a role, a channel or a member, the names a 
 
 ## Commands
 
-### `/serverinfo`
+### `/info`
 
-Show facts about this server
+Show facts about a role, a channel, or this server
 
-- Japanese name: `serverinfo`
-- Japanese description: このサーバーの情報を表示します
-
-This command takes no options.
-
-### `/roleinfo`
-
-Show facts about a role
-
-- Japanese name: `roleinfo`
-- Japanese description: ロールの情報を表示します
+- Japanese name: `info`
+- Japanese description: ロール、チャンネル、またはこのサーバーの情報を表示します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `role` | role | role | yes | - | The role |
-
-### `/channelinfo`
-
-Show facts about a channel
-
-- Japanese name: `channelinfo`
-- Japanese description: チャンネルの情報を表示します
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `channel` | channel | channel | yes | - | The channel |
+| `role` | role | role | no | - | A role to tell about |
+| `channel` | channel | channel | no | - | A channel to tell about |
 
 ### `/avatar`
 
@@ -68,14 +49,15 @@ Show the avatar of a member
 
 ### `/names`
 
-Show the names a member went by
+Show the names a member went by, or find the members who went by a name
 
 - Japanese name: `names`
-- Japanese description: メンバーの過去の名前を表示します
+- Japanese description: メンバーの過去の名前を表示、またはある名前で過ごしたメンバーを探します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `user` | user | user | yes | - | The member |
+| `user` | user | user | no | - | The member; yourself when left out |
+| `name` | name | string | no | max_length 64 | Instead: find the members who went by this name (case does not matter) |
 
 ### `/nickname`
 
@@ -100,17 +82,6 @@ Tell when a Discord id was made
 |---|---|---|---|---|---|
 | `id` | id | string | yes | max_length 20 | The id of a user, channel, role, message or the like |
 
-### `/findname`
-
-Find the members who went by a name
-
-- Japanese name: `名前検索`
-- Japanese description: ある名前で過ごしたことのあるメンバーを探します
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `name` | 名前 | string | yes | max_length 64 | A name, exactly as the member had it (case does not matter) |
-
 ### `/locate`
 
 Find the voice channel a member is in
@@ -124,27 +95,16 @@ Find the voice channel a member is in
 
 ### `/vcmove`
 
-Move a member to another voice channel
+Move a member, or everyone in a voice channel, to another voice channel
 
 - Japanese name: `vcmove`
-- Japanese description: メンバーを別のボイスチャンネルへ移動します
+- Japanese description: メンバー、またはチャンネルにいる全員を別のボイスチャンネルへ移動します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `user` | user | user | yes | - | The member, who has to be in voice |
 | `channel` | channel | channel | yes | - | The voice channel to move them to |
-
-### `/vcmoveall`
-
-Move everyone in a voice channel to another
-
-- Japanese name: `全員移動`
-- Japanese description: ボイスチャンネルにいる全員を別のチャンネルへ移動します
-
-| Option | Japanese name | Type | Required | Limits | Description |
-|---|---|---|---|---|---|
-| `from` | 移動元 | channel | yes | - | The voice channel to empty |
-| `to` | 移動先 | channel | yes | - | The voice channel to move them to |
+| `user` | user | user | no | - | The member, who has to be in voice |
+| `from` | from | channel | no | - | Instead of one member: the voice channel to empty |
 
 ### `/vckick`
 

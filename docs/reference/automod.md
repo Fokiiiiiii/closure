@@ -100,21 +100,15 @@ Put the antiraid level back to the calm one
 
 ##### `/automod antiraid release`
 
-Take a member out of the quarantine
+Take a member, or every member, out of the quarantine
 
 - Japanese name: `release`
-- Japanese description: メンバーを隔離から解除する
+- Japanese description: メンバー、または全員を隔離から解除します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `user` | user | user | yes | - | The member to take out of the quarantine |
-
-##### `/automod antiraid release-all`
-
-Take every member out of the quarantine
-
-- Japanese name: `release-all`
-- Japanese description: 隔離中のメンバーを全員解除する
+| `user` | user | user | no | - | The member to take out of the quarantine |
+| `all` | all | boolean | no | - | Yes: take every member out of the quarantine |
 
 ## Configuration
 

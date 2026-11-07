@@ -48,30 +48,30 @@ struct MaybeUser {
 }
 
 #[derive(CommandArgs)]
-struct FindName {
-    /// A name, exactly as the member had it (case does not matter).
+struct NamesArgs {
+    /// The member whose names to show; yourself when left out.
+    user: Option<UserId>,
+    /// Instead: find the members who went by this name (case does not matter).
     #[arg(max_length = 64)]
-    name: String,
+    name: Option<String>,
 }
 
 #[derive(CommandArgs)]
-struct OneRole {
-    /// The role.
-    role: RoleId,
-}
-
-#[derive(CommandArgs)]
-struct OneChannel {
-    /// The channel.
-    channel: ChannelId,
+struct Info {
+    /// A role to tell about; the server when both are left out.
+    role: Option<RoleId>,
+    /// A channel to tell about.
+    channel: Option<ChannelId>,
 }
 
 #[derive(CommandArgs)]
 struct MoveArgs {
-    /// The member, who has to be in voice.
-    user: UserId,
     /// The voice channel to move them to.
     channel: ChannelId,
+    /// The member, who has to be in voice.
+    user: Option<UserId>,
+    /// Instead of one member: the voice channel to empty.
+    from: Option<ChannelId>,
 }
 
 #[derive(Deserialize)]
@@ -106,14 +106,6 @@ struct Snowflake {
     /// The id of a user, channel, role, message or the like.
     #[arg(max_length = 20)]
     id: String,
-}
-
-#[derive(CommandArgs)]
-struct MoveAll {
-    /// The voice channel to empty.
-    from: ChannelId,
-    /// The voice channel to move them to.
-    to: ChannelId,
 }
 
 /// A name a member went by.
@@ -276,6 +268,16 @@ async fn avatar(cx: CommandCx, args: MaybeUser) -> Result<(), UserError> {
     }
 }
 
+/// Tells about a role, a channel, or the server.
+async fn info(cx: CommandCx, args: Info) -> Result<(), UserError> {
+    match (args.role, args.channel) {
+        (Some(_), Some(_)) => Err(UserError::message("utility-info-one")),
+        (Some(role), None) => roleinfo(cx, role).await,
+        (None, Some(channel)) => channelinfo(cx, channel).await,
+        (None, None) => serverinfo(cx, ()).await,
+    }
+}
+
 async fn serverinfo(cx: CommandCx, (): ()) -> Result<(), UserError> {
     let guild = cx
         .api()
@@ -307,7 +309,7 @@ async fn serverinfo(cx: CommandCx, (): ()) -> Result<(), UserError> {
     cx.reply_with(reply_of(card)?).await
 }
 
-async fn roleinfo(cx: CommandCx, args: OneRole) -> Result<(), UserError> {
+async fn roleinfo(cx: CommandCx, role: RoleId) -> Result<(), UserError> {
     let Outcome::Roles(roles) = cx
         .api()
         .execute(Action::ListRoles {
@@ -320,7 +322,7 @@ async fn roleinfo(cx: CommandCx, args: OneRole) -> Result<(), UserError> {
     };
     let role = roles
         .iter()
-        .find(|r| r.id.get() == args.role.get())
+        .find(|r| r.id.get() == role.get())
         .ok_or_else(|| UserError::message("utility-not-found"))?;
     let say = |key: &str| cx.t(key, &Args::new());
     let yes_no = |on: bool| say(if on { "utility-yes" } else { "utility-no" });
@@ -377,11 +379,11 @@ async fn invoker_sees(cx: &CommandCx, channel: &Channel) -> Result<bool, UserErr
         .contains(Permissions::VIEW_CHANNEL))
 }
 
-async fn channelinfo(cx: CommandCx, args: OneChannel) -> Result<(), UserError> {
+async fn channelinfo(cx: CommandCx, channel: ChannelId) -> Result<(), UserError> {
     let Outcome::Channel(channel) = cx
         .api()
         .execute(Action::GetChannel {
-            channel_id: args.channel,
+            channel_id: channel,
         })
         .await
         .map_err(|e| failed(&e))?
@@ -414,10 +416,25 @@ async fn channelinfo(cx: CommandCx, args: OneChannel) -> Result<(), UserError> {
     cx.reply_with(reply_of(card)?).await
 }
 
-async fn names(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
+/// The names a member went by, or the members who went by a name.
+async fn names(cx: CommandCx, args: NamesArgs) -> Result<(), UserError> {
+    match (args.user, args.name) {
+        (Some(_), Some(_)) => Err(UserError::message("utility-names-one")),
+        (None, Some(name)) => {
+            cx.require("utility.search").await?;
+            find_name(cx, name).await
+        }
+        (user, None) => {
+            let user = user.unwrap_or(cx.user().id);
+            list_names(cx, user).await
+        }
+    }
+}
+
+async fn list_names(cx: CommandCx, user: UserId) -> Result<(), UserError> {
     let seen = cx
         .store()
-        .get::<Vec<Seen>>(&names_key(args.user.get()))
+        .get::<Vec<Seen>>(&names_key(user.get()))
         .await
         .map_err(|e| internal(&e))?
         .unwrap_or_default();
@@ -449,8 +466,8 @@ async fn names(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
 
 /// The members who went by a name, found by the index of names. Each is checked against their own
 /// list, which drops a clash of the hash and a name that has since scrolled out of the list.
-async fn findname(cx: CommandCx, args: FindName) -> Result<(), UserError> {
-    let wanted = args.name.trim().to_lowercase();
+async fn find_name(cx: CommandCx, name: String) -> Result<(), UserError> {
+    let wanted = name.trim().to_lowercase();
     let found = cx
         .store()
         .set_sample(&name_index(&wanted), MAX_FOUND)
@@ -501,33 +518,42 @@ async fn locate(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
     }
 }
 
+/// Moves a member to a voice channel, or everyone in a voice channel.
 async fn vcmove(cx: CommandCx, args: MoveArgs) -> Result<(), UserError> {
+    match (args.user, args.from) {
+        (Some(user), None) => move_one(cx, user, args.channel).await,
+        (None, Some(from)) => move_all(cx, from, args.channel).await,
+        _ => Err(UserError::message("utility-move-one")),
+    }
+}
+
+async fn move_one(cx: CommandCx, user: UserId, to: ChannelId) -> Result<(), UserError> {
     // Not the invoker, the owner, a bot, or someone whose highest role is not below theirs.
-    cx.check_target(args.user).await?;
+    cx.check_target(user).await?;
     let reason = Reason::new(cx.t("utility-reason-move", &Args::new())).map_err(|e| failed(&e))?;
     cx.api()
-        .move_member(cx.guild_id(), args.user, args.channel, reason)
+        .move_member(cx.guild_id(), user, to, reason)
         .await
         .map_err(|e| failed(&e))?;
     cx.reply_private_t(
         "utility-moved",
         &Args::new()
-            .with("user", format!("<@{}>", args.user))
-            .with("channel", format!("<#{}>", args.channel)),
+            .with("user", format!("<@{user}>"))
+            .with("channel", format!("<#{to}>")),
     )
     .await
 }
 
 /// Moves the members in a voice channel to another. The bot knows who is in a channel from the
 /// voice changes it has seen, so each one is checked against where they are before the move.
-async fn vcmoveall(cx: CommandCx, args: MoveAll) -> Result<(), UserError> {
-    if args.from == args.to {
+async fn move_all(cx: CommandCx, from: ChannelId, to: ChannelId) -> Result<(), UserError> {
+    if from == to {
         return Err(UserError::message("utility-moveall-same"));
     }
     cx.defer(true).await?;
     let members = cx
         .store()
-        .set_sample(&voice_set(args.from), MAX_MOVED)
+        .set_sample(&voice_set(from), MAX_MOVED)
         .await
         .map_err(|e| internal(&e))?;
     let (mut moved, mut left_out) = (0_i64, 0_i64);
@@ -537,9 +563,9 @@ async fn vcmoveall(cx: CommandCx, args: MoveAll) -> Result<(), UserError> {
             .get::<u64>(&voice_key(user))
             .await
             .map_err(|e| internal(&e))?;
-        let Some(id) = UserId::new_checked(user).filter(|_| there == Some(args.from.get())) else {
+        let Some(id) = UserId::new_checked(user).filter(|_| there == Some(from.get())) else {
             cx.store()
-                .set_remove(&voice_set(args.from), user)
+                .set_remove(&voice_set(from), user)
                 .await
                 .map_err(|e| internal(&e))?;
             continue;
@@ -549,7 +575,7 @@ async fn vcmoveall(cx: CommandCx, args: MoveAll) -> Result<(), UserError> {
         let done = cx.check_target(id).await.is_ok()
             && cx
                 .api()
-                .move_member(cx.guild_id(), id, args.to, reason)
+                .move_member(cx.guild_id(), id, to, reason)
                 .await
                 .is_ok();
         if done {
@@ -563,7 +589,7 @@ async fn vcmoveall(cx: CommandCx, args: MoveAll) -> Result<(), UserError> {
         &Args::new()
             .with("moved", moved)
             .with("left", left_out)
-            .with("channel", format!("<#{}>", args.to)),
+            .with("channel", format!("<#{to}>")),
     )
     .await
 }
@@ -799,19 +825,9 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 "permission-utility-voice",
             )?)
             .command(
-                Command::<()>::new("serverinfo")
+                Command::<Info>::new("info")
                     .requires("utility.info")
-                    .handler(serverinfo),
-            )
-            .command(
-                Command::<OneRole>::new("roleinfo")
-                    .requires("utility.info")
-                    .handler(roleinfo),
-            )
-            .command(
-                Command::<OneChannel>::new("channelinfo")
-                    .requires("utility.info")
-                    .handler(channelinfo),
+                    .handler(info),
             )
             .command(
                 Command::<MaybeUser>::new("avatar")
@@ -819,7 +835,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                     .handler(avatar),
             )
             .command(
-                Command::<OneUser>::new("names")
+                Command::<NamesArgs>::new("names")
                     .requires("utility.info")
                     .handler(names),
             )
@@ -834,11 +850,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                     .handler(snowflake),
             )
             .command(
-                Command::<FindName>::new("findname")
-                    .requires("utility.search")
-                    .handler(findname),
-            )
-            .command(
                 Command::<OneUser>::new("locate")
                     .requires("utility.info")
                     .handler(locate),
@@ -847,11 +858,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 Command::<MoveArgs>::new("vcmove")
                     .requires("utility.voice")
                     .handler(vcmove),
-            )
-            .command(
-                Command::<MoveAll>::new("vcmoveall")
-                    .requires("utility.voice")
-                    .handler(vcmoveall),
             )
             .command(
                 Command::<OneUser>::new("vckick")

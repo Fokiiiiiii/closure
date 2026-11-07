@@ -230,7 +230,7 @@ fn everyone_with(permissions: &str) -> twilight_model::guild::Role {
 #[tokio::test]
 async fn a_channel_the_invoker_cannot_see_is_not_described() {
     let channelinfo = || {
-        Invocation::new("channelinfo")
+        Invocation::new("info")
             .option("channel", CommandOptionValue::Channel(Id::new(30)))
             .user(50)
     };
@@ -268,7 +268,7 @@ async fn members_are_found_by_a_name_they_went_by_and_only_by_a_moderator() {
         .await
         .unwrap();
     let find = |name: &str| {
-        Invocation::new("findname")
+        Invocation::new("names")
             .option("name", CommandOptionValue::String(name.to_owned()))
             .roles([MODERATOR])
             .user(50)
@@ -279,7 +279,7 @@ async fn members_are_found_by_a_name_they_went_by_and_only_by_a_moderator() {
     assert!(!text.contains("<@9>"), "{text}");
     let none = harness.invoke(find("never used")).await.unwrap();
     assert!(none[0].content.contains("No member is known"));
-    let plain = Invocation::new("findname")
+    let plain = Invocation::new("names")
         .option("name", CommandOptionValue::String("old name".to_owned()))
         .user(51);
     let refused = harness.invoke(plain).await.unwrap();
@@ -321,9 +321,9 @@ async fn everyone_in_a_voice_channel_is_moved_at_once_and_only_those_still_there
         .emit(voice_move(9, Some(30), Some(31)))
         .await
         .unwrap();
-    let all = Invocation::new("vcmoveall")
+    let all = Invocation::new("vcmove")
         .option("from", CommandOptionValue::Channel(Id::new(30)))
-        .option("to", CommandOptionValue::Channel(Id::new(32)))
+        .option("channel", CommandOptionValue::Channel(Id::new(32)))
         .roles([MODERATOR])
         .user(50);
     harness.invoke(all).await.unwrap();
@@ -341,9 +341,9 @@ async fn everyone_in_a_voice_channel_is_moved_at_once_and_only_those_still_there
         .collect();
     moved.sort_unstable();
     assert_eq!(moved, [7, 8]);
-    let same = Invocation::new("vcmoveall")
+    let same = Invocation::new("vcmove")
         .option("from", CommandOptionValue::Channel(Id::new(30)))
-        .option("to", CommandOptionValue::Channel(Id::new(30)))
+        .option("channel", CommandOptionValue::Channel(Id::new(30)))
         .roles([MODERATOR])
         .user(50);
     assert!(
