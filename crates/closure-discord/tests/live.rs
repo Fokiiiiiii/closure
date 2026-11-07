@@ -100,6 +100,7 @@ async fn gateway_connects_and_closes_cleanly() {
             token: setting("DISCORD_TOKEN"),
             intents: gateway_intents(&registry),
             latency: Arc::default(),
+            member_request_limit: 0,
         },
         new_cache(),
         dispatcher.clone(),

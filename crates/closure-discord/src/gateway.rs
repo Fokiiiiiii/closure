@@ -101,6 +101,11 @@ pub struct GatewayConfig {
     pub intents: Intents,
     /// Where the heartbeat round trips go; the same value the dispatcher hands the modules.
     pub latency: Arc<GatewayLatency>,
+    /// The members of a guild with more than this many are not asked for all at once: they would be
+    /// held in memory and sent over the gateway in numbers that grow with the guild. Those members
+    /// are known as they speak and as the gateway reports them, and are fetched when a check needs
+    /// one. `0` asks for every guild's members.
+    pub member_request_limit: u64,
 }
 
 impl fmt::Debug for GatewayConfig {
@@ -224,6 +229,7 @@ struct ShardContext {
     latency: Arc<GatewayLatency>,
     /// Whether the bot asked for members, which a guild's member list needs to be requested.
     members_intent: bool,
+    member_request_limit: u64,
     shutdown: CancellationToken,
 }
 
@@ -502,6 +508,7 @@ pub async fn start_gateway(
         health: Arc::clone(&health),
         latency: config.latency,
         members_intent: config.intents.contains(Intents::GUILD_MEMBERS),
+        member_request_limit: config.member_request_limit,
         shutdown,
     });
     let tracker = TaskTracker::new();
@@ -545,7 +552,7 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
                 let latency = shard.latency().recent().first().copied();
                 handle_event(&context, id, latency, &event);
                 if context.members_intent
-                    && let Some(guild) = guild_to_request(&event)
+                    && let Some(guild) = guild_to_request(&event, context.member_request_limit)
                 {
                     // Discord leaves offline members out of a guild's first payload; asking caches them.
                     members.push(guild);
@@ -678,14 +685,19 @@ impl MemberRequests {
     }
 }
 
-/// The guild whose members to ask Discord for: one that just became available.
-fn guild_to_request(event: &Event) -> Option<Id<GuildMarker>> {
+/// The guild whose members to ask Discord for: one that just became available, unless it has more
+/// members than `limit` (`0` has none).
+fn guild_to_request(event: &Event, limit: u64) -> Option<Id<GuildMarker>> {
     let Event::GuildCreate(created) = event else {
         return None;
     };
     match &**created {
-        GuildCreate::Available(guild) => Some(guild.id),
-        GuildCreate::Unavailable(_) => None,
+        GuildCreate::Available(guild)
+            if limit == 0 || guild.member_count.is_none_or(|count| count <= limit) =>
+        {
+            Some(guild.id)
+        }
+        GuildCreate::Available(_) | GuildCreate::Unavailable(_) => None,
     }
 }
 
@@ -848,8 +860,35 @@ mod tests {
         let unavailable: GuildCreate =
             serde_json::from_value(json!({ "id": "1", "unavailable": true })).unwrap();
         assert_eq!(
-            guild_to_request(&Event::GuildCreate(Box::new(unavailable))),
+            guild_to_request(&Event::GuildCreate(Box::new(unavailable)), 0),
             None
+        );
+    }
+
+    fn guild_with(members: u64) -> Event {
+        let created: GuildCreate = serde_json::from_value(json!({
+            "id": "1", "name": "big", "owner_id": "2", "afk_timeout": 300,
+            "default_message_notifications": 0, "explicit_content_filter": 0, "features": [],
+            "mfa_level": 0, "nsfw_level": 0, "preferred_locale": "en-US", "premium_tier": 0,
+            "system_channel_flags": 0, "verification_level": 0, "premium_progress_bar_enabled": false, "roles": [], "emojis": [],
+            "stickers": [], "channels": [], "threads": [], "members": [], "presences": [],
+            "voice_states": [], "stage_instances": [], "guild_scheduled_events": [],
+            "member_count": members, "large": true, "unavailable": false
+        }))
+        .unwrap();
+        Event::GuildCreate(Box::new(created))
+    }
+
+    #[test]
+    fn a_guild_past_the_limit_is_not_asked_for_all_its_members() {
+        assert_eq!(
+            guild_to_request(&guild_with(500_000), 500_000),
+            Some(Id::new(1))
+        );
+        assert_eq!(guild_to_request(&guild_with(500_001), 500_000), None);
+        assert_eq!(
+            guild_to_request(&guild_with(9_000_000), 0),
+            Some(Id::new(1))
         );
     }
 
@@ -885,7 +924,7 @@ mod tests {
 
     #[test]
     fn an_event_that_is_not_a_guild_is_not_asked_for_its_members() {
-        assert_eq!(guild_to_request(&Event::GatewayHeartbeatAck), None);
+        assert_eq!(guild_to_request(&Event::GatewayHeartbeatAck, 0), None);
     }
 
     #[test]
@@ -1029,6 +1068,7 @@ mod tests {
             health: Arc::new(GatewayHealth::new(2)),
             latency: Arc::default(),
             members_intent: false,
+            member_request_limit: 0,
             shutdown: CancellationToken::new(),
         });
         let second = Arc::clone(&context);
@@ -1240,6 +1280,7 @@ mod tests {
             token: "super-secret".into(),
             intents: Intents::GUILDS,
             latency: Arc::default(),
+            member_request_limit: 0,
         };
         assert!(!format!("{config:?}").contains("super-secret"));
     }

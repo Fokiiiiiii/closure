@@ -642,6 +642,7 @@ async fn serve(
                 token: args.discord_token.clone(),
                 intents: gateway_intents(&core.registry),
                 latency,
+                member_request_limit: args.member_request_limit,
             },
             Arc::clone(&cache),
             dispatcher,

@@ -88,6 +88,13 @@ pub struct Args {
     #[arg(long, env = "MESSAGE_HISTORY_DAYS", default_value_t = 7)]
     pub message_history_days: u32,
 
+    /// A server with more members than this is not asked for all of them at start-up: they would
+    /// be held in memory and sent over the gateway in numbers that grow with the server. Its
+    /// members are known as the gateway reports them and are fetched when a check needs one.
+    /// `0` asks for every server's members.
+    #[arg(long, env = "MEMBER_REQUEST_LIMIT", default_value_t = 500_000)]
+    pub member_request_limit: u64,
+
     #[arg(long, env = "LOG_FORMAT", value_enum, default_value_t = LogFormat::Pretty)]
     pub log_format: LogFormat,
 }
@@ -102,6 +109,7 @@ impl fmt::Debug for Args {
             .field("skip_command_registration", &self.skip_command_registration)
             .field("clear_guild_commands", &self.clear_guild_commands)
             .field("api_trusted_proxies", &self.api_trusted_proxies)
+            .field("member_request_limit", &self.member_request_limit)
             .field("message_history_days", &self.message_history_days)
             .field("log_format", &self.log_format)
             .finish_non_exhaustive()
