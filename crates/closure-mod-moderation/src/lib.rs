@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::json;
 use twilight_model::gateway::Intents;
 
+mod bulk;
 mod casetools;
 mod channel_controls;
 mod clear;
@@ -1204,6 +1205,7 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
 /// The commands that act on a channel and the ones that look at, or act on, many members.
 fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
     builder
+        .job(bulk::JOB, bulk::step)
         .job(
             "channel_restore_slowmode",
             channel_controls::restore_slowmode,
@@ -1242,6 +1244,10 @@ fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
 }
 
 /// The module, still open for a test to build on.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the declaration: each command and job in turn"
+)]
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
     let (schema, defaults) = settings();
     let builder = ModuleBuilder::new("moderation", "Moderation", env!("CARGO_PKG_VERSION"))?
@@ -1281,6 +1287,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .config(schema, defaults)
         .component(templates::ROUTE, templates::pick)
         .component(undo::ROUTE, undo::press)
+        .component(bulk::ROUTE, bulk::press)
         .command(
             Command::<Warn>::new("warn")
                 .requires("moderation.warn")
@@ -1302,6 +1309,23 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 .requires("moderation.clear")
                 .cooldown(Cooldown::per_user(Duration::from_secs(2)))
                 .handler(clear::clear),
+        )
+        .group(
+            "bulk",
+            [
+                Command::<bulk::Start>::new("start")
+                    .requires("moderation.massban")
+                    .handler(bulk::start),
+                Command::<bulk::OfOperation>::new("status")
+                    .requires("moderation.massban")
+                    .handler(bulk::status),
+                Command::<bulk::OfOperation>::new("cancel")
+                    .requires("moderation.massban")
+                    .handler(bulk::cancel),
+                Command::<bulk::OfOperation>::new("retry")
+                    .requires("moderation.massban")
+                    .handler(bulk::retry),
+            ],
         )
         .group(
             "case",

@@ -95,6 +95,61 @@ Delete the newest messages of the channel
 |---|---|---|---|---|---|
 | `count` | 件数 | integer | yes | - | How many messages, from 1 to 100 |
 
+### `/bulk`
+
+Punish many members at once, after a preview
+
+- Japanese name: `一括処罰`
+- Japanese description: 確認してから、多数のメンバーをまとめて処罰します
+
+#### `/bulk start`
+
+Show what a ban, kick, timeout or unban of many members would do, and wait for Run
+
+- Japanese name: `開始`
+- Japanese description: 多数のメンバーの BAN・Kick・Timeout・BAN 解除の内容を見せ、実行ボタンを待ちます
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `action` | 処理 | string | yes | max_length 16 | ban, kick, timeout or unban |
+| `users` | ユーザー | string | yes | - | User IDs or mentions separated by spaces or commas |
+| `reason` | 理由 | string | yes | max_length 512 | Why |
+| `duration` | 期間 | string | no | max_length 32 | How long a timeout lasts, such as 1h or 3d; a ban lasts for good when it is left out |
+| `delete_days` | 削除日数 | integer | no | min 0; max 7 | Days of messages a ban deletes, 0 to 7 |
+
+#### `/bulk status`
+
+Where a bulk operation stands
+
+- Japanese name: `状況`
+- Japanese description: 一括処罰の状況を見ます
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `number` | 番号 | integer | yes | - | The number of the operation |
+
+#### `/bulk cancel`
+
+Stop a bulk operation between two batches
+
+- Japanese name: `中止`
+- Japanese description: 一括処罰をバッチの間で止めます
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `number` | 番号 | integer | yes | - | The number of the operation |
+
+#### `/bulk retry`
+
+Take the members that failed again
+
+- Japanese name: `再試行`
+- Japanese description: 失敗したメンバーをもう一度処理します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `number` | 番号 | integer | yes | - | The number of the operation |
+
 ### `/case`
 
 Look at, list and revoke cases

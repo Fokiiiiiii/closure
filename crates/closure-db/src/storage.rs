@@ -599,6 +599,34 @@ impl StorageBackend for Db {
             .filter_map(|m| u64::try_from(m).ok())
             .collect())
     }
+
+    async fn set_take(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        // `SKIP LOCKED` hands two callers at once different members.
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "DELETE FROM module_sets WHERE ctid IN (
+                 SELECT ctid FROM module_sets
+                 WHERE module = $1 AND guild_id = $2 AND name = $3
+                 LIMIT $4 FOR UPDATE SKIP LOCKED)
+             RETURNING member",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(name)
+        .bind(i64::try_from(count).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|m| u64::try_from(m).ok())
+            .collect())
+    }
 }
 
 impl Db {
@@ -1079,6 +1107,16 @@ mod tests {
             drawn.dedup();
             assert_eq!(drawn.len(), 8, "each member once");
             assert_eq!(store.set_sample("giveaway", 100).await.unwrap().len(), 19);
+            // A queue: taken once, gone from the set.
+            let mut first = store.set_take("giveaway", 5).await.unwrap();
+            let rest = store.set_take("giveaway", 100).await.unwrap();
+            assert_eq!((first.len(), rest.len()), (5, 14));
+            first.extend(rest);
+            first.sort_unstable();
+            first.dedup();
+            assert_eq!(first.len(), 19, "nobody twice");
+            assert_eq!(store.set_count("giveaway").await.unwrap(), 0);
+            assert!(store.set_take("giveaway", 5).await.unwrap().is_empty());
         }
         let elsewhere = store(&db, "leveling", 2);
         assert_eq!(elsewhere.score_count("xp").await.unwrap(), 0);

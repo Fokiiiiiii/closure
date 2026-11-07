@@ -78,7 +78,8 @@ pub use closure_core::subscription::{EventFilter, Flow, Subscription};
 pub use closure_sdk_macros::CommandArgs;
 pub use cooldown::{Cooldown, CooldownScope};
 pub use cx::{
-    AutocompleteCx, CommandCx, ComponentCx, ContextCx, Cx, JobCx, ModalCx, parse_module_config,
+    AutocompleteCx, CommandCx, ComponentCx, ContextCx, Cx, JobCx, ModalCx, check_target_of,
+    parse_module_config,
 };
 pub use dm::{DirectMessage, Sent};
 pub use duration::{DurationError, TimeStyle};

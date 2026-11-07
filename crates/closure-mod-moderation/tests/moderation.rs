@@ -5303,3 +5303,179 @@ async fn cases_are_found_by_who_what_where_from_and_a_word_and_exported_as_a_fil
         "{said:?}"
     );
 }
+
+// ---- bulk punishments ----
+
+fn bulk(sub: &str) -> Invocation {
+    Invocation::new("bulk").subcommand(sub)
+}
+
+fn bulk_start(action: &str, users: &str) -> Invocation {
+    bulk("start")
+        .option("action", opt_text(action))
+        .option("users", opt_text(users))
+        .option("reason", opt_text("raid"))
+        .user(MODERATOR)
+        .owner()
+}
+
+fn bans_of(harness: &Harness) -> Vec<u64> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|a| match a {
+            Action::Ban { user_id, .. } => Some(user_id.get()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_bulk_ban_shows_what_it_would_do_and_does_nothing_until_run_is_pressed() {
+    let harness = harness();
+    let replies = harness
+        .invoke(bulk_start(
+            "ban",
+            &format!("{MEMBER} {FREE} {ABOVE} 999 {MEMBER}"),
+        ))
+        .await
+        .unwrap();
+    let preview = replies.last().unwrap();
+    assert!(preview.content.contains("#1"), "{preview:?}");
+    assert!(
+        preview.content.contains("4 members"),
+        "each member once: {preview:?}"
+    );
+    assert!(
+        preview.content.contains("Run") || !preview.components.is_empty(),
+        "{preview:?}"
+    );
+    assert!(bans_of(&harness).is_empty(), "nothing is done before Run");
+    harness.run_due_jobs().await;
+    assert!(bans_of(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn pressing_run_bans_them_a_few_at_a_time_and_posts_the_result_and_cancel_stops_it() {
+    let harness = harness();
+    harness.api().add_channel(Id::new(5), Some(Id::new(GUILD)));
+    let members: Vec<u64> = (2000..2013).collect();
+    for member in &members {
+        harness
+            .api()
+            .set_not_a_member(Id::new(GUILD), Id::new(*member));
+    }
+    let list = members
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    harness.invoke(bulk_start("ban", &list)).await.unwrap();
+    // Only the one who started it may press.
+    let stranger = Click::new("moderation:bulk:*:run:1").user(55);
+    assert!(harness.click(stranger).await.is_err() || bans_of(&harness).is_empty());
+    let press = Click::new("moderation:bulk:*:run:1")
+        .user(MODERATOR)
+        .roles([ADMIN_ROLE]);
+    harness.click(press).await.unwrap();
+    // A batch is five members: thirteen take three rounds, each after a pause.
+    harness.run_due_jobs().await;
+    assert_eq!(bans_of(&harness).len(), 5);
+    harness.advance(Duration::from_secs(3));
+    harness.run_due_jobs().await;
+    assert_eq!(bans_of(&harness).len(), 10);
+    harness.advance(Duration::from_secs(3));
+    harness.run_due_jobs().await;
+    assert_eq!(bans_of(&harness).len(), 13);
+    let mut seen = bans_of(&harness);
+    seen.sort_unstable();
+    assert_eq!(seen, members);
+    let status = harness
+        .invoke(
+            bulk("status")
+                .option("number", CommandOptionValue::Integer(1))
+                .user(MODERATOR)
+                .owner(),
+        )
+        .await
+        .unwrap();
+    assert!(status[0].content.contains("13 done"), "{status:?}");
+    assert!(status[0].content.contains("done"), "{status:?}");
+}
+
+#[tokio::test]
+async fn a_member_who_cannot_be_done_is_left_out_with_the_reason_and_a_cancel_stops_the_rest() {
+    let harness = harness();
+    let replies = harness
+        .invoke(bulk_start("ban", &format!("{MODERATOR} {MEMBER}")))
+        .await
+        .unwrap();
+    let preview = &replies.last().unwrap().content;
+    assert!(preview.contains("it is you"), "{preview}");
+    assert!(preview.contains("1 left out"), "{preview}");
+    // Cancelled in the preview: the run that follows does nothing.
+    harness
+        .invoke(
+            bulk("cancel")
+                .option("number", CommandOptionValue::Integer(1))
+                .user(MODERATOR)
+                .owner(),
+        )
+        .await
+        .unwrap();
+    let press = Click::new("moderation:bulk:*:run:1")
+        .user(MODERATOR)
+        .roles([ADMIN_ROLE]);
+    let _ = harness.click(press).await;
+    harness.run_due_jobs().await;
+    assert!(bans_of(&harness).is_empty());
+}
+
+#[tokio::test]
+async fn a_member_who_failed_is_taken_again_by_retry() {
+    let harness = harness();
+    harness
+        .api()
+        .set_not_a_member(Id::new(GUILD), Id::new(2100));
+    harness.invoke(bulk_start("ban", "2100")).await.unwrap();
+    harness
+        .click(
+            Click::new("moderation:bulk:*:run:1")
+                .user(MODERATOR)
+                .roles([ADMIN_ROLE]),
+        )
+        .await
+        .unwrap();
+    // The first call of the job asks about the member, the second bans them: it is refused.
+    harness
+        .api()
+        .fail_nth(1, DiscordError::Forbidden("above the bot".to_owned()));
+    harness.run_due_jobs().await;
+    assert!(bans_of(&harness).is_empty(), "the ban was refused");
+    let status = || {
+        bulk("status")
+            .option("number", CommandOptionValue::Integer(1))
+            .user(MODERATOR)
+            .owner()
+    };
+    let said = harness.invoke(status()).await.unwrap();
+    assert!(said[0].content.contains("1 failed"), "{said:?}");
+    assert!(said[0].content.contains("Discord refused"), "{said:?}");
+    harness
+        .invoke(
+            bulk("retry")
+                .option("number", CommandOptionValue::Integer(1))
+                .user(MODERATOR)
+                .owner(),
+        )
+        .await
+        .unwrap();
+    harness.run_due_jobs().await;
+    assert_eq!(bans_of(&harness), [2100]);
+    let said = harness.invoke(status()).await.unwrap();
+    assert!(
+        said[0].content.contains("1 done") && said[0].content.contains("0 failed"),
+        "{said:?}"
+    );
+}

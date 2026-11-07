@@ -22,7 +22,7 @@ pub(crate) struct Massban {
     delete_days: Option<i64>,
 }
 
-fn parse_user(token: &str) -> Option<UserId> {
+pub(crate) fn parse_user(token: &str) -> Option<UserId> {
     let value = if let Some(value) = token.strip_prefix("<@") {
         value
             .strip_suffix('>')?

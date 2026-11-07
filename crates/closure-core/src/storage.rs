@@ -264,6 +264,18 @@ pub trait StorageBackend: Send + Sync {
     ) -> Result<Vec<u64>, StorageError> {
         Err(StorageError::Unavailable)
     }
+
+    /// Takes up to `count` members out of the set and returns them, in no particular order. Two
+    /// callers at once never get the same member: a queue of work that is done a few at a time.
+    async fn set_take(
+        &self,
+        _module: &ModuleId,
+        _guild: GuildId,
+        _name: &str,
+        _count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
 }
 
 /// Whether `key` is one the store accepts: 1 to 128 printable ASCII characters.
@@ -698,6 +710,15 @@ impl Store {
         self.allowed()?;
         check_counter(name)?;
         self.backend.set_count(&self.module, self.guild, name).await
+    }
+
+    /// Takes up to `count` members out of the set and returns them: the set as a queue of work.
+    pub async fn set_take(&self, name: &str, count: usize) -> Result<Vec<u64>, StorageError> {
+        self.allowed()?;
+        check_counter(name)?;
+        self.backend
+            .set_take(&self.module, self.guild, name, count)
+            .await
     }
 
     /// Up to `count` members of the set, chosen at random, each once.
@@ -1150,6 +1171,27 @@ impl StorageBackend for MemoryStorage {
         }
         members.truncate(count);
         Ok(members)
+    }
+
+    async fn set_take(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        let mut inner = self.lock();
+        let Some(set) = inner
+            .sets
+            .get_mut(&(module.clone(), guild, name.to_owned()))
+        else {
+            return Ok(Vec::new());
+        };
+        let taken: Vec<u64> = set.iter().copied().take(count).collect();
+        for member in &taken {
+            set.remove(member);
+        }
+        Ok(taken)
     }
 }
 

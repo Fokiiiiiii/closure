@@ -606,48 +606,60 @@ impl<I: InteractionRef + 'static> Cx<I> {
     /// invoker's (the owner is exempt from that). Someone who is not a member passes. Needs the
     /// capability `ReadGuild`.
     pub async fn check_target(&self, user: UserId) -> Result<(), UserError> {
-        if user == self.user().id {
-            return Err(UserError::Target(TargetProblem::SelfTarget));
-        }
-        if self.api().guild_owner().await? == Some(user) {
-            return Err(UserError::Target(TargetProblem::Owner));
-        }
-        let member = match self.api().get_member(self.guild_id(), user).await {
-            Ok(member) => member,
-            Err(DiscordError::NotFound) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        if member.user.bot {
-            return Err(UserError::Target(TargetProblem::Bot));
-        }
-        if self.actor().await.owner {
-            return Ok(());
-        }
-        let Outcome::Roles(roles) = self
-            .api()
-            .execute(Action::ListRoles {
-                guild_id: self.guild_id(),
-            })
-            .await?
-        else {
-            return Err(UserError::Module(ModuleError::other(
-                "the roles of the guild were not listed",
-            )));
-        };
-        // Without a role a member ranks below every role, so two members without roles tie.
-        let highest = |ids: &[RoleId]| {
-            roles
-                .iter()
-                .filter(|role| ids.contains(&role.id))
-                .map(|role| role.position)
-                .max()
-                .unwrap_or(-1)
-        };
-        if highest(&member.roles) >= highest(self.interaction.roles()) {
-            return Err(UserError::Target(TargetProblem::Higher));
-        }
-        Ok(())
+        check_target_of(&self.ctx, &self.actor().await, user).await
     }
+}
+
+/// Fails unless `actor` may act on `target` (a kick, a ban, a timeout): not themselves, not the
+/// owner, not a bot, and not someone whose highest role is not below theirs (the owner is exempt
+/// from that). Someone who is not a member passes. Needs the capability `ReadGuild`. This is what
+/// [`CommandCx::check_target`] asks, for a work that runs later and has no interaction.
+pub async fn check_target_of(
+    ctx: &EventContext,
+    actor: &Actor,
+    target: UserId,
+) -> Result<(), UserError> {
+    if target == actor.user {
+        return Err(UserError::Target(TargetProblem::SelfTarget));
+    }
+    if ctx.api.guild_owner().await? == Some(target) {
+        return Err(UserError::Target(TargetProblem::Owner));
+    }
+    let member = match ctx.api.get_member(ctx.guild_id, target).await {
+        Ok(member) => member,
+        Err(DiscordError::NotFound) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if member.user.bot {
+        return Err(UserError::Target(TargetProblem::Bot));
+    }
+    if actor.owner {
+        return Ok(());
+    }
+    let Outcome::Roles(roles) = ctx
+        .api
+        .execute(Action::ListRoles {
+            guild_id: ctx.guild_id,
+        })
+        .await?
+    else {
+        return Err(UserError::Module(ModuleError::other(
+            "the roles of the guild were not listed",
+        )));
+    };
+    // Without a role a member ranks below every role, so two members without roles tie.
+    let highest = |ids: &[RoleId]| {
+        roles
+            .iter()
+            .filter(|role| ids.contains(&role.id))
+            .map(|role| role.position)
+            .max()
+            .unwrap_or(-1)
+    };
+    if highest(&member.roles) >= highest(&actor.roles) {
+        return Err(UserError::Target(TargetProblem::Higher));
+    }
+    Ok(())
 }
 
 /// A job the module scheduled, now due.
