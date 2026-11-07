@@ -50,7 +50,48 @@ pub struct ScheduledPost {
     pub payload: serde_json::Value,
 }
 
+/// How taking back a scheduled post went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withdrawn {
+    /// It was waiting and is gone.
+    Removed,
+    /// A runner has it and is sending it now: it cannot be called back.
+    Sending,
+    /// There is no such post.
+    Missing,
+}
+
 impl Db {
+    /// Takes back the scheduled post `key` of `guild`, unless a runner has taken it already: saying
+    /// that a post was removed while it is sent all the same would be untrue.
+    pub async fn withdraw_post(&self, guild: GuildId, key: &str) -> Result<Withdrawn, DbError> {
+        let removed = sqlx::query(
+            "DELETE FROM scheduled_jobs
+             WHERE module = 'post' AND guild_id = $1 AND dedupe_key = $2
+               AND (leased_until IS NULL OR leased_until <= now())",
+        )
+        .bind(to_db(guild)?)
+        .bind(key)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if removed > 0 {
+            return Ok(Withdrawn::Removed);
+        }
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM scheduled_jobs WHERE module = 'post' AND guild_id = $1 AND dedupe_key = $2",
+        )
+        .bind(to_db(guild)?)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(if exists.is_some() {
+            Withdrawn::Sending
+        } else {
+            Withdrawn::Missing
+        })
+    }
+
     /// The posts of `guild` that wait for their time, soonest first.
     pub async fn scheduled_posts(&self, guild: GuildId) -> Result<Vec<ScheduledPost>, DbError> {
         let rows: Vec<(String, i64, serde_json::Value)> = sqlx::query_as(
@@ -507,6 +548,38 @@ mod tests {
         assert!(warn.cancel("user:7").await.unwrap());
         assert!(!warn.cancel("user:7").await.unwrap());
         assert_eq!(count(&db).await, 2);
+    }
+
+    #[sqlx::test]
+    async fn a_post_is_taken_back_only_while_nobody_is_sending_it(pool: PgPool) {
+        let db = database(pool).await;
+        let post = scheduler(&db, "post", 1);
+        post.job("send", &1)
+            .unwrap()
+            .key("p1")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        post.job("send", &2)
+            .unwrap()
+            .key("p2")
+            .after(Duration::from_secs(100))
+            .await
+            .unwrap();
+        assert_eq!(db.claim_due(5, LEASE).await.unwrap().len(), 1);
+        let guild = closure_core::event::GuildId::new(1);
+        assert_eq!(
+            db.withdraw_post(guild, "p1").await.unwrap(),
+            Withdrawn::Sending
+        );
+        assert_eq!(
+            db.withdraw_post(guild, "p2").await.unwrap(),
+            Withdrawn::Removed
+        );
+        assert_eq!(
+            db.withdraw_post(guild, "p2").await.unwrap(),
+            Withdrawn::Missing
+        );
     }
 
     #[sqlx::test]

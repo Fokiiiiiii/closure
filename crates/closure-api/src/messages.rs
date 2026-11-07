@@ -291,16 +291,17 @@ pub(crate) async fn unschedule(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let guild = authorize(&state, raw, &headers).await?;
-    let module = ModuleId::new("post").map_err(|e| ApiError::Internal(e.to_string()))?;
-    let removed = state
+    match state
         .inner
         .db
-        .cancel(&module, guild, &key)
+        .withdraw_post(guild, &key)
         .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-    if removed {
-        Ok(Json(json!({ "removed": true })))
-    } else {
-        Err(ApiError::NotFound("no such scheduled post".into()))
+        .map_err(|error| ApiError::Internal(error.to_string()))?
+    {
+        closure_db::Withdrawn::Removed => Ok(Json(json!({ "removed": true }))),
+        closure_db::Withdrawn::Sending => Err(ApiError::Conflict(
+            "that post is being sent right now".into(),
+        )),
+        closure_db::Withdrawn::Missing => Err(ApiError::NotFound("no such scheduled post".into())),
     }
 }

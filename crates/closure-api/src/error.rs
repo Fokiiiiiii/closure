@@ -15,6 +15,8 @@ pub(crate) enum ApiError {
     BadRequest(String),
     Forbidden(String),
     NotFound(String),
+    /// The thing is in the middle of being done and cannot be changed now.
+    Conflict(String),
     Unavailable,
     /// A write that must say which revision it edits (`If-Match`) did not.
     PreconditionRequired,
@@ -112,6 +114,7 @@ impl IntoResponse for ApiError {
             }
             Self::Forbidden(message) => respond(StatusCode::FORBIDDEN, body("forbidden", message)),
             Self::NotFound(message) => respond(StatusCode::NOT_FOUND, body("not_found", message)),
+            Self::Conflict(message) => respond(StatusCode::CONFLICT, body("conflict", message)),
             Self::Unavailable => respond(
                 StatusCode::SERVICE_UNAVAILABLE,
                 body("unavailable", "gateway cache is not ready"),

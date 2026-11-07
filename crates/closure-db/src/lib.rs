@@ -17,7 +17,7 @@ mod history;
 mod history_file_tests;
 mod ids;
 mod scheduler;
-pub use scheduler::ScheduledPost;
+pub use scheduler::{ScheduledPost, Withdrawn};
 mod stats;
 mod storage;
 
