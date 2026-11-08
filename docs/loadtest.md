@@ -15,4 +15,3 @@ first entry). Nothing is left out, it only comes a little later and together.
 
 The raid and the spam phases still shed about 99% at full rate: the load is some two hundred times
 the budget. The calm and mildly busy servers are what this changes.
-
