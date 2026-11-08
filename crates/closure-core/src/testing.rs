@@ -153,6 +153,8 @@ pub struct MockApi {
     /// The guilds whose invites are switched off by an edit, as the pretend Discord reports them.
     invites_disabled: Mutex<HashSet<GuildId>>,
     lookups: Mutex<usize>,
+    /// Who reacted to each message the test declared reactors for, by id, oldest id first.
+    reactors: Mutex<HashMap<(ChannelId, MessageId), Vec<UserId>>>,
     /// The entries of the pretend Discord's audit log, oldest first.
     audit_log: Mutex<Vec<AuditLogEntry>>,
     /// The messages of each channel, as the pretend Discord holds them.
@@ -269,7 +271,17 @@ impl MockApi {
                 cursor,
             } => Ok(self.messages_page(*channel_id, *limit, *cursor)),
             Action::GetPins { .. } => Ok(Outcome::Messages(vec![])),
-            Action::GetReactionUsers { .. } => Ok(Outcome::Users(vec![])),
+            Action::GetReactionUsers {
+                channel_id,
+                message_id,
+                after,
+                limit,
+                ..
+            } => Ok(Outcome::Users(self.reactors_page(
+                (*channel_id, *message_id),
+                *after,
+                *limit,
+            ))),
             Action::ListThreadMembers { .. } => Ok(Outcome::ThreadMembers(vec![])),
             Action::ListInvites { .. } => Ok(Outcome::Invites(vec![])),
             Action::ListWebhooks { .. } => Ok(Outcome::Webhooks(vec![])),
@@ -400,6 +412,35 @@ impl MockApi {
             users: Vec::new(),
             webhooks: Vec::new(),
         }
+    }
+
+    /// Declares who reacted to a message, for `GetReactionUsers`: Discord lists them by user id,
+    /// a page after the user a request names.
+    pub fn set_reactors(&self, channel: ChannelId, message: MessageId, mut users: Vec<UserId>) {
+        users.sort();
+        lock(&self.reactors).insert((channel, message), users);
+    }
+
+    fn reactors_page(
+        &self,
+        message: (ChannelId, MessageId),
+        after: Option<UserId>,
+        limit: u16,
+    ) -> Vec<twilight_model::user::User> {
+        lock(&self.reactors)
+            .get(&message)
+            .into_iter()
+            .flatten()
+            .filter(|user| after.is_none_or(|after| **user > after))
+            .take(usize::from(limit))
+            .filter_map(|user| {
+                serde_json::from_value(serde_json::json!({
+                    "id": user.get().to_string(), "username": "reactor",
+                    "discriminator": "0", "avatar": null,
+                }))
+                .ok()
+            })
+            .collect()
     }
 
     /// Every action received so far, in order.
