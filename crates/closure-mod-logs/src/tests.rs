@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use closure_core::action::Action;
 use closure_core::capability::Capability;
@@ -2373,4 +2373,61 @@ async fn a_webhook_that_is_gone_sends_the_entry_to_the_channel_of_its_kind() {
         Some(OTHER_LOG),
         "the channel of the kind takes it"
     );
+}
+
+fn messages_with_embeds(harness: &Harness) -> Vec<usize> {
+    harness
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::SendMessage { embeds, .. } => Some(embeds.len()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_busy_server_gets_its_entries_in_few_messages_and_none_is_lost() {
+    let harness = harness();
+    for user in 0..26 {
+        harness.emit(join(100 + user, false)).await.unwrap();
+    }
+    // Six posts go out as they come; the other twenty wait in batches of ten.
+    let posted = messages_with_embeds(&harness);
+    assert_eq!(posted.iter().take(6).sum::<usize>(), 6, "{posted:?}");
+    assert_eq!(posted[6..], [10, 10], "{posted:?}");
+
+    // What is left (none here) goes out after the delay; the entries are all accounted for.
+    harness.advance(Duration::from_secs(10));
+    let ran = harness.run_due_jobs().await;
+    assert!(ran.iter().all(Result::is_ok), "{ran:?}");
+    assert_eq!(messages_with_embeds(&harness).iter().sum::<usize>(), 26);
+}
+
+#[tokio::test]
+async fn a_batch_that_does_not_fill_up_is_posted_after_the_delay() {
+    let harness = harness();
+    for user in 0..9 {
+        harness.emit(join(100 + user, false)).await.unwrap();
+    }
+    let before = messages_with_embeds(&harness);
+    assert_eq!(before.iter().sum::<usize>(), 6, "three entries wait");
+    assert_eq!(harness.jobs(), 1, "one job posts the batch");
+
+    harness.advance(Duration::from_secs(6));
+    let ran = harness.run_due_jobs().await;
+    assert!(ran.iter().all(Result::is_ok), "{ran:?}");
+    let after = messages_with_embeds(&harness);
+    assert_eq!(after.iter().sum::<usize>(), 9);
+    assert_eq!(after.last(), Some(&3), "the three came in one message");
+}
+
+#[tokio::test]
+async fn a_calm_server_is_not_delayed() {
+    let harness = harness();
+    for user in 0..6 {
+        harness.emit(join(100 + user, false)).await.unwrap();
+    }
+    assert_eq!(messages_with_embeds(&harness), vec![1; 6]);
+    assert_eq!(harness.jobs(), 0, "nothing is waiting");
 }

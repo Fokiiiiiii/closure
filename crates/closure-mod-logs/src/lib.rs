@@ -25,6 +25,7 @@ use twilight_model::channel::message::Embed;
 use twilight_model::id::Id;
 
 mod audit;
+mod batch;
 mod invites;
 mod permissions;
 use audit::{add_audit, audit_of, bulk_audit_of, change_audit_of, deletion_audit_of};
@@ -344,6 +345,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             // The uses of the invites at the last look are kept in the module's storage.
             .capability(Capability::Storage)
             .job("retry_log", retry_post)
+            .job(batch::FLUSH_JOB, batch::flush)
             .job("invite_snapshot", invite_snapshot)
             .on(Subscription::new(EventKind::GuildAvailable), watch_invites)
             .intents(
@@ -655,7 +657,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
             None => return Ok(Flow::Continue),
         },
     };
-    post_or_retry(&ctx, channel, entries).await?;
+    batch::submit(&ctx, channel, entries).await?;
     Ok(Flow::Continue)
 }
 

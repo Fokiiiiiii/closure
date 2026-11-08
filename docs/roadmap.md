@@ -190,7 +190,7 @@ Everything above comes after the open items of the audit of 2026-11-06 that touc
 (the punishment state machine, the jobs and outbox, the quarantine table): those are the ground the
 new moderation stands on.
 
-## Under load: what the load test found (first fix done, the rest planned)
+## Under load: what the load test found (the first two fixes done, the rest planned)
 
 Measured with [the load test](loadtest.md): several servers of hundreds of thousands of members,
 a raid and then spam, under Discord's limit of 50 requests a second for the whole bot. The limit,
@@ -198,11 +198,13 @@ not the modules or the database, is what runs out. In order of value:
 
 1. **Done: fewer requests for a join.** The quarantine role is looked up once a minute for a
    server, not for each joiner (4.9 to 3.0 requests a join).
-2. **Give up the cosmetic requests first.** The welcome and the log entry of a join cost two
-   requests each. When requests wait too long, they are the ones to give up; the log entries of a
-   raid can be gathered into one message.
-3. **One request for many members.** Discord bans up to 200 accounts in one request. A join-burst
-   rule that bans or kicks each member it counted costs one request (or more) for each.
+2. **Done: gather the log entries of a busy server.** Ten embeds go into one message after a
+   server's first six posts a minute (3.0 to 2.1 requests a join; chat under the limit is no longer
+   shed).
+3. **One request for many members.** Discord bans up to 200 accounts in one request, but the
+   Twilight client the bot uses (0.17.1) has no call for it, and a request made outside it would not
+   be counted against the limit. It needs a call of our own that goes through the same limiter, and
+   a test against a real server.
 4. **Choose what is shed.** A full server queue drops the newest event whatever it is. The events
    that carry a raid (joins, and the messages that trip a rule) should not be shed before chat.
 5. **A queue per server measured in waiting requests**, not in events: an event that waits for
