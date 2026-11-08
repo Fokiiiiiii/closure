@@ -36,6 +36,7 @@ closure-mod-remind.workspace = true
 closure-mod-persist.workspace = true
 closure-mod-roles.workspace = true
 closure-mod-verify.workspace = true
+closure-mod-guard.workspace = true
 closure-mod-post.workspace = true
 closure-mod-phishing.workspace = true
 closure-mod-utility.workspace = true

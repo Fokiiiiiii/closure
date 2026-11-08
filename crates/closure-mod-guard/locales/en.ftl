@@ -1,0 +1,15 @@
+config-guard-channel_deletes = Channels one account may delete within the window before it is stopped. 0: not watched.
+config-guard-role_deletes = Roles one account may delete within the window before it is stopped. 0: not watched.
+config-guard-bans = Members one account may ban within the window before it is stopped. 0: not watched. The bot's own bans are not counted.
+config-guard-window = The window in which the changes are counted, such as 30s.
+config-guard-response = What is done to an account that reaches a limit: strip its moderator powers (a bot is kicked) and tell the staff, or only tell the staff.
+config-guard-alert_channel = Where the staff are told. Left empty, the log channel of the server.
+config-guard-exempt_users = Accounts that are never stopped. The owner of the server and the bot are never stopped.
+config-guard-exempt_roles = Roles whose members are never stopped.
+guard-change-channel = deleted channels
+guard-change-role = deleted roles
+guard-change-ban = banned members
+guard-alert = ⚠️ { $user } { $change }: { $count } within { $seconds } seconds.
+guard-stripped = Took { $done } role(s) with moderator powers off the account. Could not take off: { $kept }.
+guard-kicked = The account is a bot, so it was kicked.
+guard-reason = Stopped by the guard: too many changes at once
