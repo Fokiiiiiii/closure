@@ -1,6 +1,5 @@
-//! The files that messages carried, for the logs of modules: what the history kept of them, and posting
-//! them with the entries that describe them. Discord serves an attachment's link only for a while, so a
-//! log relies on the bytes the host kept (see `closure_core::attachments`).
+//! Posting the files that messages carried, for the logs of modules.
+//! Discord serves attachment links only for a while, so this reads the bytes the host kept.
 
 use std::fmt;
 
@@ -162,9 +161,7 @@ pub async fn kept_files(ctx: &EventContext, message: MessageId) -> Result<Vec<Ke
     Ok(kept)
 }
 
-/// The files of the given attachments of a message, in the order given: the bytes the host kept for
-/// each, or none for one it did not keep. The attachments are the ones the host reports, so this
-/// reads nothing else of the history.
+/// The kept bytes of the given attachments of a message, in order; `None` for one not kept.
 pub async fn files_of_attachments(
     ctx: &EventContext,
     message: MessageId,
@@ -193,8 +190,7 @@ pub struct LogEntry {
     pub files: Vec<FileUpload>,
 }
 
-/// Posts the entries to the destination, in order. Entries without files share messages, as many embeds to a
-/// message as Discord takes and as many characters as `MAX_EMBED_CHARS` allows; a file goes in a
+/// Posts entries in order, packing embeds into as few messages as Discord and `MAX_EMBED_CHARS` allow.
 /// message of its own, with the embed of its entry, which shows a picture inside it.
 pub async fn post(
     ctx: &EventContext,

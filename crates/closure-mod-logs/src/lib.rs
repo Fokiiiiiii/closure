@@ -175,7 +175,6 @@ struct Config {
     emojis: bool,
     stickers: bool,
     stage_instances: bool,
-    /// Whether a join names the invite the member came by.
     #[serde(default)]
     invite_tracking: bool,
     /// Channels whose messages, and whose own changes, are not logged.
@@ -184,7 +183,6 @@ struct Config {
     /// Roles whose changes, and whose members' messages and role changes, are not logged.
     #[serde(default)]
     ignored_roles: Vec<String>,
-    /// Members of whom nothing is logged.
     #[serde(default)]
     ignored_users: Vec<String>,
     /// Channels of their own for a kind of entry; the others go where `channel` or `webhook` says.
@@ -196,18 +194,12 @@ struct Config {
     webhook_routes: Routes,
 }
 
-/// A channel for each kind of entry.
 #[derive(Debug, Default, Deserialize)]
 struct Routes {
-    /// Edits and deletions of messages.
     messages: Option<String>,
-    /// Joins, departures, nicknames and roles of members.
     members: Option<String>,
-    /// Bans, unbans and timeouts.
     moderation: Option<String>,
-    /// Channels, threads, roles, emojis, stickers and stages.
     server: Option<String>,
-    /// Members in voice channels.
     voice: Option<String>,
 }
 
@@ -413,7 +405,6 @@ async fn audit_within_deadline(
     }
 }
 
-/// The kinds of entries that can have a channel of their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Group {
     Messages,
@@ -423,7 +414,6 @@ enum Group {
     Voice,
 }
 
-/// Which kind of entry an event gives, if a log shows it at all.
 fn group_of(event: &Event) -> Option<Group> {
     Some(match event {
         Event::MessageUpdated(_)
@@ -1018,7 +1008,6 @@ async fn edited(ctx: &EventContext, message: &MessageInfo) -> Result<LogEntry, M
     })
 }
 
-/// A saved message with its author, channel, id, the files that were kept of it, and its text.
 fn saved_card(
     ctx: &EventContext,
     title: &str,
@@ -1081,7 +1070,6 @@ fn text_field(ctx: &EventContext, card: EmbedBuilder, key: &str, text: &str) -> 
     card.field(label(ctx, key), value, false)
 }
 
-/// The names of the attachments as a field, when there are any.
 fn attachments_field(
     ctx: &EventContext,
     card: EmbedBuilder,
@@ -1130,7 +1118,6 @@ async fn joined(
     joined_entry(ctx, member, invite.as_ref())
 }
 
-/// What the invite field of a join says.
 fn invite_text(ctx: &EventContext, found: &invites::Found) -> String {
     match found {
         invites::Found::Invite { code, inviter } => {
@@ -1237,7 +1224,6 @@ fn member_entry(
     })
 }
 
-/// A card about a member: its title, and the member it is about.
 fn member_card(ctx: &EventContext, title: &str, color: Color, user: &UserInfo) -> EmbedBuilder {
     card(label(ctx, title), color).field(
         label(ctx, "logs-member"),
@@ -1286,7 +1272,6 @@ fn changed(entry: Option<LogEntry>) -> Vec<LogEntry> {
     entry.into_iter().collect()
 }
 
-/// An entry without files.
 fn plain(card: EmbedBuilder) -> Result<LogEntry, ModuleError> {
     Ok(LogEntry {
         embed: build(card)?,
@@ -1302,7 +1287,6 @@ fn name_text(ctx: &EventContext, name: Option<&str>) -> String {
     }
 }
 
-/// A text as a code block, or the word for none.
 fn text_or_none(ctx: &EventContext, text: Option<&str>) -> String {
     match text {
         Some(text) if !text.is_empty() => code_block(text),
@@ -1764,7 +1748,6 @@ fn code_block(text: &str) -> String {
     format!("```{}```", clip(&escaped, FIELD_LIMIT - CODE_FENCE_CHARS))
 }
 
-/// The characters that the code block around a text adds to it.
 const CODE_FENCE_CHARS: usize = 6;
 
 #[cfg(test)]

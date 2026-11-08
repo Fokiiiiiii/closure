@@ -90,8 +90,7 @@ impl Localizer<'_> {
         out
     }
 
-    /// The text of one catalog entry in the default language, or the key itself when the catalog
-    /// has no entry for it: a module's tests check that every command has one.
+    /// The text of one catalog entry in the default language, or the key when the catalog has none; a module's tests check that every command has one.
     fn default_text(&self, key: &str) -> String {
         self.translator
             .exact(Locale::DEFAULT, self.namespace, key, &Args::new())
@@ -235,8 +234,7 @@ fn typed_option(spec: &OptionSpec, localizer: &Localizer<'_>, key: &str) -> Comm
     }
 }
 
-/// A subcommand. `parent` is the catalog path of its command or group, so its name is
-/// `subcommand-{parent}-{name}` and its options are `option-{parent}-{name}-{option}`.
+/// A subcommand; `parent` is its command's or group's catalog path, giving `subcommand-{parent}-{name}` and `option-{parent}-{name}-{option}`.
 fn subcommand_builder(
     parent: &str,
     spec: &SubcommandSpec,
@@ -351,11 +349,7 @@ pub fn build_commands(
     Ok(commands)
 }
 
-/// Replaces the published commands of `scope` with `commands`. The call is idempotent: the
-/// result is the same however often it runs. Returns how many commands Discord now has.
-///
-/// Commands of modules that are disabled in a guild stay visible; invoking one gets a private
-/// "that feature is turned off" answer from the dispatcher.
+/// Replaces the published commands of `scope`; idempotent, returning how many Discord now has. Commands of modules disabled in a guild stay visible; invoking one gets a private "feature turned off" answer from the dispatcher.
 pub async fn register_commands(
     http: &Client,
     application_id: ApplicationId,

@@ -407,7 +407,6 @@ fn stickers_hit(ctx: &EventContext, stickers: &Stickers, message: &MessageInfo) 
     })
 }
 
-/// The text a target gives the matcher.
 pub fn target_text(target: Target, message: &MessageInfo) -> &str {
     match target {
         Target::Message => &message.content,
@@ -567,7 +566,6 @@ pub fn wide(count: usize) -> u64 {
     u64::try_from(count).unwrap_or(u64::MAX)
 }
 
-/// The window of a spam trigger as the text says it, in the server's language.
 pub fn window_text(ctx: &EventContext, window: std::time::Duration) -> String {
     duration::format_in(ctx, ctx.locale, window)
 }

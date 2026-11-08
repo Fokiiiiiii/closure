@@ -1,8 +1,5 @@
 //! Fluent-backed translations.
-//!
-//! Every module owns a catalog per [`Locale`] (declared in its manifest). Lookups fall back
-//! from the requested locale to [`Locale::DEFAULT`], then to the shared `core` catalog and
-//! finally to the key itself, so a missing translation can never break a response.
+//! Every module owns a catalog per `Locale`; lookups fall back to `Locale::DEFAULT`, then the shared `core` catalog, then the key itself, so a missing translation never breaks a response.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -41,8 +38,7 @@ pub enum I18nError {
 type Bundle = FluentBundle<FluentResource>;
 type Bundles = HashMap<Locale, HashMap<String, Bundle>>;
 
-/// Collects catalogs and validates them up front: a malformed catalog fails startup instead of
-/// surfacing as a missing message in production.
+/// Validates catalogs up front: a malformed catalog fails startup, not a production message.
 pub struct TranslatorBuilder {
     bundles: Bundles,
 }
@@ -218,8 +214,7 @@ pub fn error_key(error: &DiscordError) -> &'static str {
     }
 }
 
-/// A message safe to show to a Discord user: localised, and free of internal details such as
-/// HTTP bodies.
+/// A message safe to show to a Discord user: localised, without internal details such as HTTP bodies.
 #[must_use]
 pub fn user_message(translator: &dyn Translator, locale: Locale, error: &DiscordError) -> String {
     let args = match error {
@@ -245,8 +240,7 @@ pub fn message_keys(source: &str) -> Result<BTreeSet<String>, I18nError> {
     Ok(keys)
 }
 
-/// Keys present in `reference` but absent from `other`. Modules use this in a test to prove
-/// every locale covers the same messages.
+/// Keys in `reference` missing from `other`; tests use it to check locale coverage.
 pub fn missing_keys(reference: &str, other: &str) -> Result<Vec<String>, I18nError> {
     let other = message_keys(other)?;
     Ok(message_keys(reference)?

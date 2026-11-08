@@ -25,15 +25,10 @@ const MAX_EMOJI_CHARS: usize = 100;
 /// How many entries each list of the `permissions` section may hold.
 const MAX_PERMISSION_ENTRIES: usize = 200;
 
-/// A document may not grow beyond this once parsed. The YAML text is capped much lower, but
-/// aliases can expand a small text into a large value, and the result is stored twice (current
-/// and history).
+/// Caps the parsed document: YAML aliases can expand a small text into a large value, and the result is stored twice.
 pub(crate) const MAX_DOCUMENT_BYTES: usize = 128 * 1024;
 
 /// Turns sparse [`GuildOverrides`] into validated [`GuildSettings`].
-///
-/// Module config schemas are compiled once here, so a module that ships an unusable schema
-/// stops startup instead of failing on the first guild that configures it.
 pub struct ConfigCompiler {
     registry: Arc<ModuleRegistry>,
     validators: HashMap<ModuleId, Validator>,
@@ -113,9 +108,8 @@ impl ConfigCompiler {
         self
     }
 
-    /// Makes `defaults` the bottom layer of every guild's configuration: preset, then these
-    /// bot-wide defaults, then the guild's own document. They must make a valid configuration
-    /// on their own.
+    /// Makes `defaults` the bottom layer of every guild's configuration: preset, then these bot-wide
+    /// defaults, then the guild's own document. They must make a valid configuration on their own.
     pub fn with_bot_defaults(mut self, defaults: &GuildOverrides) -> Result<Self, ConfigError> {
         self.bot_defaults = None;
         let mut value = serde_json::to_value(defaults)
@@ -179,9 +173,7 @@ impl ConfigCompiler {
     }
 }
 
-/// The documents a layered configuration was made of. A module's configuration is built from
-/// them one layer after the other (the module's defaults, the bot's, the guild's), which merging
-/// the two documents first would not give when a layer changes the shape of a value.
+/// The documents a layered configuration was made of.
 #[derive(Clone, Copy)]
 struct Layers<'a> {
     bot: &'a Value,
@@ -810,10 +802,8 @@ fn pointer_to_path(pointer: &str) -> String {
         })
 }
 
-/// Deep-merges `over` onto `base`.
-///
-/// Objects merge key by key, everything else (including arrays) is replaced. A `null` in `over`
-/// means "use the default": the key is left as in `base` and never written when `base` lacks it.
+/// Deep-merges `over` onto `base`. Objects merge key by key, everything else (including arrays) is
+/// replaced.
 pub(crate) fn merge(base: &Value, over: &Value) -> Value {
     match (base, over) {
         (_, Value::Null) => base.clone(),
@@ -1124,7 +1114,6 @@ permissions:
         .unwrap();
         let permissions = &settings.permissions;
         assert_eq!(permissions.administrator_level, Level::MODERATOR);
-        // The older `moderator_roles` still makes moderators.
         assert!(permissions.check(&actor(1, &[5]), &key("warn.add")).allowed);
         assert!(
             permissions
@@ -1132,7 +1121,6 @@ permissions:
                 .allowed
         );
         assert!(!permissions.check(&actor(1, &[]), &key("warn.add")).allowed);
-        // Levels from roles and from a member's own entry; `warn.clear` stays at the default.
         assert_eq!(
             permissions.level_of(&actor(1, &[11])),
             Level::new(60).unwrap()
@@ -1147,7 +1135,6 @@ permissions:
                 .check(&actor(1, &[11]), &key("warn.clear"))
                 .allowed
         );
-        // An allowance beats the level, a refusal beats both.
         assert_eq!(
             permissions.check(&actor(30, &[]), &key("warn.add")).reason,
             Reason::AllowedUser
@@ -1158,7 +1145,6 @@ permissions:
                 .reason,
             Reason::DeniedRole(Id::new(12))
         );
-        // What was written is shown back.
         assert!(settings.effective.permissions.keys.contains_key("warn.add"));
     }
 
@@ -1246,7 +1232,6 @@ modules:
         let compiler = compiler().with_bot_defaults(&bot).unwrap();
         let warn = ModuleId::new("warn").unwrap();
 
-        // A guild that configured nothing gets them.
         let defaults = compiler.defaults();
         assert_eq!(
             defaults.effective.language.0,
@@ -1258,7 +1243,6 @@ modules:
             json!({ "limit": 6, "notify": false })
         );
 
-        // A guild's own document wins, key by key; what it leaves out comes from the bot.
         let own = crate::yaml::parse_overrides(
             "
 language: en
@@ -1505,8 +1489,6 @@ modules:
 
     #[test]
     fn nul_in_a_key_that_the_merge_drops_is_still_refused() {
-        // `null` means "use the default", so the key vanishes from the merged value, but the
-        // document PostgreSQL would be asked to store still contains it.
         let error = compiler()
             .compile(&warn_override(json!({ "bad\u{0}key": null })))
             .unwrap_err();
@@ -1609,8 +1591,6 @@ modules:
 
     #[test]
     fn the_layers_apply_one_after_the_other_not_the_top_two_first() {
-        // defaults {x:{a:1,b:2}}, then the bot's x: 0 replaces it, then the guild's {a: 3} replaces
-        // that: nothing of the default's `b` is left to come back.
         let compiler = with_bot("modules: { cfg: { config: { x: 0 } } }");
         let own =
             crate::yaml::parse_overrides("modules: { cfg: { config: { x: { a: 3 } } } }").unwrap();
@@ -1620,7 +1600,6 @@ modules:
             *settings.module(&cfg).unwrap().config,
             json!({ "x": { "a": 3 } })
         );
-        // What the guild leaves alone is the bot's.
         let nothing = compiler.compile(&GuildOverrides::default()).unwrap();
         assert_eq!(*nothing.module(&cfg).unwrap().config, json!({ "x": 0 }));
     }

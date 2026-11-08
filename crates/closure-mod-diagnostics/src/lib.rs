@@ -24,7 +24,6 @@ const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 /// How far the clocks may differ before the delay is not shown at all.
 const CLOCK_TOLERANCE_MS: u64 = 60_000;
 
-/// The module's section of a guild's configuration.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Config {
@@ -38,12 +37,10 @@ impl Default for Config {
     }
 }
 
-/// How long after Discord created the interaction the bot saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Delay {
     /// The local clock is behind Discord's, so the delay is shown as zero.
     ClockBehind,
-    /// Whole milliseconds.
     After(u64),
 }
 
@@ -63,7 +60,6 @@ fn delay(interaction_id: u64, now_ms: u64) -> Option<Delay> {
     }
 }
 
-/// The system clock in Unix milliseconds; zero if it is before the epoch.
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -72,12 +68,10 @@ fn now_ms() -> u64 {
         })
 }
 
-/// A duration in whole milliseconds, rounded to the nearest.
 fn millis(duration: Duration) -> u128 {
     (duration.as_micros() + 500) / 1000
 }
 
-/// "mean (min–max)" in whole milliseconds.
 fn range(mean: Duration, min: Duration, max: Duration) -> String {
     format!("{} ms ({}–{} ms)", millis(mean), millis(min), millis(max))
 }
@@ -163,7 +157,6 @@ async fn ping(cx: CommandCx, (): ()) -> Result<(), UserError> {
     .await
 }
 
-/// The module's declaration; the bot builds it with the other modules.
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
     Ok(
         ModuleBuilder::new("diagnostics", "Diagnostics", env!("CARGO_PKG_VERSION"))?
@@ -188,7 +181,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
     )
 }
 
-/// The module, ready to be registered.
 pub fn module() -> Result<SdkModule, CoreError> {
     builder()?.build()
 }

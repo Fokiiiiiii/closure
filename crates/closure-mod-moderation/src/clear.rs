@@ -75,7 +75,6 @@ impl Wanted {
         }
     }
 
-    /// Whether any part asks for fewer messages than all of them.
     fn narrows(&self) -> bool {
         self.user.is_some() || self.bots || self.contains.is_some() || self.links || self.files
     }
@@ -105,7 +104,6 @@ impl Wanted {
     }
 }
 
-/// Whether a text (in lower case) holds a link or an invite.
 fn has_link(content: &str) -> bool {
     ["http://", "https://", "discord.gg/", "discord.com/invite/"]
         .iter()

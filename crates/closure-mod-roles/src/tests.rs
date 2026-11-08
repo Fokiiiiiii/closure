@@ -208,7 +208,6 @@ async fn a_reaction_on_a_role_message_gives_and_takes_back_the_role() {
 #[tokio::test]
 async fn a_member_who_may_not_pick_roles_gets_none_from_a_button_or_a_reaction() {
     let harness = self::harness();
-    // `roles.self` is denied to the member's role: neither way in gives them a role.
     harness.permissions(|permissions| {
         permissions
             .keys

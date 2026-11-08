@@ -16,11 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
-/// Compiles a stored document and installs it, unless the store already holds a newer revision.
-/// The store decides whether the install changed anything; `report` only picks between a change
-/// the modules must hear about and a load they learn of another way (start-up, a rejoin).
-/// A document that no longer validates (say, a module was removed) is reported and skipped, so
-/// the guild keeps its previous settings instead of one bad record stopping everyone.
+/// Compiles a stored document and installs it unless the store already holds a newer revision; `report` picks whether a change is announced to the modules.
+/// A document that no longer validates (say, a module was removed) is reported and skipped, so the guild keeps its previous settings.
 fn apply(
     store: &SettingsStore,
     guild: GuildId,
@@ -43,8 +40,7 @@ pub async fn load_all(db: &Db, store: &SettingsStore) -> Result<usize, DbError> 
     load(db, store, false).await
 }
 
-/// Loads every configuration, reporting each guild whose effective configuration changed when
-/// `report` is set. Returns how many were installed.
+/// Loads every configuration, reporting each guild whose effective configuration changed when `report` is set; returns how many were installed.
 async fn load(db: &Db, store: &SettingsStore, report: bool) -> Result<usize, DbError> {
     let mut installed = 0;
     db.for_each_config(|guild, result| match result {
@@ -59,8 +55,7 @@ async fn load(db: &Db, store: &SettingsStore, report: bool) -> Result<usize, DbE
     Ok(installed)
 }
 
-/// Reloads one guild when the bot rejoins it. Nothing is reported: the arrival is announced
-/// once by the hooks, after the configuration is back.
+/// Reloads one guild when the bot rejoins it; nothing is reported, as the hooks announce the arrival once the configuration is back.
 pub async fn reload_one(db: &Db, store: &SettingsStore, guild: GuildId) -> Result<(), DbError> {
     reload(db, store, guild, false).await
 }
@@ -78,13 +73,7 @@ async fn reload(
     Ok(())
 }
 
-/// Subscribes to changes, loads everything once, and keeps the store current in the background.
-///
-/// Returns after the first load, so the caller can start accepting events knowing that stored
-/// settings are in place. Subscribing happens before loading so no edit can fall in between.
-///
-/// Every later change of a guild's effective configuration is reported through the store's
-/// change hook.
+/// Subscribes to changes, loads everything once, and keeps the store current in the background. Returns after the first load; subscribing happens before loading so no edit can fall in between. Later changes of a guild's effective configuration are reported through the store's change hook.
 pub async fn start(
     db: Db,
     store: Arc<SettingsStore>,
@@ -103,8 +92,7 @@ async fn follow(
     shutdown: CancellationToken,
 ) {
     loop {
-        // The listener is moved in and gone when this returns, which hands its connection back
-        // to the pool before `resync` needs connections of its own.
+        // The listener is moved in and gone when this returns, which hands its connection back to the pool before `resync` needs connections of its own.
         if !apply_notifications(&db, &store, listener, &shutdown).await {
             return;
         }
@@ -139,10 +127,7 @@ async fn apply_notifications(
     }
 }
 
-/// Resubscribes and reloads everything, retrying until both succeed: edits made while
-/// disconnected produced no notification, so a reload that failed once must not be dropped or
-/// the store would stay stale until the next unrelated edit. Subscribing comes first so no edit
-/// can fall between the two.
+/// Resubscribes and reloads everything, retrying until both succeed: edits made while disconnected produced no notification, so a failed reload must not be dropped. Subscribing comes first so no edit can fall between the two.
 async fn resync(
     db: &Db,
     store: &SettingsStore,
@@ -156,8 +141,7 @@ async fn resync(
     .await
 }
 
-/// Runs `attempt` every `delay` until it succeeds. `None` means shutdown came first, which also
-/// abandons an attempt in progress.
+/// Runs `attempt` every `delay` until it succeeds; `None` means shutdown came first, which also abandons an attempt in progress.
 async fn retry_until_ok<T, E, F, Fut>(
     delay: Duration,
     shutdown: &CancellationToken,
@@ -394,8 +378,7 @@ mod tests {
             .await
             .unwrap();
 
-        // A notification whose reload fails (the stored document is unreadable) sends the task
-        // into a resync while its old listener is still alive.
+        // A notification whose reload fails (the stored document is unreadable) sends the task into a resync while its old listener is still alive.
         sqlx::query("UPDATE guild_config SET doc = '{\"preset\": 5}' WHERE guild_id = 1")
             .execute(&admin)
             .await

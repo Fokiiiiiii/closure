@@ -67,7 +67,6 @@ async fn the_names_a_member_went_by_are_listed() {
         .emit(Event::MemberUpdated(info(7, Some("Second"))))
         .await
         .unwrap();
-    // The same names again add nothing.
     harness
         .emit(Event::MemberUpdated(info(7, Some("Second"))))
         .await
@@ -234,14 +233,12 @@ async fn a_channel_the_invoker_cannot_see_is_not_described() {
             .option("channel", CommandOptionValue::Channel(Id::new(30)))
             .user(50)
     };
-    // Everybody may see it: it is described.
     let open = harness();
     open.api().set_channels(Id::new(1), vec![text_channel(30)]);
     open.api()
         .set_roles(Id::new(1), vec![everyone_with("1024")]);
     let shown = open.invoke(channelinfo()).await.unwrap();
     assert_eq!(shown[0].embeds[0].title.as_deref(), Some("channel-30"));
-    // Nobody may: the answer is the same as for a channel that is not there.
     let hidden = harness();
     hidden
         .api()
@@ -285,7 +282,6 @@ async fn a_thread_takes_the_view_of_its_parent_and_not_its_own_empty_overwrites(
         "{refused:?}"
     );
     assert!(!refused[0].content.contains("secret-thread"), "{refused:?}");
-    // With a parent everybody sees, the thread is described.
     let open = harness();
     open.api()
         .set_channels(Id::new(1), vec![text_channel(30), thread]);
@@ -357,7 +353,6 @@ async fn everyone_in_a_voice_channel_is_moved_at_once_and_only_those_still_there
             .await
             .unwrap();
     }
-    // 9 left for another channel; 8 stays in 30.
     harness
         .emit(voice_move(9, Some(30), Some(31)))
         .await
@@ -405,7 +400,6 @@ async fn a_member_who_hops_between_voice_channels_too_often_is_disconnected() {
     assert_eq!(disconnected(&harness, 7), 0, "three is the limit");
     harness.emit(hop(31)).await.unwrap();
     assert_eq!(disconnected(&harness, 7), 1);
-    // The count starts again, and a slow member is never caught.
     harness.emit(hop(30)).await.unwrap();
     assert_eq!(disconnected(&harness, 7), 1);
     for to in [31, 30, 31] {
@@ -544,7 +538,6 @@ async fn a_message_is_described_only_in_this_server_and_only_when_its_channel_is
     let bad = open.invoke(info_of("message", "somewhere")).await.unwrap();
     assert!(bad[0].content.contains("not a link"), "{bad:?}");
 
-    // A channel nobody may see: the message is as unknown as one that is not there.
     let hidden = harness();
     hidden
         .api()

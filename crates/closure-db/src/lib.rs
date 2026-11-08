@@ -1,9 +1,7 @@
-//! PostgreSQL persistence.
-//!
-//! The database is the source of truth for guild configuration. Every write is one transaction
-//! that also appends history and notifies other processes, configuration edits use optimistic
-//! concurrency (a stale editor gets a conflict instead of silently overwriting), and queries are
-//! parameterised and exercised against a real database in the tests.
+//! PostgreSQL persistence. The database is the source of truth for guild configuration. Every write is
+//! one transaction that also appends history and notifies other processes, configuration edits use
+//! optimistic concurrency (a stale editor gets a conflict instead of silently overwriting), and queries
+//! are parameterised and exercised against a real database in the tests.
 
 mod audit;
 mod cases;
@@ -33,14 +31,10 @@ pub use audit::{AuditEvent, AuditRecord};
 pub use config::{CONFIG_CHANNEL, ConfigEvent, ConfigHistoryEntry, ConfigListener, StoredConfig};
 pub use error::DbError;
 
-/// Connection pool settings. The defaults suit a single bot process; raise `max_connections`
-/// only after checking the server's connection limit.
 #[derive(Debug, Clone)]
 pub struct DbOptions {
     pub max_connections: u32,
-    /// How long a caller waits for a free connection before the call fails.
     pub acquire_timeout: Duration,
-    /// Server-side cap on a single statement, so one bad query cannot hold a connection.
     pub statement_timeout: Duration,
 }
 
@@ -170,12 +164,10 @@ mod tests {
         );
     }
 
-    /// What the three plugins kept as entries before they had scores and sets is moved by 0015.
     #[sqlx::test(migrations = false)]
     async fn the_entries_of_the_plugins_move_to_scores_and_sets(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
         db.migrate().await.unwrap();
-        // A guild that had run the new code already has some experience of its own.
         sqlx::query("INSERT INTO module_scores VALUES ('leveling', 1, 'xp', 7, 5)")
             .execute(&pool)
             .await
@@ -243,7 +235,6 @@ mod tests {
         );
     }
 
-    /// 0017 sets the counts of kept files and entries right where a write slipped past them.
     #[sqlx::test(migrations = false)]
     async fn the_counts_of_usage_are_made_right_again_by_0017(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
@@ -255,7 +246,6 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        // What a write that slipped past the triggers leaves: numbers that are not the rows'.
         sqlx::query("UPDATE module_kv_usage SET entries = 99 WHERE module = 'warn'")
             .execute(&pool)
             .await

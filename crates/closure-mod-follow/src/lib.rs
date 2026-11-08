@@ -15,9 +15,7 @@ use closure_sdk::{
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 
-/// The most moderators told at once about one member.
 const MAX_FOLLOWERS: usize = 25;
-/// The most members shown in a list.
 const MAX_LISTED: usize = 50;
 
 #[derive(CommandArgs)]
@@ -89,7 +87,6 @@ async fn list(cx: CommandCx, (): ()) -> Result<(), UserError> {
         .await
 }
 
-/// A member joined a voice channel or moved: the moderators who follow them are told.
 async fn on_voice(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     let Event::VoiceStateChanged {
         user,

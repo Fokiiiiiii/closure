@@ -49,12 +49,8 @@ fn stored_from_row(
 }
 
 impl Db {
-    /// Saves a guild's configuration and returns its new revision.
-    ///
-    /// `expected` is the revision the editor started from, or `None` to create the first one.
-    /// If someone else saved in between, nothing is written and
-    /// [`DbError::RevisionConflict`] reports the current revision. The write, its history entry
-    /// and the change notification commit together or not at all.
+    /// Saves a guild's configuration and returns its new revision. `expected` is the revision the editor
+    /// started from, or `None` to create the first one.
     pub async fn save_config(
         &self,
         guild: GuildId,
@@ -146,9 +142,8 @@ impl Db {
         row.map(|row| stored_from_row(guild, row)).transpose()
     }
 
-    /// Streams every configuration of guilds the bot is still in to `sink`, without loading
-    /// them all into memory. A document that no longer parses is reported to the sink as an
-    /// error for that guild and does not stop the others. Returns the number of rows visited.
+    /// Streams every configuration of guilds the bot is still in to `sink`, without loading them all into
+    /// memory.
     pub async fn for_each_config(
         &self,
         mut sink: impl FnMut(GuildId, Result<StoredConfig, DbError>) + Send,
@@ -460,7 +455,6 @@ mod tests {
             history.iter().map(|h| h.revision).collect::<Vec<_>>(),
             [4, 3]
         );
-        // The next page: what is older than the oldest of the last.
         let older = db.config_history_before(guild, Some(3), 2).await.unwrap();
         assert_eq!(older.iter().map(|h| h.revision).collect::<Vec<_>>(), [2, 1]);
     }

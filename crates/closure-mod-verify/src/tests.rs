@@ -123,7 +123,6 @@ async fn a_member_who_is_verified_already_is_told_and_nothing_is_given() {
 #[tokio::test]
 async fn a_role_with_moderator_powers_is_never_given_by_the_button() {
     let harness = harness(gate());
-    // The verified role was set to one that can ban: the button refuses.
     harness.api().set_roles(
         Id::new(1),
         vec![role(VERIFIED, 1 << 2), role(UNVERIFIED, 0)],
@@ -134,7 +133,6 @@ async fn a_role_with_moderator_powers_is_never_given_by_the_button() {
         replies.last().unwrap().content.contains("moderator powers"),
         "{replies:?}"
     );
-    // So does a server that set nothing.
     harness.set_config(json!({ "mode": "button" }));
     let unset = harness.click(Click::new(PRESS).user(MEMBER)).await.unwrap();
     assert!(
@@ -174,7 +172,6 @@ async fn the_question_mode_asks_a_sum_once_and_gives_the_role_for_the_right_answ
         "{wrong:?}"
     );
     assert!(!gave(&harness, MEMBER, VERIFIED));
-    // A sum can be tried once: the right answer to the old one is no use.
     let late = harness
         .submit(
             Submit::new("verify:answer:7:")

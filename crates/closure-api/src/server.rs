@@ -1,9 +1,7 @@
 //! The server the API runs on: what is limited before a request is even read.
 //!
-//! `axum::serve` accepts every connection and waits as long as a client likes for its request
-//! headers, so a few hundred idle or trickling connections could keep the API busy for good. Here
-//! the number of connections is capped, a connection over the cap is closed at once, and a
-//! client that does not finish its headers in time is cut off.
+//! `axum::serve` accepts every connection and waits as long as a client likes for its headers, so idle or trickling connections could hold the API busy.
+//! Here the connection count is capped, connections over the cap are closed at once, and clients too slow to send headers are cut off.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,8 +24,7 @@ use tower::Service;
 pub struct ServerLimits {
     /// Connections served at once. The API is for a few operators and tools.
     pub max_connections: usize,
-    /// How long a client has to send the headers of a request (also between two requests on one
-    /// connection).
+    /// How long a client has to send a request's headers (also between two requests on one connection).
     pub header_timeout: Duration,
 }
 
@@ -43,8 +40,7 @@ impl Default for ServerLimits {
 /// How far apart the messages about a full server are.
 const LOG_EVERY: Duration = Duration::from_secs(10);
 
-/// Serves `router` on `listener` until `shutdown` is cancelled, then lets requests under way
-/// finish and returns once every connection is closed.
+/// Serves `router` on `listener` until `shutdown` is cancelled, then finishes requests under way and returns once every connection is closed.
 pub async fn serve(
     listener: TcpListener,
     router: Router,
@@ -143,8 +139,7 @@ mod tests {
         }
     }
 
-    /// Sends one request and returns what came back, or `None` if the connection was closed
-    /// without an answer.
+    /// Sends one request and returns the response, or `None` if the connection closed without an answer.
     async fn get_root(address: SocketAddr) -> Option<String> {
         let mut stream = TcpStream::connect(address).await.ok()?;
         stream

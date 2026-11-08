@@ -10,8 +10,7 @@
 //! `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID` and `TEST_GUILD_ID`. Tests whose name starts with
 //! `in_guild_` additionally need the bot to have been invited to that server.
 
-// Helpers in an integration test are outside `#[test]` functions, where the workspace's
-// `unwrap`/`expect` ban would otherwise apply; a panic is the right way for a test to fail.
+// Helpers here are outside `#[test]` functions, where the workspace's `unwrap`/`expect` ban would otherwise apply; a panic is how a test should fail.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;

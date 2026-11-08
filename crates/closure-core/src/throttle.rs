@@ -63,7 +63,6 @@ mod tests {
             assert_eq!(gate.pass_at(start + Duration::from_secs(second)), None);
         }
         assert_eq!(gate.pass_at(start + Duration::from_secs(10)), Some(9));
-        // The count starts over.
         assert_eq!(gate.pass_at(start + Duration::from_secs(11)), None);
         assert_eq!(gate.pass_at(start + Duration::from_secs(20)), Some(1));
     }

@@ -1,5 +1,4 @@
-//! The recorder keeps the files of attachments: fetched when a deletion or an edit needs them, and kept
-//! as messages arrive when a module asks for it.
+//! The recorder keeps attachment files: fetched when a deletion or edit needs them, and kept as messages arrive when a module asks.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -39,8 +38,7 @@ fn calls(fetcher: &Served) -> usize {
     fetcher.calls.load(Ordering::SeqCst)
 }
 
-/// A store with a `logs` module: it asks for files, when `asks_for_files`; and keeps them as they
-/// arrive when its setting says so.
+/// A store with a `logs` module that asks for files when `asks_for_files`, and keeps them as they arrive when its setting says so.
 fn store(asks_for_files: bool) -> Arc<SettingsStore> {
     let mut manifest = ModuleManifest::new(ModuleId::new("logs").unwrap(), "logs", "0.1.0");
     manifest.capabilities = [Capability::ReadMessageHistory]
@@ -337,8 +335,7 @@ async fn arrivals_beyond_the_backlog_are_not_queued() {
             .unwrap();
     }
 
-    // Every arrival still waiting for its files holds a clone of the backend. Two more are the
-    // test's own handle and the recorder's.
+    // Every arrival still waiting for its files holds a clone of the backend; two more are the test's own handle and the recorder's.
     assert!(
         Arc::strong_count(&backend) <= BACKLOG_LIMIT + 2,
         "{} clones of the backend are alive: more arrivals wait than the backlog allows",

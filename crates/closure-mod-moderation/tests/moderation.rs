@@ -34,7 +34,6 @@ const MEMBER: u64 = 7;
 const BOT: u64 = 8;
 const ABOVE: u64 = 9;
 const FREE: u64 = 42;
-/// The owner of the server in every run whose invocation does not name the invoker as owner.
 const OWNER: u64 = 999_999_999;
 
 const DAY: u64 = 86_400;
@@ -233,12 +232,10 @@ fn text(replies: &[Reply]) -> &str {
     replies.last().map_or("", |reply| reply.content.as_str())
 }
 
-/// The answer of a command or a press: the acknowledgement comes first, the answer is the last reply.
 fn answer(replies: &[Reply]) -> &Reply {
     replies.last().expect("an answer")
 }
 
-/// The lines of the answer that start with a case number, in the order given.
 fn numbered_lines(replies: &[Reply]) -> Vec<&str> {
     text(replies)
         .lines()
@@ -253,8 +250,6 @@ async fn cases_of(harness: &Harness, target: u64) -> Vec<closure_sdk::Case> {
         .await
         .unwrap()
 }
-
-// ---- /warn ----
 
 #[tokio::test]
 async fn a_moderator_warns_and_the_warning_is_a_case_that_expires_in_thirty_days() {
@@ -280,7 +275,6 @@ async fn a_moderator_warns_and_the_warning_is_a_case_that_expires_in_thirty_days
 async fn a_punishment_is_acknowledged_before_discord_is_asked_and_answered_by_an_edit() {
     let harness = harness();
     let replies = harness.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
-    // The first thing sent is the acknowledgement, so a slow punishment cannot pass Discord's limit.
     assert!(
         matches!(
             harness.api().actions().first(),
@@ -298,7 +292,6 @@ async fn a_punishment_is_acknowledged_before_discord_is_asked_and_answered_by_an
     );
 }
 
-/// The Discord markup of when case `number` ends, as the replies and the direct messages show it.
 async fn ends(harness: &Harness, number: i64) -> String {
     let case = harness.cases().get(number).await.unwrap().unwrap();
     format!("<t:{}:f>", case.expires_at.unwrap())
@@ -356,7 +349,6 @@ async fn a_moderator_cannot_warn_themselves_the_owner_a_bot_or_someone_above_the
         .set_member(Id::new(GUILD), member(ABOVE, &[ADMIN_ROLE], false));
 
     for target in [MODERATOR, OWNER, BOT, ABOVE] {
-        // Past the cooldown, so that the refusal is the check's and not the cooldown's.
         harness.advance(Duration::from_secs(3));
         let refused = harness.invoke(warn(target, Some("no"))).await.unwrap();
         assert!(!text(&refused).is_empty(), "{target}: {refused:?}");
@@ -424,7 +416,6 @@ async fn the_direct_message_can_be_turned_off() {
 #[tokio::test]
 async fn a_closed_direct_message_does_not_fail_the_warning() {
     let harness = harness();
-    // The acknowledgement is the first call, the warning's own request the second; the direct message is the third.
     harness
         .api()
         .fail_nth(3, DiscordError::DirectMessagesClosed);
@@ -451,8 +442,6 @@ async fn a_warning_is_posted_to_the_log_channel_when_there_is_one() {
     assert!(quiet.sent_embeds().is_empty());
     assert_eq!(cases_of(&quiet, MEMBER).await.len(), 1);
 }
-
-// ---- tones ----
 
 #[tokio::test]
 async fn a_punishment_is_a_case_card_in_the_colour_of_its_kind_and_a_list_stays_info() {
@@ -499,8 +488,6 @@ async fn a_long_undo_label_is_cut_so_the_warning_is_still_answered() {
     assert!(warned.is_ok(), "{warned:?}");
     assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
 }
-
-// ---- /warnings ----
 
 #[tokio::test]
 async fn warnings_list_only_the_active_ones_newest_first() {
@@ -575,8 +562,6 @@ async fn at_most_ten_of_the_newest_warnings_are_listed() {
     );
 }
 
-// ---- /note ----
-
 #[tokio::test]
 async fn a_note_is_a_case_without_expiry_and_no_warning() {
     let harness = harness();
@@ -601,8 +586,6 @@ async fn a_note_may_be_about_the_moderator_or_the_owner() {
     assert_eq!(cases_of(&harness, MODERATOR).await.len(), 1);
     assert_eq!(cases_of(&harness, OWNER).await.len(), 1);
 }
-
-// ---- /case ----
 
 #[tokio::test]
 async fn a_case_is_shown_as_the_log_shows_it() {
@@ -724,8 +707,6 @@ async fn the_case_commands_need_their_permissions() {
     );
 }
 
-// ---- settings and texts ----
-
 #[test]
 fn the_settings_default_to_thirty_days_a_direct_message_a_timeout_at_three_warnings_and_a_kick_at_five()
  {
@@ -794,8 +775,6 @@ async fn dm_template_from_moderation_config() {
     assert_eq!(dm_contents(&harness), ["custom <@7>"]);
 }
 
-// ---- /timeout, /untimeout, /kick, /ban, /unban ----
-
 fn by_admin(invocation: Invocation) -> Invocation {
     invocation.roles([ADMIN_ROLE]).user(MODERATOR)
 }
@@ -811,7 +790,6 @@ fn timeout(target: u64, duration: &str, reason: Option<&str>) -> Invocation {
     timeout_of(target, Some(duration), reason)
 }
 
-/// A `/timeout` whose duration may be left out.
 fn timeout_of(target: u64, duration: Option<&str>, reason: Option<&str>) -> Invocation {
     let invocation = Invocation::new("timeout").option("user", user(target));
     let invocation = match duration {
@@ -864,8 +842,6 @@ fn unban(target: u64, reason: Option<&str>) -> Invocation {
     ))
 }
 
-/// What the module did to Discord, in order: the direct messages and the timeouts, kicks, bans
-/// and unbans. Lookups of members are left out.
 fn sequence(harness: &Harness) -> Vec<&'static str> {
     harness
         .api()
@@ -1069,7 +1045,6 @@ async fn a_kick_without_direct_messages_is_only_the_kick() {
 async fn a_kick_the_discord_refuses_leaves_no_case_and_no_log() {
     let harness = harness();
     harness.set_log_channel(50);
-    // The acknowledgement is the first call, the lookup the second, the direct message the third, the kick the fourth.
     harness
         .api()
         .fail_nth(4, DiscordError::Forbidden("missing permission".to_owned()));
@@ -1223,7 +1198,6 @@ async fn a_lift_that_fails_otherwise_is_left_to_run_again() {
 #[tokio::test]
 async fn a_ban_the_discord_refuses_leaves_no_case_and_no_timer() {
     let harness = harness();
-    // The acknowledgement, the lookup of the member, the direct message, then the ban.
     harness
         .api()
         .fail_nth(4, DiscordError::Forbidden("missing permission".to_owned()));
@@ -1241,7 +1215,6 @@ async fn a_ban_the_discord_refuses_leaves_no_case_and_no_timer() {
 async fn a_timed_ban_holds_even_when_its_timer_cannot_be_set() {
     let harness = harness();
     harness.set_log_channel(50);
-    // A server may hold 10 000 jobs at most; fill it up so that the timer is refused.
     for n in 0..10_000_u32 {
         harness
             .scheduler()
@@ -1274,7 +1247,6 @@ async fn a_ban_for_good_that_replaces_a_timed_one_drops_its_timer() {
         .invoke(ban(MEMBER, Some("raid"), None, None))
         .await
         .unwrap();
-    // The old timer would lift the new ban when its time is up.
     assert_eq!(harness.jobs(), 0);
 }
 
@@ -1377,7 +1349,6 @@ async fn the_direct_message_and_the_log_speak_the_server_language() {
 #[tokio::test]
 async fn a_closed_direct_message_does_not_fail_a_ban() {
     let harness = harness();
-    // The acknowledgement is the first call, the lookup of the member the second, the direct message the third.
     harness
         .api()
         .fail_nth(3, DiscordError::DirectMessagesClosed);
@@ -1396,7 +1367,6 @@ async fn a_closed_direct_message_does_not_fail_a_ban() {
 #[tokio::test]
 async fn the_message_to_the_member_is_in_the_server_language_and_shows_the_end_as_a_timestamp() {
     let harness = harness();
-    // The server speaks English; the moderator reads Japanese.
     let replies = harness
         .invoke(ban(MEMBER, Some("raid"), Some("1h"), None).locale(Locale::Ja))
         .await
@@ -1419,10 +1389,6 @@ async fn the_message_to_the_member_is_in_the_server_language_and_shows_the_end_a
     assert!(direct[1].contains(&ends(&harness, 2).await), "{direct:?}");
 }
 
-// ---- escalation ----
-
-/// Warns `target` `times` times in a row, letting the cooldown pass before each. Returns the
-/// replies to the last one.
 async fn warn_times(harness: &Harness, target: u64, times: usize) -> Vec<Reply> {
     let mut replies = Vec::new();
     for _ in 0..times {
@@ -1485,7 +1451,6 @@ async fn the_third_warning_times_the_member_out_once_and_says_so() {
     assert_eq!(embeds[2].title.as_deref(), Some("Case #3 · Warning"));
     assert_eq!(embeds[3].title.as_deref(), Some("Case #4 · Timeout"));
 
-    // Exactly three: a fourth warning does not time the member out again.
     let fourth = warn_times(&harness, MEMBER, 1).await;
     assert!(!text(&fourth).contains("Escalation"), "{fourth:?}");
     assert_eq!(
@@ -1603,8 +1568,6 @@ async fn a_failed_escalation_leaves_the_warning_and_no_escalation_case() {
         "escalation": [{ "warns": 3, "action": "timeout", "duration": "1h" }]
     }));
     warn_times(&harness, MEMBER, 2).await;
-    // Counted from here: the lookup of the member, the log of the warning, the warning's direct
-    // message, then the timeout.
     harness
         .api()
         .fail_nth(5, DiscordError::Forbidden("missing permission".to_owned()));
@@ -1704,7 +1667,6 @@ async fn a_revoked_warning_is_not_counted() {
     warn_times(&harness, MEMBER, 2).await;
     harness.invoke(case_revoke(1, None)).await.unwrap();
 
-    // Two stand now: the second and this one.
     let third = warn_times(&harness, MEMBER, 1).await;
     assert!(!text(&third).contains("Escalation"), "{third:?}");
     let fourth = warn_times(&harness, MEMBER, 1).await;
@@ -1775,8 +1737,6 @@ fn the_escalation_rules_are_checked_against_their_schema() {
     assert!(!accepted(json!({ "escalation": vec![rule; 11] })));
 }
 
-// ---- timeouts by role, and voice mutes ----
-
 const TIMEOUT_ROLE: u64 = 30;
 const VOICE_ROLE: u64 = 31;
 
@@ -1798,7 +1758,6 @@ fn voice_unmute(target: u64, reason: Option<&str>) -> Invocation {
     ))
 }
 
-/// Whether the module added (`added`) or removed `role` from anyone.
 fn role_changed(harness: &Harness, role: u64, added: bool) -> bool {
     harness.api().actions().iter().any(|action| match action {
         Action::AddRole { role_id, .. } => added && *role_id == Id::new(role),
@@ -1807,7 +1766,6 @@ fn role_changed(harness: &Harness, role: u64, added: bool) -> bool {
     })
 }
 
-/// Fills the scheduler of the module, so that the next job is refused.
 async fn fill_scheduler(harness: &Harness) {
     for n in 0..10_000_u32 {
         harness
@@ -1933,15 +1891,12 @@ async fn an_untimeout_by_role_works_without_a_configured_role() {
     assert_eq!(sequence(&harness), ["role-"]);
 }
 
-/// A role of the guild that Discord manages itself, such as a bot's or a boost role.
 fn managed_role(id: u64, position: i64) -> Role {
     let mut role = role(id, position);
     role.managed = true;
     role
 }
 
-/// The roles the commands take off: a member with a plain role, a managed one, and one above the
-/// bot's top role (at position 3), all below the moderator's (at position 5).
 fn strip_setup(harness: &Harness) {
     harness.set_bot_id(Some(Id::new(BOT)));
     harness.api().set_roles(
@@ -1978,7 +1933,6 @@ fn removed(harness: &Harness) -> Vec<u64> {
         .collect()
 }
 
-/// The stripped roles given back: the dedicated role's own additions are left out.
 fn given_back(harness: &Harness) -> Vec<u64> {
     harness
         .api()
@@ -2002,8 +1956,6 @@ async fn a_role_timeout_takes_off_the_roles_it_may_and_gives_them_back_when_lift
         .invoke(timeout(MEMBER, "1h", Some("spam")))
         .await
         .unwrap();
-    // @everyone, the managed role and the role above the bot stay; the dedicated role is not
-    // among the member's roles, and is given, not taken.
     assert_eq!(removed(&harness), [60]);
     harness
         .invoke(untimeout(MEMBER, Some("sorry")))
@@ -2153,14 +2105,12 @@ async fn the_roles_come_back_only_when_the_last_timeout_is_lifted() {
         .invoke(timeout(MEMBER, "2h", Some("second")))
         .await
         .unwrap();
-    // The first timer is due at one hour; the second still stands, so nothing comes back yet.
     harness.advance(Duration::from_mins(31));
     harness.run_due_jobs().await;
     assert!(
         given_back(&harness).is_empty(),
         "the second timeout still stands"
     );
-    // The second timer is due at two and a half hours.
     harness.advance(Duration::from_mins(90));
     harness.run_due_jobs().await;
     assert_eq!(given_back(&harness).last(), Some(&60));
@@ -2336,7 +2286,6 @@ async fn a_voice_mute_with_a_duration_is_lifted_when_its_time_is_up() {
 async fn a_voice_mute_the_discord_refuses_for_a_member_out_of_voice_leaves_no_case() {
     let harness = harness();
     harness.set_log_channel(50);
-    // The lookup of the member is the first call, the mute the second.
     harness.api().fail_nth(2, DiscordError::NotInVoice);
     let result = harness
         .invoke(voice_mute(MEMBER, Some("1h"), Some("noisy")))
@@ -2484,8 +2433,6 @@ async fn a_voice_lift_gives_up_a_day_after_it_fell_due() {
         runs += 1;
         harness.advance(Duration::from_secs(600));
     }
-    // About a day of tries, ten minutes apart, then it is dropped. The mock records a refused
-    // call too, so each try is one `vcunmute` in the sequence.
     assert!((144..=147).contains(&runs), "{runs} runs");
     let attempts = sequence(&harness);
     assert_eq!(attempts[..2], ["vcmute", "dm"]);
@@ -2566,16 +2513,12 @@ fn the_restriction_settings_are_checked_against_their_schema() {
     assert!(!accepted(json!({ "timeout_role": 123 })));
 }
 
-// ---- templates ----
-
-/// The settings with the templates of one punishment.
 fn templates_for(kind: &str, templates: serde_json::Value) -> serde_json::Value {
     let mut section = serde_json::Map::new();
     section.insert(kind.to_owned(), templates);
     json!({ "templates": section })
 }
 
-/// The select menu of a reply, if it has one.
 fn menu_of(reply: &Reply) -> Option<SelectMenu> {
     reply
         .components
@@ -2589,7 +2532,6 @@ fn menu_of(reply: &Reply) -> Option<SelectMenu> {
         })
 }
 
-/// The options of the picker as `(label, value, description)`.
 fn options_of(reply: &Reply) -> Vec<(String, String, Option<String>)> {
     menu_of(reply)
         .expect("a select menu")
@@ -2600,17 +2542,14 @@ fn options_of(reply: &Reply) -> Vec<(String, String, Option<String>)> {
         .collect()
 }
 
-/// The reply that replaced the picker, if the pick changed it.
 fn edit_of(replies: &[Reply]) -> Option<&Reply> {
     replies.iter().find(|reply| reply.kind == ReplyKind::Edit)
 }
 
-/// The custom id of the picker that the command answered with.
 fn picker_id(replies: &[Reply]) -> String {
     answer(replies).custom_ids()[0].clone()
 }
 
-/// Picks `template` in the picker `custom_id` as `user`, who has `roles`.
 async fn pick_as(
     harness: &Harness,
     custom_id: &str,
@@ -2629,12 +2568,10 @@ async fn pick_as(
         .unwrap()
 }
 
-/// Picks `template` as the moderator, who has the moderator role.
 async fn pick(harness: &Harness, custom_id: &str, template: &'static str) -> Vec<Reply> {
     pick_as(harness, custom_id, template, MODERATOR, &[MODERATOR_ROLE]).await
 }
 
-/// Whether the settings are accepted by the module's schema.
 fn accepted_settings(config: serde_json::Value) -> bool {
     let registry = Arc::new(
         ModuleRegistry::new(vec![Arc::new(module().unwrap()) as Arc<dyn Module>]).unwrap(),
@@ -2642,7 +2579,6 @@ fn accepted_settings(config: serde_json::Value) -> bool {
     let compiler = ConfigCompiler::new(registry).unwrap();
     let mut moderation = serde_json::Map::new();
     moderation.insert("config".to_owned(), config);
-    // JSON is YAML, so the settings go in as one flow mapping.
     let yaml = format!(
         "modules:\n  moderation: {}\n",
         serde_json::Value::Object(moderation)
@@ -2956,7 +2892,6 @@ async fn a_template_that_cannot_be_used_is_not_offered() {
         )]
     );
 
-    // Discord's limit of 28 days is for its own timeout only.
     harness.set_config(json!({
         "timeout_method": "role",
         "timeout_role": "30",
@@ -3101,9 +3036,6 @@ fn the_templates_are_checked_against_their_schema() {
     assert!(!accepted_settings(ban_templates(json!(vec![template; 26]))));
 }
 
-// ---- undo buttons ----
-
-/// The buttons of a reply, as `(label, custom_id)`.
 fn buttons_of(reply: &Reply) -> Vec<(String, String)> {
     reply
         .components
@@ -3125,14 +3057,12 @@ fn buttons_of(reply: &Reply) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The undo button of a reply, as `(label, custom_id)`.
 fn undo_of(reply: &Reply) -> Option<(String, String)> {
     buttons_of(reply)
         .into_iter()
         .find(|(_, custom_id)| custom_id.starts_with("moderation:undo:"))
 }
 
-/// The custom id of the undo button of the answer.
 fn undo_id(replies: &[Reply]) -> String {
     undo_of(answer(replies)).expect("an undo button").1
 }
@@ -3141,7 +3071,6 @@ fn undo_id_of_case(kind: &str, target: u64, number: i64) -> String {
     format!("moderation:undo:*:{kind}:{target}:{number}")
 }
 
-/// Presses the button `custom_id` as `user`, who has `roles`.
 async fn press_as(harness: &Harness, custom_id: &str, user: u64, roles: &[u64]) -> Vec<Reply> {
     harness
         .click(
@@ -3153,12 +3082,10 @@ async fn press_as(harness: &Harness, custom_id: &str, user: u64, roles: &[u64]) 
         .unwrap()
 }
 
-/// Presses the button as the moderator.
 async fn press(harness: &Harness, custom_id: &str) -> Vec<Reply> {
     press_as(harness, custom_id, MODERATOR, &[MODERATOR_ROLE]).await
 }
 
-/// How often the module asked Discord for the guild.
 fn guild_fetches(harness: &Harness) -> usize {
     harness
         .api()
@@ -3444,7 +3371,6 @@ async fn a_press_whose_case_is_of_another_member_or_another_kind_is_refused() {
         text(&other_member).contains("That is already over."),
         "{other_member:?}"
     );
-    // An administrator presses, so that the kind is what refuses it and not the permission.
     let other_kind = press_as(
         &harness,
         &undo_id_of_case("ban", MEMBER, 1),
@@ -3460,9 +3386,6 @@ async fn a_press_whose_case_is_of_another_member_or_another_kind_is_refused() {
     assert!(cases_of(&harness, MEMBER).await[0].revoked.is_none());
 }
 
-// ---- history line ----
-
-/// The last line of the reply's text, the history line when it has one.
 fn last_line(replies: &[Reply]) -> &str {
     text(replies).lines().last().unwrap_or_default()
 }
@@ -3587,8 +3510,6 @@ async fn the_history_line_is_on_the_picker_path_too_and_not_on_a_warning() {
     );
 }
 
-// ---- placeholders in template reasons ----
-
 #[tokio::test]
 async fn each_placeholder_is_expanded_in_the_stored_reason_and_the_direct_message() {
     let harness = harness();
@@ -3623,7 +3544,6 @@ async fn each_placeholder_is_expanded_in_the_stored_reason_and_the_direct_messag
         case.reason.as_deref(),
         Some("Raid by tester on <@7> in Test Server")
     );
-    // The direct message escapes the text, which breaks the mention into plain text.
     assert!(
         dm_contents(&harness)[0].contains("Raid by tester on <\u{200B}@7\\> in Test Server"),
         "{:?}",
@@ -3791,8 +3711,6 @@ async fn an_expanded_reason_is_cut_to_the_length_a_case_keeps() {
     assert!(reason.ends_with('…'));
 }
 
-// ---- members who rejoin while a punishment stands ----
-
 fn joined(user: u64, bot: bool) -> Event {
     Event::MemberJoined(MemberInfo {
         guild_id: Id::new(GUILD),
@@ -3808,12 +3726,10 @@ fn joined(user: u64, bot: bool) -> Event {
     })
 }
 
-/// The member is back in the server, as the gateway announces it.
 async fn rejoin(harness: &Harness, user: u64) -> Result<(), ModuleError> {
     harness.emit(joined(user, false)).await.map(drop)
 }
 
-/// The roles the module gave, in order.
 fn roles_added(harness: &Harness) -> Vec<u64> {
     harness
         .api()
@@ -3826,7 +3742,6 @@ fn roles_added(harness: &Harness) -> Vec<u64> {
         .collect()
 }
 
-/// The timeouts the module gave, in order: their seconds, or `None` for a lift.
 fn timeouts_sent(harness: &Harness) -> Vec<Option<u32>> {
     harness
         .api()
@@ -3858,7 +3773,6 @@ async fn a_role_given_again_on_rejoin_is_lifted_by_a_timer_of_its_own() {
         .invoke(timeout(MEMBER, "1h", Some("spam")))
         .await
         .unwrap();
-    // The configured role changes while the member is away: the rejoin gives the new one.
     harness.set_config(json!({ "timeout_method": "role", "timeout_role": "31" }));
     rejoin(&harness, MEMBER).await.unwrap();
     assert_eq!(roles_added(&harness).last(), Some(&31));
@@ -4122,7 +4036,6 @@ async fn a_punishment_in_force_is_found_however_many_cases_were_written_after_it
         .invoke(timeout(MEMBER, "1h", Some("spam")))
         .await
         .unwrap();
-    // More cases than a look back over the newest ones reaches.
     for at in 0..150 {
         harness
             .invoke(note(MEMBER, &format!("note {at}")))
@@ -4147,10 +4060,6 @@ fn the_module_listens_for_joins_with_the_members_intent() {
     assert!(manifest.subscription(EventKind::MemberJoined).is_some());
 }
 
-// ---- an undo button of an older punishment ----
-
-/// Case #1 of the member is revoked with its button, case #2 still stands, and Discord is not
-/// called: `discord` is what it was before the press.
 async fn assert_only_the_older_case_revoked(harness: &Harness, discord: &[&str]) {
     assert_eq!(sequence(harness), discord, "Discord is not called");
     let first = harness.cases().get(1).await.unwrap().unwrap();
@@ -4167,7 +4076,6 @@ async fn assert_only_the_older_case_revoked(harness: &Harness, discord: &[&str])
     );
 }
 
-/// The result of an older punishment's button: the message says that a newer one still applies.
 fn superseded_text(replies: &[Reply]) -> String {
     edit_of(replies)
         .expect("the message is replaced")
@@ -4197,7 +4105,6 @@ async fn pressing_undo_on_an_older_timeout_revokes_only_that_one() {
     );
     assert_only_the_older_case_revoked(&harness, &discord).await;
 
-    // The newest timeout is still lifted by its own button.
     press(&harness, &undo_id_of_case("timeout", MEMBER, 2)).await;
     assert_eq!(sequence(&harness).last(), Some(&"untimeout"));
     let second = harness.cases().get(2).await.unwrap().unwrap();
@@ -4271,15 +4178,12 @@ async fn pressing_undo_on_an_older_voice_mute_revokes_only_that_one() {
     assert_eq!(sequence(&harness).last(), Some(&"vcunmute"));
 }
 
-// ---- durations as a date and time ----
-
 const DAY_SECONDS: i64 = 86_400;
 
 fn is_leap(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-/// `unix` written as `YYYY-MM-DD HH:MM` in UTC, which an English server reads without a zone.
 fn utc_text(unix: i64) -> String {
     let mut days = unix.div_euclid(DAY_SECONDS);
     let seconds = unix.rem_euclid(DAY_SECONDS);
@@ -4304,7 +4208,6 @@ fn utc_text(unix: i64) -> String {
     )
 }
 
-/// The minute `days` from now, which [`utc_text`] names exactly.
 fn minute_in(days: i64) -> i64 {
     let now = i64::try_from(
         SystemTime::now()
@@ -4393,7 +4296,6 @@ async fn a_date_that_has_passed_is_refused_before_anything_is_asked_of_discord()
         .clone()
         .unwrap_or_default();
     assert!(shown.contains("passed"), "{shown:?}");
-    // Only the answer itself is recorded: no lookup or change happens on Discord.
     assert!(
         harness
             .api()
@@ -4431,7 +4333,6 @@ async fn roles_removed_before_a_failure_are_given_back_when_lifted() {
         "remove_roles_on_mute": ["60", "61"],
         "restore_roles_on_mute": ["60", "61"]
     }));
-    // The second role fails in the middle of the strip; the first one must not be lost.
     harness.api().fail_role(
         Id::new(61),
         DiscordError::Transient("connection reset".into()),
@@ -4487,7 +4388,6 @@ async fn roles_beyond_the_limit_stay_on_the_member_and_are_counted() {
 async fn a_timeout_and_a_voice_mute_share_the_roles_taken_off_and_no_restriction_role_comes_back() {
     let harness = harness();
     strip_setup(&harness);
-    // The timeout gave the member its timeout role, which the voice mute must leave alone.
     harness.api().set_member(
         Id::new(GUILD),
         member(MEMBER, &[GUILD, 60, 61, 62, TIMEOUT_ROLE], false),
@@ -4513,14 +4413,12 @@ async fn a_timeout_and_a_voice_mute_share_the_roles_taken_off_and_no_restriction
         "a restriction role is never taken off: {:?}",
         removed(&harness)
     );
-    // The timeout ends first: its role goes, but the mute still stands, so nothing comes back.
     harness.advance(Duration::from_secs(3_601));
     harness.run_due_jobs().await;
     assert!(
         given_back(&harness).is_empty(),
         "the voice mute still stands"
     );
-    // The mute ends: the roles come back, and the expired timeout role does not.
     harness.advance(Duration::from_secs(3_600));
     harness.run_due_jobs().await;
     assert_eq!(given_back(&harness).last(), Some(&60));
@@ -4557,7 +4455,6 @@ async fn roles_that_could_not_be_given_back_are_given_back_by_a_later_lift() {
         .await
         .unwrap();
     harness.api().recover_roles();
-    // The command has a cooldown of a few seconds.
     harness.advance(Duration::from_secs(60));
     harness
         .invoke(untimeout(MEMBER, Some("again")))
@@ -4696,9 +4593,6 @@ mod rejoin_expiry_race {
     }
 }
 
-// ---- punishments made by hand in Discord ----
-
-/// An audit log entry of `kind` on `target`, made by `by` with `reason`, five seconds ago.
 fn made_by_hand(
     kind: AuditLogEventType,
     target: u64,
@@ -4758,7 +4652,6 @@ async fn a_ban_made_by_hand_is_a_case_with_the_moderator_the_audit_log_names_and
     assert_eq!(case.reason.as_deref(), Some("raiding"));
     assert_eq!(case.source, closure_sdk::CaseSource::Manual);
     assert!(case.revoked.is_none());
-    // The unban, also by hand, ends the case that stands.
     harness.api().add_audit_entry(made_by_hand(
         AuditLogEventType::MemberBanRemove,
         MEMBER,
@@ -4828,7 +4721,6 @@ async fn a_timeout_made_by_hand_is_a_case_until_the_time_it_was_given_and_taking
 
 #[tokio::test]
 async fn what_the_module_did_itself_and_what_the_audit_log_cannot_place_are_not_recorded_twice() {
-    // The module bans, and Discord reports the ban: one case, not two.
     let harness = harness();
     harness
         .invoke(ban(MEMBER, Some("spam"), None, None))
@@ -4848,7 +4740,6 @@ async fn what_the_module_did_itself_and_what_the_audit_log_cannot_place_are_not_
         .await
         .unwrap();
     assert_eq!(cases_of_kind(&harness, MEMBER, "ban").await, 1);
-    // No entry of the audit log that names the change: nobody is blamed.
     let unknown = self::harness();
     unknown
         .emit(Event::BanAdded {
@@ -4879,8 +4770,6 @@ async fn manual_cases_can_be_turned_off() {
         .unwrap();
     assert!(cases_of(&harness, MEMBER).await.is_empty());
 }
-
-// ---- the staff are told when a member with a history is back ----
 
 fn sent_to(harness: &Harness, channel: u64) -> Vec<String> {
     harness
@@ -4919,7 +4808,6 @@ async fn a_member_with_cases_who_comes_back_is_told_to_the_staff_channel() {
         alerts[0].contains("spamming links") && alerts[0].contains("was rude"),
         "{alerts:?}"
     );
-    // A member with no case is not announced, and an alert that is off is not sent.
     let clean = self::harness();
     clean.api().add_channel(Id::new(60), Some(Id::new(GUILD)));
     clean.set_config(json!({"alert_on_rejoin": true, "alert_channel": "60"}));
@@ -4932,8 +4820,6 @@ async fn a_member_with_cases_who_comes_back_is_told_to_the_staff_channel() {
     rejoin(&off, MEMBER).await.unwrap();
     assert!(sent_to(&off, 60).is_empty());
 }
-
-// ---- softban ----
 
 fn softban(target: u64, reason: Option<&str>, days: Option<i64>) -> Invocation {
     let invocation = with_reason(
@@ -4974,7 +4860,6 @@ async fn a_softban_bans_with_the_messages_of_a_day_deleted_and_lifts_the_ban_at_
     assert_eq!(cases.len(), 1, "one case, not a ban and an unban");
     assert_eq!(cases[0].kind.as_str(), "softban");
     assert_eq!(cases[0].reason.as_deref(), Some("raid"));
-    // The days are asked for as given, one to seven.
     let seven = self::harness();
     seven.invoke(softban(MEMBER, None, Some(7))).await.unwrap();
     assert!(seven.api().actions().iter().any(
@@ -4997,7 +4882,6 @@ async fn a_softban_whose_unban_fails_once_is_tried_again_and_a_moderator_below_c
         .count();
     assert_eq!(unbans, 1, "the second try got through");
     assert_eq!(cases_of(&harness, MEMBER).await[0].kind.as_str(), "softban");
-    // Without the permission to ban, nothing happens.
     let nobody = self::harness();
     let _ = nobody
         .invoke(
@@ -5018,8 +4902,6 @@ async fn a_softban_whose_unban_fails_once_is_tried_again_and_a_moderator_below_c
             .any(|a| matches!(a, Action::Ban { .. }))
     );
 }
-
-// ---- the tools for the cases themselves ----
 
 fn case_cmd(sub: &str) -> Invocation {
     Invocation::new("case").subcommand(sub)
@@ -5076,7 +4958,6 @@ async fn a_case_is_recorded_changed_hidden_and_deleted_by_hand() {
     assert_eq!(cases.len(), 1);
     assert_eq!(cases[0].kind.as_str(), "note");
     assert_eq!(cases[0].source, closure_sdk::CaseSource::Command);
-    // A kind that is none of ours is refused.
     let refused = harness
         .invoke(by_moderator_of(
             case_cmd("add")
@@ -5087,7 +4968,6 @@ async fn a_case_is_recorded_changed_hidden_and_deleted_by_hand() {
         .unwrap();
     assert!(refused[0].content.contains("softban"), "{refused:?}");
     assert_eq!(cases_of(&harness, MEMBER).await.len(), 1);
-    // The reason is changed; a moderator may.
     harness
         .invoke(by_moderator_of(
             case_cmd("update")
@@ -5107,7 +4987,6 @@ async fn a_case_is_recorded_changed_hidden_and_deleted_by_hand() {
             .as_deref(),
         Some("a better reason")
     );
-    // Hiding needs the admin level: a moderator is refused, an admin hides, the list leaves it out.
     let _ = harness
         .invoke(by_moderator_of(
             case_cmd("hide").option("number", CommandOptionValue::Integer(1)),
@@ -5128,7 +5007,6 @@ async fn a_case_is_recorded_changed_hidden_and_deleted_by_hand() {
         .await
         .unwrap();
     assert!(!listed[0].content.contains("a better reason"), "{listed:?}");
-    // The number still shows it.
     let viewed = harness
         .invoke(by_moderator_of(
             case_cmd("view").option("number", CommandOptionValue::Integer(1)),
@@ -5136,7 +5014,6 @@ async fn a_case_is_recorded_changed_hidden_and_deleted_by_hand() {
         .await
         .unwrap();
     assert!(!viewed.is_empty());
-    // Deleting asks to be told yes.
     let asked = harness
         .invoke(by_admin(
             case_cmd("delete")
@@ -5172,7 +5049,6 @@ async fn cases_are_found_by_who_what_where_from_and_a_word_and_exported_as_a_fil
         .invoke(by_moderator_of(note(MEMBER, "=HYPERLINK(\"x\")")))
         .await
         .unwrap();
-    // The commands have a short cooldown for each moderator.
     harness.advance(Duration::from_secs(10));
     let spam = harness
         .invoke(by_moderator_of(warn(FREE, Some("spam"))))
@@ -5194,7 +5070,6 @@ async fn cases_are_found_by_who_what_where_from_and_a_word_and_exported_as_a_fil
     assert!(none[0].content.contains("No case"), "{none:?}");
     let bad = find(case_cmd("search").option("state", opt_text("sleeping"))).await;
     assert!(bad[0].content.contains("active"), "{bad:?}");
-    // Hidden ones are for those who may hide.
     let denied = harness
         .invoke(by_moderator_of(
             case_cmd("search").option("hidden", CommandOptionValue::Boolean(true)),
@@ -5202,7 +5077,6 @@ async fn cases_are_found_by_who_what_where_from_and_a_word_and_exported_as_a_fil
         .await
         .unwrap();
     assert!(denied[0].content.contains("level"), "{denied:?}");
-    // The export is a file in the channel for exports, by an admin; formulas are made plain.
     harness
         .invoke(by_admin(
             case_cmd("search")
@@ -5232,7 +5106,6 @@ async fn cases_are_found_by_who_what_where_from_and_a_word_and_exported_as_a_fil
     assert_eq!(csv.lines().count(), 3, "{csv}");
     assert!(csv.contains("\"links, again\""), "{csv}");
     assert!(csv.contains("'=HYPERLINK"), "{csv}");
-    // Without the channel, nothing is sent.
     let bare = self::harness();
     let said = bare
         .invoke(by_admin(
@@ -5245,8 +5118,6 @@ async fn cases_are_found_by_who_what_where_from_and_a_word_and_exported_as_a_fil
         "{said:?}"
     );
 }
-
-// ---- bulk punishments ----
 
 fn bulk(sub: &str) -> Invocation {
     Invocation::new("bulk").subcommand(sub)
@@ -5359,7 +5230,6 @@ async fn a_cancel_while_a_batch_runs_is_not_taken_back_by_the_batch() {
         .option("number", CommandOptionValue::Integer(1))
         .user(MODERATOR)
         .owner();
-    // The mock gives the other task its turn at each call, so the cancel lands inside the batch.
     let (_, cancelled) = tokio::join!(harness.run_due_jobs(), harness.invoke(cancel));
     cancelled.unwrap();
     let operation: serde_json::Value = harness.store().get("bulk:1").await.unwrap().unwrap();
@@ -5390,14 +5260,12 @@ async fn pressing_run_bans_them_a_few_at_a_time_and_posts_the_result_and_cancel_
         .collect::<Vec<_>>()
         .join(",");
     harness.invoke(bulk_start("ban", &list)).await.unwrap();
-    // Only the one who started it may press.
     let stranger = Click::new("moderation:bulk:*:run:1").user(55);
     assert!(harness.click(stranger).await.is_err() || bans_of(&harness).is_empty());
     let press = Click::new("moderation:bulk:*:run:1")
         .user(MODERATOR)
         .roles([ADMIN_ROLE]);
     harness.click(press).await.unwrap();
-    // A batch is five members: thirteen take three rounds, each after a pause.
     harness.run_due_jobs().await;
     assert_eq!(bans_of(&harness).len(), 5);
     harness.advance(Duration::from_secs(3));
@@ -5432,7 +5300,6 @@ async fn a_member_who_cannot_be_done_is_left_out_with_the_reason_and_a_cancel_st
     let preview = &replies.last().unwrap().content;
     assert!(preview.contains("it is you"), "{preview}");
     assert!(preview.contains("1 left out"), "{preview}");
-    // Cancelled in the preview: the run that follows does nothing.
     harness
         .invoke(
             bulk("cancel")
@@ -5465,7 +5332,6 @@ async fn a_member_who_failed_is_taken_again_by_retry() {
         )
         .await
         .unwrap();
-    // The first call of the job asks about the member, the second bans them: it is refused.
     harness
         .api()
         .fail_nth(1, DiscordError::Forbidden("above the bot".to_owned()));
@@ -5497,8 +5363,6 @@ async fn a_member_who_failed_is_taken_again_by_retry() {
         "{said:?}"
     );
 }
-
-// ---- approval of what is big or for good ----
 
 fn needs_approval_config() -> serde_json::Value {
     json!({
@@ -5537,8 +5401,6 @@ async fn a_big_bulk_operation_waits_for_another_moderator_who_approves_it() {
             .api()
             .set_not_a_member(Id::new(GUILD), Id::new(member));
     }
-    // Started by an admin who may not approve: the owner level is what `massban` needs, so a
-    // second moderator is asked for with a size of three or more.
     harness
         .invoke(bulk_start("ban", "3000 3001 3002 3003"))
         .await
@@ -5546,14 +5408,12 @@ async fn a_big_bulk_operation_waits_for_another_moderator_who_approves_it() {
     let run = Click::new("moderation:bulk:*:run:1")
         .user(MODERATOR)
         .roles([ADMIN_ROLE]);
-    // This admin may approve too (moderation.approve is an admin permission): no second one.
     harness.click(run).await.unwrap();
     harness.run_due_jobs().await;
     assert!(
         !bans_of(&harness).is_empty(),
         "an admin who may approve needs none"
     );
-    // A moderator below that asks, and somebody else approves.
     let low = self::harness();
     low.api().add_channel(Id::new(62), Some(Id::new(GUILD)));
     low.set_config(needs_approval_config());
@@ -5593,14 +5453,12 @@ async fn a_big_bulk_operation_waits_for_another_moderator_who_approves_it() {
     let asked = messages_to(&low, 62);
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert!(asked[0].0.contains("asks to do this") && asked[0].1 == 1);
-    // The one who asked cannot approve their own.
     let own = Click::new("moderation:bulk:*:approve:1")
         .user(MODERATOR)
         .roles([ADMIN_ROLE]);
     assert!(low.click(own).await.is_err() || bans_of(&low).is_empty());
     low.run_due_jobs().await;
     assert!(bans_of(&low).is_empty());
-    // Somebody else, who may approve, does.
     let other = Click::new("moderation:bulk:*:approve:1")
         .user(OTHER_ADMIN)
         .roles([ADMIN_ROLE]);
@@ -5634,7 +5492,6 @@ async fn a_ban_for_good_asks_for_an_approval_and_a_deny_cancels_it() {
             None => invocation,
         }
     };
-    // A ban for a while is done at once; one for good waits.
     harness.invoke(ban_as_moderator(Some("7d"))).await.unwrap();
     assert_eq!(bans_of(&harness), [MEMBER]);
     let waiting = self::harness();
@@ -5658,8 +5515,6 @@ async fn a_ban_for_good_asks_for_an_approval_and_a_deny_cancels_it() {
     waiting.run_due_jobs().await;
     assert!(bans_of(&waiting).is_empty(), "denied: nothing is done");
 }
-
-// ---- appeals ----
 
 fn appeal(text: &str) -> Invocation {
     Invocation::new("appeal")
@@ -5686,7 +5541,6 @@ async fn a_member_appeals_a_standing_punishment_once_and_the_staff_get_two_butto
     let note = harness.cases().get(2).await.unwrap().unwrap();
     assert_eq!(note.source.as_str(), "appeal");
     assert_eq!(note.target.get(), MEMBER);
-    // A second try is turned away and posts nothing.
     let again = harness.invoke(appeal("again")).await.unwrap();
     assert!(text(&again).contains("appealed already"), "{again:?}");
     assert_eq!(messages_to(&harness, 62).len(), 1);
@@ -5698,7 +5552,6 @@ async fn an_appeal_needs_a_standing_punishment_and_a_channel_to_send_it_to() {
     let none = harness.invoke(appeal("please")).await.unwrap();
     assert!(text(&none).contains("no punishment"), "{none:?}");
     assert!(messages_to(&harness, 62).is_empty());
-    // Without a channel for approvals there is nowhere to send it.
     let unset = self::harness();
     unset.invoke(warn(MEMBER, Some("spam"))).await.unwrap();
     let replies = unset.invoke(appeal("please")).await.unwrap();
@@ -5748,8 +5601,6 @@ async fn refusing_an_appeal_leaves_the_punishment_and_says_who_decided() {
     );
 }
 
-// ---- a slowmode longer than Discord's ----
-
 const SLOW_CHANNEL: u64 = 77;
 
 fn deleted_in(harness: &Harness, channel: u64) -> usize {
@@ -5797,7 +5648,6 @@ async fn a_long_slowmode_keeps_discords_longest_and_removes_a_message_that_comes
     assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 0, "the first one stays");
     harness.message(say(MEMBER)).await.unwrap();
     assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 1, "too soon");
-    // Somebody else has a slowmode of their own, and another channel has none.
     harness.message(say(FREE)).await.unwrap();
     harness
         .message(Message::new(MEMBER, 5).content("hi"))
@@ -5832,7 +5682,6 @@ async fn a_long_slowmode_spares_the_exempt_roles_and_a_short_one_replaces_it() {
     harness.message(staff()).await.unwrap();
     harness.message(staff()).await.unwrap();
     assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 0);
-    // A shorter one is Discord's own, and nothing is held back by the bot any more.
     harness.advance(Duration::from_secs(3));
     harness.invoke(long_slowmode(600)).await.unwrap();
     let say = || Message::new(MEMBER, SLOW_CHANNEL).content("hi");
@@ -5872,8 +5721,6 @@ async fn a_voice_mute_and_the_lifts_can_be_written_down_by_hand_and_other_kinds_
     harness.invoke(add_case("mute-forever")).await.unwrap();
     assert!(harness.cases().get(5).await.unwrap().is_none());
 }
-
-// ---- the member menu ----
 
 fn menu_form(action: &str, target: u64, invoker: u64) -> String {
     CustomId::new("menu_do")
@@ -5949,7 +5796,6 @@ async fn the_member_menu_times_out_bans_and_notes_through_the_forms() {
         harness.cases().get(1).await.unwrap().unwrap().kind.as_str(),
         "timeout"
     );
-    // A ban is for an administrator, as the command is.
     let banned = harness
         .submit(
             form(
@@ -6010,7 +5856,6 @@ async fn a_form_with_a_bad_length_or_days_does_nothing_and_says_so() {
 #[tokio::test]
 async fn the_member_menu_gives_nobody_more_than_they_had() {
     let harness = harness();
-    // Without the role, the form is refused for the level.
     let denied = harness
         .submit(
             Submit::new(menu_form("ban", MEMBER, UNPRIVILEGED))
@@ -6022,7 +5867,6 @@ async fn the_member_menu_gives_nobody_more_than_they_had() {
     assert!(text(&denied).contains("level"), "{denied:?}");
     assert!(harness.cases().get(1).await.unwrap().is_none());
 
-    // The buttons are the moderator's: somebody else pressing one gets no form.
     let opened = open_menu(&harness).await;
     let buttons = opened.last().unwrap().custom_ids();
     let stolen = harness
@@ -6038,7 +5882,6 @@ async fn the_member_menu_gives_nobody_more_than_they_had() {
         Some(ReplyKind::Modal)
     );
 
-    // Nor does the menu open on oneself.
     let on_self = harness
         .context_command(
             ContextUse::on_user("Moderate", MODERATOR)

@@ -35,29 +35,22 @@ use crate::convert;
 use crate::dispatcher::Dispatcher;
 use crate::text_commands;
 
-/// How long a shard waits between two requests for the members of a guild. A shard may send 120
-/// commands a minute, and a request for all the members of a large guild takes a while to answer.
+/// Wait between two member requests of a shard; a shard may send 120 commands a minute, and a whole-guild request takes a while to answer.
 const MEMBER_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long a hook may take before the gateway moves on without it.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the history may take to keep one message, fetching its attachments when a deletion
-/// or an edit needs them. Shorter than the lanes' wait for it (`RECORD_WAIT` in dispatcher.rs,
-/// 25 seconds), so normally a lane hears that the record is done before it gives up on it.
+/// Time the history may take to keep one message, fetching its attachments when a deletion or edit needs them; shorter than the lanes' wait (`RECORD_WAIT`, 25 seconds) so a lane usually hears the record is done before giving up.
 const RECORD_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// How many message events may wait for their hook. Past it the newest is dropped and logged:
-/// keeping them all would let a slow database grow memory without bound.
+/// Message events that may wait for their hook; past it the newest is dropped and logged, since keeping them all would let a slow database grow memory without bound.
 const MESSAGE_QUEUE_CAPACITY: usize = 10_000;
 
 /// The most a spill file holds. Past it the newest member event is dropped and logged.
 const SPILL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Called by the gateway for guild arrivals and departures.
-///
-/// Hooks run in order on a background task, right after the event is handed to the dispatcher,
-/// so a slow database never stalls reading from the gateway (which would make Discord cut the
-/// connection). The price is that a module can see the event a moment before the hook finished.
+/// Hooks run in order on a background task, right after the event is handed to the dispatcher, so a slow database never stalls reading from the gateway (which would get the connection cut). A module may see an event a moment before its hook finished.
 #[async_trait]
 pub trait GuildHooks: Send + Sync {
     /// The bot can see the guild: on start-up for every guild, and when it is added to one.
@@ -72,16 +65,12 @@ pub trait GuildHooks: Send + Sync {
     /// The bot was removed from the guild (not merely disconnected by an outage).
     async fn guild_removed(&self, _guild: GuildId) {}
 
-    /// Whether the messages of the guild are wanted now (see [`Self::message`]). Asked for every
-    /// message event before it is copied, so it must be a cheap read.
+    /// Whether the guild's messages are wanted now (see [`Self::message`]); asked before every message event is copied, so it must be a cheap read.
     fn wants_messages(&self, _guild: GuildId) -> bool {
         false
     }
 
-    /// A message event of a guild that [`Self::wants_messages`] said yes to. Hooks of message
-    /// events run in the order the events came, before the guild hooks waiting at the same time.
-    /// A hook may change the event (the history sets what an edit took away); the modules get it
-    /// as changed.
+    /// A message event of a guild that [`Self::wants_messages`] said yes to. Hooks of message events run in the order the events came, before the guild hooks waiting at the same time. A hook may change the event (the history sets what an edit took away); the modules get it as changed.
     async fn message(&self, _event: &mut ModuleEvent) {}
 
     async fn member_activity(&self, _event: &ModuleEvent) {}
@@ -106,13 +95,9 @@ pub struct GatewayConfig {
     pub intents: Intents,
     /// Where the heartbeat round trips go; the same value the dispatcher hands the modules.
     pub latency: Arc<GatewayLatency>,
-    /// The members of a guild with more than this many are not asked for all at once: they would be
-    /// held in memory and sent over the gateway in numbers that grow with the guild. Those members
-    /// are known as they speak and as the gateway reports them, and are fetched when a check needs
-    /// one. `0` asks for every guild's members.
+    /// Guilds with more members than this are not asked for all at once: they would be held in memory and sent in growing numbers. Their members are known as they speak and as the gateway reports them, and fetched when a check needs one. `0` asks for every guild's members.
     pub member_request_limit: u64,
-    /// Where the member events that do not fit in a full queue are kept until the hooks catch up;
-    /// without it they are dropped.
+    /// Where member events that do not fit a full queue are kept until the hooks catch up; without it they are dropped.
     pub member_spool: Option<PathBuf>,
 }
 
@@ -124,11 +109,7 @@ impl fmt::Debug for GatewayConfig {
     }
 }
 
-/// The intents to request: those the registered modules declare, plus `GUILDS`, without which
-/// the bot learns nothing about its servers.
-///
-/// Intents belong to the connection, not to a guild, so this is the union over all registered
-/// modules rather than over the modules enabled somewhere.
+/// Intents to request: those the registered modules declare, plus `GUILDS` (without which the bot learns nothing of its servers). Intents belong to the connection, so this is the union over all registered modules, not the enabled ones.
 #[must_use]
 pub fn gateway_intents(registry: &ModuleRegistry) -> Intents {
     registry.all_intents() | Intents::GUILDS
@@ -192,8 +173,7 @@ impl GatewayHealth {
         self.total() > 0 && self.ready() == self.total()
     }
 
-    /// Whether the shard that holds `guild` has a session: a guild's pages need its own shard, not
-    /// every one of them. Discord gives a guild to shard `(id >> 22) % shards`.
+    /// Whether the shard holding `guild` has a session; a guild's pages need its own shard, which Discord assigns as `(id >> 22) % shards`.
     #[must_use]
     pub fn guild_ready(&self, guild: u64) -> bool {
         let total = self.shards.len() as u64;
@@ -220,8 +200,7 @@ impl GatewayHandle {
         &self.health
     }
 
-    /// Completes when every shard has stopped: after shutdown was requested, or because Discord
-    /// closed them for good (invalid token, disallowed intents).
+    /// Completes when every shard has stopped: after shutdown was requested, or because Discord closed them for good (invalid token, disallowed intents).
     pub async fn closed(&self) {
         self.tracker.wait().await;
     }
@@ -231,7 +210,7 @@ struct ShardContext {
     cache: Arc<InMemoryCache>,
     dispatcher: Dispatcher,
     hooks: Arc<HookQueues>,
-    /// Asked whether a message event is wanted before it is queued.
+    /// Hooks for guild arrivals, departures and messages (see [`GuildHooks`]).
     guild_hooks: Arc<dyn GuildHooks>,
     health: Arc<GatewayHealth>,
     latency: Arc<GatewayLatency>,
@@ -242,8 +221,7 @@ struct ShardContext {
 }
 
 impl Drop for ShardContext {
-    /// Every shard task holds the context, so it is dropped when the last of them has finished,
-    /// whether that is because of a shutdown or because Discord closed them for good.
+    /// Every shard task holds the context, so it is dropped when the last of them has finished, by shutdown or because Discord closed them for good.
     fn drop(&mut self) {
         self.hooks.close();
     }
@@ -270,12 +248,7 @@ impl HookJob {
     }
 }
 
-/// The newest pending hook of each guild.
-///
-/// Hooks bring persistent state in line with the guilds the bot is in, so only the latest word
-/// about a guild matters: a departure replaces a queued arrival and the other way round. That
-/// keeps the queue bounded by the number of guilds, and pushing never waits, so a slow database
-/// can never stop a shard from being read (which would get the connection cut).
+/// The newest pending hook of each guild. Hooks bring persistent state in line with the guilds the bot is in, so only the latest word about a guild matters; this keeps the queue bounded by the number of guilds, and pushing never waits, so a slow database cannot cut the connection.
 #[derive(Default)]
 struct HookQueue {
     state: Mutex<HookQueueState>,
@@ -292,16 +265,13 @@ struct HookQueueState {
         ModuleEvent,
         Option<tokio::sync::oneshot::Sender<ModuleEvent>>,
     )>,
-    /// Set once no shard can push any more, and by the worker when it stops.
-    /// No message is accepted after that.
+    /// Set once no shard can push any more, or the worker stops; no message is accepted after that.
     closed: bool,
-    /// Member events go to the spill file, not the queue, until the file has been worked off: they
-    /// then stay in the order they came.
+    /// Member events go to the spill file, not the queue, until the file has been worked off, so they stay in the order they came.
     spilling: bool,
 }
 
-/// What the worker takes from the queue in one go, so that the queue cannot close between the
-/// reading of the pending work and the reading of `closed`.
+/// What the worker takes in one go, so the queue cannot close between reading pending work and reading `closed`.
 struct Taken {
     jobs: Vec<HookJob>,
     messages: Vec<(
@@ -317,8 +287,7 @@ impl HookQueue {
         self.wake.notify_one();
     }
 
-    /// Queues a message event for [`GuildHooks::message`]. Past the capacity the event is dropped
-    /// and logged by its kind alone, never its content.
+    /// Queues a message event for [`GuildHooks::message`]. Past capacity the event is dropped and logged by its kind alone, never its content.
     fn push_message(
         &self,
         event: ModuleEvent,
@@ -341,9 +310,7 @@ impl HookQueue {
         Some(recorded)
     }
 
-    /// Queues a join or a leave for [`GuildHooks::member_activity`]. When the queue is full the
-    /// event is written to the spill file instead, and the worker plays it back once it has caught
-    /// up, so a slow database delays these records and does not lose them.
+    /// Queues a join or a leave for [`GuildHooks::member_activity`]. When the queue is full the event is written to the spill file instead; the worker plays it back once it has caught up, so a slow database delays these records without losing them.
     fn push_member_activity(&self, event: ModuleEvent) {
         let mut state = self.state();
         if state.closed {
@@ -367,8 +334,7 @@ impl HookQueue {
         self.wake.notify_one();
     }
 
-    /// A queue whose overflow of member events is kept in `path`. Events left there by an earlier
-    /// run are played back first.
+    /// A queue whose overflow of member events is kept in `path`; events left by an earlier run are played back first.
     fn with_spill(path: PathBuf) -> Self {
         let spill = Spill::new(path);
         let queue = Self {
@@ -390,11 +356,9 @@ impl HookQueue {
         };
         let events = spill.take();
         if events.is_empty() {
-            // What was taken held nothing that can be read (or nothing): it is not kept, or the
-            // worker would come back to it for ever.
+            // What was taken held nothing readable: it is not kept, or the worker would come back to it for ever.
             spill.finish();
-            // Nothing is left: events go to the queue again. Checked under the queue's lock, so
-            // none is written to the file between the check and the change.
+            // Nothing is left: events go to the queue again, checked under the queue's lock so none is written to the file in between.
             let mut state = self.state();
             if spill.has_events() {
                 return true;
@@ -422,16 +386,14 @@ impl HookQueue {
         self.wake.notify_one();
     }
 
-    /// Closes the queue and drops the senders still waiting, which lets their lanes go on. Used once
-    /// the worker has stopped, when nothing queued will ever be recorded.
+    /// Closes the queue and drops the senders still waiting, which lets their lanes go on; used once the worker has stopped, when nothing queued will ever be recorded.
     fn abandon(&self) {
         let mut state = self.state();
         state.closed = true;
         state.messages.clear();
     }
 
-    /// Everything pending, and whether the queue is closed. All of it is read under one lock, so
-    /// a closed queue that reports no work really is finished.
+    /// Everything pending, and whether the queue is closed; all read under one lock, so a closed queue reporting no work is really finished.
     fn take(&self) -> Taken {
         let mut state = self.state();
         Taken {
@@ -446,12 +408,10 @@ impl HookQueue {
     }
 }
 
-/// How many workers record messages. A guild always has the same one, so its events stay in
-/// order, and a guild whose database writes crawl holds up only the guilds that share its lane.
+/// How many workers record messages. A guild always has the same one, so its events stay in order, and a guild whose database writes crawl holds up only the guilds sharing its lane.
 const MESSAGE_LANES: usize = 8;
 
-/// The queues the gateway feeds: one for guild arrivals and departures, so those never wait behind
-/// recorded messages, and [`MESSAGE_LANES`] for the message and member-activity hooks.
+/// The queues the gateway feeds: one for guild arrivals and departures, so those never wait behind recorded messages, and [`MESSAGE_LANES`] for message and member-activity hooks.
 struct HookQueues {
     lifecycle: Arc<HookQueue>,
     lanes: Vec<Arc<HookQueue>>,
@@ -492,9 +452,7 @@ impl HookQueues {
     }
 }
 
-/// Member events that did not fit in a full queue, one JSON object to a line. Taking them moves
-/// the file aside first and removes it once they were played back, so a stop in the middle plays
-/// them back again on the next start.
+/// Member events that did not fit a full queue, one JSON object to a line. Taking them moves the file aside first and removes it once played back, so a stop in the middle replays them on the next start.
 struct Spill {
     path: PathBuf,
     replay: PathBuf,
@@ -572,9 +530,7 @@ impl Spill {
     }
 }
 
-/// Runs the member-activity hook for one event; a hook that panics or takes too long is logged.
-/// Whether the event should be tried again: it timed out, which a slow database may do and a
-/// panic does not mend.
+/// Runs the member-activity hook for one event; a hook that panics or takes too long is logged. The event is tried again on a timeout, which a slow database may cause, but not after a panic.
 async fn run_member_activity(hooks: &dyn GuildHooks, event: &ModuleEvent) -> bool {
     let hook = AssertUnwindSafe(hooks.member_activity(event)).catch_unwind();
     match tokio::time::timeout(HOOK_TIMEOUT, hook).await {
@@ -590,8 +546,7 @@ async fn run_member_activity(hooks: &dyn GuildHooks, event: &ModuleEvent) -> boo
     }
 }
 
-/// Abandons the queue when the worker ends, whether it returns, panics or is aborted. The lanes wait
-/// for the messages they hold, so none may stay queued for a worker that is gone.
+/// Abandons the queue when the worker ends, whether it returns, panics or is aborted; the lanes wait for the messages they hold, so none may stay queued for a worker that is gone.
 struct WorkerExit(Arc<HookQueue>);
 
 impl Drop for WorkerExit {
@@ -600,8 +555,7 @@ impl Drop for WorkerExit {
     }
 }
 
-/// Runs queued hooks one at a time. Ends once the queue is closed and empty, so the hooks of
-/// events handled while the shards were shutting down are not lost.
+/// Runs queued hooks one at a time. Ends once the queue is closed and empty, so hooks of events handled during shutdown are not lost.
 async fn run_hook_worker(hooks: Arc<dyn GuildHooks>, queue: Arc<HookQueue>) {
     let _exit = WorkerExit(Arc::clone(&queue));
     loop {
@@ -669,8 +623,7 @@ fn message_guild(event: &ModuleEvent) -> Option<GuildId> {
     }
 }
 
-/// Queues a message event when its guild wants messages. The check comes first, so an event of a
-/// guild that keeps none is never copied.
+/// Queues a message event when its guild wants messages; the check comes first, so an event of a guild that keeps none is never copied.
 fn offer_message(
     queue: &HookQueue,
     hooks: &dyn GuildHooks,
@@ -701,8 +654,7 @@ fn readiness_change(event: &Event) -> Option<bool> {
     }
 }
 
-/// Connects the recommended number of shards and feeds the cache and the dispatcher until
-/// `shutdown` is cancelled.
+/// Connects the recommended number of shards and feeds the cache and dispatcher until `shutdown` is cancelled.
 pub async fn start_gateway(
     http: &Client,
     config: GatewayConfig,
@@ -764,8 +716,7 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
         let Some(item) = item else { break };
         match item {
             Ok(event) => {
-                // Once shutdown was requested, the close handshake finishing is the end. The
-                // stream itself would otherwise reconnect, as it does after any close.
+                // Once shutdown was requested, the close handshake finishing is the end; the stream itself would otherwise reconnect, as it does after any close.
                 let finished = closing && matches!(event, Event::GatewayClose(_));
                 // `Shard` is not `Sync`, so only plain values cross the await points below.
                 let latency = shard.latency().recent().first().copied();
@@ -780,8 +731,7 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
                     break;
                 }
             }
-            // Never print the error itself: for a payload that fails to parse it contains the
-            // whole event, including interaction tokens and member data.
+            // Never print the error itself: for a payload that fails to parse it contains the whole event, including interaction tokens and member data.
             Err(error) => tracing::warn!(
                 shard = %id,
                 class = error_class(error.kind()),
@@ -904,8 +854,7 @@ impl MemberRequests {
     }
 }
 
-/// The guild whose members to ask Discord for: one that just became available, unless it has more
-/// members than `limit` (`0` has none).
+/// The guild whose members to ask Discord for: one that just became available, unless it has more members than `limit` (`0` has none).
 fn guild_to_request(event: &Event, limit: u64) -> Option<Id<GuildMarker>> {
     let Event::GuildCreate(created) = event else {
         return None;
@@ -1215,8 +1164,7 @@ mod tests {
         let queue = Arc::new(HookQueue::default());
         let guild: GuildId = twilight_model::id::Id::new(7);
 
-        // Far more pushes than any bounded channel would hold, with no worker running yet:
-        // every push returns at once and the queue keeps one entry per guild.
+        // Far more pushes than any bounded channel would hold, with no worker running yet: every push returns at once and the queue keeps one entry per guild.
         for round in 0..100_000 {
             queue.push(available(7, &round.to_string()));
         }

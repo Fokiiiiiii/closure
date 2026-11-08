@@ -92,7 +92,6 @@ async fn unresolved_webhook_blocks_already_scheduled_deletion() {
 async fn schedules_and_deletes_after_delay() {
     let h = harness(delete_config());
     h.message(Message::new(7, 5)).await.unwrap();
-    // One job sweeps the guild, whatever the number of messages.
     h.message(Message::new(8, 5)).await.unwrap();
     assert_eq!(h.jobs(), 1);
     let deleted = |h: &Harness| {
@@ -105,7 +104,6 @@ async fn schedules_and_deletes_after_delay() {
     h.advance(Duration::from_secs(4));
     assert!(h.run_due_jobs().await.iter().all(Result::is_ok));
     assert_eq!(deleted(&h), 0, "not before the delay");
-    // The sets are ten seconds wide and the sweep runs every ten, so a message goes within a few turns.
     for _ in 0..3 {
         h.advance(Duration::from_secs(10));
         assert!(h.run_due_jobs().await.iter().all(Result::is_ok));
@@ -117,7 +115,6 @@ async fn schedules_and_deletes_after_delay() {
 async fn a_first_sweep_that_comes_late_still_deletes_what_fell_due_before_it() {
     let h = harness(delete_config());
     h.message(Message::new(7, 5)).await.unwrap();
-    // The sweep job is not run until a minute has passed: the message fell due long before.
     h.advance(Duration::from_secs(60));
     for _ in 0..4 {
         assert!(h.run_due_jobs().await.iter().all(Result::is_ok));

@@ -32,13 +32,11 @@ use crate::memory::Memory;
 use crate::triggers::Hit;
 
 const DAY_SECONDS: u32 = 86_400;
-/// The name the bot's own punishments and records carry.
 const BOT_NAME: &str = "automod";
 /// Discord takes at most this many messages in one bulk delete.
 const BULK_DELETE: usize = 100;
 /// Discord's longest message.
 const CONTENT_CHARS: usize = 2_000;
-/// The job that removes a reply once its `auto_delete` time is up.
 pub const CLEANUP_JOB: &str = "automod_cleanup";
 
 /// What the actions of a rule are given besides the rule, the hit and the context.
@@ -50,7 +48,6 @@ pub struct Deps<'a> {
     pub antiraid: Option<&'a crate::antiraid::Antiraid>,
 }
 
-/// Whether an action ran, and whether it punished a member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ran {
     /// Nothing to act on in this context, so nothing was done.
@@ -67,11 +64,8 @@ pub struct Applied {
     pub error: Option<ModuleError>,
 }
 
-/// Runs the rule's actions in order, for each member of the hit. A failing one does not stop the
-/// next; the first error is kept. When nothing punished a member, the hit is recorded as an `automod`
-/// case for each of them, so that a deletion still shows in the log. A later message of a burst only
-/// has its messages deleted. The counter triggers that the actions fired are returned, for the engine
-/// to run.
+/// Runs the rule's actions in order for each member of the hit; the first error is returned.
+/// When nothing punished a member, the hit is logged as an `automod` case.
 pub async fn apply(deps: &Deps<'_>, rule: &Rule, hit: &Hit, context: &Context) -> Applied {
     let ctx = deps.ctx;
     let mut applied = Applied::default();
@@ -262,7 +256,6 @@ fn other() -> (Ran, Vec<Context>) {
     (Ran::Other, Vec::new())
 }
 
-/// Deletes the messages of the hit, when there are any.
 async fn delete_hit(
     deps: &Deps<'_>,
     rule: &Rule,
@@ -285,7 +278,6 @@ async fn delete_hit(
         .map(|()| other())
 }
 
-/// Warns, times out, kicks or bans each member of the hit.
 async fn punish(
     deps: &Deps<'_>,
     punisher: &Punisher<'_>,
@@ -351,7 +343,6 @@ async fn punish(
     result.map(|()| (Ran::Punished, Vec::new()))
 }
 
-/// Gives or takes the roles from each member of the hit.
 async fn roles_action(
     deps: &Deps<'_>,
     rule: &Rule,
@@ -371,7 +362,6 @@ async fn roles_action(
     .map(|()| other())
 }
 
-/// Sets the nickname of each member of the hit, from a template.
 async fn nickname(
     deps: &Deps<'_>,
     rule: &Rule,
@@ -403,7 +393,6 @@ async fn nickname(
     .map(|()| other())
 }
 
-/// Sets the slowmode of the channels given, or of the channel of the event.
 async fn slowmode(
     deps: &Deps<'_>,
     rule: &Rule,
@@ -645,7 +634,6 @@ fn module_error(error: UserError) -> ModuleError {
     }
 }
 
-/// Deletes what the member sent within `within`, from the history, and the messages of the hit.
 async fn purge(
     ctx: &EventContext,
     hit: &Hit,
@@ -708,7 +696,6 @@ async fn delete_all(
     first_error.map_or(Ok(()), Err)
 }
 
-/// Sends the reply in the channel of the message, optionally removing it again later.
 async fn reply(
     ctx: &EventContext,
     message: &MessageInfo,
@@ -967,7 +954,6 @@ pub(crate) fn text(ctx: &EventContext, key: &str, args: &Args) -> String {
     ctx.t_in(ctx.locale, key, args)
 }
 
-/// The payload of the job that removes a reply.
 #[derive(Debug, Serialize, Deserialize)]
 struct Cleanup {
     channel: u64,

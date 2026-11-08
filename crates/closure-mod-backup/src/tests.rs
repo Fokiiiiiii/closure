@@ -37,7 +37,6 @@ fn channel(id: u64, kind: u8, name: &str, parent: Option<u64>, overwrites: &Valu
     .unwrap()
 }
 
-/// A server with a category, a channel in it that only staff may not see, and two roles.
 fn harness() -> Harness {
     let harness = Harness::new(builder().unwrap()).unwrap();
     harness.permissions(|permissions| {
@@ -114,7 +113,6 @@ async fn restore_creates_the_roles_and_channels_again_in_order_and_is_safe_to_re
     assert_eq!(channels[1].name, "rules");
     assert_eq!(channels[1].slowmode_seconds, 5);
     assert_eq!(channels[1].topic.as_deref(), Some("read first"));
-    // The channel is put in the new category, and the overwrite names the new role.
     assert!(
         channels[1]
             .parent_id

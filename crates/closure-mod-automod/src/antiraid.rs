@@ -43,14 +43,12 @@ const MAX_CHANNELS: usize = 200;
 const LEGACY_CHUNKS: usize = 17;
 /// How often a write that lost a race to another write is tried again.
 const CAS_TRIES: usize = 5;
-/// The job that returns a timed level to the calm one.
 pub const EXPIRE_JOB: &str = "antiraid_expire";
 const EXPIRE_KEY: &str = "antiraid";
 /// The job that applies again the effects of a change that were not all made. It has one key, so
 /// that a later try replaces an earlier one.
 pub const RESUME_JOB: &str = "antiraid_resume";
 const RESUME_KEY: &str = "antiraid:resume";
-/// How long after a change is tried again, and how many times it is.
 const RESUME_DELAY: Duration = Duration::from_secs(60);
 const RESUME_TRIES: u32 = 5;
 const LEVEL_KEY: &str = "antiraid:level";
@@ -59,10 +57,7 @@ const SLOWMODE_KEY: &str = "antiraid:slowmode:";
 const QUARANTINE_KEY: &str = "antiraid:quarantined:";
 /// The marker that the quarantine role sync of the SDK stores once the channels of the role are set.
 const QUARANTINE_SYNCED_KEY: &str = "synced:quarantine";
-/// The most entries one listing of the store returns.
 const LIST_LIMIT: usize = 1_000;
-
-// ---- configuration ----
 
 /// The antiraid section as written. It is read on its own, so that a bad section disables antiraid
 /// and nothing else.
@@ -76,7 +71,6 @@ pub struct AntiraidConfig {
     pub quarantine_release: bool,
 }
 
-/// What a level does, as written.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EffectConfig {
@@ -132,7 +126,6 @@ pub struct Quarantine {
 }
 
 impl Antiraid {
-    /// The calm level, the one a server is at until it is raised.
     #[must_use]
     pub fn calm(&self) -> &str {
         // `check` keeps at least two levels, so the first always exists.
@@ -248,9 +241,6 @@ fn optional_role(text: Option<&str>) -> Result<Option<RoleId>, Problem> {
     }
 }
 
-// ---- the level ----
-
-/// Who raised or lowered the level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Setter {
@@ -266,24 +256,19 @@ pub enum Setter {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Level {
     pub name: String,
-    /// Unix seconds of the change.
     pub set_at: i64,
     pub set_by: Setter,
-    /// When a timed level ends, if it does.
     pub until: Option<i64>,
     /// Counts the changes of the level. A job made for a change acts only while it is the current one.
     #[serde(default)]
     pub generation: u64,
-    /// Whether every effect of the level is in place.
     #[serde(default = "applied_by_default")]
     pub applied: bool,
-    /// Why the effects are not all in place, while they are not.
     #[serde(default)]
     pub gap: Option<Gap>,
     /// The calm level, which a timed level returns to. Kept here so that an expiry needs no section.
     #[serde(default)]
     pub calm: Option<String>,
-    /// How often the resume job has tried to finish this change.
     #[serde(default)]
     pub tries: u32,
 }
@@ -293,34 +278,28 @@ fn applied_by_default() -> bool {
     true
 }
 
-/// What is missing from a level whose effects are not all in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Gap {
     /// The change was started but not confirmed complete; the process may have stopped in it.
     Unfinished,
-    /// A Discord change or a stored value failed.
     Failed,
-    /// The end of the timed level could not be scheduled.
     Expiry,
 }
 
 impl Level {
-    /// Why the level is incomplete, if it is.
     #[must_use]
     pub fn incomplete(&self) -> Option<Gap> {
         (!self.applied).then(|| self.gap.unwrap_or(Gap::Unfinished))
     }
 }
 
-/// How many Discord changes a level change made, and how many failed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tally {
     pub changed: usize,
     pub failed: usize,
 }
 
-/// What a level change did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     pub old: String,
@@ -328,9 +307,7 @@ pub struct Change {
     pub set_by: Setter,
     pub until: Option<i64>,
     pub tally: Tally,
-    /// Whether the invites are paused by antiraid once the change is made.
     pub invites_paused: bool,
-    /// Why the effects are not all in place, if they are not.
     pub gap: Option<Gap>,
     /// Whether the quarantine role of the level is ready for members; `None` without a quarantine.
     pub quarantine_ready: Option<bool>,
@@ -845,8 +822,6 @@ async fn resume_unconfigured(ctx: &EventContext, generation: u64) -> Result<(), 
     Ok(())
 }
 
-// ---- slowmodes ----
-
 /// Sets the slowmode the level wants on its channels, remembering each original first, and restores
 /// the originals of the channels that the level no longer covers.
 async fn slowmodes(ctx: &EventContext, wanted: Option<&Slowmode>, tally: &mut Tally) {
@@ -1198,8 +1173,6 @@ async fn notify(ctx: &EventContext, change: &Change, notify: Option<ChannelId>) 
         send(ctx, channel, body.clone()).await;
     }
 }
-
-// ---- quarantine ----
 
 /// A quarantined member, with the roles given to it (`marker` is zero when there is none).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

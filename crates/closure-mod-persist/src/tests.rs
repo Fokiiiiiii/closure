@@ -47,7 +47,6 @@ async fn a_member_gets_back_the_kept_roles_when_they_rejoin() {
         })
         .collect();
     assert_eq!(given, [10]);
-    // The note is used once.
     harness
         .emit(Event::MemberJoined(member(7, &[], None)))
         .await
@@ -111,7 +110,6 @@ async fn a_role_not_given_back_is_not_forgotten_when_the_ones_that_were_make_the
     let _ = harness
         .emit(Event::MemberJoined(member(7, &[], None)))
         .await;
-    // The role 10 was given: the member is updated with it, and has not 11.
     harness
         .emit(Event::MemberUpdated(member(7, &[10], None)))
         .await

@@ -6,7 +6,6 @@ use closure_sdk::{ChannelId, EventContext, ModuleError, UserId};
 
 use crate::context::{Context, Source, Who};
 
-/// How a counter changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     Add(i64),
@@ -20,7 +19,6 @@ pub enum Missing {
     User,
 }
 
-/// The definition of the counter called `name`.
 pub fn find<'a>(defs: &'a [CounterDef], name: &str) -> Option<&'a CounterDef> {
     defs.iter().find(|def| def.name == name)
 }

@@ -1,10 +1,8 @@
-//! The serializable boundary between modules and Discord.
-//!
-//! Every Discord side effect a module can cause is one [`Action`]. A single choke point
-//! ([`ApiClient`](crate::client::ApiClient)) validates the action, checks the module's
-//! [`Capability`] and forwards it to a [`DiscordApi`](crate::client::DiscordApi), which keeps
-//! authorisation, metrics, auditing and rate-limit handling in one place. Because actions are
-//! plain data, scripted (Lua/WASM) modules use the exact same path as native ones.
+//! The serializable boundary between modules and Discord. Every Discord side effect a module can cause
+//! is one [`Action`]. A single choke point ([`ApiClient`](crate::client::ApiClient)) validates the
+//! action, checks the module's [`Capability`] and forwards it to a
+//! [`DiscordApi`](crate::client::DiscordApi), which keeps authorisation, metrics, auditing and rate-
+//! limit handling in one place.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -46,9 +44,6 @@ pub const MAX_SLOWMODE_SECONDS: u16 = 21_600;
 pub const MAX_NICKNAME_CHARS: usize = 32;
 
 /// Why a moderation action happened; written to Discord's audit log.
-///
-/// Discord rejects empty reasons for audit purposes and truncates beyond 512 characters, so
-/// the invariant is enforced at construction and on deserialisation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Reason(String);
@@ -1479,10 +1474,7 @@ impl Action {
         }
     }
 
-    /// The guild the action names, if it names one. Actions that identify only a channel, a
-    /// message or an interaction return `None`: their guild cannot be known without a lookup
-    /// (for channels and messages, see [`channels`](Self::channels); for interaction
-    /// responses, [`interaction_token`](Self::interaction_token)).
+    /// The guild the action names, or `None` when it names only a channel, message or interaction (see [`channels`](Self::channels) and [`interaction_token`](Self::interaction_token)).
     #[must_use]
     pub fn guild_id(&self) -> Option<GuildId> {
         match self {
@@ -1570,11 +1562,7 @@ impl Action {
         }
     }
 
-    /// Every channel the action targets or refers to: the channel of a message action, the
-    /// channel being edited, the parent category of a new channel, the alert channel and the
-    /// exempt channels of an auto-moderation rule. Which guild each belongs to has to be looked
-    /// up; see [`DiscordApi::channel_guild`](crate::client::DiscordApi::channel_guild).
-    ///
+    /// Every channel the action targets or refers to; their guilds have to be looked up (see [`DiscordApi::channel_guild`](crate::client::DiscordApi::channel_guild)).
     /// The match has no wildcard arm, so a new action cannot be added without deciding this.
     #[must_use]
     pub fn channels(&self) -> Vec<ChannelId> {
@@ -1682,9 +1670,7 @@ impl Action {
         }
     }
 
-    /// The interaction token of the actions that answer an interaction. Which guild a token
-    /// belongs to is known only to the host, which registered it when the interaction arrived;
-    /// see [`InteractionGuilds`](crate::interaction::InteractionGuilds).
+    /// The interaction token of an action that answers an interaction; the host knows the guild it belongs to.
     #[must_use]
     pub fn interaction_token(&self) -> Option<&InteractionToken> {
         match self {
@@ -2125,7 +2111,6 @@ mod tests {
             })],
             files: Vec::new(),
         };
-        // The check that a module sends only its own components reads this list.
         assert_eq!(action.custom_ids(), ["other:delete:1"]);
     }
 
@@ -2400,7 +2385,6 @@ mod tests {
         assert!(check_components(&ok).is_ok());
         assert!(check_components(&[]).is_ok());
 
-        // Too many rows, too many buttons, nothing in a row, a button outside a row.
         assert!(check_components(&vec![row_of(vec![button_with("m:a", "A")]); 6]).is_err());
         let six = (0..6)
             .map(|n| button_with(&format!("m:{n}"), "x"))
@@ -2408,7 +2392,6 @@ mod tests {
         assert!(check_components(&[row_of(six)]).is_err());
         assert!(check_components(&[row_of(vec![])]).is_err());
         assert!(check_components(&[button_with("m:a", "A")]).is_err());
-        // Ids and labels that are empty or too long, a link without https.
         assert!(check_components(&[row_of(vec![button_with("", "A")])]).is_err());
         assert!(check_components(&[row_of(vec![button_with(&"m".repeat(101), "A")])]).is_err());
         assert!(check_components(&[row_of(vec![button_with("m:a", &"l".repeat(81))])]).is_err());
@@ -2937,7 +2920,6 @@ mod tests {
         assert_eq!(action.guild_id(), None);
         assert_eq!(action.name(), "create_invite");
         assert!(action.validate().is_ok());
-        // Zero means never expires, zero uses means no limit.
         assert!(new_invite(0, 0).validate().is_ok());
         assert!(new_invite(604_800, 100).validate().is_ok());
         assert!(new_invite(604_801, 5).validate().is_err());
@@ -2961,7 +2943,6 @@ mod tests {
         assert_eq!(delete("aB3-_9x").capability(), Capability::ManageInvites);
         assert_eq!(delete("aB3-_9x").guild_id(), Some(id::<7, _>()));
         assert!(delete("aB3-_9x").validate().is_ok());
-        // A code goes into a URL path: separators and empty codes are refused.
         for code in ["", "a/b", "a?b", "a b", &"x".repeat(65)] {
             assert!(delete(code).validate().is_err(), "{code:?}");
         }
@@ -3314,7 +3295,6 @@ mod tests {
                 .validate()
                 .is_err()
         );
-        // The decoded picture is at most 256 KiB.
         let too_big = format!("data:image/png;base64,{}", "A".repeat(350_000));
         assert!(create("party", &too_big).validate().is_err());
 

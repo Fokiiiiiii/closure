@@ -41,8 +41,7 @@ impl TwilightApi {
             .map(Outcome::Invites)
     }
 
-    /// Discord deletes an invite by its code alone, so the guild of the invite is read first and
-    /// must be `guild`; otherwise nothing is deleted.
+    /// Discord deletes an invite by its code alone, so its guild is read first; it must be `guild`, otherwise nothing is deleted.
     pub(super) async fn delete_invite(
         &self,
         guild: GuildId,

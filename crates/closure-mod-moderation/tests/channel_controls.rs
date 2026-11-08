@@ -48,7 +48,6 @@ async fn slowmode_bounds_and_timed_restore() {
     h.invoke(invocation("slowmode").option("seconds", CommandOptionValue::Integer(21601)))
         .await
         .unwrap();
-    // Above Discord's longest, Discord keeps its longest and the bot keeps the rest.
     assert!(h.api().actions()[before..].iter().any(
         |a| matches!(a, Action::EditChannel { patch, .. } if patch.slowmode_seconds == Some(21600))
     ));
@@ -291,7 +290,6 @@ async fn channel_commands_succeed_without_log_or_when_post_fails() {
                 }
             };
             if fail {
-                // Defer, channel lookup when needed, change, then log.
                 let nth = if name == "unlock" { 4 } else { 5 };
                 h.api()
                     .fail_nth(nth, closure_sdk::DiscordError::Fatal("offline".into()));

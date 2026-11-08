@@ -33,9 +33,7 @@ fn response_data(reply: &InteractionReply) -> InteractionResponseData {
     }
 }
 
-/// What an update says about the message it changes: its embeds and components are exactly
-/// those of the reply, so none means "take the old ones off". (A new message has none to take
-/// off, and leaves them out.)
+/// An update's embeds and components are exactly the reply's, so none means "take the old ones off"; a new message has none to take off and leaves them out.
 /// A choice of an autocomplete answer, in the form Discord takes.
 fn choice(choice: &OptionChoice) -> CommandOptionChoice {
     CommandOptionChoice {
@@ -149,8 +147,7 @@ impl TwilightApi {
         run(request).await
     }
 
-    /// Replaces the deferred or original response: the text if the reply has any (else it is left
-    /// as it is), the embeds and components exactly as the reply has them.
+    /// Replaces the deferred or original response: the text if the reply has one (else left as is), with embeds and components exactly as the reply has them.
     pub(super) async fn edit_response(
         &self,
         token: &InteractionToken,
@@ -176,8 +173,7 @@ impl TwilightApi {
     }
 }
 
-/// How long the bot's reply to a text command can still be edited, as long as the interaction
-/// token of a slash command is good.
+/// How long the bot's reply to a text command can still be edited, as long as a slash command's interaction token is good.
 const EDITABLE_FOR: Duration = Duration::from_mins(15);
 
 /// Most replies to text commands remembered for editing; the oldest are forgotten first.
@@ -235,8 +231,7 @@ impl TextReplies {
 }
 
 impl TwilightApi {
-    /// A text command has no interaction to answer, so the bot replies to its message in the same
-    /// channel. A deferral is only remembered: the first edit sends the reply.
+    /// A text command has no interaction to answer, so the bot replies to its message in the same channel; a deferral is only remembered, and the first edit sends the reply.
     async fn respond_to_text_command(
         &self,
         channel: ChannelId,
@@ -302,8 +297,7 @@ impl TwilightApi {
         }
     }
 
-    /// Sends `reply` as a reply to `invoker`. No one is pinged: a reply does not notify the
-    /// author it answers, and neither do mentions in it.
+    /// Sends `reply` as a reply to `invoker`; no one is pinged, neither the author nor mentions.
     async fn send_text_reply(
         &self,
         channel: ChannelId,
@@ -316,10 +310,7 @@ impl TwilightApi {
         self.post_text_reply(channel, Some(invoker), reply).await
     }
 
-    /// A private reply goes to the direct messages of whoever wrote the command: the channel is
-    /// read by everyone in it, and a message that is deleted later has been readable until then.
-    /// When their messages are closed, the command is marked with a reaction and nothing else is
-    /// said.
+    /// A private reply goes to the DMs of whoever wrote the command, since the channel is readable by everyone in it. When their DMs are closed, the command is marked with a reaction and nothing else is said.
     async fn send_private_text_reply(
         &self,
         channel: ChannelId,
@@ -339,8 +330,7 @@ impl TwilightApi {
         sent
     }
 
-    /// Sends `reply` to `channel`, as a reply to `invoker` when there is one. No one is pinged: a
-    /// reply does not notify the author it answers, and neither do mentions in it.
+    /// Sends `reply` to `channel`, as a reply to `invoker` when there is one; no one is pinged.
     async fn post_text_reply(
         &self,
         channel: ChannelId,

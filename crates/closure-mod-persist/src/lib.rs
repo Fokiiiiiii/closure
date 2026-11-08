@@ -26,13 +26,10 @@ const KEEP: Duration = Duration::from_hours(2160);
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Config {
-    /// The roles to give back.
     roles: Vec<String>,
-    /// Whether the nickname comes back too.
     nickname: bool,
 }
 
-/// What is kept of a member.
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Note {
     roles: Vec<u64>,

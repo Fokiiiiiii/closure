@@ -77,9 +77,7 @@ impl ModuleError {
     }
 }
 
-/// Normalised failure of a Discord operation. Implementations of
-/// [`DiscordApi`](crate::client::DiscordApi) map transport and HTTP errors onto these
-/// variants so modules never depend on a particular HTTP library.
+/// Normalised failure of a Discord operation.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum DiscordError {
     /// The action was rejected locally before any request was made.

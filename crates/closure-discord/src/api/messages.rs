@@ -18,8 +18,7 @@ fn request_emoji(emoji: &Emoji) -> RequestReactionType<'_> {
     }
 }
 
-/// Nobody is notified unless the caller explicitly lists them; `@everyone`, `@here` and
-/// arbitrary role mentions can never be produced by echoing user text.
+/// Nobody is notified unless listed explicitly; `@everyone`, `@here`, and arbitrary role mentions can never come from echoing user text.
 pub(super) fn allowed_mentions(policy: &MentionPolicy) -> AllowedMentions {
     match policy {
         MentionPolicy::None => AllowedMentions::default(),
@@ -85,8 +84,7 @@ impl TwilightApi {
             request = request.embeds(embeds);
         }
         if let Some(message) = reply_to {
-            // A reply to a message that has since been deleted (say, by auto moderation) should
-            // still be sent as a plain message rather than fail.
+            // A reply to a message deleted since should still be sent as a plain message, not fail.
             request = request.reply(message).fail_if_not_exists(false);
         }
         read(request)
@@ -94,11 +92,8 @@ impl TwilightApi {
             .map(|message| Outcome::Message(Box::new(message)))
     }
 
-    /// Opens the private channel with `user` and sends the message there. The user must be a
-    /// member of `guild`: the cache is trusted when it knows, otherwise Discord is asked, and
-    /// when that fails nothing is sent.
-    /// Sends a message with components, or replaces a message of the bot with one. Nobody is
-    /// mentioned.
+    /// Opens the private channel with `user` and sends there; `user` must be a member of `guild`, otherwise nothing is sent.
+    /// Sends a message with components, or replaces a message of the bot with one; nobody is mentioned.
     #[allow(
         clippy::too_many_arguments,
         reason = "the fields of `Action::PostMessage`"

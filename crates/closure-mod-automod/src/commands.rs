@@ -262,8 +262,6 @@ async fn reply_value(
     cx.reply_private(text).await
 }
 
-// ---- /automod antiraid ----
-
 /// The level names that start with what the user typed, for the `set` command.
 pub fn level_choices(state: &State, cx: &AutocompleteCx) -> Result<Vec<Choice>, UserError> {
     let loaded = state.load(cx.ctx()).map_err(UserError::Module)?;

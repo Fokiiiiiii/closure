@@ -1,12 +1,9 @@
-//! Undo buttons: the button a punishment's reply carries lifts the punishment again, as its
-//! un-command does. The button is not `only_for`, so any moderator may press it. Each press checks
-//! the permission of the kind and the target again, and that the case still stands.
+//! Undo buttons: a punishment's reply carries a button that lifts the punishment, as its un-command does.
+//! Any moderator may press it; each press checks the permission and that the case still stands.
 //!
-//! A button never expires by itself, since the SDK has no expiry for components yet. The check that
-//! the case still stands is what keeps an old button harmless.
+//! Buttons never expire (the SDK has no component expiry); the still-stands check keeps old ones harmless.
 //!
-//! The button of an older punishment while a newer one still stands only revokes its own case:
-//! the newer one is still in force, so Discord and the timers are left alone.
+//! An old button while a newer punishment stands only revokes its own case, leaving the rest alone.
 
 use closure_sdk::embed::truncate;
 use closure_sdk::ui::{self, CustomId};
@@ -17,7 +14,6 @@ use twilight_model::channel::message::component::ButtonStyle;
 use crate::templates::text_reply;
 use crate::{Config, mention, punisher_for, stands};
 
-/// The route of the undo buttons.
 pub(crate) const ROUTE: &str = "undo";
 
 /// How many characters a button's label may have: Discord refuses a longer one, and a text that
@@ -34,7 +30,6 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    /// Every kind.
     pub(crate) const ALL: [Self; 4] = [Self::Timeout, Self::Ban, Self::Vcmute, Self::Warn];
 
     /// The kind of the case the button undoes, as the custom id and the cases name it.
@@ -69,7 +64,6 @@ impl Kind {
     }
 }
 
-/// The undo button of case `number`, a punishment of `kind` against `user`.
 pub(crate) fn button<I: InteractionRef + 'static>(
     cx: &Cx<I>,
     kind: Kind,
@@ -91,7 +85,6 @@ pub(crate) fn row(button: Option<Component>) -> Vec<Component> {
     button.map_or_else(Vec::new, |button| vec![ui::row([button])])
 }
 
-/// The kind, member and case that the data of a button names.
 fn parse(data: &str) -> Option<(Kind, UserId, i64)> {
     let mut parts = data.splitn(3, ':');
     let kind = Kind::parse(parts.next()?)?;
@@ -199,7 +192,6 @@ async fn revoke<I: InteractionRef + 'static>(cx: &Cx<I>, number: i64) -> Result<
     Ok(())
 }
 
-/// The result, with the line that says who undid the punishment.
 fn undone_by<I: InteractionRef + 'static>(cx: &Cx<I>, body: &str) -> String {
     format!(
         "{}\n{body}",

@@ -1,18 +1,5 @@
-//! Counters: named integers kept per guild, and per channel or per user as the definition says,
-//! that decay over time and fire triggers when they cross a condition. The module's config gives
-//! the definitions; this keeps the values.
-//!
-//! Every change is one compare-and-set write of the scope's entry, so two handlers changing the
-//! same counter cannot lose an update. A conflict is retried a few times, then reported as
-//! [`CounterError::Conflict`]. Decay is lazy: a value is brought up to date from the time of its
-//! last write whenever it is read or changed, so no job runs in the background.
-//!
-//! Triggers look at each change as a step from the value as last written (before decay) to the new
-//! one. A trigger fires when the step takes the value from not matching its condition to matching
-//! it. Its reverse fires when the step takes the value from matching the condition to matching the
-//! reverse.
-//! So a value that jumps over the reverse's range fires nothing until a step crosses it.
-//!
+//! Named counters kept per guild (or per channel or user), which decay over time and fire triggers when they cross a condition.
+//! Changes are compare-and-set writes, so concurrent changes cannot lose an update; decay is applied lazily on read or change.
 //! Shortcut: a trigger that only decay crosses fires on the next change of that scope, not at
 //! decay time, and a value nobody has touched stays at its initial value; a sweep job over the
 //! scopes would make both exact.

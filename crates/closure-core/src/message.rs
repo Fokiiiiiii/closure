@@ -551,8 +551,6 @@ mod tests {
         assert!(serde_json::from_value::<MessageSpec>(json!({"embeds": [{"colour": 1}]})).is_err());
     }
 
-    /// What the writer is allowed to save is what the bot is allowed to send: a message that
-    /// `into_post` accepts passes the checks of the action that posts it, at the edges too.
     #[test]
     fn a_message_that_is_accepted_is_one_that_can_be_posted() {
         let embed = json!({

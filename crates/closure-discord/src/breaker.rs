@@ -20,9 +20,7 @@ impl Default for BreakerConfig {
     }
 }
 
-/// Proof that a call was admitted, handed back with its result. It says which period of the
-/// breaker the call belongs to and whether the call is the recovery trial, so that a result is
-/// never mistaken for another call's.
+/// Proof a call was admitted, handed back with its result: which period of the breaker the call belongs to and whether it is the recovery trial, so a result is never mistaken for another's.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Ticket {
     generation: u64,
@@ -32,12 +30,8 @@ pub(crate) struct Ticket {
 /// A circuit breaker for one module in one guild.
 ///
 /// A module that keeps timing out or panicking would otherwise burn a task and a timeout's worth
-/// of latency on every event. After `threshold` consecutive failures its calls are skipped for
-/// `cooldown`; then a single trial call decides whether it recovered.
-///
-/// Calls can overlap and handlers may run for a minute, so a call admitted before the breaker
-/// opened can finish while a trial is running. Results of such calls (an older `generation`)
-/// are ignored: they say nothing about whether the module has recovered.
+/// After `threshold` consecutive failures its calls are skipped for `cooldown`; then a single trial call decides whether it recovered.
+/// Calls can overlap while a trial runs, so results of calls admitted before the breaker opened (an older `generation`) say nothing about recovery and are ignored.
 #[derive(Debug, Default)]
 pub(crate) struct Breaker {
     consecutive_failures: u32,
@@ -49,14 +43,12 @@ pub(crate) struct Breaker {
 }
 
 impl Breaker {
-    /// Admits a call now, or refuses it. After the cooldown, the first caller is admitted as the
-    /// trial and the breaker closes the door again until that trial reports back.
+    /// Admits a call now, or refuses it. After the cooldown the first caller is admitted as the trial; until it reports back, the door stays shut.
     pub(crate) fn allow(&mut self, now: Instant) -> Option<Ticket> {
         let trial = match self.open_until {
             None => false,
             Some(until) if now < until => return None,
-            // The cooldown is over. One call at a time may test whether the module recovered,
-            // however long it takes: others stay out until it reports.
+            // The cooldown is over; one call at a time may test recovery, however long it takes, so others stay out until it reports.
             Some(_) if self.trial_in_flight => return None,
             Some(_) => {
                 self.trial_in_flight = true;

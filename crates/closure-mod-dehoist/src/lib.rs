@@ -56,7 +56,6 @@ async fn rename(
         .map(drop)
 }
 
-/// A member joined or changed: a hoisting name is cleaned.
 async fn on_member(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     let (Event::MemberJoined(member) | Event::MemberUpdated(member)) = event else {
         return Ok(Flow::Continue);
@@ -73,7 +72,6 @@ async fn on_member(ctx: EventContext, event: Event) -> Result<Flow, ModuleError>
     Ok(Flow::Continue)
 }
 
-/// Cleans the names of the members already in the server.
 async fn sweep(cx: CommandCx, (): ()) -> Result<(), UserError> {
     cx.defer(true).await?;
     let ctx = cx.ctx();

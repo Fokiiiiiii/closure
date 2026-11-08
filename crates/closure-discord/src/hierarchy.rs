@@ -17,16 +17,14 @@ use closure_core::error::DiscordError;
 use closure_core::event::{ChannelId, GuildId, RoleId, UserId};
 use twilight_cache_inmemory::{CacheableRole, InMemoryCache};
 
-/// What the hierarchy check needs to know. Implemented over Twilight's cache, and by fakes in
-/// tests.
+/// What the hierarchy check needs to know; implemented over Twilight's cache and by fakes in tests.
 pub trait CacheView: Send + Sync {
     fn bot_user(&self) -> Option<UserId>;
     fn guild_owner(&self, guild: GuildId) -> Option<UserId>;
     /// Roles of a member, not including the implicit `@everyone` role.
     fn member_roles(&self, guild: GuildId, user: UserId) -> Option<Vec<RoleId>>;
     fn role_position(&self, role: RoleId) -> Option<i64>;
-    /// The guild a channel (or thread) belongs to, if the cache knows the channel. `None` means
-    /// "unknown", not "outside any guild", so callers fall back to asking Discord.
+    /// The guild a channel or thread belongs to, if the cache knows it; `None` means unknown, so callers fall back to asking Discord.
     fn channel_guild(&self, _channel: ChannelId) -> Option<GuildId> {
         None
     }
@@ -60,8 +58,7 @@ impl CacheView for InMemoryCacheView {
     }
 }
 
-/// Position in the hierarchy: a higher `position` wins, and between equal positions the role
-/// created earlier (smaller id) wins, as Discord orders them.
+/// Position in the hierarchy: a higher `position` wins; at equal positions the earlier-created (smaller id) role wins, as Discord orders them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Rank {
     position: i64,
@@ -82,8 +79,7 @@ impl PartialOrd for Rank {
     }
 }
 
-/// The highest role of `user`, or `None` when the cache does not know their roles. A member
-/// with no roles ranks as `@everyone` (whose id is the guild id, at position 0).
+/// The highest role of `user`, or `None` when the cache does not know their roles; a member with no roles ranks as `@everyone` (position 0).
 fn highest_rank(view: &dyn CacheView, guild: GuildId, user: UserId) -> Option<Rank> {
     let everyone = Rank {
         position: 0,
@@ -107,8 +103,7 @@ pub enum Preflight {
     Pass,
     /// Certainly wrong; do not send.
     Reject(DiscordError),
-    /// Probably wrong according to a possibly stale cache. Send anyway, and use this error
-    /// to explain a `403` if one comes back.
+    /// Probably wrong according to a possibly stale cache. Send anyway, and use this error to explain a `403` if one comes back.
     Suspect(DiscordError),
 }
 

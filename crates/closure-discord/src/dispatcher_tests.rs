@@ -69,8 +69,7 @@ enum Behavior {
     ScheduleAnother,
     /// Records a case for the message it got and logs the guild and the case's number.
     RecordCase,
-    /// Like `RecordCase`, but only for messages, so that a module which also gets the case
-    /// announcements does not record one for each of them.
+    /// Like `RecordCase`, but only for messages, so a module that also gets the case announcements does not record one for each.
     RecordCaseOnMessage,
     /// Logs the content of the kept message it was told about, or why it cannot read it.
     ReadHistoryOfMessage,
@@ -93,8 +92,7 @@ struct Probe {
     running_at_unload: AtomicUsize,
     /// A client a module kept from an earlier event.
     held: Mutex<Option<ApiClient>>,
-    /// The log entries say which module made them (for tests that look at the order across
-    /// modules, which share one log).
+    /// The log entries say which module made them, for tests that look at the order across modules, which share one log.
     prefixed: bool,
     /// The module keeps the lower priorities from the events it handles.
     stops: AtomicBool,
@@ -171,8 +169,7 @@ impl Probe {
         *self.behavior.lock().unwrap() = behavior;
     }
 
-    /// Keeps the client of a message event, then replays it on a command of another guild,
-    /// also with a record of interactions of the module's own making.
+    /// Keeps the client of a message event, then replays it on a command of another guild, also with a record of interactions of its own making.
     async fn hold_then_replay(&self, ctx: &EventContext, event: &Event) {
         match event {
             Event::MessageCreated(_) => {
@@ -760,8 +757,7 @@ async fn different_channels_are_handled_in_parallel() {
     h.dispatcher.dispatch(message(a, 1));
     h.dispatcher.dispatch(message(b, 2));
 
-    // Each handler waits for the other; serial processing would hit the module timeout and
-    // both would count as failures instead of finishing together.
+    // Each handler waits for the other; serial processing would hit the module timeout and both would count as failures instead of finishing together.
     tokio::time::timeout(Duration::from_secs(5), async {
         while probe.max_running() < 2 {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -1354,7 +1350,6 @@ async fn a_command_still_waiting_in_its_lane_at_the_deadline_is_answered_busy_an
     h.dispatcher.dispatch(command("warn", Some(Locale::En)));
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // The second command is answered while the first still runs.
     let actions = h.api.actions();
     assert_eq!(actions.len(), 1, "{actions:?}");
     let (text, ephemeral) = reply_text(&actions[0]);
@@ -1471,8 +1466,7 @@ async fn an_autocomplete_that_overruns_its_deadline_is_stopped_and_returns_its_t
             "the handler that overran the deadline is stopped"
         );
 
-        // The overrun counts as a failure, so the breaker is open again. After its cooldown
-        // the next call must be let through, which needs the trial to have been given back.
+        // The overrun counts as a failure, so the breaker is open again; after its cooldown the next call must be let through, which needs the trial to have been given back.
         tokio::time::sleep(Duration::from_secs(31)).await;
         slow.set(Behavior::Ok);
         let before = slow.log().len();
@@ -1727,7 +1721,6 @@ async fn a_module_that_blocks_a_thread_gets_no_further_calls_until_it_is_back() 
     assert_eq!(seen, ["load", "msg:1", "msg:2", "msg:3"]);
     assert_eq!(blocker.log(), ["load", "msg:1"]);
 
-    // Once the call has returned, the module is asked again.
     tokio::time::timeout(Duration::from_secs(10), async {
         while h.dispatcher.is_wedged(&blocker.manifest.id) {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1889,7 +1882,6 @@ async fn a_module_that_stops_an_event_keeps_it_from_the_lower_priorities_only() 
     // The peer of the same priority still gets it; the lower one does not.
     assert_eq!(order, ["first:msg:1", "peer:msg:1"]);
 
-    // A module that fails does not stop anything.
     first.set(Behavior::Fail);
     log.lock().unwrap().clear();
     h.dispatcher.dispatch(message(3, 2));
@@ -2015,8 +2007,7 @@ fn per_second(count: usize, elapsed: Duration) -> u128 {
     u128::try_from(count).unwrap_or(0) * 1_000_000 / elapsed.as_micros().max(1)
 }
 
-/// Not a test of behaviour: prints what the dispatcher manages on this machine. Run with
-/// `cargo test --release -p closure-discord --lib measure -- --ignored --nocapture`.
+/// Not a test of behaviour: prints what the dispatcher manages on this machine. Run with `cargo test --release -p closure-discord --lib measure -- --ignored --nocapture`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "a measurement, not a test"]
 async fn measure_throughput_of_events_that_need_no_work() {
@@ -2045,8 +2036,7 @@ async fn measure_throughput_of_events_that_need_no_work() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "a measurement, not a test"]
 async fn measure_one_guild_flooding_a_module_that_takes_its_time() {
-    // What a raid does: one guild, far more events than its queue holds, a module that needs
-    // 2 ms for each.
+    // What a raid does: one guild, far more events than its queue holds, and a module that needs 2 ms for each.
     for (name, capacity, lanes) in [
         ("small", 200, 2),
         ("medium", 1_000, 4),
@@ -2184,8 +2174,7 @@ async fn a_module_can_answer_the_interaction_it_was_given_but_not_one_it_was_not
 
 #[tokio::test]
 async fn a_client_kept_from_one_guild_cannot_answer_an_interaction_of_another() {
-    // One module, shared by both guilds, keeps the client it got for a message in guild 1 and
-    // uses it, also with a record of its own making, on a command that arrives in guild 2.
+    // One module, shared by both guilds, keeps the client it got for a message in guild 1 and uses it, also with a record of its own making, on a command that arrives in guild 2.
     let mut module = Probe::new(
         "tools",
         &[EventKind::MessageCreated],
@@ -2258,8 +2247,7 @@ fn warn_module(behavior: Behavior) -> Arc<Probe> {
     module
 }
 
-/// [`harness`] for text commands: the guild's prefix (`None` turns them off), its language, and
-/// the bot's id, which text commands run as.
+/// [`harness`] for text commands: the guild's prefix (`None` turns them off), its language, and the bot's id, which text commands run as.
 async fn text_harness(
     probes: &[(&Arc<Probe>, bool)],
     prefix: Option<&str>,
@@ -2638,9 +2626,7 @@ async fn the_wait_counts_from_arrival_not_from_the_lane() {
         .dispatch_message_after(message(3, 1), first_done, |_| Permissions::empty());
     h.dispatcher
         .dispatch_message_after(message(3, 2), second_done, |_| Permissions::empty());
-    // The first message is kept at 20 seconds, so the lane is busy until then. The second is kept
-    // only at 30 seconds after it arrived: it must reach the modules at its own wait, 25 seconds
-    // after arrival, not when the lane frees up.
+    // The first message is kept at 20 seconds, so the lane is busy until then; the second is kept only at 30 seconds after arrival and must reach the modules at its own wait, 25 seconds after arrival, not when the lane frees up.
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(20)).await;
         let _ = first_recorded.send(message(3, 1));
@@ -2809,8 +2795,7 @@ async fn a_command_whose_interaction_cannot_be_recorded_is_not_handed_to_a_modul
     h.dispatcher.flush().await;
     h.dispatcher.dispatch(command_with(1, "second")); // over the limit of guild 1
     h.dispatcher.flush().await;
-    // The very same interaction again is accepted (it is recorded), but only if the refused
-    // command above gave its place in the queue back.
+    // The very same interaction again is accepted (it is recorded), but only if the refused command above gave its place back.
     h.dispatcher.dispatch(command_with(1, "first"));
     h.dispatcher.flush().await;
     h.dispatcher.dispatch(command_with(2, "other-guild"));
@@ -3345,8 +3330,7 @@ async fn a_module_reads_a_kept_message_only_with_the_capability() {
     );
 }
 
-/// Counts the calls a backend gets. It answers a standing search with nothing, so only the count
-/// shows which method was called.
+/// Counts the calls a backend gets; it answers a standing search with nothing, so only the count shows which method was called.
 #[derive(Default)]
 struct StandingCounter {
     standing: std::sync::atomic::AtomicUsize,

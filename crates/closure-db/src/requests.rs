@@ -139,7 +139,6 @@ mod tests {
             db.claim_request(guild, "1", "k", &request).await.unwrap(),
             Claim::Fresh
         );
-        // Under way, or cut short by a stop: it is not carried out again.
         assert_eq!(
             db.claim_request(guild, "1", "k", &request).await.unwrap(),
             Claim::Pending
@@ -157,7 +156,6 @@ mod tests {
                 .unwrap(),
             Claim::Different
         );
-        // Another person, or another server, has keys of its own.
         assert_eq!(
             db.claim_request(guild, "2", "k", &request).await.unwrap(),
             Claim::Fresh

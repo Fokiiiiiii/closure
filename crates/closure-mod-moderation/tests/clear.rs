@@ -17,7 +17,6 @@ const CHANNEL: u64 = 5;
 const MODERATOR: u64 = 100;
 const MODERATOR_ROLE: u64 = 10;
 const DAY: u64 = 86_400;
-/// Discord's epoch, in milliseconds since the Unix epoch: a snowflake counts from it.
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
 fn role(id: u64, position: i64) -> Role {
@@ -36,7 +35,6 @@ fn role(id: u64, position: i64) -> Role {
     .unwrap()
 }
 
-/// The id a message sent `seconds_ago` gets, so the module can tell how old it is.
 fn message_id(seconds_ago: u64) -> u64 {
     let now_ms = u64::try_from(
         SystemTime::now()
@@ -185,7 +183,6 @@ async fn clear_in_an_empty_channel_deletes_nothing() {
     );
 }
 
-/// A message with an author, a text, files and a pin, as the pretend Discord holds it.
 fn posted(
     id: u64,
     author: u64,
@@ -224,7 +221,6 @@ fn deleted_ids(harness: &Harness) -> Vec<u64> {
     ids
 }
 
-/// Eight messages, oldest first, and the ids they got.
 fn crowded() -> (Harness, Vec<u64>) {
     let harness = harness();
     let ids: Vec<u64> = (1..=8).map(|n| message_id(100 - n * 10)).collect();
@@ -244,7 +240,6 @@ fn crowded() -> (Harness, Vec<u64>) {
     (harness, ids)
 }
 
-/// Which of the eight messages (by position, oldest first) a `/clear` with these options deletes.
 async fn cleared(count: i64, options: &[(&str, CommandOptionValue)]) -> Vec<usize> {
     let (harness, ids) = crowded();
     let mut invocation = clear(count);
@@ -262,21 +257,16 @@ async fn cleared(count: i64, options: &[(&str, CommandOptionValue)]) -> Vec<usiz
 async fn clear_takes_only_the_messages_that_fit_the_filters() {
     let yes = || CommandOptionValue::Boolean(true);
     let text = |text: &str| CommandOptionValue::String(text.to_owned());
-    // Without a filter, the newest messages, whoever wrote them.
     assert_eq!(cleared(3, &[]).await, [5, 6, 7]);
-    // A member.
     assert_eq!(
         cleared(8, &[("user", CommandOptionValue::User(Id::new(7)))]).await,
         [0, 2, 4, 7]
     );
-    // Bots; links and invites; files; a text in any case.
     assert_eq!(cleared(8, &[("bots", yes())]).await, [3, 6]);
     assert_eq!(cleared(8, &[("links", yes())]).await, [1, 4]);
     assert_eq!(cleared(8, &[("files", yes())]).await, [2, 6]);
     assert_eq!(cleared(8, &[("contains", text("hello"))]).await, [0, 5]);
-    // Filters hold together.
     assert_eq!(cleared(8, &[("bots", yes()), ("files", yes())]).await, [6]);
-    // The count is how many that fit, the newest of them.
     assert_eq!(
         cleared(2, &[("user", CommandOptionValue::User(Id::new(7)))]).await,
         [4, 7]
@@ -315,7 +305,6 @@ async fn clear_leaves_pinned_messages_unless_they_are_asked_for() {
 #[tokio::test]
 async fn a_filter_looks_back_past_the_messages_that_do_not_fit_and_stops_at_a_limit() {
     let harness = harness();
-    // One message of the member, long ago, below more than a page of others.
     let mine = message_id(1_000);
     harness
         .api()

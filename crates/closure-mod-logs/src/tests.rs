@@ -51,7 +51,6 @@ fn config(channel: Option<&str>, deletes: bool) -> serde_json::Value {
     })
 }
 
-/// A 1 by 1 PNG, the picture that the showcase shows inside its embed.
 const PICTURE_BYTES: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
@@ -132,7 +131,6 @@ fn edited(
     })
 }
 
-/// The edit as the recorder hands it on: the text it replaced is `previous`.
 fn replacing(mut event: Event, previous: &str) -> Event {
     if let Event::MessageUpdated(info) = &mut event {
         info.previous_content = Some(previous.into());
@@ -140,7 +138,6 @@ fn replacing(mut event: Event, previous: &str) -> Event {
     event
 }
 
-/// What the module posted: the channel, the text, the JSON of the embeds, and each file's name and bytes.
 struct Posted {
     channel: u64,
     text: Option<String>,
@@ -406,8 +403,6 @@ async fn webhook_destination_priority_and_old_retry_payload() {
 #[tokio::test]
 async fn the_entries_go_to_the_configured_channel_and_not_the_log_channel() {
     let harness = harness();
-    // The harness knows only the channels it was given: register the other one, then put the
-    // log channel back, so that the configured channel is the one that must win.
     harness.set_log_channel(OTHER_LOG);
     harness.set_log_channel(LOG);
     harness.set_config(config(Some(&OTHER_LOG.to_string()), true));
@@ -490,7 +485,6 @@ async fn unavailable_webhooks_fall_back_or_fail_without_retry() {
     ] {
         for fallback in [false, true] {
             let harness = Harness::new(builder().unwrap()).unwrap();
-            // The first call that fails must be the post, not a look at the invites.
             harness.set_config(config(None, true));
             if fallback {
                 harness.set_log_channel(LOG);
@@ -871,7 +865,6 @@ async fn showcase_a_bulk_deletion_shows_a_summary_and_each_message_it_kept() {
         .await
         .unwrap();
 
-    // The entries without files share one message: the summary, then each message kept.
     let posted = sent(&harness);
     assert_eq!(posted.len(), 1, "{:?}", posted.len());
     assert!(
@@ -887,7 +880,6 @@ async fn showcase_a_bulk_deletion_shows_a_summary_and_each_message_it_kept() {
     assert!(posted[0].embeds.contains("議事録"), "{}", posted[0].embeds);
 }
 
-/// A user id whose snowflake says the account was made at `unix_seconds`.
 fn user_made_at(unix_seconds: u64) -> u64 {
     const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
     (((unix_seconds * 1_000) - DISCORD_EPOCH_MS) << 22) | 1
@@ -1015,7 +1007,6 @@ fn the_module_asks_for_message_content_so_that_it_can_post_the_text() {
     assert!(module.manifest().intents.contains(Intents::MESSAGE_CONTENT));
 }
 
-/// A channel as the gateway describes it, with the topic it has.
 fn channel_info(name: &str, topic: Option<&str>) -> ChannelInfo {
     ChannelInfo {
         id: Id::new(CHANNEL),
@@ -1096,7 +1087,6 @@ async fn a_change_of_a_permission_overwrite_shows_what_the_role_allows_and_denie
 async fn many_overwrite_changes_with_long_texts_still_make_an_entry_that_fits_an_embed() {
     let harness = harness();
     let mut after = channel_info("general", None);
-    // Every role gets every permission: the longest value an overwrite has.
     after.overwrites = (1..=15)
         .map(|role| role_overwrite(role, Permissions::all(), Permissions::empty()))
         .collect();
@@ -1491,10 +1481,8 @@ fn both_languages_define_the_same_messages() {
     assert_eq!(keys(EN), keys(JA));
 }
 
-/// The snowflakes count from Discord's epoch, in milliseconds.
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
-/// An audit log entry of `kind` on `target`, made by `by` with `reason`, `seconds_ago` seconds ago.
 fn audit(
     kind: AuditLogEventType,
     target: u64,
@@ -1703,7 +1691,6 @@ async fn a_voice_move_names_the_moderator_who_made_it() {
     assert!(posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
 }
 
-/// An audit log entry of a bulk delete of `count` messages in `channel`, made by `by`.
 fn bulk_audit(channel: u64, count: usize, by: u64) -> AuditLogEntry {
     let mut entry = audit(AuditLogEventType::MessageBulkDelete, channel, by, None, 5);
     entry.options = Some(
@@ -1753,7 +1740,6 @@ async fn a_bulk_delete_of_another_count_is_not_named() {
     assert!(!posted[0].embeds.contains("<@9>"), "{}", posted[0].embeds);
 }
 
-/// An audit log entry of a deletion of a message by `author` in `channel`, made by `by`.
 fn deletion_audit(author: u64, channel: u64, by: u64) -> AuditLogEntry {
     let mut entry = audit(AuditLogEventType::MessageDelete, author, by, None, 5);
     entry.options =
@@ -2182,7 +2168,6 @@ fn ban(user: u64) -> Event {
 #[tokio::test]
 async fn a_kind_of_entry_goes_to_its_own_channel_and_the_others_to_the_usual_one() {
     let harness = harness();
-    // The harness knows only the channels it was given: register the other one first.
     harness.set_log_channel(OTHER_LOG);
     harness.set_log_channel(LOG);
     let mut settings = config(None, true);
@@ -2231,7 +2216,6 @@ async fn nothing_is_logged_for_an_ignored_channel_member_or_role() {
     settings["ignored_roles"] = json!(["900"]);
     harness.set_config(settings);
 
-    // A message deleted in an ignored channel, a ban of an ignored member, an ignored role changed.
     harness.emit(deleted(12)).await.unwrap();
     harness.emit(ban(6)).await.unwrap();
     harness
@@ -2249,7 +2233,6 @@ async fn nothing_is_logged_for_an_ignored_channel_member_or_role() {
         .unwrap();
     assert!(sent(&harness).is_empty(), "nothing is posted");
 
-    // Anybody else is logged as before.
     harness.emit(ban(7)).await.unwrap();
     assert_eq!(sent(&harness).len(), 1);
 }
@@ -2299,7 +2282,6 @@ async fn a_join_names_the_invite_whose_count_went_up() {
     harness
         .api()
         .set_guild_invites(guild, &[("abc", 3, Some(Id::new(9))), ("def", 1, None)]);
-    // The first look has nothing to compare with.
     harness.emit(join(40, false)).await.unwrap();
     assert!(sent(&harness)[0].embeds.contains("Unknown"));
 
@@ -2312,7 +2294,6 @@ async fn a_join_names_the_invite_whose_count_went_up() {
     assert!(embeds.contains("discord.gg/abc"), "{embeds}");
     assert!(embeds.contains("<@9>"), "{embeds}");
 
-    // Two counted at once are told as a choice, not named.
     harness.advance(std::time::Duration::from_secs(10));
     harness
         .api()
@@ -2338,7 +2319,6 @@ async fn a_bot_a_burst_and_a_switched_off_setting_do_not_look_at_the_invites() {
         "a bot has no invite"
     );
 
-    // Two joins in one moment: the second is not looked up.
     harness.emit(join(51, false)).await.unwrap();
     harness.emit(join(52, false)).await.unwrap();
     assert!(sent(&harness)[1].embeds.contains("Invite"));
@@ -2370,7 +2350,6 @@ async fn a_kind_of_entry_can_go_to_a_webhook_of_its_own() {
         harness.actions()
     );
 
-    // A kind without a webhook goes the usual way, to the log channel.
     harness.emit(ban(6)).await.unwrap();
     assert_eq!(sent(&harness).last().map(|post| post.channel), Some(LOG));
 }

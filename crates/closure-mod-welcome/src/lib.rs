@@ -32,7 +32,6 @@ pub struct Config {
     pub include_bots: bool,
 }
 
-/// What the welcome says: a text, or a message with embeds.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum Message {
@@ -40,10 +39,8 @@ pub enum Message {
     Rich(MessageSpec),
 }
 
-/// The variables a welcome message may use.
 const VARIABLES: [&str; 4] = ["user", "username", "server", "count"];
 
-/// A welcome message that has been read.
 enum Welcome {
     Text(Template),
     Rich(MessageTemplate),

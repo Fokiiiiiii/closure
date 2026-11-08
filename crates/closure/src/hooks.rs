@@ -13,8 +13,7 @@ use closure_discord::GuildHooks;
 use crate::changes::ConfigChanges;
 use crate::sync;
 
-/// Keeps persistent state in step with the guilds the bot is in. Failures are logged and never
-/// stop event processing: a database hiccup must not make the bot deaf.
+/// Keeps persistent state in step with the guilds the bot is in; failures are logged and never stop event processing, since a database hiccup must not make the bot deaf.
 pub struct AppHooks {
     db: Db,
     store: Arc<SettingsStore>,
@@ -75,9 +74,7 @@ impl AppHooks {
     }
 }
 
-/// Brings the recorded guilds in line with the list Discord reports at start-up: the gateway
-/// only announces changes while connected, so guilds joined or left during downtime would
-/// otherwise stay wrong. Run before the gateway starts so it cannot race with the hooks.
+/// Brings the recorded guilds in line with the list Discord reports at start-up; the gateway only announces changes while connected, so guilds joined or left during downtime would otherwise stay wrong. Runs before the gateway starts, so it cannot race with the hooks.
 pub async fn reconcile_guilds(db: &Db, present: &[GuildId]) -> Result<u64, closure_db::DbError> {
     for guild in present {
         db.register_guild(*guild).await?;
@@ -93,8 +90,7 @@ impl GuildHooks for AppHooks {
         if let Err(error) = self.db.register_guild(guild).await {
             tracing::warn!(%guild, %error, "could not record the guild");
         }
-        // Configurations are loaded at start-up; a guild the bot rejoined after leaving was
-        // dropped from memory and needs its stored configuration back.
+        // Configurations are loaded at start-up; a guild the bot rejoined after leaving was dropped from memory and needs its stored configuration back.
         if !self.store.is_configured(guild)
             && let Err(error) = sync::reload_one(&self.db, &self.store, guild).await
         {

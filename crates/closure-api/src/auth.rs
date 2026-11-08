@@ -13,8 +13,7 @@ use subtle::ConstantTimeEq;
 use crate::ApiState;
 use crate::error::ApiError;
 
-/// SHA-256 of the admin token. Comparing digests means the comparison takes the same time
-/// whatever length the presented token has, and the token itself is not kept in memory.
+/// SHA-256 of the admin token; comparing digests takes the same time whatever the token's length.
 pub(crate) fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
@@ -33,10 +32,8 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 /// How many addresses are followed; the rest share one allowance.
 const MAX_TRACKED: usize = 4096;
 
-/// Counts failed logins per address, so a token cannot be guessed at the speed of the network.
-/// Once an address has used up its allowance every request of it is refused, whatever token it
-/// presents, until the window ends: letting a right guess through would make the limit useless.
-///
+/// Counts failed logins per address, so a token cannot be guessed at network speed.
+/// Once an address has used its allowance, every request from it is refused until the window ends, whatever token it presents.
 /// Behind a reverse proxy every client has the address of the proxy, and they share an allowance.
 #[derive(Debug, Default)]
 pub(crate) struct FailureLimiter {
@@ -58,8 +55,7 @@ impl Window {
 /// The allowance of addresses that could not be told apart because too many are followed.
 const OVERFLOW: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
-/// The address an allowance is kept for. An IPv6 client is counted by its /64: the host part of its
-/// address is its own to choose, so counting addresses would give it a new allowance every time.
+/// Allowance key of an address: an IPv6 client is counted by its /64, since its host part is its own to choose.
 fn allowance_key(address: IpAddr) -> IpAddr {
     match address {
         IpAddr::V4(_) => address,
@@ -120,9 +116,8 @@ impl FailureLimiter {
     }
 }
 
-/// Who a request is from: the address it came over, or, when that is a proxy that is trusted, the
-/// last address the proxy put in `X-Forwarded-For` (the one it saw itself; earlier ones are the
-/// client's to write).
+/// Who a request is from: the connecting address, or behind a trusted proxy the last `X-Forwarded-For` entry.
+/// Earlier entries are the client's to write, so only the last one counts.
 fn client_of(connected: IpAddr, headers: &axum::http::HeaderMap, trusted: &[IpAddr]) -> IpAddr {
     if !trusted.contains(&connected) {
         return connected;
@@ -173,12 +168,10 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("x-forwarded-for", "6.6.6.6, 203.0.113.9".parse().unwrap());
         let trusted = [proxy];
-        // The last address is the one the proxy saw; an earlier one is the client's own claim.
         assert_eq!(
             client_of(proxy, &headers, &trusted),
             "203.0.113.9".parse::<IpAddr>().unwrap()
         );
-        // From anyone else the header means nothing.
         assert_eq!(client_of(other, &headers, &trusted), other);
         assert_eq!(
             client_of(proxy, &axum::http::HeaderMap::new(), &trusted),
@@ -201,10 +194,8 @@ mod tests {
         limiter.record_failure_at(ip(1), start);
         let wait = limiter.blocked_at(ip(1), start + Duration::from_secs(20));
         assert_eq!(wait, Some(Duration::from_secs(40)));
-        // Others are not affected, and the window ends.
         assert_eq!(limiter.blocked_at(ip(2), start), None);
         assert_eq!(limiter.blocked_at(ip(1), start + FAILURE_WINDOW), None);
-        // A failure after the window starts a new one.
         limiter.record_failure_at(ip(1), start + FAILURE_WINDOW);
         assert_eq!(limiter.blocked_at(ip(1), start + FAILURE_WINDOW), None);
     }
@@ -222,9 +213,7 @@ mod tests {
             limiter.record_failure_at(ip(u8::try_from(n).unwrap()), start);
         }
         assert!(limiter.blocked_at(ip(200), start).is_some());
-        // The table does not grow past its limit.
         assert!(limiter.windows.lock().unwrap().len() <= MAX_TRACKED + 1);
-        // Once the windows have ended there is room again.
         let later = start + FAILURE_WINDOW;
         limiter.record_failure_at(ip(201), later);
         assert_eq!(limiter.blocked_at(ip(200), later), None);

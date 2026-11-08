@@ -1,9 +1,7 @@
-//! Which guild each live interaction belongs to.
-//!
-//! A module is one object shared by every guild, so it can hold on to the client it was given
-//! while handling a guild A event and use it with an interaction token it received in guild B.
-//! Discord would accept that: the token alone decides where the response goes. The host
-//! therefore records, when an interaction arrives, which guild it came from, and
+//! Which guild each live interaction belongs to. A module is one object shared by every guild, so it
+//! can hold on to the client it was given while handling a guild A event and use it with an interaction
+//! token it received in guild B. Discord would accept that: the token alone decides where the response
+//! goes. The host therefore records, when an interaction arrives, which guild it came from, and
 //! [`ApiClient`](crate::client::ApiClient) answers only interactions of the guild it is bound to.
 
 use std::collections::{HashMap, VecDeque};
@@ -17,9 +15,7 @@ use crate::throttle::LogGate;
 /// How long Discord honours an interaction token (15 minutes), plus a little slack.
 const LIFETIME: Duration = Duration::from_mins(16);
 
-/// How many interactions may be recorded. A record that cannot be made means the interaction
-/// cannot be answered by a module, so the limits are far above what a real workload reaches and
-/// exist to keep memory bounded when something floods the bot.
+/// How many interactions may be recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InteractionLimits {
     /// Live records of all guilds together.
@@ -62,9 +58,7 @@ impl Recorded {
 struct Records {
     /// Every token is in here and in `by_expiry` exactly once.
     guilds: HashMap<Arc<str>, (GuildId, Instant)>,
-    /// Tokens in the order they were recorded. Records are made while holding the lock and
-    /// every record lives equally long, so this is also the order in which they expire, and only
-    /// the expired front ever has to be looked at.
+    /// Tokens in the order they were recorded.
     by_expiry: VecDeque<(Instant, Arc<str>)>,
     /// Live records per guild.
     per_guild: HashMap<GuildId, usize>,
@@ -176,12 +170,8 @@ impl InteractionGuilds {
         }
     }
 
-    /// Records that `token` was issued for an interaction in `guild`. Called by the host for
-    /// every interaction it receives, before any module sees it. A token that is already
-    /// recorded keeps its first record.
-    ///
-    /// Says whether the token is recorded. When it is not (a limit is reached), no module can
-    /// answer the interaction, so the host should not hand it to one.
+    /// Records that `token` was issued for an interaction in `guild`. Called by the host for every
+    /// interaction it receives, before any module sees it.
     #[must_use]
     pub fn register(&self, token: &InteractionToken, guild: GuildId) -> Recorded {
         // The guard lives for this statement only; the logging below is outside the lock.
@@ -227,10 +217,7 @@ impl InteractionGuilds {
     }
 }
 
-/// The records with their lock held. Reading the time and using it happen inside the methods
-/// of this type, on the guard it holds, so a time cannot be read under one lock and used under
-/// another, or after the lock was let go and taken again, and a guard of some other table cannot
-/// be mixed in. The raw `Instant` is never handed out.
+/// The records with their lock held.
 struct Locked<'a> {
     records: MutexGuard<'a, Records>,
     table: &'a InteractionGuilds,
@@ -263,7 +250,6 @@ mod tests {
     };
 
     impl InteractionGuilds {
-        /// Records at a chosen time, for the tests that need to move it.
         fn register_at(&self, token: &str, guild: u64, now: Instant) -> Recorded {
             self.lock().record(self.limits, token, Id::new(guild), now)
         }
@@ -309,8 +295,6 @@ mod tests {
         assert!(!format!("{guilds:?}").contains("secret-token"));
     }
 
-    /// Fills the whole table with tokens recorded at `at`, spread over enough guilds that no
-    /// single guild is full.
     fn full(at: Instant) -> InteractionGuilds {
         let guilds = InteractionGuilds::with_limits(LIMITS);
         for n in 0..LIMITS.total {
@@ -434,7 +418,6 @@ mod tests {
         let guilds = full(start);
         let examined_before = guilds.lock().examined;
 
-        // Nothing has expired, so every refusal stops at the first entry of the queue.
         for n in 0..1000 {
             let at = start + Duration::from_secs(1);
             assert_eq!(
@@ -454,7 +437,6 @@ mod tests {
         let start = Instant::now();
         assert_eq!(guilds.register_at("token", 1, start), Recorded::New);
 
-        // More than the limits, later, and for another guild.
         let later = start + Duration::from_secs(60);
         for _ in 0..=LIMITS.total {
             assert_eq!(guilds.register_at("token", 2, later), Recorded::Known);
@@ -463,20 +445,11 @@ mod tests {
         assert_eq!(guilds.at("token", later), Some(Id::new(1)), "first record");
         assert_eq!(guilds.lock().guilds.len(), 1);
         assert_eq!(guilds.lock().by_expiry.len(), 1);
-        // And it does not live longer than its first record says.
         assert_eq!(guilds.at("token", start + LIFETIME), None);
     }
 
     #[test]
     fn the_time_of_a_record_is_read_while_the_lock_is_held() {
-        // The structure already forces this (the time is read inside `Locked`, which holds the
-        // guard); this checks the behaviour, and can only ever fail in the right direction: if
-        // the second caller were slow to start, the test would pass without having proved
-        // anything.
-        //
-        // The first caller is stopped inside the clock. If the clock is read under the lock,
-        // the second caller cannot get to its own clock until the first has finished; if it were
-        // read before taking the lock, both would already be inside it.
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let release_rx = Mutex::new(release_rx);
@@ -497,8 +470,6 @@ mod tests {
             std::thread::spawn(move || guilds.register(&InteractionToken::new("a"), Id::new(1)))
         };
         entered_rx.recv().unwrap();
-        // The second caller says it is about to register, so the wait below starts only once it
-        // really is on its way to the clock.
         let (started_tx, started_rx) = mpsc::channel();
         let second = {
             let guilds = Arc::clone(&guilds);
@@ -553,7 +524,6 @@ mod tests {
 
     #[test]
     fn a_guild_with_no_room_leaves_nothing_behind() {
-        // A limit of zero refuses everything; it must not cost memory per guild it refuses.
         let guilds = InteractionGuilds::with_limits(InteractionLimits {
             total: 100,
             per_guild: 0,

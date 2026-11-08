@@ -4,9 +4,6 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// A coarse permission a module must hold to perform a class of Discord actions.
-///
-/// Native modules declare what they need and receive it by default; modules loaded from
-/// scripts or WASM receive only what the guild administrator explicitly grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {

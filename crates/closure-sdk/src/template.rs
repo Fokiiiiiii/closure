@@ -1,6 +1,4 @@
-//! A small text template for messages a module sends: `{name}` and `{a.b.c}` are replaced by
-//! the values a module gives, `{{` and `}}` stand for literal braces, and a name the values do
-//! not have renders as nothing. There are no functions, so a template can only read the data it
+//! Text templates for module messages: `{name}` and `{a.b.c}` read values, `{{`/`}}` are braces, unknown names render as nothing.
 //! is given. A render is cut at [`MAX_OUTPUT_CHARS`].
 
 use std::borrow::Cow;

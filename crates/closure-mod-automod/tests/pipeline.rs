@@ -49,8 +49,6 @@ async fn status_text(harness: &closure_sdk::testing::Harness) -> String {
     description(&replies)
 }
 
-// ---- the module as the host sees it ----
-
 #[test]
 fn the_manifest_declares_the_intents_capabilities_and_subscriptions() {
     let manifest = module().unwrap().manifest().clone();
@@ -247,8 +245,6 @@ fn every_text_is_in_both_languages() {
     let ja = include_str!("../locales/ja.ftl");
     assert_eq!(missing_keys(en, ja).unwrap(), Vec::<String>::new());
 }
-
-// ---- scope ----
 
 #[tokio::test]
 async fn the_channels_of_a_rule_are_included_or_excluded() {
@@ -465,8 +461,6 @@ async fn a_member_whose_join_date_is_unknown_is_out_of_scope_of_an_age_rule() {
     );
 }
 
-// ---- order, continuation, cooldown ----
-
 #[tokio::test]
 async fn the_first_rule_that_hits_is_the_only_one_that_fires() {
     let harness = with_rules(rules(&[
@@ -580,8 +574,6 @@ async fn a_rule_on_cooldown_is_skipped_and_the_next_rule_gets_its_turn() {
     assert_eq!(deletions(&harness), 1, "a is on cooldown, so b deletes");
 }
 
-// ---- dry run ----
-
 #[tokio::test]
 async fn a_dry_run_acts_on_nothing_and_posts_what_would_have_run() {
     let harness = configured(json!({
@@ -630,8 +622,6 @@ async fn a_dry_run_does_not_take_the_burst_so_every_message_of_it_is_reported() 
     );
     assert_eq!(deletions(&harness), 0);
 }
-
-// ---- invalid rules ----
 
 #[tokio::test]
 async fn invalid_rules_never_run_and_the_status_lists_them() {
@@ -711,8 +701,6 @@ async fn coordinated_spam_config_validation_matches_schema() {
         );
     }
 }
-
-// ---- /automod status ----
 
 #[tokio::test]
 async fn status_shows_the_dry_run_state_the_counts_and_each_rule_in_one_line() {
@@ -811,8 +799,6 @@ async fn a_status_line_of_a_rule_names_its_triggers_and_actions() {
     assert!(text.contains("repeat"), "{text}");
     assert!(text.contains("purge"), "{text}");
 }
-
-// ---- the events, actions and counters of part two ----
 
 #[test]
 fn the_manifest_subscribes_to_the_member_role_thread_and_case_events() {

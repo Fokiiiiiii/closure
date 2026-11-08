@@ -37,9 +37,7 @@ fn replies_private(ctx: &EventContext) -> Option<bool> {
     }
 }
 
-/// The module's configuration as its own type. The `replies` key is taken out first, so a
-/// module that denies unknown fields still reads its configuration. For handlers that get an
-/// event rather than an interaction.
+/// The module's configuration as its own type; the `replies` key is removed first, so denied unknown fields do not reject it.
 pub fn parse_module_config<T: DeserializeOwned>(ctx: &EventContext) -> Result<T, ModuleError> {
     let mut config = ctx.config().clone();
     if let Some(object) = config.as_object_mut() {
@@ -48,8 +46,7 @@ pub fn parse_module_config<T: DeserializeOwned>(ctx: &EventContext) -> Result<T,
     serde_json::from_value(config).map_err(|error| ModuleError::Config(error.to_string()))
 }
 
-/// A reply that shows `text` as the description of one embed. Empty text makes no embed, so
-/// Discord's refusal of an empty reply applies as before.
+/// Shows `text` as one embed; empty text makes no embed, so Discord's refusal of an empty reply still applies.
 fn embed_reply(
     tone: Tone,
     text: String,
@@ -123,11 +120,7 @@ impl Answers {
     }
 }
 
-/// One interaction being handled: a command ([`CommandCx`]), a click ([`ComponentCx`]) or a
-/// submitted modal ([`ModalCx`]).
-///
-/// Cheap to clone; the clones share what was answered, so the first answer is the response to
-/// the interaction and the following ones are follow-ups, whoever sends them.
+/// One interaction being handled: a command, a click or a submitted modal. Clones share what was answered.
 pub struct Cx<I> {
     ctx: EventContext,
     interaction: Arc<I>,
@@ -486,8 +479,7 @@ impl<I: InteractionRef + 'static> Cx<I> {
             .await
     }
 
-    /// The first answer is the response to the interaction (or, after [`Self::defer`], the
-    /// edit of the "thinking" message); every later one is a follow-up. An answer for the user
+    /// The first answer is the response (or the edit of a deferred "thinking" message); later ones are follow-ups.
     /// alone after a public [`Self::defer`] finishes the public message with a plain "Done." and
     /// goes to the user as a follow-up, because a public message cannot be made private. The
     /// administrator's `replies` setting, when set, decides whether the reply is private.
@@ -619,19 +611,13 @@ impl<I: InteractionRef + 'static> Cx<I> {
         }
     }
 
-    /// Fails unless the module may act on `user` (a kick, a ban, a timeout): not the invoker
-    /// themselves, not the owner, not a bot, and not someone whose highest role is not below the
-    /// invoker's (the owner is exempt from that). Someone who is not a member passes. Needs the
-    /// capability `ReadGuild`.
+    /// Fails unless the module may act on `user` (kick, ban, timeout); someone who is not a member passes. Needs `ReadGuild`.
     pub async fn check_target(&self, user: UserId) -> Result<(), UserError> {
         check_target_of(&self.ctx, &self.actor().await, user).await
     }
 }
 
-/// Fails unless `actor` may act on `target` (a kick, a ban, a timeout): not themselves, not the
-/// owner, not a bot, and not someone whose highest role is not below theirs (the owner is exempt
-/// from that). Someone who is not a member passes. Needs the capability `ReadGuild`. This is what
-/// [`CommandCx::check_target`] asks, for a work that runs later and has no interaction.
+/// Like `check_target`, but for `actor` when the work runs later with no interaction.
 pub async fn check_target_of(
     ctx: &EventContext,
     actor: &Actor,
@@ -834,9 +820,7 @@ impl ComponentCx {
         Ok(result?)
     }
 
-    /// Answers the click by changing the message the component is on: its text, embeds and
-    /// components (those the reply does not have are taken off). Works as the first answer, or
-    /// after [`Self::defer_update`].
+    /// Answers the click by changing the message's text, embeds and components (missing ones are taken off).
     /// Refuses a private reply, since the message everyone sees cannot be private ([`Self::reply_private`]).
     pub async fn update(&self, reply: InteractionReply) -> Result<(), UserError> {
         if reply.ephemeral {

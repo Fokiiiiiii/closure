@@ -527,8 +527,6 @@ impl MockApi {
         lock(&self.roles).insert(guild, roles);
     }
 
-    /// Makes every role change of `role`, and every overwrite for it, fail with `error`, as Discord
-    /// does for a role above the bot's.
     /// The roles of a guild as they are now, the ones made by the module included.
     pub fn roles(&self, guild: GuildId) -> Vec<Role> {
         lock(&self.roles).get(&guild).cloned().unwrap_or_default()

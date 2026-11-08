@@ -1,10 +1,6 @@
-//! Recent actions: what members did in the last moments, kept in memory so a module can count a
-//! burst (messages, mentions, joins) and act once per burst. Nothing is persisted: a restart
-//! starts empty.
+//! Recent actions kept in memory (not persisted) so a module can count a burst of messages, mentions or joins and act once per burst.
 //!
-//! A window starts inclusively: an action exactly `within` seconds old still counts. The
-//! filters gate a window: when the selected actions do not span enough distinct groups or
-//! subjects, [`RecentActions::sum`] is 0 and [`RecentActions::take`] takes nothing.
+//! Windows include actions exactly `within` seconds old; filters need enough distinct groups or subjects, else the sum is 0.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -137,7 +133,6 @@ impl Query<'_> {
     }
 }
 
-/// The actions of `log` that match, oldest first.
 fn held(log: &Mutex<GuildLog>) -> MutexGuard<'_, GuildLog> {
     log.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -318,9 +313,7 @@ impl RecentActions {
         mark(&mut held(&log), key, until);
     }
 
-    /// Checks a burst and, when it passes, takes the actions it counts out of the window and marks
-    /// its key handled. The check and the taking happen under one lock, so two checks of the same
-    /// burst cannot both pass. `counts` gives the count of the window, or `None` when it does not pass.
+    /// Checks a burst and, when it passes, takes its counted actions and marks the key handled, under one lock.
     #[must_use]
     pub fn claim_burst(
         &self,

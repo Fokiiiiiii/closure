@@ -21,11 +21,9 @@ use serde_json::json;
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
-/// How long an answer of the service is remembered.
 const REMEMBER: Duration = Duration::from_secs(600);
 /// How many answers are remembered; past this the oldest half goes.
 const MAX_REMEMBERED: usize = 2000;
-/// The most characters of links sent in one question.
 const MAX_QUESTION: usize = 1500;
 /// The most questions one message is asked about: the service is not asked about a wall of links
 /// without end.
@@ -34,7 +32,6 @@ const MAX_QUESTIONS: usize = 4;
 /// once instead of each waiting its turn on a service that is down.
 const BACK_OFF: Duration = Duration::from_secs(15);
 
-/// What happens to the member who posted a flagged link.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Punishment {
@@ -56,7 +53,6 @@ const BAN_CLEANUP_SECONDS: u32 = 3600;
 struct State {
     checker: Arc<dyn LinkChecker>,
     seen: Mutex<HashMap<String, (Instant, Option<String>)>>,
-    /// Until when the service is left alone, after it failed to answer.
     down_until: Mutex<Option<Instant>>,
 }
 

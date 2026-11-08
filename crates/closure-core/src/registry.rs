@@ -13,9 +13,6 @@ use crate::subscription::Subscription;
 const MAX_CONTEXT_COMMANDS_PER_KIND: usize = 15;
 
 /// The validated, dependency-ordered set of modules the bot runs.
-///
-/// Construction fails on any inconsistency (duplicate ids, unknown or cyclic dependencies,
-/// colliding or malformed commands) so a broken module set stops the process at startup.
 pub struct ModuleRegistry {
     modules: Vec<Arc<dyn Module>>,
     index: HashMap<ModuleId, usize>,
@@ -579,7 +576,6 @@ mod tests {
             });
             ModuleRegistry::new(vec![Arc::new(Stub(manifest))]).is_ok()
         };
-        // What fits.
         assert!(with(OptionKind::Integer, &|o| {
             o.min_value = Some(1.0);
             o.max_value = Some(5.0);
@@ -592,7 +588,6 @@ mod tests {
             vec![pick(ChoiceValue::String("a".into()))]));
         assert!(with(OptionKind::Number, &|o| o.choices =
             vec![pick(ChoiceValue::Number(1.5))]));
-        // What does not.
         assert!(!with(OptionKind::Boolean, &|o| o.choices =
             vec![pick(ChoiceValue::Integer(1))]));
         assert!(!with(OptionKind::Integer, &|o| o.choices =
@@ -675,7 +670,6 @@ mod tests {
                 .is_none()
         );
 
-        // Another module's namespace, and a key twice.
         assert!(matches!(
             ModuleRegistry::new(vec![with_permissions("warn", &["mute.add"])]),
             Err(CoreError::PermissionOutsideModule { .. })
@@ -724,11 +718,9 @@ mod tests {
             .into_iter()
             .map(|(module, _)| module.manifest().id.to_string())
             .collect();
-        // Equal priorities keep the order of the registry.
         assert_eq!(order, ["high", "also-plain", "plain", "low"]);
         assert!(registry.subscriptions(EventKind::BanAdded).is_empty());
 
-        // A subscription for a kind the module does not take, twice, or with a huge filter.
         let mut outside = ModuleManifest::new(id("a"), "a", "0.1.0");
         outside
             .subscriptions

@@ -31,8 +31,7 @@ use twilight_model::id::Id;
 
 /// The variable the bot reads its token from.
 pub(crate) const TOKEN_VARIABLE: &str = "DISCORD_TOKEN";
-/// The name prefix of the tests that make the showcase; a test binary does not name its tests by
-/// module, so the prefix is in the function name.
+/// Name prefix of the tests that make the showcase; a test binary cannot name them by module, so the prefix is in the function name.
 const SHOWCASE_PREFIX: &str = "showcase_";
 /// How much of a message's opening tells its kind apart from another message of the same kind.
 const TEMPLATE_CHARS: usize = 25;
@@ -71,19 +70,15 @@ enum Step {
     Skip(String),
 }
 
-/// Replays the dumps in `dir` to the channel `channel_id`. `Ok(false)` means that some messages
-/// could not be sent.
-///
+/// Replays the dumps in `dir` to `channel_id`; `Ok(false)` means some messages could not be sent.
 /// # Errors
 ///
-/// Fails before sending anything when the directory cannot be read, a line is not a recorded
-/// action, or the token is missing.
+/// Fails before sending anything when the directory cannot be read, a line is not a recorded action, or the token is missing.
 pub fn run(dir: &Path, channel_id: u64) -> Result<bool> {
     replay(dir, channel_id, token_from_env())
 }
 
-/// The token from the environment, or from `.env` when the variable is not set there. A missing
-/// `.env` is normal.
+/// The token from the environment, or from `.env` when the variable is not set there; a missing `.env` is normal.
 pub(crate) fn token_from_env() -> Option<String> {
     let _ = dotenvy::dotenv();
     std::env::var(TOKEN_VARIABLE)
@@ -113,8 +108,7 @@ fn replay(dir: &Path, channel_id: u64, token: Option<String>) -> Result<bool> {
         .enable_all()
         .build()?;
     let failures = runtime.block_on(async move {
-        // The client starts its rate limiter on the runtime it runs in, so it is made here.
-        // Only messages are sent, and they do not use the application id (interaction routes do).
+        // The client starts its rate limiter on the runtime it runs in, so it is made here; only messages are sent, and they do not use the application id (interaction routes do).
         let api = TwilightApi::new(Arc::new(Client::new(token)), Id::new(1));
         let mut failures = 0_usize;
         for (number, action) in posts.into_iter().enumerate() {
@@ -135,8 +129,7 @@ fn replay(dir: &Path, channel_id: u64, token: Option<String>) -> Result<bool> {
     Ok(failures == 0)
 }
 
-/// The lines of every `.jsonl` dump in `dir`, file by file in name order. The order between
-/// files is by process id, not by time.
+/// The lines of every `.jsonl` dump in `dir`, file by file in name order; the order between files is by process id, not by time.
 fn dump_lines(dir: &Path) -> Result<Vec<String>> {
     let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
     let mut files = Vec::new();
@@ -164,9 +157,7 @@ fn dump_lines(dir: &Path) -> Result<Vec<String>> {
 }
 
 /// Turns recorded action lines into the messages to send to `channel`.
-///
 /// # Errors
-///
 /// Fails on the first line that is not JSON or not a recorded action.
 pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) -> Result<Plan> {
     let translator = TranslatorBuilder::new()?.build();
@@ -212,9 +203,7 @@ pub fn plan<'a>(lines: impl IntoIterator<Item = &'a str>, channel: ChannelId) ->
     Ok(plan)
 }
 
-/// The key of a message's kind: the opening of its text with every number masked, so that a
-/// warning or a ban is sent once however many numbers it names. A message without text is keyed by
-/// its whole content, so that different embeds are never merged.
+/// The key of a message's kind: the opening of its text with every number masked, so a warning or a ban is sent once however many numbers it names; a message without text is keyed by its whole content.
 fn template_key(content: Option<&str>, embeds: &[Embed]) -> String {
     match text_of(content, embeds) {
         Some(text) => mask_numbers(&text).chars().take(TEMPLATE_CHARS).collect(),
@@ -237,8 +226,7 @@ fn embed_text(embed: &Embed) -> Option<String> {
         .or_else(|| embed.fields.last().map(|field| field.value.clone()))
 }
 
-/// Everything a message shows, as one text: its content, and the titles, descriptions and fields of
-/// its embeds.
+/// Everything a message shows as one text: its content, and the titles, descriptions and fields of its embeds.
 fn all_text(content: Option<&str>, embeds: &[Embed]) -> String {
     let mut parts: Vec<&str> = content.into_iter().collect();
     for embed in embeds {
@@ -316,10 +304,7 @@ fn step(action: Action, kind: &str, channel: ChannelId, translator: &dyn Transla
     }
 }
 
-/// A direct message, posted under a first line that names the member it was meant for. The line is
-/// not what tells the kinds apart: the same message goes to many members, so the key is the text
-/// the member reads. A message with text is checked with its line, as it always was; one without
-/// text is checked by its embeds alone.
+/// A direct message, posted under a first line naming the member. That line does not tell kinds apart: a message with text is checked with its line, one without by its embeds alone.
 fn direct_message(
     channel: ChannelId,
     user_id: UserId,

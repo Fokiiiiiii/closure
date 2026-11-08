@@ -34,7 +34,6 @@ const MAX_STICKIES: usize = 25;
 #[serde(deny_unknown_fields, default)]
 struct Config {
     stickies: Vec<Sticky>,
-    /// How long after a message the sticky text is posted again, such as 5s.
     delay: String,
 }
 
@@ -68,7 +67,6 @@ impl Config {
     }
 }
 
-/// What the job is about.
 #[derive(Debug, Serialize, Deserialize)]
 struct Repost {
     channel: u64,
@@ -115,7 +113,6 @@ async fn spoke(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     Ok(Flow::Continue)
 }
 
-/// Deletes the sticky message posted last and posts the text again.
 async fn repost(cx: JobCx) -> Result<(), ModuleError> {
     let payload: Repost = cx.payload()?;
     let Some(channel) = ChannelId::new_checked(payload.channel) else {

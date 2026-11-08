@@ -103,7 +103,6 @@ pub async fn status(cx: CommandCx, (): ()) -> Result<(), UserError> {
     .await
 }
 
-/// The antiraid level, or why antiraid is not in use.
 async fn antiraid_line(cx: &CommandCx, setup: &Setup) -> Result<String, UserError> {
     if let Some(problem) = &setup.antiraid_problem {
         return Ok(cx.t(
@@ -194,7 +193,6 @@ fn events_of(cx: &CommandCx, valid: &[&Rule]) -> Vec<String> {
         .collect()
 }
 
-/// A counter on a line: how it is kept, and its triggers.
 fn counter_line(cx: &CommandCx, def: &CounterDef) -> String {
     let scope = match (def.per_user, def.per_channel) {
         (true, true) => cx.t("status-scope-both", &Args::new()),

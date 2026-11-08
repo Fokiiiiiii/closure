@@ -1,7 +1,6 @@
 //! The reference of the shipped modules, generated from their manifests and catalogs.
 //!
-//! The output depends only on those inputs, so the same build always writes the same bytes;
-//! `docs --check` relies on that.
+//! The output depends only on those inputs, so the same build always writes the same bytes, which `docs --check` relies on.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -135,8 +134,7 @@ fn push_commands(out: &mut String, manifest: &ModuleManifest, translator: &dyn T
     }
 }
 
-/// A subcommand, or a group of them: `slash` is the command's path as users type it, `parent`
-/// the catalog path of the command or group it belongs to.
+/// A subcommand, or a group of them: `slash` is the command's path as users type it; `parent` is the catalog path of the command or group it belongs to.
 fn push_subcommand(
     out: &mut String,
     translator: &dyn Translator,

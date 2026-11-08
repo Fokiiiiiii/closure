@@ -439,8 +439,7 @@ async fn publish_commands(
     Ok(())
 }
 
-/// Empties the commands each guild has of its own. A run that published to one guild left them there,
-/// and Discord shows them next to the global ones, so every command would appear twice.
+/// Empties the commands each guild has of its own; a run that published to one guild left them there, and Discord shows them next to the global ones, so each would appear twice.
 async fn clear_guild_commands(http: &Client, application_id: Id<ApplicationMarker>) {
     let guilds = match joined_guilds(http).await {
         Ok(guilds) => guilds,
@@ -564,9 +563,7 @@ struct Started {
     hooks: Option<Arc<AppHooks>>,
 }
 
-/// Starts everything that talks to Discord and waits until the process is asked to stop.
-/// Returns whether the gateway stopped on its own. Whatever was started before an error is
-/// left in `started`, so the caller can still shut it down in order.
+/// Starts everything that talks to Discord and waits until the process is asked to stop; returns whether the gateway stopped on its own. Whatever was started before an error is left in `started`, so the caller can still shut it down in order.
 async fn serve(
     args: &Args,
     core: &Core,
@@ -683,11 +680,7 @@ const HAND_OVER_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// How long a change that was refused every time waits before it is queued again.
 const HAND_OVER_TRY_LATER: Duration = Duration::from_secs(2);
 
-/// Hands the modules of a guild that its configuration changed, until shutdown. The event is
-/// dispatched like any other, so it reaches only the modules that are enabled in the guild.
-/// A refused hand-over (the dispatcher is full or closing) is retried a few times; after that the
-/// change is queued again a little later, so a busy dispatcher never holds up the reload and no
-/// change is lost.
+/// Hands the modules of a guild that its configuration changed, until shutdown; the event reaches only the modules enabled in the guild. A refused hand-over is retried a few times, then queued again later, so a busy dispatcher never holds up the reload and no change is lost.
 async fn forward_config_changes(
     changes: Arc<ConfigChanges>,
     mut hand_over: impl FnMut(GuildId) -> bool + Send + 'static,
@@ -721,9 +714,7 @@ async fn forward_config_changes(
     }
 }
 
-/// Waits for a background task that was told to stop. One that does not stop in time is aborted:
-/// dropping its handle would leave it running, holding database connections that `db.close()`
-/// then waits for.
+/// Waits for a background task that was told to stop; one that does not stop in time is aborted, since dropping its handle would leave it holding database connections that `db.close()` waits for.
 async fn stop_task(mut task: JoinHandle<()>, name: &str) {
     if tokio::time::timeout(TASK_STOP_TIMEOUT, &mut task)
         .await
@@ -807,8 +798,7 @@ pub async fn run(args: Args) -> Result<()> {
     if let Some(dispatcher) = &started.dispatcher {
         dispatcher.shutdown(DISPATCHER_DRAIN_TIMEOUT).await;
     }
-    // A job the dispatcher was still running has handed back its result by now. Aborting the
-    // runner earlier would lose that result, and the job would be run again after a restart.
+    // A job the dispatcher was still running has handed back its result by now; aborting the runner earlier would lose that result, and the job would run again after a restart.
     if let (false, Some(task)) = (jobs_stopped, jobs_task) {
         stop_task(task, "scheduled jobs").await;
     }
@@ -1170,8 +1160,7 @@ mod tests {
         let commands = build_commands(&registry, &catalogs.build()).unwrap();
         assert_eq!(commands.len(), SHIPPED_COMMANDS);
         for command in commands {
-            // A name Discord would refuse (uppercase, too long) is dropped with only a log line,
-            // so it is looked for here.
+            // A name Discord would refuse (uppercase, too long) is dropped with only a log line, so it is looked for here.
             assert!(
                 command
                     .name_localizations

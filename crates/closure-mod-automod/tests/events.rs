@@ -23,7 +23,6 @@ use common::*;
 use serde_json::{Value, json};
 use twilight_model::id::Id;
 
-/// The owner of the pretend server, as the harness names it when a test does not.
 const OWNER: u64 = 999_999_999;
 const THREAD: u64 = 90;
 
@@ -50,8 +49,6 @@ fn bans_of(harness: &closure_sdk::testing::Harness) -> Vec<u64> {
 fn count_kicks(harness: &closure_sdk::testing::Harness) -> usize {
     count_actions(harness, |a| matches!(a, Action::Kick { .. }))
 }
-
-// ---- joins and leaves ----
 
 #[tokio::test]
 async fn member_join_hits_every_join_without_only_new() {
@@ -141,8 +138,6 @@ async fn member_leave_hits_a_departure() {
     leave(&harness, MEMBER).await;
     assert_eq!(texts_in(&harness, NOTIFY), vec!["left member".to_owned()]);
 }
-
-// ---- role changes ----
 
 #[tokio::test]
 async fn role_added_hits_when_one_of_its_roles_is_added() {
@@ -240,8 +235,6 @@ async fn a_role_the_bot_gave_itself_counts_again_after_ten_seconds() {
     assert_eq!(texts_in(&harness, NOTIFY), vec!["counted".to_owned()]);
 }
 
-// ---- cases ----
-
 #[tokio::test]
 async fn a_case_of_the_bot_itself_is_ignored_unless_include_own_is_set() {
     let ignoring = with_rules(rules(&[(
@@ -289,8 +282,6 @@ async fn a_case_trigger_hits_only_the_kinds_it_lists() {
     assert_eq!(texts_in(&harness, NOTIFY), vec!["ban".to_owned()]);
 }
 
-// ---- threads ----
-
 #[tokio::test]
 async fn each_thread_trigger_hits_only_its_own_event() {
     let harness = with_rules(rules(&[
@@ -322,8 +313,6 @@ async fn each_thread_trigger_hits_only_its_own_event() {
         vec!["created", "archived", "unarchived", "deleted"]
     );
 }
-
-// ---- without a message ----
 
 #[tokio::test]
 async fn actions_that_need_a_message_are_skipped_silently_for_a_join() {
@@ -360,8 +349,6 @@ async fn a_punishment_of_a_join_targets_the_joining_member() {
     assert_eq!(cases_of(&harness, MEMBER).await[0].kind.as_str(), "warn");
 }
 
-// ---- role, nickname and slowmode actions ----
-
 #[tokio::test]
 async fn add_roles_adds_each_role_to_the_member() {
     let harness = with_rules(rules(&[(
@@ -395,7 +382,6 @@ async fn add_roles_does_not_give_a_role_with_the_powers_of_a_moderator() {
             json!([{ "do": "add_roles", "roles": [ROLE.to_string(), OTHER_ROLE.to_string()] }]),
         ),
     )]));
-    // The second role carries Ban Members: a rule may not give it.
     let mut strong = plain_role(OTHER_ROLE);
     strong.permissions = twilight_model::guild::Permissions::BAN_MEMBERS;
     harness
@@ -515,8 +501,6 @@ async fn slowmode_on_a_join_without_a_channel_does_nothing() {
         0
     );
 }
-
-// ---- missing permissions ----
 
 #[tokio::test]
 async fn a_forbidden_action_is_reported_once_a_minute_and_a_real_failure_always_is() {

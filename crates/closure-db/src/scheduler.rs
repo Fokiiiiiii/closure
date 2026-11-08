@@ -284,9 +284,8 @@ impl SchedulerBackend for Db {
     }
 
     async fn complete(&self, id: i64, token: i64) -> Result<(), ScheduleError> {
-        // A job that repeats is set for its next planned time that is still ahead; the runs missed
-        // while the bot was down are not made up for. Only the hand-out that holds the job can
-        // say it is done.
+        // A job that repeats is set for its next planned time that is still ahead; the runs missed while the
+        // bot was down are not made up for. Only the hand-out that holds the job can say it is done.
         sqlx::query(
             "WITH removed AS (
                  DELETE FROM scheduled_jobs
@@ -421,7 +420,6 @@ mod tests {
 
     const LEASE: Duration = Duration::from_secs(60);
 
-    /// Moves every job's planned time back, as if that much time had passed.
     async fn age(db: &Db, seconds: i64) {
         sqlx::query(
             "UPDATE scheduled_jobs SET
@@ -489,7 +487,6 @@ mod tests {
         assert_eq!(jobs[0].guild_id, Id::new(1));
         assert!(db.claim_due(10, LEASE).await.unwrap().is_empty());
 
-        // The runner died: after the lease the job comes again, counted.
         age(&db, 120).await;
         let again = db.claim_due(10, LEASE).await.unwrap();
         assert_eq!(again[0].attempt, 2);
@@ -517,7 +514,6 @@ mod tests {
         let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
         assert_eq!(job.attempt, 1, "a new run starts counting again");
 
-        // Down for a long time: one run, not one for every minute missed.
         age(&db, 10_000).await;
         db.complete(job.id, job.token).await.unwrap();
         assert!(db.claim_due(1, LEASE).await.unwrap().is_empty());
@@ -641,7 +637,6 @@ mod tests {
             .unwrap();
         let claimed = db.claim_due(5, Duration::from_secs(1)).await.unwrap();
         let job = &claimed[0];
-        // The lease is made longer, and the job is not handed out while the first would have run out.
         assert!(
             db.renew(job.id, job.token, Duration::from_secs(600))
                 .await
@@ -649,7 +644,6 @@ mod tests {
         );
         age(&db, 5).await;
         assert!(db.claim_due(5, LEASE).await.unwrap().is_empty());
-        // A runner that does not hold the job (another token) cannot keep it.
         assert!(!db.renew(job.id, job.token + 1, LEASE).await.unwrap());
     }
 
@@ -680,7 +674,6 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!((state.as_str(), error.as_str()), ("failed", "boom"));
-        // Given-up jobs are cleaned away after a while, and not before.
         assert_eq!(db.purge_scheduled_jobs().await.unwrap(), 0);
         sqlx::query("UPDATE scheduled_jobs SET updated_at = now() - interval '15 days'")
             .execute(&db.pool)
@@ -717,11 +710,9 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(state().await, "failed");
-        // Whoever makes sure the job is there finds it failed, and it runs again.
         again().await;
         assert_eq!(state().await, "pending");
         assert_eq!(count(&db).await, 1);
-        // One that waits is left as it is.
         again().await;
         assert_eq!(count(&db).await, 1);
     }
@@ -779,8 +770,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // Every runner is started before any is awaited, and they all claim after the barrier, so
-        // the claims really overlap. A runner that never starts makes the timeout fail the test.
         let start = Arc::new(tokio::sync::Barrier::new(4));
         let runners: Vec<_> = (0..4)
             .map(|_| {
@@ -844,7 +833,6 @@ mod tests {
             }
         }
         assert_eq!(added, 5);
-        // Another guild has its own room; a time given in unix seconds is that time.
         let other = scheduler(&db, "warn", 2);
         other
             .job("at", &1)
@@ -876,7 +864,6 @@ mod tests {
             .await
             .unwrap();
         let old = db.claim_due(1, LEASE).await.unwrap().remove(0);
-        // The handler sets the next one under the same key; then the old run reports.
         warn.job("cleanup", &2)
             .unwrap()
             .key("c")
@@ -895,7 +882,6 @@ mod tests {
         age(&db, 601).await;
         assert_eq!(db.claim_due(1, LEASE).await.unwrap()[0].payload, json!(2));
 
-        // Handed out again after the lease: only the newest hand-out can report.
         age(&db, 120).await;
         let newer = db.claim_due(1, LEASE).await.unwrap().remove(0);
         db.complete(newer.id, newer.token - 1).await.unwrap();
@@ -917,11 +903,9 @@ mod tests {
         db.retry(job.id, job.token, Duration::from_secs(5), "boom")
             .await
             .unwrap();
-        // Tried again 5 seconds after the planned time, and done.
         age(&db, 5).await;
         let again = db.claim_due(1, LEASE).await.unwrap().remove(0);
         db.complete(again.id, again.token).await.unwrap();
-        // The next run is 60 seconds after the *planned* time, so 55 seconds from now.
         let ahead: f64 = sqlx::query_scalar(
             "SELECT extract(epoch FROM run_at - now())::float8 FROM scheduled_jobs",
         )
@@ -941,7 +925,6 @@ mod tests {
             .after(Duration::ZERO)
             .await
             .unwrap();
-        // Holds the row the way a concurrent complete() would, before it deletes it.
         let mut tx = db.pool.begin().await.unwrap();
         sqlx::query(
             "SELECT id FROM scheduled_jobs

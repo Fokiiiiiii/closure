@@ -1,5 +1,4 @@
-//! A message that a server wrote, with variables in its texts: the welcome message, a
-//! punishment's direct message.
+//! A message a server wrote, with variables in its texts; `parse` checks them against the allowed names.
 
 use closure_core::message::{MessageError, MessageSpec};
 use twilight_model::channel::message::Embed;
@@ -14,11 +13,7 @@ pub struct MessageTemplate {
 }
 
 impl MessageTemplate {
-    /// Reads `spec`, refusing a text that is not a template or that names a variable that is not
-    /// in `allowed`, and a message that cannot be sent.
-    ///
-    /// # Errors
-    /// What is wrong with the message, in words.
+    /// Checks `spec`: each text must be a template using only `allowed` variables.
     pub fn parse(spec: MessageSpec, allowed: &[&str]) -> Result<Self, String> {
         let mut used = Vec::new();
         for text in spec.texts() {
@@ -45,9 +40,7 @@ impl MessageTemplate {
     }
 
     /// The text and the embeds to send, with the variables filled in.
-    ///
-    /// # Errors
-    /// A limit the message breaks once the variables are in.
+    /// Fails when the rendered message breaks a Discord limit.
     pub fn render(
         &self,
         now: i64,

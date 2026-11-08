@@ -1,5 +1,4 @@
-//! The guilds whose configuration changed, until their modules are told. A guild that changes again
-//! before it is told waits once, so the queue never holds more entries than there are guilds.
+//! The guilds whose configuration changed, until their modules are told; a guild that changes again before it is told waits once, so the queue never holds more entries than guilds.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Mutex, PoisonError};

@@ -1,10 +1,4 @@
-//! Buttons, select menus, forms and pages.
-//!
-//! Every component carries a `custom_id`, which is how a click finds its way back to the module
-//! and the handler that offered it: `module:route:owner:data`. `route` names the handler
-//! (`ModuleBuilder::component` / `modal`), `owner` is `*` or the id of the only user who may use
-//! it, and `data` is whatever the module wants back (at most about 25 characters when the owner
-//! is set: Discord allows 100 characters in all; keep more in the module's storage).
+//! Buttons, select menus, forms and pages. A `custom_id` of `module:route:owner:data` routes a click back to the handler that offered it.
 
 use std::time::Duration;
 
@@ -44,8 +38,7 @@ impl CustomId {
         }
     }
 
-    /// The component stops working `lifetime` after `now` (see `cx.now()`): a press after that
-    /// is refused. The expiry is part of the `custom_id`, so it lasts as long as the message.
+    /// The component stops working `lifetime` after `now`; a press after that is refused.
     #[must_use]
     pub fn expires_in(mut self, now: i64, lifetime: Duration) -> Self {
         self.expires_at = Some(deadline(now, lifetime));
@@ -65,8 +58,7 @@ impl CustomId {
         self
     }
 
-    /// The text Discord keeps: it starts with the id of the module.
-    /// The owner field is `*` or the user's id, followed by `@` and the expiry when there is one.
+    /// The text Discord keeps: the module id, then the owner (`*` or a user id, `@` and the expiry if any).
     #[must_use]
     pub fn encode(&self, module: &ModuleId) -> String {
         let owner = self

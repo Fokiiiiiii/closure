@@ -17,8 +17,7 @@ pub(crate) async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Readiness: the database answers and every gateway shard holds a session. A load balancer or
-/// orchestrator should keep traffic away while this is not `200`.
+/// Readiness: the database answers and every gateway shard holds a session; otherwise keep traffic away.
 pub(crate) async fn readyz(State(state): State<ApiState>) -> Response {
     let database = tokio::time::timeout(DATABASE_PROBE_TIMEOUT, state.inner.db.ping())
         .await

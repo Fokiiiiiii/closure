@@ -69,13 +69,11 @@ impl GuildPolicy {
 pub struct RuntimeLimits {
     /// How long a module may spend on one event before it is abandoned.
     pub handler_timeout: Duration,
-    /// Events the guild may have waiting or running at once; beyond this new events are
-    /// dropped and counted. Slash commands have a budget of their own, so a flood of ordinary
-    /// events cannot crowd them out.
+    /// Events the guild may have waiting or running at once; beyond this new events are dropped and
+    /// counted.
     pub queue_capacity: usize,
-    /// Independent lanes for ordinary events. Events keep their order within one lane, and
-    /// lanes run in parallel; an event's lane is chosen from the channel, user or role it
-    /// concerns. A quarter as many extra lanes (at least one) serve slash commands.
+    /// Independent lanes for ordinary events. Events keep their order within one lane, and lanes run in
+    /// parallel; an event's lane is chosen from the channel, user or role it concerns.
     pub concurrency: usize,
 }
 
@@ -90,9 +88,6 @@ impl Default for RuntimeLimits {
 }
 
 /// Source of resolved per-guild settings.
-///
-/// Lookups sit on the event hot path and must not block or perform I/O: implementations serve
-/// them from an in-memory snapshot that is refreshed in the background.
 pub trait SettingsProvider: Send + Sync {
     /// The language of the guild: its configured override, else its Discord community locale,
     /// else [`Locale::DEFAULT`].

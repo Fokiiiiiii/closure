@@ -38,9 +38,7 @@ pub async fn post_text(ctx: &EventContext, content: String) -> Result<(), UserEr
     Ok(())
 }
 
-/// Posts `case` to the guild's log destination and returns the id of the message. Returns
-/// `None` and sends nothing when the guild has no log destination. Needs the capability
-/// `SendMessages` as well as `cases`.
+/// Posts `case` to the guild's log destination and returns its message id; `None` when there is none.
 pub async fn post(ctx: &EventContext, case: &Case) -> Result<Option<MessageId>, UserError> {
     let Some(destination) = Destination::from_policy(ctx.policy()) else {
         return Ok(None);
@@ -118,9 +116,7 @@ async fn settle(ctx: &EventContext, case: &Case) -> Result<(), UserError> {
     Ok(())
 }
 
-/// Tries again the posts that did not get through, `limit` of them. Each run takes some numbers
-/// out of the set and puts the failed ones back at the end, so a post that never gets through
-/// does not block the ones behind it.
+/// Retries up to `limit` pending log posts. Failed ones go to the end so they do not block the rest.
 pub(crate) async fn retry_pending(ctx: &EventContext, limit: usize) -> Result<(), UserError> {
     // Entries written before the set existed are added to it as they are met.
     for (key, entry) in ctx.store().list("modlog-pending:", limit).await? {
@@ -130,9 +126,7 @@ pub(crate) async fn retry_pending(ctx: &EventContext, limit: usize) -> Result<()
             tracing::warn!(%key, "a pending case log has no case number");
         }
     }
-    // A walk through the set by a cursor that is kept: the posts that fail stay in it, and the next
-    // run goes on behind them, so a few that never get through do not hold the others back. A
-    // post that is done leaves the set when it is settled.
+    // A cursor walks the set, so posts that keep failing do not hold back the others.
     let cursor: u64 = ctx.store().get(CURSOR_KEY).await?.unwrap_or(0);
     let mut batch = ctx.store().set_after(PENDING_SET, cursor, limit).await?;
     if batch.is_empty() && cursor != 0 {

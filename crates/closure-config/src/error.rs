@@ -1,9 +1,7 @@
 use std::fmt;
 
-/// One problem found in a configuration document.
-///
-/// `code` is stable and language independent so a dashboard can translate it; `message` is an
-/// English description for logs and API clients.
+/// One problem found in a configuration document. `code` is stable and language independent so a
+/// dashboard can translate it; `message` is an English description for logs and API clients.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
     /// Dotted path into the document, e.g. `modules.warn.config.limit`.

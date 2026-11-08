@@ -8,7 +8,6 @@ use closure_sdk::testing::{Harness, Message};
 
 use crate::builder;
 
-/// Flags every text with `evil` in it, and counts how often it was asked.
 struct Fake {
     asked: AtomicUsize,
     down: bool,
@@ -133,7 +132,6 @@ fn both_catalogs_define_the_same_messages() {
 #[tokio::test]
 async fn a_link_far_into_a_long_message_is_checked_and_a_service_that_is_down_is_asked_once() {
     let (harness, fake) = harness(false);
-    // 60 safe links, then a flagged one: it does not sit in the first question, but within four.
     let safe: Vec<String> = (0..60)
         .map(|n| format!("https://ok{n}.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
         .collect();

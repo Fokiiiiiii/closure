@@ -341,11 +341,9 @@ const BUCKET_SECONDS: i64 = 10;
 const SWEEP_BUDGET: usize = 100;
 const SWEEP_STEPS: i64 = 720;
 
-/// The guilds whose sweep job this process has made sure of.
 #[derive(Default)]
 struct Sweeps {
     ensured: Mutex<HashSet<u64>>,
-    /// The channels whose sweep cursor was put in place by this process.
     started: Mutex<HashSet<u64>>,
 }
 

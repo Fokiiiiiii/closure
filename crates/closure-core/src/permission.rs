@@ -72,8 +72,7 @@ impl fmt::Display for Level {
 }
 
 /// Names one thing a module does, like `moderation.ban`: two to four dot-separated parts of
-/// `[a-z][a-z0-9_-]*`. The first part is the id of the module that declares it, so keys of
-/// different modules never collide and a guild can tell where one comes from.
+/// `[a-z][a-z0-9_-]*`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PermissionKey(String);
@@ -411,13 +410,11 @@ mod tests {
             KeyRule {
                 allow_roles: vec![Id::new(20)],
                 deny_roles: vec![Id::new(21)],
-                // 6 is allowed by name and refused by name: the refusal wins.
                 allow_users: vec![Id::new(5), Id::new(6)],
                 deny_users: vec![Id::new(6)],
                 ..KeyRule::default()
             },
         );
-        // No level at all, yet allowed by role or by name.
         let by_role = permissions.check(&member(&[20]), &ban);
         assert_eq!(by_role.reason, Reason::AllowedRole(Id::new(20)));
         assert!(by_role.allowed);
@@ -425,7 +422,6 @@ mod tests {
         friend.user = Id::new(5);
         assert_eq!(permissions.check(&friend, &ban).reason, Reason::AllowedUser);
 
-        // A refusal wins over an allowance and over a high level.
         let both = permissions.check(&member(&[20, 21]), &ban);
         assert_eq!(both.reason, Reason::DeniedRole(Id::new(21)));
         assert!(!both.allowed);
@@ -452,7 +448,6 @@ mod tests {
         let decision = permissions.check(&owner, &ban);
         assert!(decision.allowed);
         assert_eq!(decision.reason, Reason::Owner);
-        // A key nobody declared is refused to everyone else.
         let unknown = key("moderation.unheard");
         assert_eq!(
             permissions.check(&member(&[]), &unknown).reason,

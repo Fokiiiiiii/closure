@@ -89,8 +89,7 @@ fn message(message: &Message) -> Option<MessageInfo> {
     message_in(message, None)
 }
 
-/// The message as the bot sees it. A message Discord resolves for a context-menu command carries
-/// no `guild_id` of its own: it is in the guild the interaction came from, `fallback`.
+/// The message as the bot sees it; a message resolved for a context-menu command has no `guild_id`, so it is in the interaction's guild (`fallback`).
 fn message_in(message: &Message, fallback: Option<GuildId>) -> Option<MessageInfo> {
     Some(MessageInfo {
         removed_attachments: Vec::new(),
@@ -189,8 +188,7 @@ fn mentionable(resolved: &InteractionDataResolved, id: Id<GenericMarker>) -> Opt
         .then_some(Mentionable::User(user))
 }
 
-/// `None` for a value the module model does not have (autocomplete state) or one Discord did
-/// not resolve, which is dropped rather than guessed at.
+/// `None` for a value the module model does not have (autocomplete state), or one Discord did not resolve, which is dropped rather than guessed at.
 fn option_value(
     value: &TwilightValue,
     resolved: Option<&InteractionDataResolved>,
@@ -228,8 +226,7 @@ fn options(
         .collect()
 }
 
-/// Splits `/command sub opt:...` into the subcommand name and its options; `/command group sub`
-/// gives the name `group sub` (names cannot hold a space, so the two levels stay apart).
+/// Splits `/command sub opt:...` into the subcommand name and its options; `group sub` stays one name, so the two levels cannot blur.
 fn split_subcommand(
     raw: &[CommandDataOption],
     resolved: Option<&InteractionDataResolved>,
@@ -411,8 +408,7 @@ fn autocomplete(interaction: &Interaction) -> Option<AutocompleteInvocation> {
     })
 }
 
-/// A context-menu command: the user or the message it was used on is in the resolved data. A
-/// target Discord did not resolve is dropped, as an option of an unknown kind is.
+/// A context-menu command: the user or message it was used on is in the resolved data; a target Discord did not resolve is dropped.
 fn context(interaction: &Interaction) -> Option<ContextInvocation> {
     let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
         return None;
@@ -540,8 +536,7 @@ pub(crate) fn event(gateway: &Gateway) -> Option<Event> {
     })
 }
 
-/// What the cache held about the entity an event changes, read before the cache applied the
-/// event. Without it, the events that compare old and new state are not sent.
+/// What the cache held about the entity an event changes, read before the cache applied the event; without it, events comparing old and new state are not sent.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Before {
     /// The roles of the member, when the member was cached.
@@ -564,8 +559,7 @@ pub(crate) struct Before {
     pub(crate) stage: Option<StageInfo>,
 }
 
-/// Every event a payload gives: the one it converts to, then the one that compares it with
-/// `before` (a role change follows its member update).
+/// Every event a payload gives: the one it converts to, then the one comparing it with `before` (a role change follows its member update).
 pub(crate) fn events(gateway: &Gateway, before: &Before) -> Vec<Event> {
     event(gateway)
         .into_iter()
@@ -645,8 +639,7 @@ fn member_changes(updated: &MemberUpdate, before: &Before) -> Vec<Event> {
     changes
 }
 
-/// A member joined a voice channel, left one or moved to another, against the channel the bot knew
-/// the member to be in before.
+/// A member joined, left or moved voice channel, judged against the channel the bot knew the member to be in before.
 fn voice_change(state: &VoiceState, before: &Before) -> Option<Event> {
     let guild_id = state.guild_id?;
     if before.voice_channel == state.channel_id {
@@ -830,8 +823,7 @@ fn thread(channel: &Channel) -> Option<ThreadInfo> {
     })
 }
 
-/// Discord marks a thread that was just made; the threads the bot learns of at start-up or when it
-/// is added to one come without the mark.
+/// Discord marks a thread that was just made; threads learned at start-up or when the bot is added come without the mark.
 fn thread_created(created: &ThreadCreate) -> Option<Event> {
     if created.0.newly_created != Some(true) {
         return None;
@@ -1111,8 +1103,7 @@ mod tests {
 
     #[test]
     fn an_update_missing_required_fields_does_not_parse_at_all() {
-        // Twilight reads an update as a whole message, so a partial one (an embed-only update)
-        // never reaches the converter. This pins that assumption.
+        // Twilight reads an update as a whole message, so a partial one (an embed-only update) never reaches the converter; this pins that assumption.
         let partial = json!({ "id": "100", "channel_id": "3", "guild_id": "1", "embeds": [] });
         assert!(serde_json::from_value::<MessageUpdate>(partial).is_err());
     }

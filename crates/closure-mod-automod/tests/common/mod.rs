@@ -37,10 +37,8 @@ pub const ROLE: u64 = 77;
 pub const MODERATOR: u64 = 100;
 pub const MEMBER: u64 = 7;
 pub const OTHER_MEMBER: u64 = 8;
-/// The bot's own user id, as the harness gives it.
 pub const BOT: u64 = 9_999;
 
-/// The module with the channels and the moderator role of the tests.
 pub fn harness() -> Harness {
     let harness = Harness::new(builder().unwrap()).unwrap();
     harness.permissions(|permissions| {
@@ -53,7 +51,6 @@ pub fn harness() -> Harness {
             .api()
             .add_channel(Id::new(channel), Some(Id::new(GUILD)));
     }
-    // The roles the rules give: plain ones, with no powers (a rule does not give any other).
     harness.api().set_roles(
         Id::new(GUILD),
         vec![plain_role(ROLE), plain_role(OTHER_ROLE)],
@@ -61,10 +58,8 @@ pub fn harness() -> Harness {
     harness
 }
 
-/// The second role of the tests.
 pub const OTHER_ROLE: u64 = 78;
 
-/// A role with no permissions at all.
 pub fn plain_role(id: u64) -> twilight_model::guild::Role {
     serde_json::from_value(json!({
         "id": id.to_string(), "name": format!("role-{id}"), "color": 0, "hoist": false,
@@ -75,7 +70,6 @@ pub fn plain_role(id: u64) -> twilight_model::guild::Role {
     .unwrap()
 }
 
-/// A harness with the log channel set and `config` as the module's configuration.
 pub fn configured(config: Value) -> Harness {
     let harness = harness();
     harness.set_log_channel(LOG);
@@ -83,12 +77,10 @@ pub fn configured(config: Value) -> Harness {
     harness
 }
 
-/// A harness whose configuration has these rules (an object of rules keyed by id).
 pub fn with_rules(rules: Value) -> Harness {
     configured(json!({ "rules": rules }))
 }
 
-/// Rules keyed by id, in the order given (the module evaluates them by id, see the docs).
 pub fn rules(list: &[(&str, Value)]) -> Value {
     Value::Object(
         list.iter()
@@ -97,28 +89,23 @@ pub fn rules(list: &[(&str, Value)]) -> Value {
     )
 }
 
-/// One rule: its triggers (a JSON array) and its actions (a JSON array).
 pub fn rule(triggers: Value, actions: Value) -> Value {
     json!({ "triggers": triggers, "actions": actions })
 }
 
-/// The actions that delete the message.
 pub fn delete() -> Value {
     json!([{ "do": "delete" }])
 }
 
-/// A harness with one rule `r` that deletes what `trigger` finds.
 pub fn deletes_when(trigger: Value) -> Harness {
     with_rules(rules(&[("r", rule(json!([trigger]), delete()))]))
 }
 
-/// Puts a rule into the rule's scope object.
 pub fn scoped(mut rule: Value, scope: Value) -> Value {
     rule["scope"] = scope;
     rule
 }
 
-/// Posts `content` from `author` in `CHANNEL`, as the gateway would.
 pub async fn say(harness: &Harness, author: u64, content: &str) {
     say_in(harness, author, CHANNEL, content).await;
 }
@@ -130,7 +117,6 @@ pub async fn say_in(harness: &Harness, author: u64, channel: u64, content: &str)
         .unwrap();
 }
 
-/// A message with every field the module reads, for what [`Message`] cannot express.
 pub fn custom(author: u64, channel: u64, content: &str) -> MessageInfo {
     static NEXT: AtomicU64 = AtomicU64::new(50_000);
     MessageInfo {
@@ -170,24 +156,20 @@ pub fn file(name: &str, content_type: Option<&str>) -> AttachmentInfo {
     }
 }
 
-/// Delivers a created message to the module.
 pub async fn post(harness: &Harness, message: MessageInfo) {
     harness.emit(Event::MessageCreated(message)).await.unwrap();
 }
 
-/// Whether a rule that deletes what `trigger` finds deletes the message `info`.
 pub async fn trips_with(trigger: Value, info: MessageInfo) -> bool {
     let harness = deletes_when(trigger);
     post(&harness, info).await;
     deletions(&harness) > 0
 }
 
-/// Whether a rule that deletes what `trigger` finds deletes a message with `content` from a member.
 pub async fn trips(trigger: Value, content: &str) -> bool {
     trips_with(trigger, custom(MEMBER, CHANNEL, content)).await
 }
 
-/// The message ids the module asked Discord to delete, in order.
 pub fn deleted_ids(harness: &Harness) -> Vec<u64> {
     harness
         .api()
@@ -203,7 +185,6 @@ pub fn deleted_ids(harness: &Harness) -> Vec<u64> {
         .collect()
 }
 
-/// How many messages the module asked Discord to delete.
 pub fn deletions(harness: &Harness) -> usize {
     deleted_ids(harness).len()
 }
@@ -212,7 +193,6 @@ pub fn count_actions(harness: &Harness, wanted: impl Fn(&Action) -> bool) -> usi
     harness.api().actions().iter().filter(|a| wanted(a)).count()
 }
 
-/// The text of each message the module sent, with the channel it went to.
 pub fn sent_texts(harness: &Harness) -> Vec<(u64, String)> {
     harness
         .api()
@@ -240,7 +220,6 @@ pub async fn cases_of(harness: &Harness, target: u64) -> Vec<Case> {
         .unwrap()
 }
 
-/// Everything an embed says, as one text.
 pub fn embed_text(embed: &Embed) -> String {
     let mut text = String::new();
     if let Some(title) = &embed.title {
@@ -268,7 +247,6 @@ pub fn description(replies: &[Reply]) -> String {
         .join("\n")
 }
 
-/// A message that the history of the harness keeps, sent `seconds_ago` before now.
 pub async fn seed(harness: &Harness, id: u64, author: u64, channel: u64, seconds_ago: i64) {
     let created_at = unix_now() - seconds_ago;
     harness
@@ -294,7 +272,6 @@ pub async fn seed(harness: &Harness, id: u64, author: u64, channel: u64, seconds
         .unwrap();
 }
 
-/// The Unix time of the harness clock, which starts at the real time.
 pub fn unix_now() -> i64 {
     i64::try_from(
         SystemTime::now()
@@ -305,7 +282,6 @@ pub fn unix_now() -> i64 {
     .unwrap()
 }
 
-/// A member of the guild, as the pretend Discord gives it. `joined` is an ISO 8601 time.
 pub fn member(id: u64, roles: &[u64], bot: bool, joined: Option<&str>) -> Member {
     let mut value = json!({
         "deaf": false,
@@ -326,21 +302,17 @@ pub fn member(id: u64, roles: &[u64], bot: bool, joined: Option<&str>) -> Member
     serde_json::from_value(value).unwrap()
 }
 
-/// The ISO 8601 time of `days` days before now.
 pub fn days_ago(days: i64) -> String {
     let secs = unix_now() - days * 86_400;
     Timestamp::from_secs(secs).unwrap().iso_8601().to_string()
 }
 
-/// Declares a member of the guild with these roles to the pretend Discord, for the checks that
-/// look a member up (the scope of a rule reads the roles of a member that an event does not carry).
 pub fn declare(harness: &Harness, id: u64, roles: &[u64]) {
     harness
         .api()
         .set_member(Id::new(GUILD), member(id, roles, false, None));
 }
 
-/// Delivers a member's join as the gateway would: with its roles and the time it joined.
 pub async fn join_with(harness: &Harness, user: u64, roles: &[u64], joined_at: i64) {
     harness
         .emit(Event::MemberJoined(closure_core::event::MemberInfo {
@@ -359,12 +331,10 @@ pub async fn join_with(harness: &Harness, user: u64, roles: &[u64], joined_at: i
         .unwrap();
 }
 
-/// Delivers a join of `user` now, with no roles.
 pub async fn join(harness: &Harness, user: u64) {
     join_with(harness, user, &[], unix_now()).await;
 }
 
-/// Delivers the departure of `user` from the guild.
 pub async fn leave(harness: &Harness, user: u64) {
     harness
         .emit(Event::MemberLeft {
@@ -379,14 +349,12 @@ pub async fn leave(harness: &Harness, user: u64) {
         .unwrap();
 }
 
-/// A user id whose account was made `secs_ago` seconds ago, as Discord's snowflakes say it.
 pub fn account_made(secs_ago: i64) -> u64 {
     const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
     let made_ms = u64::try_from((unix_now() - secs_ago) * 1000).unwrap();
     ((made_ms - DISCORD_EPOCH_MS) << 22) | 1
 }
 
-/// A case of `kind` against `target`, recorded by `moderator`, as the dispatcher announces it.
 pub fn case(kind: &str, target: u64, moderator: u64) -> Case {
     Case {
         number: 1,
@@ -404,7 +372,6 @@ pub fn case(kind: &str, target: u64, moderator: u64) -> Case {
     }
 }
 
-/// The texts posted to `channel`, in order.
 pub fn texts_in(harness: &Harness, channel: u64) -> Vec<String> {
     sent_texts(harness)
         .into_iter()

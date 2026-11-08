@@ -1,10 +1,8 @@
-//! Two-tier guild configuration.
-//!
-//! A guild is configured by one sparse document, [`GuildOverrides`]: only what an administrator
-//! wrote is stored, and everything else comes from the preset and the module manifests. The
-//! *simple* tier (a dashboard form) edits a handful of fields of that document; the *advanced*
-//! tier is the whole document as YAML. Both are the same schema, so switching tiers never loses
-//! information and defaults can improve without rewriting stored configs.
+//! Two-tier guild configuration. A guild is configured by one sparse document, [`GuildOverrides`]: only
+//! what an administrator wrote is stored, and everything else comes from the preset and the module
+//! manifests. The *simple* tier (a dashboard form) edits a handful of fields of that document; the
+//! *advanced* tier is the whole document as YAML. Both are the same schema, so switching tiers never
+//! loses information and defaults can improve without rewriting stored configs.
 
 mod compile;
 mod error;

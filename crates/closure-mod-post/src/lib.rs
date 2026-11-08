@@ -1,10 +1,7 @@
-//! Sends the posts that were scheduled in the dashboard.
+//! Sends the posts scheduled in the dashboard when their time comes.
 //!
-//! The dashboard keeps a post as a job of this module, whole: the channel, the message as it was
-//! written (text, embeds, buttons) and the message to replace, if any. When the time comes the job
-//! turns it into a Discord message and posts it. A post that can never be sent (the channel is
-//! gone, the bot may no longer write there, the message breaks a limit) is dropped with a log
-//! line; one that failed for another reason is tried again.
+//! Each post is kept as a job of this module and sent when due.
+//! A post that can never be sent is dropped with a log line; other failures are retried.
 
 use closure_core::action::Action;
 use closure_core::error::DiscordError;

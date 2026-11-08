@@ -175,7 +175,6 @@ mod tests {
             .filter;
         assert!(channels.matches(&message(3, false, &[])));
         assert!(!channels.matches(&message(4, false, &[])));
-        // An event that is not about a channel cannot be in one.
         assert!(!channels.matches(&Event::GuildRemoved {
             guild_id: Id::new(1)
         }));

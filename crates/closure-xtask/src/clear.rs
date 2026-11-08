@@ -1,5 +1,4 @@
-//! Deletes the messages the bot posted in a test channel, so that a replay can start over. Only the
-//! bot's own messages posted at or after the given time are deleted; older ones are kept.
+//! Deletes the bot's own messages in a test channel posted at or after a given time, so a replay can start over; older ones are kept.
 
 use anyhow::{Context, Result, bail};
 use twilight_http::Client;
@@ -12,9 +11,7 @@ use crate::replay::{TOKEN_VARIABLE, token_from_env};
 const PAGE_SIZE: u16 = 100;
 
 /// Deletes the bot's own messages in `channel_id` posted at or after `after` (Unix seconds).
-///
 /// # Errors
-///
 /// Fails before deleting anything when the token is missing or the channel cannot be read.
 pub fn run(channel_id: u64, after: i64) -> Result<bool> {
     let Some(token) = token_from_env() else {

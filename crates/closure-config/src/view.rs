@@ -1,10 +1,8 @@
-//! The simple and the advanced view of a guild's configuration.
-//!
-//! A setting is *basic* when its schema node carries `"x-ui": { "level": "basic" }`, or when an
-//! ancestor node does (the nearest marker wins; the default is advanced). The guild-wide keys in
-//! [`BASIC_KEYS`] are basic without a marker, and so is every module's `enabled` switch. A
-//! document's basic view holds only those settings; an object is in it when it is basic or holds a
-//! basic setting, and a basic node is taken whole.
+//! The simple and the advanced view of a guild's configuration. A setting is *basic* when its schema
+//! node carries `"x-ui": { "level": "basic" }`, or when an ancestor node does (the nearest marker wins;
+//! the default is advanced). The guild-wide keys in [`BASIC_KEYS`] are basic without a marker, and so
+//! is every module's `enabled` switch. A document's basic view holds only those settings; an object is
+//! in it when it is basic or holds a basic setting, and a basic node is taken whole.
 
 use closure_core::registry::ModuleRegistry;
 use serde_json::{Map, Value};
@@ -153,11 +151,6 @@ pub fn basic_view(
 }
 
 /// Applies a basic-shaped document (YAML or JSON) on top of the stored one.
-///
-/// Keys present are set, keys absent keep their stored value, and `null` clears what it is given
-/// for, as it does in a full document. A key outside the basic view is refused by name, so no
-/// advanced value is ever changed by this path. The result is a whole document, which the caller
-/// validates and stores as a full write would be.
 pub fn merge_basic(
     stored: &GuildOverrides,
     yaml: &str,
@@ -582,7 +575,6 @@ mod tests {
         let base = stored("preset: small\n");
         let merged = merge_basic(&base, "language: ja\n", &registry()).unwrap();
         let yaml = overrides_to_yaml(&merged).unwrap();
-        // The YAML writer stamps the format version; everything else round-trips.
         let mut expected = merged.clone();
         expected.version = Some(crate::model::CURRENT_VERSION);
         assert_eq!(crate::yaml::parse_overrides(&yaml).unwrap(), expected);

@@ -1,8 +1,5 @@
-//! A softban: a ban that deletes the messages of the last days, lifted at once. The member is out
-//! of the server and their messages are gone, and they may come back. It is one case of its own
-//! kind (`softban`). The two steps are not left half done: if the unban fails after the ban got
-//! through, the ban is recorded as the case, the moderator is told, and the member stays banned
-//! until somebody lifts it.
+//! A softban: a ban that deletes recent messages and is lifted at once (case kind `softban`).
+//! If the unban fails after the ban, the ban is recorded and the moderator told; the member stays banned.
 
 use closure_core::action::Reason;
 use closure_core::cases::{CaseKind, CaseSource, NewCase};
@@ -10,7 +7,6 @@ use closure_sdk::{Args, Cx, InteractionRef, Tone, UserError, UserId, punish};
 
 use crate::{delete_seconds, mention, reason_of};
 
-/// Bans, deletes the messages of `delete_days` (one by default), and lifts the ban.
 pub(crate) async fn softban<I: InteractionRef + 'static>(
     cx: Cx<I>,
     user: UserId,

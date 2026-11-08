@@ -17,11 +17,8 @@ use crate::yaml::parse_overrides;
 /// Called with a guild whose effective configuration an install changed (see `install`).
 type ChangeHook = Box<dyn Fn(GuildId) + Send + Sync>;
 
-/// In-memory, concurrently readable settings of every guild.
-///
-/// Reads never block on I/O or on a writer for another guild. A configuration that fails
-/// validation is rejected as a whole and the previous settings stay in force, so a bad edit can
-/// never leave a guild half-configured.
+/// In-memory, concurrently readable settings of every guild. Reads never block on I/O or on a writer
+/// for another guild.
 pub struct SettingsStore {
     compiler: ConfigCompiler,
     guilds: DashMap<GuildId, Versioned>,
@@ -61,9 +58,8 @@ impl SettingsStore {
         &self.compiler
     }
 
-    /// Validates `overrides` and, only if they are valid, makes them the guild's settings,
-    /// regardless of any revision. For deployments without a database and for tests; code that
-    /// reads from the database uses [`install`](Self::install).
+    /// Validates `overrides` and, only if they are valid, makes them the guild's settings, regardless of
+    /// any revision.
     pub fn set_guild(
         &self,
         guild: GuildId,
@@ -81,11 +77,7 @@ impl SettingsStore {
         Ok(settings)
     }
 
-    /// Installs settings read at `revision`, unless newer ones are already in place. Concurrent
-    /// writers and the change listener may all call this; the highest revision always wins, so
-    /// they can race without a stale read overwriting a fresh one. A change of the effective
-    /// configuration is reported to the change hook, at most once per revision.
-    /// Returns whether it installed.
+    /// Installs settings read at `revision`, unless newer ones are already in place.
     #[must_use]
     pub fn install(&self, guild: GuildId, revision: i64, settings: GuildSettings) -> bool {
         self.install_inner(guild, revision, settings, true)
@@ -318,7 +310,6 @@ mod tests {
     fn the_guild_policy_follows_the_document() {
         let store = store();
         let guild = Id::new(1);
-        // A guild with no document gets the defaults, which keep text command replies for 30 seconds.
         assert_eq!(
             *store.policy(guild),
             GuildPolicy {

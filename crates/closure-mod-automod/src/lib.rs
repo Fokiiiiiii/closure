@@ -1,11 +1,6 @@
-//! The `automod` module: rules that check every message, the members and the roles, the cases,
-//! the threads and the counters, and act on the first rule that hits.
+//! The `automod` module: rules that check events and act on the first one that hits.
 //!
-//! The rules are the server's to write (see `docs/automod.md`). This module is the frame they run
-//! in: the events ([`context`]), the triggers and the spam windows ([`triggers`], [`spam`]), the
-//! counters ([`counter`], [`commands`]), the actions and their record ([`actions`]), the pipeline
-//! ([`engine`]), the configuration with its tolerant reading of each rule ([`config`]), and
-//! `/automod status`. It is off until a server turns it on.
+//! The rules are written by the server; this module is the frame they run in.
 
 mod actions;
 mod antiraid;

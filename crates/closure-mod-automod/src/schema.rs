@@ -31,7 +31,6 @@ fn role_list_setting(description: &str) -> Value {
     })
 }
 
-/// The schema and the defaults of the module's section.
 pub fn settings() -> (Value, Value) {
     (
         json!({

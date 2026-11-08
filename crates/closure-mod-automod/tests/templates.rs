@@ -20,7 +20,6 @@ fn timeout(duration: &str) -> Value {
     json!([{"do": "delete"}, {"do": "timeout", "duration": duration}])
 }
 
-/// Every template, as the dashboard writes it.
 fn templates() -> Vec<(&'static str, Value)> {
     let rule = |name: &str, triggers: Value, actions: Value, enabled: bool| json!({"name": name, "enabled": enabled, "triggers": triggers, "actions": actions});
     vec![
@@ -127,7 +126,6 @@ async fn the_templates_do_what_their_names_say() {
     assert!(!trips("invites", "hello").await);
     assert!(trips("caps", "THIS IS ALL CAPITALS").await);
     assert!(!trips("caps", "this is fine").await);
-    // The word template starts switched off, so it does nothing until it is switched on.
     assert!(!trips("words", "e.x.a.m.p.l.e").await);
     let mut on = by_key("words");
     on["enabled"] = json!(true);

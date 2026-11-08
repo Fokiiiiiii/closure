@@ -41,13 +41,10 @@ pub struct State {
 /// lead elsewhere, so an hour is safe.
 const INVITE_MEMORY: Duration = Duration::from_secs(3600);
 /// How many codes are remembered; past this the memory starts over.
-/// The most guilds whose compiled setup is kept.
 const MAX_LOADED_GUILDS: usize = 20_000;
 const MAX_INVITES_REMEMBERED: usize = 2000;
-/// The most invite codes of one message that are asked about.
 const MAX_INVITES_ASKED: usize = 5;
 
-/// A guild's configuration as it was read, with its rules and counters.
 #[derive(Debug)]
 pub struct Loaded {
     /// The configuration it was read from; the reading is kept while this stays the same.
@@ -182,7 +179,6 @@ struct Work {
     depth: u8,
 }
 
-/// Handles a gateway event the rules read.
 pub async fn on_event(state: &State, ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     match &event {
         Event::ThreadCreated(thread)

@@ -34,7 +34,6 @@ struct Pair {
 }
 
 impl Config {
-    /// The text channel that belongs to a voice channel.
     fn text_of(&self, voice: ChannelId) -> Option<ChannelId> {
         self.pairs
             .iter()

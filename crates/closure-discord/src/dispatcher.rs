@@ -51,9 +51,7 @@ use crate::breaker::{Breaker, BreakerConfig, Ticket};
 use crate::notice;
 use crate::text_commands::{NOTICE_LIFETIME, Reader, Reading, TextCommandApi};
 
-/// How long `shutdown` waits for lanes to stop once they were told to abort.
-/// Most usage lines answered at once. A usage line costs a Discord call, so an answer past this is
-/// dropped rather than queued: a flood of incomplete commands must not spawn a task for each.
+/// Most usage lines answered at once; a usage line costs a Discord call, so past this an answer is dropped rather than queued, and a flood cannot spawn a task for each.
 const MAX_USAGE_REPLIES: usize = 16;
 
 /// Most notices about text commands shown at once.
@@ -61,15 +59,13 @@ const MAX_NOTICES: usize = 16;
 
 const HARD_STOP_WAIT: Duration = Duration::from_secs(2);
 
-/// How long an aborted module task gets to actually stop. Shorter than [`HARD_STOP_WAIT`], so a
-/// module that blocks its thread is reported by the lane before `shutdown` gives up on it.
+/// How long an aborted module task gets to stop; shorter than [`HARD_STOP_WAIT`], so a blocked thread is reported by the lane before `shutdown` gives up.
 const TASK_STOP_WAIT: Duration = Duration::from_secs(1);
 
 /// How long the dispatcher waits for a reply to a user before giving up on it.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How far apart the messages about a full queue are; a raid fills it for as long as it lasts,
-/// and each dropped event would otherwise be a line.
+/// How far apart the full-queue messages are; a raid fills the queue for as long as it lasts, and each dropped event would otherwise log a line.
 const QUEUE_FULL_LOG_EVERY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
@@ -81,11 +77,9 @@ pub struct DispatcherConfig {
     pub reap_every: Duration,
     /// How many interactions may be waiting for an answer; see [`InteractionLimits`].
     pub interaction_limits: InteractionLimits,
-    /// The bot's own user id (its application id), given to every module call. `None` when
-    /// unknown, as in tests that do not need it.
+    /// The bot's own user id (application id), given to every module call; `None` when unknown, as in tests that do not need it.
     pub bot_id: Option<UserId>,
-    /// The Gateway's heartbeat round trips, given to every module call. Empty unless the
-    /// Gateway writes into the same value.
+    /// The gateway's heartbeat round trips, given to every module call; the gateway writes into the same value.
     pub gateway_latency: Arc<GatewayLatency>,
 }
 
@@ -111,12 +105,10 @@ pub enum DispatchError {
     },
 }
 
-/// How long a lane waits, counted from when a message arrived, for the history to be done with it.
-/// Queue time counts. Past it the message goes to the modules without waiting for the history.
+/// How long a lane waits, counted from message arrival, for the history to be done with it; past this, the message goes to the modules without waiting for the history.
 const RECORD_WAIT: Duration = Duration::from_secs(25);
 
-/// How long an interaction may wait in its lane before it is answered as busy and not run. Discord
-/// allows three seconds for the first answer; this leaves time for the answer to arrive.
+/// How long an interaction may wait in its lane before it is answered as busy and not run; Discord allows three seconds for the first answer, which leaves time for the answer to arrive.
 const INTERACTION_DEADLINE: Duration = Duration::from_millis(2_500);
 
 struct Job {
@@ -126,12 +118,9 @@ struct Job {
     command: bool,
     /// Where to say how a scheduled job went; dropped unsent if the job was lost on the way.
     outcome: Option<oneshot::Sender<JobOutcome>>,
-    /// Set for a message: the lane waits for the history to be done with it, but only up to
-    /// `RECORD_WAIT` after the message arrived. The history sends whether or not it kept the message;
-    /// a dropped sender ends the wait too.
+    /// Set for a message: the lane waits for the history to be done with it, but only up to `RECORD_WAIT` after arrival. The history sends whether or not it kept the message; a dropped sender ends the wait too.
     recorded: Option<oneshot::Receiver<Event>>,
-    /// Set by whichever takes the job first: the lane that runs it, or the deadline of an
-    /// interaction that answers it as busy (see `answer_when_busy`).
+    /// Set by whichever takes the job first: the lane that runs it, or the deadline of an interaction that answers it as busy (see `answer_when_busy`).
     claim: Arc<AtomicBool>,
 }
 
@@ -142,24 +131,20 @@ pub enum JobOutcome {
     Done,
     /// The module failed, panicked or timed out: try again later.
     Failed(String),
-    /// Nobody could run it for a reason that is not the job's (the module is switched off or
-    /// paused, the queue is full, the bot is stopping): try again later, without counting.
+    /// Nobody could run it for a reason that is not the job's (module switched off or paused, queue full, bot stopping): try again later, without counting.
     Postponed,
     /// The module does not exist any more: the job can never run.
     Gone,
-    /// The module said it cannot handle this job (`Flow::Stop`), for example because a newer
-    /// version no longer has the handler: it is not tried again, and a repeating one stops.
+    /// The module said it cannot handle this job (`Flow::Stop`), for example a newer version lacks the handler: it is not tried again, and a repeating one stops.
     Dropped,
 }
 
-/// Lanes a long queue of ordinary events can never occupy, so that slash commands are answered
-/// within Discord's three second window even in the middle of a raid.
+/// Lanes a long queue of ordinary events can never occupy, so slash commands are answered within Discord's three-second window even mid-raid.
 fn command_lane_count(concurrency: usize) -> usize {
     (concurrency / 4).max(1)
 }
 
-/// Room in each lane's channel. The real limit is the guild-wide budget checked on dispatch;
-/// this only has to be larger than any allowed `queue_capacity`. Channels allocate lazily.
+/// Room in each lane's channel; the real limit is the guild-wide budget checked on dispatch, so this only has to exceed any allowed `queue_capacity`.
 const LANE_CHANNEL_CAPACITY: usize = 10_000;
 
 /// State shared by the lanes of one guild.
@@ -253,8 +238,7 @@ struct Shared {
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
     /// The guild of every live interaction, so a module cannot answer another guild's.
     interactions: Arc<InteractionGuilds>,
-    /// Per module, how many of its calls overran the timeout and are still running, because
-    /// they block a thread and cannot be aborted. A module with any is not given new calls.
+    /// Per module, how many of its calls overran the timeout and still run, since they block a thread and cannot be aborted; a module with any gets no new calls.
     wedged: DashMap<ModuleId, Arc<AtomicUsize>>,
     pending_total: AtomicUsize,
     /// The answers to incomplete text commands still allowed to run at once.
@@ -263,8 +247,7 @@ struct Shared {
     notices: Arc<Semaphore>,
     closing: AtomicBool,
     cancel: CancellationToken,
-    /// Cancelled when the grace period of `shutdown` ran out: lanes stop taking work and running
-    /// module calls are aborted, so nothing is still running when the modules are unloaded.
+    /// Cancelled when the grace period of `shutdown` ran out: lanes stop taking work and running module calls are aborted, so nothing runs when modules are unloaded.
     abort: CancellationToken,
     tracker: TaskTracker,
 }
@@ -285,13 +268,11 @@ impl std::fmt::Debug for Dispatcher {
 }
 
 tokio::task_local! {
-    /// Whether the module call running in this task was given a `CaseCreated`. A case recorded
-    /// then is not announced again, or two modules answering each other's cases would loop.
+    /// Whether the module call in this task was given a `CaseCreated`; a case recorded then is not announced again, or two modules answering each other's cases would loop.
     static HANDLING_CASE_ANNOUNCEMENT: bool;
 }
 
-/// Records cases through `inner`, then queues a `CaseCreated` for the guild. Queuing never waits,
-/// and the modules that get the event cannot fail the recording.
+/// Records cases through `inner`, then queues a `CaseCreated` for the guild; queuing never waits, and the modules that get the event cannot fail the recording.
 struct NotifyingCases {
     inner: Arc<dyn CaseBackend>,
     shared: Weak<Shared>,
@@ -389,8 +370,7 @@ impl CaseBackend for NotifyingCases {
     }
 }
 
-/// How an event concerns a particular channel, user or role: events with the same key are
-/// handled in order.
+/// How an event concerns a channel, user or role: events with the same key are handled in order.
 fn ordering_key(event: &Event) -> u64 {
     match event {
         Event::MemberJoined(member) | Event::MemberUpdated(member) => member.user.id.get(),
@@ -438,15 +418,13 @@ fn ordering_key(event: &Event) -> u64 {
 }
 
 fn lane_index(key: u64, lanes: usize) -> usize {
-    // Snowflakes carry a counter in their low bits; mix before taking the remainder so lanes
-    // fill evenly.
+    // Snowflakes carry a counter in their low bits; mix before taking the remainder so lanes fill evenly.
     let mixed = key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
     usize::try_from(mixed % lanes as u64).unwrap_or(0)
 }
 
 impl Dispatcher {
-    /// Loads the modules in dependency order and starts accepting events. A module that fails
-    /// to load stops startup.
+    /// Loads the modules in dependency order and starts accepting events; a module that fails to load stops startup.
     pub async fn start(
         registry: Arc<ModuleRegistry>,
         settings: Arc<dyn SettingsProvider>,
@@ -465,8 +443,7 @@ impl Dispatcher {
         .await
     }
 
-    /// [`Self::start`] with the place modules keep their data (see [`closure_core::storage`]).
-    /// Without it, data lives in memory and is gone when the bot stops.
+    /// [`Self::start`] with the place modules keep their data (see [`closure_core::storage`]); without it, data lives in memory and is gone when the bot stops.
     pub async fn start_with_storage(
         registry: Arc<ModuleRegistry>,
         settings: Arc<dyn SettingsProvider>,
@@ -489,8 +466,7 @@ impl Dispatcher {
         .await
     }
 
-    /// [`Self::start_with_storage`] with the place scheduled jobs, moderation cases and the
-    /// message history are kept as well. Whoever keeps the jobs runs them with [`Self::run_job`].
+    /// [`Self::start_with_storage`] with the place scheduled jobs, moderation cases and the message history are kept as well; whoever keeps the jobs runs them with [`Self::run_job`].
     // Each service is its own argument: one struct for them would change every caller.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_with_services(
@@ -550,21 +526,18 @@ impl Dispatcher {
         Ok(Self { shared })
     }
 
-    /// Queues an event. Never blocks: when the guild already has `queue_capacity` events
-    /// waiting or running, the event is dropped and counted.
+    /// Queues an event. Never blocks: when the guild already has `queue_capacity` events waiting or running, the event is dropped and counted.
     pub fn dispatch(&self, event: Event) {
         self.enqueue(event, None);
     }
 
-    /// Like [`dispatch`](Self::dispatch), but tells whether the event was accepted. A refused
-    /// event is not delivered at all, so the caller may send it again.
+    /// Like [`dispatch`](Self::dispatch), but says whether the event was accepted; a refused event is not delivered at all, so the caller may send it again.
     #[must_use]
     pub fn try_dispatch(&self, event: Event) -> bool {
         self.enqueue(event, None)
     }
 
-    /// [`Self::dispatch`], and a message that is a text command also runs as that command (see
-    /// [`crate::text_commands`]). `permissions` is asked for only when a command runs.
+    /// Like [`Self::dispatch`], and a message that is a text command also runs as that command (see [`crate::text_commands`]); `permissions` is asked for only when a command runs.
     pub fn dispatch_message(
         &self,
         event: Event,
@@ -573,9 +546,7 @@ impl Dispatcher {
         self.dispatch_message_recorded(event, None, permissions);
     }
 
-    /// Like [`Self::dispatch_message`], but the modules get the event only once `recorded` has fired
-    /// or been dropped, or `RECORD_WAIT` has passed since the event arrived, whichever comes first.
-    /// Firing means the history is done with the event, kept or not.
+    /// Like [`Self::dispatch_message`], but modules get the event only once `recorded` has fired or been dropped, or `RECORD_WAIT` has passed since arrival, whichever is first; firing means the history is done with the event.
     pub fn dispatch_message_after(
         &self,
         event: Event,
@@ -644,8 +615,7 @@ impl Dispatcher {
         .read(message, permissions)
     }
 
-    /// Says what a text command should have looked like. The answer is ephemeral, so it does not
-    /// stay in the channel.
+    /// Says what a text command should have looked like; the answer is ephemeral, so it does not stay in the channel.
     fn answer_usage(&self, invocation: CommandInvocation, text: String) {
         if self.shared.closing.load(Ordering::Acquire) {
             return;
@@ -661,8 +631,7 @@ impl Dispatcher {
         });
     }
 
-    /// Hands a due job to its module and says how it went. The job takes the same way an event
-    /// does (the guild's lane and queue, the module's timeout and breaker).
+    /// Hands a due job to its module and says how it went; the job takes the same route as an event (the guild's lane and queue, the module's timeout and breaker).
     pub async fn run_job(&self, job: ScheduledJob) -> JobOutcome {
         let (sender, receiver) = oneshot::channel();
         if !self.enqueue(Event::Scheduled(job), Some(sender)) {
@@ -696,9 +665,7 @@ impl Dispatcher {
             return false;
         };
 
-        // The budget is the guild's, not a lane's: one busy channel may use all of it.
-        // Commands, clicks and forms are answered to a person who is waiting, within three
-        // seconds, so they have lanes and a budget of their own.
+        // The budget is the guild's, not a lane's, so one busy channel may use all of it; commands, clicks and forms are answered to a waiting person within three seconds, so they get lanes and a budget of their own.
         let command = event.interaction_token().is_some();
         let budget = lanes.state.budget(command);
         if budget.fetch_add(1, Ordering::AcqRel) >= limits.queue_capacity {
@@ -710,8 +677,7 @@ impl Dispatcher {
             return false;
         }
 
-        // Once the event is accepted and before any module can see it: the record decides whose
-        // interaction a module may answer. Events dropped above never use up a record.
+        // Once accepted and before any module can see it, the record decides whose interaction a module may answer; events dropped above never use up a record.
         if let Some(token) = event.interaction_token() {
             let recorded = self.shared.interactions.register(token, guild);
             if !recorded.is_recorded() {
@@ -761,10 +727,7 @@ impl Dispatcher {
         true
     }
 
-    /// The lanes of `guild`, created on first use and rebuilt when the configured number of
-    /// lanes changed while nothing was pending. The guild's pending count is raised under the
-    /// map lock so the reaper cannot release lanes that are about to receive an event.
-    /// Returns `None` once shutdown has begun, so no lanes are created that nothing would drain.
+    /// Lanes of `guild`, created on first use and rebuilt when the configured lane count changed while nothing was pending. The pending count is raised under the map lock so the reaper cannot release lanes about to receive an event; returns `None` once shutdown has begun.
     fn lanes_for(&self, guild: GuildId, concurrency: usize) -> Option<Arc<GuildLanes>> {
         let concurrency = concurrency.max(1);
         if let Some(existing) = self.shared.guilds.get(&guild)
@@ -774,14 +737,12 @@ impl Dispatcher {
             return Some(Arc::clone(&existing));
         }
 
-        // `pending` is raised inside each arm, while the map entry is still locked: a concurrent
-        // caller that wants to replace the lanes then sees them as busy, and the reaper does too.
+        // `pending` is raised inside each arm, while the map entry is still locked, so a concurrent caller replacing the lanes, and the reaper, see them as busy.
         let lanes = match self.shared.guilds.entry(guild) {
             Entry::Occupied(mut entry) => {
                 let replace = entry.get().event_lanes != concurrency
                     && entry.get().state.pending.load(Ordering::Acquire) == 0;
-                // `shutdown` sets `closing` before it clears the map, and this check runs under
-                // the same shard lock, so a lane can never be created behind its back.
+                // `shutdown` sets `closing` before it clears the map; this check runs under the same shard lock, so a lane can never be created behind its back.
                 if replace && !self.shared.closing.load(Ordering::Acquire) {
                     entry.insert(self.spawn_lanes(guild, concurrency));
                 }
@@ -823,8 +784,7 @@ impl Dispatcher {
         })
     }
 
-    /// Whether `module` has calls that overran their timeout and cannot be stopped because they
-    /// block a thread. Such a module is not given new calls until they have returned.
+    /// Whether `module` has calls that overran their timeout and cannot be stopped because they block a thread; such a module gets no new calls until they return.
     #[must_use]
     pub fn is_wedged(&self, module: &ModuleId) -> bool {
         self.shared.is_wedged(module)
@@ -849,8 +809,7 @@ impl Dispatcher {
         }
     }
 
-    /// Stops accepting events, lets queued ones finish for up to `grace`, then unloads the
-    /// modules in reverse dependency order. Returns whether everything drained in time.
+    /// Stops accepting events, lets queued ones finish for up to `grace`, then unloads the modules in reverse dependency order; returns whether everything drained in time.
     pub async fn shutdown(&self, grace: Duration) -> bool {
         self.shared.closing.store(true, Ordering::Release);
         self.shared.cancel.cancel();
@@ -866,8 +825,7 @@ impl Dispatcher {
                 pending = self.pending(),
                 "dispatcher did not drain in time; stopping what is still running"
             );
-            // Without this the lanes would keep handling events, and a running module call
-            // would carry on, after the modules below have been unloaded.
+            // Without this, lanes would keep handling events and a running module call would carry on after the modules are unloaded.
             self.shared.abort.cancel();
             if tokio::time::timeout(HARD_STOP_WAIT, self.shared.tracker.wait())
                 .await
@@ -921,8 +879,7 @@ async fn lane_worker(
             continue;
         }
         if let Some(recorded) = job.recorded.take() {
-            // The wait runs from the arrival, so the time spent in the queue counts.
-            // Past RECORD_WAIT the message goes to the modules without waiting for the history.
+            // The wait runs from arrival, so queue time counts; past `RECORD_WAIT` the message goes to the modules without waiting for the history.
             if let Ok(Ok(recorded)) =
                 tokio::time::timeout_at(job.enqueued + RECORD_WAIT, recorded).await
             {
@@ -943,23 +900,18 @@ async fn lane_worker(
                 }
             }
             Err(_) => {
-                // handle_event isolates module panics itself; reaching this is a dispatcher bug,
-                // and the lane must survive it.
+                // handle_event isolates module panics itself; reaching this is a dispatcher bug, and the lane must survive it.
                 tracing::error!(%guild, kind = job.event.kind().as_str(), "dispatcher panicked while handling an event");
             }
         }
         settle(&shared, &state, &job);
     }
-    // Jobs still queued when the lane was told to stop would be dropped with the receiver and
-    // never counted off, which would leave `pending` (and so `flush`) stuck for good.
+    // Jobs still queued when the lane was told to stop would be dropped with the receiver and never counted off, leaving `pending` (and so `flush`) stuck for good.
     drain_closed(&mut receiver, |job| settle(&shared, &state, &job)).await;
 }
 
 /// Closes `receiver` and hands every message that was or will be sent to `each`.
-///
-/// `try_recv` is not enough: a sender that already took its capacity but has not pushed the
-/// message yet looks like an empty queue, and its message would be dropped unseen with the
-/// receiver. `recv` returns `None` only once all such senders are done.
+/// `try_recv` is not enough: a sender that took its capacity but has not pushed the message yet looks like an empty queue, and its message would be dropped unseen. `recv` returns `None` only once all such senders are done.
 async fn drain_closed<T>(receiver: &mut mpsc::Receiver<T>, mut each: impl FnMut(T)) {
     receiver.close();
     while let Some(message) = receiver.recv().await {
@@ -973,8 +925,7 @@ fn settle(shared: &Shared, state: &GuildState, job: &Job) {
     shared.pending_total.fetch_sub(1, Ordering::AcqRel);
 }
 
-/// Says that events are dropped because the guild's queue is full, but not for every one of
-/// them (see [`QUEUE_FULL_LOG_EVERY`]). Whether it said so.
+/// Says that events are dropped because the guild's queue is full, but not for every one of them (see [`QUEUE_FULL_LOG_EVERY`]); returns whether it said so.
 fn log_queue_full(state: &GuildState, guild: GuildId, kind: &str) -> bool {
     let Some(held_back) = state.queue_full_log.pass() else {
         return false;
@@ -990,9 +941,7 @@ impl Shared {
             .is_some_and(|count| count.load(Ordering::Acquire) > 0)
     }
 
-    /// Takes note of an aborted call that did not stop: it blocks a thread and keeps running
-    /// until it returns on its own. The module gets no new calls meanwhile, or each of them
-    /// would take another worker thread until the runtime has none left for anyone.
+    /// Takes note of an aborted call that did not stop: it blocks a thread and keeps running until it returns on its own. The module gets no new calls meanwhile, or each would take another worker thread until the runtime has none left.
     fn wedge(&self, module: &ModuleId, task: JoinHandle<Result<Flow, ModuleError>>) {
         let count = Arc::clone(&*self.wedged.entry(module.clone()).or_default());
         let now = count.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1015,9 +964,7 @@ impl Shared {
     }
 }
 
-/// Aborts a module task and waits until it is really gone: `abort` only requests cancellation,
-/// and the modules must not be unloaded while a handler (or its destructors) still runs.
-/// Whether it stopped; one that did not blocks a thread.
+/// Aborts a module task and waits until it is really gone: `abort` only requests cancellation, and the modules must not be unloaded while a handler (or its destructors) still runs; returns whether it stopped.
 async fn stop_task<T>(task: &mut JoinHandle<T>, module: &ModuleId) -> bool {
     task.abort();
     let stopped = tokio::time::timeout(TASK_STOP_WAIT, task).await.is_ok();
@@ -1068,8 +1015,7 @@ async fn handle_event(
         }
         _ => {}
     }
-    // Modules with the same priority run together; the groups follow each other, highest first,
-    // and a module that stops the event keeps it from the groups after its own.
+    // Modules with the same priority run together; the groups follow each other, highest first, and a module that stops the event keeps it from the groups after its own.
     let receivers: Vec<(Arc<dyn Module>, i16)> = shared
         .registry
         .subscriptions(event.kind())
@@ -1254,8 +1200,7 @@ fn context_for(
     }
 }
 
-/// Updates the breaker and logs. An error from Discord (forbidden, not found, ...) means the
-/// module did its job and Discord said no, so it does not count against the module.
+/// Updates the breaker and logs. An error from Discord (forbidden, not found, ...) means the module did its job and Discord said no, so it does not count against the module.
 fn record_verdict(
     state: &GuildState,
     id: &ModuleId,
@@ -1293,8 +1238,7 @@ fn record_verdict(
     });
 }
 
-/// A command, a click or a submitted form goes to the one module that owns it, and the person
-/// who sent it is told in their language if that module cannot answer.
+/// A command, click or submitted form goes to the one module that owns it; the person who sent it is told in their language if that module cannot answer.
 async fn handle_interaction(
     shared: &Arc<Shared>,
     guild: GuildId,
@@ -1343,13 +1287,10 @@ async fn handle_interaction(
     reply(shared, invocation, message).await;
 }
 
-/// Discord shows the user nothing when no choices come within three seconds, so the module
-/// gets less than that and the answer is given before Discord gives up.
+/// Discord shows the user nothing when no choices come within three seconds, so the module gets less than that and the answer is given before Discord gives up.
 const AUTOCOMPLETE_DEADLINE: Duration = Duration::from_millis(2_500);
 
-/// An autocomplete request goes to the module that owns the command, in the same lane and under
-/// the same breaker as a command. Whatever goes wrong, the user gets no choices: Discord has no
-/// place for an error there.
+/// An autocomplete request goes to the module that owns the command, in the same lane and under the same breaker as a command. Whatever goes wrong, the user gets no choices: Discord has no place for an error there.
 async fn handle_autocomplete(
     shared: &Arc<Shared>,
     guild: GuildId,
@@ -1394,9 +1335,7 @@ async fn answer_without_choices(shared: &Shared, query: &AutocompleteInvocation)
     }
 }
 
-/// Answers an interaction still waiting in its lane at the deadline, and keeps it from running.
-/// Discord gives an interaction three seconds for its first answer, so this cannot wait for the lane.
-/// A command run late would act after the user was told it had not been done.
+/// Answers an interaction still waiting in its lane at the deadline, and keeps it from running. Discord gives an interaction three seconds for its first answer, so this cannot wait for the lane; a command run late would act after the user was told it had not been done.
 async fn answer_when_busy(
     shared: Arc<Shared>,
     guild: GuildId,
@@ -1417,8 +1356,7 @@ async fn answer_when_busy(
     answer_busy(&shared, guild, &event).await;
 }
 
-/// Says the bot is busy, in the invoker's language. An autocomplete gets no choices, which is all
-/// Discord takes there.
+/// Says the bot is busy, in the invoker's language; an autocomplete gets no choices, which is all Discord takes there.
 async fn answer_busy(shared: &Shared, guild: GuildId, event: &Event) {
     let invocation: &dyn InteractionRef = match event {
         Event::Command(invocation) => invocation,
@@ -1446,16 +1384,14 @@ fn text(shared: &Shared, locale: Locale, key: &str) -> String {
         .translate(locale, CORE_NAMESPACE, key, &Args::new())
 }
 
-/// Tells the invoker something went wrong. If the module already acknowledged the command, a
-/// follow-up is used instead; failures here are only logged because there is nobody left to tell.
+/// Tells the invoker something went wrong; if the module already acknowledged the command, a follow-up is used. Failures here are only logged, as nobody is left to tell.
 async fn reply(shared: &Shared, invocation: &dyn InteractionRef, message: String) {
     reply_in(shared, invocation, message, notice::ERROR).await;
 }
 
 /// [`reply`] as an embed of `color`.
 async fn reply_in(shared: &Shared, invocation: &dyn InteractionRef, message: String, color: u32) {
-    // A text command has no interaction to answer privately: what the host says about it is a notice in
-    // the channel, which is taken back after a while.
+    // A text command has no interaction to answer privately: what the host says is a notice in the channel, taken back after a while.
     if invocation.token().text_command_message().is_some() {
         notice_in_channel(shared, invocation.token(), message, color);
         return;
@@ -1482,8 +1418,7 @@ async fn reply_in(shared: &Shared, invocation: &dyn InteractionRef, message: Str
     }
 }
 
-/// Posts a host notice in the channel of a text command, as a reply to the command, and takes it back
-/// after `NOTICE_LIFETIME`. At most `MAX_NOTICES` are shown at once; past that one is skipped.
+/// Posts a host notice in the channel of a text command, as a reply, and takes it back after `NOTICE_LIFETIME`; at most `MAX_NOTICES` are shown at once, and past that one is skipped.
 fn notice_in_channel(shared: &Shared, token: &InteractionToken, message: String, color: u32) {
     if shared.closing.load(Ordering::Acquire) {
         return;

@@ -13,7 +13,6 @@ use closure_sdk::{Args, CommandArgs, CommandCx, Tone, UserError, UserId};
 
 use crate::{Config, listed_reason, mention, not_found, reason_of, state};
 
-/// How many cases one page of a search lists.
 const PAGE: usize = 10;
 /// The kinds a case recorded by hand may be of. A lift (`unban`, `untimeout`, `vcunmute`) is only
 /// written down: it undoes nothing, as the commands that lift do.
@@ -142,7 +141,6 @@ pub(crate) async fn add(cx: CommandCx, args: Add) -> Result<(), UserError> {
     .await
 }
 
-/// Changes the reason of a case, or who it names as its moderator.
 pub(crate) async fn update(cx: CommandCx, args: Update) -> Result<(), UserError> {
     let reason = reason_of(args.reason);
     if reason.is_none() && args.moderator.is_none() {
@@ -198,12 +196,10 @@ async fn hide_or_show(cx: &CommandCx, number: i64, hidden: bool) -> Result<(), U
     .await
 }
 
-/// Hides a case from the lists, or shows it again.
 pub(crate) async fn hide(cx: CommandCx, args: Hide) -> Result<(), UserError> {
     hide_or_show(&cx, args.number, !args.show.unwrap_or(false)).await
 }
 
-/// Removes a case for good, when the moderator says yes.
 pub(crate) async fn delete(cx: CommandCx, args: Delete) -> Result<(), UserError> {
     if !args.confirm {
         return Err(UserError::message("case-delete-confirm").with("number", args.number));
@@ -219,7 +215,6 @@ pub(crate) async fn delete(cx: CommandCx, args: Delete) -> Result<(), UserError>
     .await
 }
 
-/// The filter a search asks for.
 async fn filter_of(cx: &CommandCx, find: &Find) -> Result<CaseFilter, UserError> {
     let source = find
         .source
@@ -267,7 +262,6 @@ async fn filter_of(cx: &CommandCx, find: &Find) -> Result<CaseFilter, UserError>
     })
 }
 
-/// Lists the cases a search finds, a page at a time.
 pub(crate) async fn search(cx: CommandCx, args: Find) -> Result<(), UserError> {
     if args.export == Some(true) {
         cx.require("moderation.export").await?;
@@ -322,7 +316,6 @@ fn cell(text: &str) -> String {
     }
 }
 
-/// The cases as a CSV file: one row for each.
 pub(crate) fn csv(cases: &[Case], now: i64) -> String {
     let mut out = String::from(
         "number,kind,target,moderator,source,state,created_at,expires_at,revoked_by,revoked_reason,hidden,reason\n",
@@ -359,7 +352,6 @@ pub(crate) fn csv(cases: &[Case], now: i64) -> String {
     out
 }
 
-/// Writes what a search finds as a CSV file to the staff channel for exports.
 async fn export(cx: CommandCx, args: Find) -> Result<(), UserError> {
     cx.defer(true).await?;
     let config: Config = cx.config()?;

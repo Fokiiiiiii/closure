@@ -6,8 +6,7 @@
 //!   are guarded by `If-Match` with the revision being edited, so two editors cannot silently
 //!   overwrite each other.
 //!
-//! Everything but the two probes needs the admin bearer token. Discord `OAuth2` logins for
-//! server administrators belong to the dashboard and are not part of this crate yet.
+//! Everything except the two probes needs the admin bearer token.
 
 mod access;
 mod auth;
@@ -43,8 +42,7 @@ use tower_http::trace::{DefaultOnFailure, TraceLayer};
 /// Shorter tokens are refused: the token is the only thing protecting configuration writes.
 pub const MIN_TOKEN_CHARS: usize = 24;
 
-/// Configuration documents are small; a limit just above the parser's keeps oversized bodies
-/// out before they are read.
+/// Configuration documents are small; the limit sits just above the parser's to reject oversized bodies early.
 const MAX_BODY_BYTES: usize = 70 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_REQUESTS: usize = 64;
@@ -140,9 +138,8 @@ impl ApiState {
         self
     }
 
-    /// Names the reverse proxies in front of the API. For a request that comes from one of them, the
-    /// client in `X-Forwarded-For` (the last address the proxy added) is who failed logins are
-    /// counted for; without this, everyone behind a proxy shares one allowance.
+    /// Trusted reverse proxies: for their requests, failed logins count the client in `X-Forwarded-For`.
+    /// Without this, every client behind a proxy shares one login allowance.
     #[must_use]
     pub fn with_trusted_proxies(mut self, proxies: Vec<std::net::IpAddr>) -> Self {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {

@@ -1,22 +1,7 @@
 //! `#[derive(CommandArgs)]`: the options of a slash command as a struct.
 //!
-//! ```ignore
-//! #[derive(CommandArgs)]
-//! struct Warn {
-//!     /// Member to warn
-//!     user: UserId,
-//!     /// Why (shown in the log)
-//!     #[arg(max_length = 512)]
-//!     reason: Option<String>,
-//! }
-//! ```
-//!
-//! Each field is one option: its name is the field's, and it is required unless the type is
-//! `Option<_>`. The description comes from the module's catalog (`option-<command>-<field>`), not
-//! from the code. Attributes inside `#[arg(..)]`: `name`, `min`, `max` (numbers), `min_length`,
-//! `max_length` (strings), `choices`
-//! (a list of strings or of integers) and `autocomplete` (a flag: the option's choices come from
-//! the handler registered with `ModuleBuilder::autocomplete`).
+//! Each field is one option: named after the field, and required unless its type is `Option<_>`.
+//! Descriptions come from the module catalog (`option-<command>-<field>`). `#[arg(..)]` takes `name`, `min`, `max`, `min_length`, `max_length`, `choices`, `autocomplete`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;

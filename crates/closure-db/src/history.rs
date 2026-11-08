@@ -128,9 +128,8 @@ const PURGE_BATCH: u64 = 1_000;
 /// A save that finds its guild over the limit drops down to the limit less this fraction of it.
 const TRIM_SLACK: u64 = 16;
 
-/// Runs the purge `statement` (which takes the cutoff and a batch size) until a batch removes fewer rows
-/// than the batch size, and returns how many rows it removed in all. One statement that removes all of
-/// it at once could run into the statement timeout.
+/// Runs the purge `statement` (which takes the cutoff and a batch size) until a batch removes fewer
+/// rows than the batch size, and returns how many rows it removed in all.
 async fn purge_in_batches(
     pool: &sqlx::PgPool,
     statement: &'static str,
@@ -710,7 +709,6 @@ mod tests {
         );
     }
 
-    /// Runs the same calls on both backends and records the answers, which must match.
     async fn script(backend: Arc<dyn HistoryBackend>) -> Vec<String> {
         let granted: CapabilitySet = [Capability::ReadMessageHistory].into_iter().collect();
         let history = MessageHistory::new(

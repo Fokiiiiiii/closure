@@ -1,6 +1,5 @@
 //! The restrictions of members as commands: `/vcmute` and `/vcunmute`, and the checks of the role
-//! and duration settings that timeouts and voice mutes need. The punishment itself, and its timer,
-//! is carried out by `closure_sdk::punish`.
+//! The punishment and its timer are carried out by `closure_sdk::punish`.
 //!
 //! A role is an ordinary role: the server decides what it denies, in the channels and categories,
 //! and the bot's top role must be above it.
@@ -25,7 +24,6 @@ pub(crate) struct VoiceMute {
     reason: Option<String>,
 }
 
-/// The role a setting names, when it is a valid role id.
 pub(crate) fn role_of(setting: Option<&str>) -> Option<RoleId> {
     setting?.parse::<u64>().ok().and_then(RoleId::new_checked)
 }

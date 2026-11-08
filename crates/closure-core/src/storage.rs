@@ -1,10 +1,8 @@
-//! Data a module keeps: entries (a key and a JSON value) and counters.
-//!
-//! A module never sees a database. It holds a [`Store`], which is bound to the module and the
-//! guild of the event, so it cannot read or write anything else's data; the host decides where
-//! the data lives ([`StorageBackend`]: PostgreSQL in the bot, [`MemoryStorage`] in tests).
-//! Everything is limited: keys, values, how many entries and counters a module may keep in a
-//! guild; going over a limit is an error, never silent loss.
+//! Data a module keeps: entries (a key and a JSON value) and counters. A module never sees a database.
+//! It holds a [`Store`], which is bound to the module and the guild of the event, so it cannot read or
+//! write anything else's data; the host decides where the data lives ([`StorageBackend`]: PostgreSQL in
+//! the bot, [`MemoryStorage`] in tests). Everything is limited: keys, values, how many entries and
+//! counters a module may keep in a guild; going over a limit is an error, never silent loss.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -56,9 +54,7 @@ pub enum StorageError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub value: serde_json::Value,
-    /// A number that changes with every write. No two writes share one, not even those of an
-    /// entry that was deleted (or expired) and made again, so a revision read earlier can
-    /// never match a later entry by accident.
+    /// A number that changes with every write.
     pub revision: i64,
 }
 
@@ -139,11 +135,6 @@ pub trait StorageBackend: Send + Sync {
         counter: &str,
         subject: u64,
     ) -> Result<(), StorageError>;
-
-    // The scores and the sets are for what grows with the members of a guild: a score each, a
-    // place in a set each. Their cost does not grow with what is already kept (no quota is
-    // counted, no lock is taken), and they answer the questions a ranking and a draw ask without
-    // reading everything.
 
     /// Adds `delta` to the score `name` of `subject`, making it if there is none; returns the
     /// new score.
@@ -265,9 +256,8 @@ pub trait StorageBackend: Send + Sync {
         Err(StorageError::Unavailable)
     }
 
-    /// Up to `count` members of the set that come after `after`, in ascending order, and none is
-    /// removed: a walk through the set in pages, for work that takes each member out only once it
-    /// is done.
+    /// Up to `count` members of the set that come after `after`, in ascending order, and none is removed: a
+    /// walk through the set in pages, for work that takes each member out only once it is done.
     async fn set_after(
         &self,
         _module: &ModuleId,
@@ -500,9 +490,8 @@ impl Store {
             .map(drop)
     }
 
-    /// Writes the value only if the entry is as `expect` says (see [`Entry::revision`]); that
-    /// is how two handlers that read, change and write the same entry avoid losing an update.
-    /// Returns the new revision.
+    /// Writes the value only if the entry is as `expect` says (see [`Entry::revision`]); that is how two
+    /// handlers that read, change and write the same entry avoid losing an update.
     pub async fn replace<T: Serialize>(
         &self,
         key: &str,
@@ -576,7 +565,6 @@ impl Store {
             .await
     }
 
-    /// The total of the counter.
     pub async fn counter_total(
         &self,
         name: &str,
@@ -617,10 +605,7 @@ impl Store {
             .await
     }
 
-    /// Adds `delta` (it may be negative) to the score `name` of `subject` and returns the new
-    /// score. A score is a number kept for each member (experience, points) that can be ranked;
-    /// unlike a counter it has no history, and unlike an entry it costs the same however many
-    /// members have one.
+    /// Adds `delta` (it may be negative) to the score `name` of `subject` and returns the new score.
     pub async fn score_add(
         &self,
         name: &str,
@@ -688,9 +673,8 @@ impl Store {
             .await
     }
 
-    /// Puts `member` (a user, a role, anything with a number) in the set `name`; whether it was
-    /// not in it already. A set holds as many members as there are; asking whether one is in it,
-    /// how many there are and for a random few do not read the rest.
+    /// Puts `member` (a user, a role, anything with a number) in the set `name`; whether it was not in it
+    /// already.
     pub async fn set_add(&self, name: &str, member: impl Into<u64>) -> Result<bool, StorageError> {
         self.allowed()?;
         check_counter(name)?;
@@ -735,9 +719,9 @@ impl Store {
             .await
     }
 
-    /// Up to `count` members of the set that come after `after`, in ascending order, none removed:
-    /// the pages of a walk through the set, for work that removes a member once it is done (a
-    /// queue that takes its members out first loses them if the work stops).
+    /// Up to `count` members of the set that come after `after`, in ascending order, none removed: the
+    /// pages of a walk through the set, for work that removes a member once it is done (a queue that takes
+    /// its members out first loses them if the work stops).
     pub async fn set_after(
         &self,
         name: &str,
@@ -1342,7 +1326,6 @@ mod tests {
         );
         f.advance(1);
         assert_eq!(store.get::<String>("session").await.unwrap(), None);
-        // An expired entry counts as missing for a write that expects none.
         assert_eq!(
             store
                 .replace("session", &"y", Expect::Missing, None)
@@ -1400,7 +1383,6 @@ mod tests {
             Some("second")
         );
 
-        // The same when the first one ran out instead of being deleted.
         store
             .set_for("t", &"first", Duration::from_secs(1))
             .await
@@ -1457,7 +1439,6 @@ mod tests {
             store.set("nul", &json!({ "k": ["a\0"] })).await,
             Err(StorageError::Value(_))
         ));
-        // Text that merely looks like an escaped NUL is fine.
         store.set("looks-like", &"\\u0000").await.unwrap();
         let none = Store::new(
             Arc::clone(&f.backend) as Arc<dyn StorageBackend>,
@@ -1492,7 +1473,6 @@ mod tests {
             Err(StorageError::QuotaExceeded { limit: 50 })
         );
         store.set("k0", &"changed").await.unwrap();
-        // Another guild has its own room, and so does a deleted key.
         f.store("warn", 2).set("one-too-many", &1).await.unwrap();
         assert!(store.delete("k1").await.unwrap());
         store.set("one-too-many", &1).await.unwrap();
@@ -1508,7 +1488,6 @@ mod tests {
         assert_eq!(store.counter_add("warns", 7_u64, 2).await.unwrap(), 3);
         assert_eq!(store.counter_add("warns", 8_u64, 5).await.unwrap(), 5);
         assert_eq!(store.counter_total("warns", 7_u64).await.unwrap(), 3);
-        // This minute and the one before it: the first warning is two minutes old.
         assert_eq!(
             store
                 .counter_recent("warns", 7_u64, Duration::from_secs(120))
@@ -1523,7 +1502,6 @@ mod tests {
                 .unwrap(),
             3
         );
-        // Less than a minute still means the current minute.
         assert_eq!(
             store
                 .counter_recent("warns", 7_u64, Duration::from_secs(1))
@@ -1541,7 +1519,6 @@ mod tests {
             0
         );
         assert_eq!(store.counter_total("warns", 8_u64).await.unwrap(), 5);
-        // Counters are the module's own, in its own guild.
         assert_eq!(
             f.store("mute", 1)
                 .counter_total("warns", 8_u64)
@@ -1581,7 +1558,6 @@ mod tests {
         store.counter_add("edge", 1_u64, -1).await.unwrap();
         f.advance(60);
         store.counter_add("edge", 1_u64, i64::MAX).await.unwrap();
-        // The total still fits (it is i64::MAX), but this minute would go past the limit.
         assert!(matches!(
             store.counter_add("edge", 1_u64, 1).await,
             Err(StorageError::Backend(_))
@@ -1603,8 +1579,6 @@ mod tests {
     async fn a_window_whose_sum_would_overflow_is_an_error() {
         let f = fixture();
         let store = f.store("warn", 1);
-        // The total stays small because the first minute is negative, but the last two minutes
-        // add up past the limit.
         store.counter_add("span", 1_u64, -i64::MAX).await.unwrap();
         f.advance(60);
         store.counter_add("span", 1_u64, i64::MAX).await.unwrap();

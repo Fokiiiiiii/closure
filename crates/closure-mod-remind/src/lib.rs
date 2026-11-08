@@ -1,7 +1,6 @@
 //! The `remind` module: one command, one permission and one setting, built with the SDK.
 //!
-//! The SDK reads the manifest, checks the permission before the handler runs and answers in the
-//! invoker's language; the handler only says what the command does. See `docs/writing-modules.md`.
+//! The SDK checks the permission before the handler runs and answers in the invoker's language.
 
 use closure_sdk::{
     Args, Command, CoreError, Level, Locale, ModuleBuilder, PermissionSpec, SdkModule,

@@ -42,7 +42,6 @@ pub(crate) async fn on_join(ctx: EventContext, event: Event) -> Result<Flow, Mod
     Ok(Flow::Continue)
 }
 
-/// How many cases of the member the alert reads and how many it lists.
 const ALERT_READ: usize = 25;
 const ALERT_LISTED: usize = 5;
 
@@ -100,7 +99,6 @@ async fn alert_staff(
     Ok(())
 }
 
-/// The newest case of `kind` that still stands against `user`.
 async fn standing(
     ctx: &EventContext,
     user: UserId,
@@ -232,7 +230,6 @@ fn tolerate_gone(result: Result<(), DiscordError>) -> Result<(), DiscordError> {
     }
 }
 
-/// The audit reason, in the language of the server.
 fn rejoin_reason(ctx: &EventContext, key: &str, number: i64) -> Reason {
     Reason::truncated(&ctx.t_in(ctx.locale, key, &Args::new().with("number", number)))
 }

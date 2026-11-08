@@ -23,9 +23,8 @@ fn options() -> Options {
     options
 }
 
-/// Parses a YAML document into sparse overrides. An empty document means "all defaults".
-///
-/// Errors carry the 1-based line and column so the editor can point at the problem.
+/// Parses a YAML document into sparse overrides. An empty document means "all defaults". Errors carry
+/// the 1-based line and column so the editor can point at the problem.
 pub fn parse_overrides(yaml: &str) -> Result<GuildOverrides, ConfigError> {
     if yaml.len() > MAX_YAML_BYTES {
         return Err(ConfigError::TooLarge {
@@ -184,9 +183,6 @@ modules:
 
     #[test]
     fn alias_expansion_bombs_are_refused() {
-        // Each level repeats the previous one nine times, so `levels` levels expand to 9^levels
-        // items. It sits in a free-form module config, where the schema itself accepts any key,
-        // so a failure can only come from the parser's budget.
         let document = |levels: usize| {
             let mut entries = vec!["l0: &l0 [x, x, x, x, x, x, x, x, x]".to_owned()];
             for level in 1..levels {
@@ -215,9 +211,6 @@ modules:
 
     #[test]
     fn a_small_document_cannot_expand_into_tens_of_megabytes() {
-        // Each level repeats the previous one three times, so with a 60 000 character string at
-        // the bottom the expansion is 60 000 * 3^6 = 43 MB, from 7 anchors, 18 aliases and
-        // about 60 KiB of text.
         let document = |size: usize| {
             let mut lines = vec![format!("l0: &l0 \"{}\"", "x".repeat(size))];
             for level in 1..=6 {
@@ -233,7 +226,6 @@ modules:
             format!("modules:\n  warn:\n    config:\n{body}")
         };
 
-        // Control: the same shape with a small string is a valid document.
         assert!(parse_overrides(&document(10)).is_ok());
 
         let bomb = document(60_000);

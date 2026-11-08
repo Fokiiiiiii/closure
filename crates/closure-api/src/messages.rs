@@ -64,8 +64,8 @@ pub trait MessageSink: Send + Sync {
 
 /// The most posts that wait for their time in one server.
 const MAX_SCHEDULED: usize = 50;
-/// Counting the waiting posts and keeping a new one are one step: two requests at once cannot both
-/// pass the limit. The API runs in one process, so one lock is enough; scheduling a post is rare.
+/// Counting waiting posts and keeping a new one are one step, so two requests at once cannot both pass the limit.
+/// One process, so one lock is enough; scheduling is rare.
 static SCHEDULING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// How far ahead a post can be scheduled.
 const MAX_AHEAD_SECONDS: i64 = 366 * 24 * 3600;
@@ -277,9 +277,8 @@ fn request_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
         })
 }
 
-/// Keeps what a keyed send answered, or gives the key up when the send surely had no effect. Any
-/// other failure may come after the message went out, so the key stays and a repeat is told that
-/// the result is not known instead of sending twice.
+/// Keeps what a keyed send answered, or releases the key when the send surely had no effect.
+/// Any other failure may come after the message went out, so the key stays and a repeat is told the result is unknown.
 async fn record_outcome(
     state: &ApiState,
     guild: GuildId,

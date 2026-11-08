@@ -16,7 +16,6 @@ use crate::config::{JoinSpam, Measure, Rule, Spam, Trigger};
 use crate::context::{Context, Source, ThreadEvent};
 use crate::triggers::{Hit, Scan, window_text};
 
-/// The kind a spam trigger is recorded under.
 pub fn kind(rule: &str, index: usize) -> String {
     format!("{rule}#{index}")
 }
@@ -349,7 +348,6 @@ fn targets(entries: &[Recent]) -> Vec<UserId> {
         .collect()
 }
 
-/// What a message measures, for the measure of its kind.
 pub fn measure(measure: Measure, message: &MessageInfo) -> u32 {
     let value = match measure {
         Measure::Messages | Measure::Duplicates => 1,

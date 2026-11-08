@@ -1,9 +1,6 @@
-//! Punishments made by hand in Discord itself (the member list, a context menu, another bot) are
-//! recorded as cases, with the moderator the audit log names, so that the history of a member
-//! is whole. A ban, a kick and a timeout are recorded; an unban and a timeout taken off end the
-//! case that stands. What the bot did itself already has its case and is not recorded twice: an
-//! entry of the audit log made by the bot is left alone, and so is a punishment that the module
-//! recorded a moment ago.
+//! Punishments made by hand in Discord are recorded as cases, with the moderator the audit log names.
+//! A ban, a kick and a timeout are recorded; an unban or a lifted timeout ends the case that stands.
+//! What the bot did itself is already a case and is not recorded twice.
 
 use closure_core::action::{Action, AuditLogQuery, Outcome};
 use closure_core::cases::{CaseKind, CaseSource, NewCase};
@@ -15,18 +12,15 @@ use crate::{Config, active_cases};
 
 /// How old an audit log entry may be and still be the change an event reports, in seconds.
 const WINDOW: i64 = 60;
-/// How many of the newest entries of a kind are read.
 const LOOKED_AT: u16 = 50;
 /// A case of the same kind recorded this recently (in seconds) is the one the event reports.
 const RECENT_CASE: i64 = 120;
 
-/// What an event about a member means for the cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Change {
     Ban,
     Unban,
     Kick,
-    /// A timeout set, until the given unix second.
     Timeout(i64),
     Untimeout,
 }
@@ -55,7 +49,6 @@ impl Change {
     }
 }
 
-/// The change an event reports, and who it is about.
 fn change_of(event: &Event, now: i64) -> Option<(Change, UserId)> {
     match event {
         Event::BanAdded { user, .. } => Some((Change::Ban, user.id)),

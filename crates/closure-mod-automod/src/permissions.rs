@@ -68,8 +68,7 @@ struct Saved {
     target: OverwriteTarget,
     original: Option<OverwriteSpec>,
     until: i64,
-    /// Whether the change was made on Discord. A change that was saved and not made (it failed) is
-    /// made at the next try, not only given more time.
+    /// Whether the change was made on Discord; a saved change that was not made is tried at the next run.
     #[serde(default = "yes")]
     applied: bool,
     /// The permission bits this module changed, so that putting back touches those only. Entries

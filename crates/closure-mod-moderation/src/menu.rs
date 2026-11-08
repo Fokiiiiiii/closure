@@ -1,7 +1,5 @@
-//! The moderation menu: a context command on a member opens a few buttons, each button opens a
-//! form for the reason (and the length, for a timeout or a ban), and the form runs the action the
-//! way the command of the same name does. Every step checks the permission of the action again, so
-//! a menu left open, or a button handed on, gives nobody more than they had.
+//! The moderation menu: a context command on a member opens buttons, which open forms.
+//! form that runs the action; every step checks the action's permission again.
 
 use std::time::Duration;
 
@@ -17,9 +15,7 @@ use crate::{
     warn,
 };
 
-/// The route of the buttons of the menu.
 const PICK: &str = "menu";
-/// The route of the forms the buttons open.
 const DO: &str = "menu_do";
 /// How long the menu keeps working after it was opened.
 const LIFETIME: Duration = Duration::from_mins(15);
@@ -27,7 +23,6 @@ const LIFETIME: Duration = Duration::from_mins(15);
 const SPAN_CHARS: u16 = 32;
 const REASON_CHARS: u16 = 512;
 
-/// What the menu can do with a member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Warn,
@@ -63,7 +58,6 @@ impl Action {
         Self::ALL.into_iter().find(|action| action.key() == key)
     }
 
-    /// The permission the command of the same name asks for.
     fn permission(self) -> &'static str {
         match self {
             Self::Warn => "moderation.warn",
@@ -101,7 +95,6 @@ fn read_data(data: &str) -> Result<(Action, UserId), UserError> {
     Ok((action, user))
 }
 
-/// Adds the menu to the module: the context command, its buttons and its forms.
 pub(crate) fn register(builder: ModuleBuilder) -> ModuleBuilder {
     builder
         .context(
@@ -113,7 +106,6 @@ pub(crate) fn register(builder: ModuleBuilder) -> ModuleBuilder {
         .modal(DO, submit)
 }
 
-/// The menu itself: one button for each thing that can be done with the member.
 async fn open(cx: ContextCx) -> Result<(), UserError> {
     let Some(user) = cx.target_user().map(|user| user.id) else {
         return Err(UserError::message("menu-no-member"));
@@ -231,7 +223,6 @@ async fn pick(cx: ComponentCx) -> Result<(), UserError> {
     cx.show_modal(ui::modal(custom_id, title, inputs)).await
 }
 
-/// A form: the action runs as its command does.
 async fn submit(cx: ModalCx) -> Result<(), UserError> {
     let (action, user) = CustomId::parse(&cx.submission().custom_id)
         .map(|(_, id)| id.data)

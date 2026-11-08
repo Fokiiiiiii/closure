@@ -12,11 +12,7 @@ use closure_core::storage::StorageError;
 use crate::args::ArgError;
 
 /// An error a command handler returns.
-///
-/// The ones that are the user's business ([`Self::message`], a missing permission, a cooldown, a
-/// bad option) are answered by the SDK in the user's language, privately, and are no failure of
-/// the module. The others are the module's: they reach the dispatcher, which tells the user
-/// that something went wrong and counts the failure.
+/// User-facing refusals are answered privately by the SDK; other errors are module failures counted by the dispatcher.
 #[derive(Debug)]
 pub enum UserError {
     /// A message from the module's own catalog.

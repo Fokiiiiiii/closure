@@ -18,12 +18,10 @@ use tokio_util::task::TaskTracker;
 
 const DAY_SECONDS: i64 = 86_400;
 
-/// How many arrivals may wait for their files at once. Past it an arrival is not kept as it comes;
-/// its files are fetched later, when a deletion or an edit needs them.
+/// How many arrivals may wait for their files at once; past it an arrival is not kept as it comes, and its files are fetched later, when a deletion or an edit needs them.
 pub(crate) const BACKLOG_LIMIT: usize = 64;
 
-/// How many deleted messages have their files fetched at once. As many as arrivals: a deletion waits
-/// for its fetches, and the same host serves both.
+/// How many deleted messages have their files fetched at once: as many as arrivals, since a deletion waits for its fetches and the same host serves both.
 const DELETED_FETCHES: usize = ARRIVAL_FETCHES;
 
 /// The time now, in Unix seconds.
@@ -36,8 +34,7 @@ pub fn unix_now() -> i64 {
         })
 }
 
-/// The earliest time a message may have been sent at and still be kept. With no retention
-/// (`0` days) that is now, so everything sent before it goes.
+/// The earliest time a message may have been sent at and still be kept; with no retention (`0` days) that is now, so everything sent before it goes.
 #[must_use]
 pub fn retention_cutoff(now: i64, retention_days: u32) -> i64 {
     now.saturating_sub(i64::from(retention_days) * DAY_SECONDS)
@@ -85,8 +82,7 @@ impl MessageRecorder {
         }
     }
 
-    /// Whether messages of `guild` are kept now: the retention is not zero, and an enabled module
-    /// holds the capability in this guild.
+    /// Whether messages of `guild` are kept now: retention is not zero and an enabled module holds the capability in this guild.
     #[must_use]
     pub fn keeps(&self, guild: GuildId) -> bool {
         self.retention_days > 0
@@ -101,9 +97,7 @@ impl MessageRecorder {
                 })
     }
 
-    /// Applies one gateway event at unix time `now`. Messages are stored only where
-    /// [`Self::keeps`] says so; a deletion is marked wherever it happens, since it adds no text.
-    /// Other events are ignored.
+    /// Applies one gateway event at unix time `now`. Messages are stored only where [`Self::keeps`] says so; a deletion is marked wherever it happens, since it adds no text; other events are ignored.
     pub async fn record(&self, event: &mut Event, now: i64) -> Result<(), HistoryError> {
         let updated = matches!(event, Event::MessageUpdated(_));
         match event {
@@ -174,8 +168,7 @@ impl MessageRecorder {
                 })
     }
 
-    /// Whether the files of new attachments are kept as their messages arrive: a module that asks for
-    /// them is enabled, and its `keep_attachments` setting is on. Off by default.
+    /// Whether new attachments' files are kept as messages arrive: a module that asks for them is enabled and its `keep_attachments` setting is on; off by default.
     fn keeps_files(&self, guild: GuildId) -> bool {
         self.retention_days > 0
             && self
@@ -195,9 +188,7 @@ impl MessageRecorder {
                 })
     }
 
-    /// The files of a message that arrives or is edited. A new attachment is kept in the background
-    /// when the setting is on; an attachment the edit removed is fetched now, while Discord may still
-    /// serve it.
+    /// The files of a message that arrives or is edited. A new attachment is kept in the background when the setting is on; an attachment the edit removed is fetched now, while Discord may still serve it.
     async fn keep_files(
         &self,
         info: &MessageInfo,
@@ -248,8 +239,7 @@ impl MessageRecorder {
         if attachments.is_empty() {
             return;
         }
-        // Past the backlog an arrival is not kept as it comes; a deletion or an edit still
-        // fetches its files.
+        // Past the backlog an arrival is not kept as it comes; a deletion or an edit still fetches its files.
         let Ok(backlog) = Arc::clone(&self.backlog).try_acquire_owned() else {
             tracing::warn!(
                 %guild,
@@ -292,8 +282,7 @@ impl MessageRecorder {
         });
     }
 
-    /// The files of deleted messages that are not kept yet, fetched now: Discord serves an attachment
-    /// only for a while after its message is gone.
+    /// The files of deleted messages not yet kept, fetched now: Discord serves an attachment only for a while after its message is gone.
     async fn fetch_deleted(
         &self,
         guild: GuildId,
@@ -324,8 +313,7 @@ impl MessageRecorder {
             .await
     }
 
-    /// Waits up to `grace` for the attachment files still being kept. Those still running after that
-    /// are stopped, so the database is not closed under them.
+    /// Waits up to `grace` for the attachment files still being kept; those still running after that are stopped, so the database is not closed under them.
     pub async fn finish(&self, grace: Duration) {
         self.background.close();
         if tokio::time::timeout(grace, self.background.wait())

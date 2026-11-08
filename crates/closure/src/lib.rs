@@ -1,5 +1,4 @@
-//! The modules this build ships. The bot and the developer tooling (`closure-xtask`) both read
-//! this list, so a module is registered in one place only.
+//! The modules this build ships; the bot and developer tooling (`closure-xtask`) both read this list, so a module is registered in one place only.
 
 use std::sync::Arc;
 

@@ -1,12 +1,7 @@
-//! Punishing members: the Discord action, the case, the log post, the direct message and the timers
-//! of a warning, a timeout, a kick, a ban or a voice mute, and of their lifts. A module that acts
-//! without a moderator (automod, as the bot) punishes through this, as a moderator's command does.
+//! Punishes members: the Discord action, case, log post, direct message and timers of a warning, timeout, kick, ban or voice mute, and their lifts.
 //!
-//! The caller checks what its own users may do, and reads its settings into [`Settings`]. This
-//! module reads no configuration. The module needs the capabilities of what it does: `Cases`,
-//! `SendMessages` (the log), `SendDirectMessages`, `KickMembers`, `BanMembers`, `TimeoutMembers`,
-//! `ManageRoles`, `MuteMembers`, `ReadGuild` (checking a member) and `Schedule` for the timers,
-//! which [`jobs`] registers.
+//! The caller checks its own users' rights and passes its settings in; this module reads no configuration.
+//! Needs the capabilities of what it does (`Cases`, `SendMessages`, `SendDirectMessages`, `KickMembers`, `BanMembers`, `TimeoutMembers`, `ManageRoles`, `MuteMembers`, `ReadGuild`, `Schedule`).
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -339,10 +334,7 @@ impl<'a> Punisher<'a> {
         self
     }
 
-    /// Makes the lift that follows undo the case `case` and no other: it is revoked, where a lift
-    /// otherwise revokes the newest case of its kind that stands. An undo button names the case it
-    /// undoes, so that an older one is not taken for the newest.
-    ///
+    /// Makes the lift undo case `case` only (not the newest of its kind), so an undo button names the case it undoes.
     /// When a newer case of the kind still stands, the lift does nothing: Discord and the timers
     /// keep the newer punishment in force. The lift then returns `case` as it is, still standing,
     /// and the caller revokes it.
@@ -1260,10 +1252,7 @@ impl<'a> Punisher<'a> {
             .await?)
     }
 
-    /// Revokes what the lift `lift` undoes: the case that `undoing` names, else the newest case of
-    /// `kind` that stands, with `reason`. The undo button has always written `removed by case #N`
-    /// for a named case, whatever its kind. The Discord action is done already, so a revoke that
-    /// fails is logged and returned, not undone.
+    /// Revokes what lift `lift` undoes: the named case, else the newest standing case of `kind`. A failure is logged and returned, not undone.
     async fn revoke_lifted(
         &self,
         target: UserId,
@@ -1553,8 +1542,7 @@ fn timeout_seconds(duration: Duration) -> Result<u32, UserError> {
         .ok_or_else(|| UserError::sdk("punish-timeout-too-long"))
 }
 
-/// The direct message about a punishment as an embed: the kind of the punishment as its title, in the
-/// colour the moderation log gives that kind, and the sentence as its description.
+/// The direct message about a punishment as an embed: the kind as its title, in the log colour for that kind.
 fn notice(ctx: &EventContext, kind: &str, text: &str) -> Result<Embed, UserError> {
     Ok(EmbedBuilder::new()
         .title(modlog::kind_name(ctx, kind))
@@ -1667,10 +1655,7 @@ async fn reschedule<T: Serialize>(
 /// Registers the handlers of the timers' jobs: `unban`, `untimeout` and `vc_unmute`. Their names,
 /// keys and payloads are the ones moderation writes, so rows scheduled before keep working.
 ///
-/// A lift that a newer case of its kind still holds does not take the punishment off early. A ban
-/// lift does nothing then. A role lift is set again for the latest end of the others, or does
-/// nothing while one of them has no end; it is due again then, so the last one to end takes the
-/// role off.
+/// A lift that a newer case of its kind still holds does not take the punishment off early; a role lift waits for the latest other end.
 #[must_use]
 pub fn jobs(builder: ModuleBuilder) -> ModuleBuilder {
     builder

@@ -320,9 +320,7 @@ fn is_trailing_punctuation(ch: char) -> bool {
     )
 }
 
-/// The host of a link, as a browser reads it: the standard parser decides where the host is (a
-/// backslash ends it like a slash, a name that is percent-encoded or written in Unicode is decoded
-/// and made ASCII), so what is shown, judged and fetched is the same name.
+/// The host of a link as a browser reads it, so what is shown, judged and fetched is the same name.
 fn host_of(url: &str) -> Option<String> {
     let lower = url.to_ascii_lowercase();
     let with_scheme = if lower.starts_with("http://") || lower.starts_with("https://") {
@@ -457,11 +455,7 @@ pub fn combining_run(text: &str) -> usize {
     best
 }
 
-/// How many emoji `text` shows, approximately. Each custom emoji `<:name:id>` or `<a:name:id>`
-/// counts once. Among Unicode emoji, a skin-tone modifier, a variation selector and a
-/// zero-width-joiner sequence count as one, and a flag (a pair of regional indicators) as one.
-/// The ranges are the usual pictographic blocks, not the Unicode emoji list, so a few symbols
-/// that people do not see as emoji are counted too.
+/// Approximate count of emoji in `text`; custom emoji count once, and sequences (modifiers, joiners, flags) count as one.
 ///
 /// ```
 /// assert_eq!(closure_sdk::text::emoji_count("hi 👍🏽 <:wave:42>"), 2);

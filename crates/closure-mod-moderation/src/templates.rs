@@ -1,10 +1,6 @@
-//! Templates: the reason and the duration a moderator gets when a punishment command leaves them
-//! out. The command then asks the moderator to pick one, and the pick carries the punishment out.
+//! Templates: the reason and duration a moderator picks when a punishment command leaves them out.
+//! The picker carries the punishment out; an unusable template is skipped, not fatal.
 //!
-//! The settings name the templates of each punishment. A template that cannot be used is skipped
-//! rather than refusing the whole configuration: one whose duration does not read, a timeout
-//! without a duration or with one Discord refuses, and a template whose id an earlier template of
-//! the same punishment already has.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -26,7 +22,6 @@ use crate::{
     with_notes,
 };
 
-/// The route of the component that the picker's select menu sends its pick to.
 pub(crate) const ROUTE: &str = "tpl";
 /// How long a picker waits for its pick before the punishment it waits for lapses.
 const PENDING_FOR: Duration = Duration::from_secs(600);
@@ -35,7 +30,6 @@ const MAX_OPTIONS: usize = 25;
 /// How many characters the description of an option shows.
 const DESCRIPTION_CHARS: usize = 100;
 
-/// The templates of each punishment, as the `templates` setting names them.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct Templates {
@@ -45,7 +39,6 @@ pub(crate) struct Templates {
     vcmute: Vec<Template>,
 }
 
-/// One template of a punishment.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Template {
@@ -56,7 +49,6 @@ struct Template {
     duration: Option<String>,
 }
 
-/// The punishments a template can stand for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Kind {
@@ -95,7 +87,6 @@ impl Kind {
         }
     }
 
-    /// The undo button of the punishment, if it has something to undo.
     fn undo(self) -> Option<undo::Kind> {
         match self {
             Self::Timeout => Some(undo::Kind::Timeout),
@@ -118,9 +109,7 @@ impl Kind {
     }
 }
 
-/// A punishment as far as it is known: what a command gave, or what a picked template filled in.
-/// While a moderator picks a template, it waits in the store under [`pending_key`]. The duration
-/// stays as typed, so a moment is resolved when the punishment runs, not when it waits.
+/// A punishment as far as it is known; a duration stays as typed until the punishment runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Punishment {
     kind: Kind,
@@ -147,7 +136,6 @@ impl Punishment {
         }
     }
 
-    /// The duration as it is now, or `None` when the punishment has none.
     fn duration(
         &self,
         cx: &Cx<impl InteractionRef + 'static>,
@@ -179,7 +167,6 @@ impl Punishment {
     }
 }
 
-/// A template a moderator may pick.
 #[derive(Debug)]
 struct Usable {
     id: String,
@@ -188,9 +175,7 @@ struct Usable {
     duration: Option<Duration>,
 }
 
-/// The templates of `kind` that a moderator may pick, in the order of the settings. A template is
-/// left out when its duration does not read, when a timeout has none or one Discord refuses, or
-/// when an earlier template of the same punishment has its id.
+/// The templates of `kind` a moderator may pick; unusable ones are left out.
 fn usable(config: &Config, kind: Kind) -> Vec<Usable> {
     if !config.templates_enabled {
         return Vec::new();
@@ -255,8 +240,8 @@ fn describe<I: InteractionRef + 'static>(cx: &Cx<I>, template: &Usable) -> Strin
     format!("{}{suffix}", truncate(&template.reason, room))
 }
 
-/// Asks the moderator for a template when the command leaves out the reason, or a timeout's duration,
-/// and a usable template can give it. The punishment waits in the store until the pick. Without a
+/// Asks the moderator for a template when a command leaves out the reason or a timeout's duration.
+/// Without a usable template it runs as it is.
 /// template it runs as it is: without a reason, unless the server requires one.
 async fn offer<I: InteractionRef + 'static>(
     cx: &Cx<I>,
@@ -342,7 +327,7 @@ pub(crate) async fn punish<I: InteractionRef + 'static>(
     .await
 }
 
-/// A moderator picked a template. The punishment waiting for it runs, with the template's reason
+/// A moderator picked a template: the waiting punishment runs with it.
 /// and duration where the command left them out. The pick takes the waiting punishment, so a second
 /// pick, or one after the time is up, finds nothing and is told so.
 pub(crate) async fn pick(cx: ComponentCx) -> Result<(), UserError> {
@@ -383,9 +368,8 @@ pub(crate) async fn pick(cx: ComponentCx) -> Result<(), UserError> {
     .await
 }
 
-/// The template's reason with `{user}`, `{moderator}` and `{server}` filled in. The server's name is
-/// asked for only when the reason names it; when Discord cannot say, the words for the server stand
-/// in for it.
+/// The template's reason with `{user}`, `{moderator}` and `{server}` filled in.
+/// The server's name is looked up only when the reason uses it.
 async fn filled_reason<I: InteractionRef + 'static>(
     cx: &Cx<I>,
     member: UserId,
@@ -437,7 +421,6 @@ pub(crate) struct Carried {
 }
 
 /// Carries out a punishment and returns the text of its reply. A command and a picked template
-/// both answer with this text.
 pub(crate) async fn carry_out<I: InteractionRef + 'static>(
     cx: &Cx<I>,
     config: &Config,
@@ -492,7 +475,6 @@ pub(crate) async fn carry_out<I: InteractionRef + 'static>(
     Ok(Carried { text, case, undo })
 }
 
-/// The settings of the templates.
 pub(crate) fn schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -508,7 +490,6 @@ pub(crate) fn schema() -> serde_json::Value {
     })
 }
 
-/// The schema of one list of templates.
 fn list(description: &str) -> serde_json::Value {
     json!({
         "type": "array",

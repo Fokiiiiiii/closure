@@ -1,36 +1,5 @@
 //! The module SDK of closure: declare a command, write what it does.
-//!
-//! ```ignore
-//! #[derive(CommandArgs)]
-//! struct Warn {
-//!     /// Member to warn
-//!     user: UserId,
-//!     /// Why
-//!     #[arg(max_length = 512)]
-//!     reason: Option<String>,
-//! }
-//!
-//! pub fn module() -> Result<SdkModule, CoreError> {
-//!     ModuleBuilder::new("warn", "Warnings", env!("CARGO_PKG_VERSION"))?
-//!         .permission(PermissionSpec::new("warn.add", Level::MODERATOR, "Warn members")?)
-//!         .command(
-//!             Command::<Warn>::new("warn")
-//!                 .requires("warn.add")
-//!                 .cooldown(Cooldown::per_user(Duration::from_secs(5)))
-//!                 .handler(|cx, args| async move {
-//!                     cx.reply_t("warned", &Args::new().with("user", args.user.get())).await
-//!                 }),
-//!         )
-//!         .catalog(Locale::En, EN)
-//!         .catalog(Locale::Ja, JA)
-//!         .build()
-//! }
-//! ```
-//!
-//! What the SDK does for a command: checks the permission and the cooldown, reads the options
-//! into the struct, runs the handler, and answers the user in their language when they are not
-//! allowed, have to wait, or the handler returns [`UserError::message`]. Tests use
-//! [`testing::Harness`].
+//! Checks the permission and cooldown, reads the options, runs the handler, and answers refusals in the user's language. Tests use [`testing::Harness`].
 
 // The derive macro names this crate by its own name.
 extern crate self as closure_sdk;

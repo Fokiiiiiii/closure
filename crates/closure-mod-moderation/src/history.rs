@@ -5,14 +5,10 @@ use closure_sdk::{Args, CaseError, Cases, Cx, InteractionRef, UserId};
 
 use crate::{PAGE, SCAN, active_cases, count};
 
-/// What a member had before a punishment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Before {
-    /// The warnings that still count.
     warnings: usize,
-    /// The cases of any kind, at most [`SCAN`].
     cases: usize,
-    /// Whether there are more cases than `cases` counts.
     more: bool,
 }
 
@@ -55,7 +51,6 @@ async fn count_cases(cases: &Cases, user: UserId) -> Result<(usize, bool), CaseE
     Ok((counted, !older.is_empty()))
 }
 
-/// The history line, in the language of the moderator.
 pub(crate) fn line<I: InteractionRef + 'static>(cx: &Cx<I>, before: Before) -> String {
     let warnings = cx.t(
         "history-warnings",

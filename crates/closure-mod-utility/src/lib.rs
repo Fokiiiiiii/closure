@@ -1,5 +1,4 @@
-//! Commands that tell about the server, a role, a channel or a member; the names a member has
-//! gone by; and finding a member in voice, or moving them.
+//! Commands that tell about the server, a role, a channel or a member, and move members in voice.
 //!
 //! What the bot knows of a name or of voice is only what it has seen since it started to watch:
 //! a member nobody saw change has no history, and a member who was already in voice before the bot
@@ -28,9 +27,7 @@ const JA: &str = include_str!("../locales/ja.ftl");
 const KEEP: Duration = Duration::from_hours(8760);
 /// The most members one move of a channel takes: the most a voice channel holds.
 const MAX_MOVED: usize = 99;
-/// The most members a search by name lists.
 const MAX_FOUND: usize = 25;
-/// The most names kept of one member.
 const MAX_NAMES: usize = 20;
 /// Discord's epoch, in Unix milliseconds.
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
@@ -169,7 +166,6 @@ fn internal(text: &impl ToString) -> UserError {
     UserError::from(ModuleError::other(text.to_string()))
 }
 
-/// When a Discord id was made, in Unix seconds.
 fn created_at(id: u64) -> i64 {
     i64::try_from(((id >> 22) + DISCORD_EPOCH_MS) / 1000).unwrap_or(0)
 }
@@ -305,7 +301,6 @@ async fn info(cx: CommandCx, args: Info) -> Result<(), UserError> {
     serverinfo(cx, ()).await
 }
 
-/// The code of an invite given as a link or as the code itself: letters, digits and dashes.
 fn invite_code(text: &str) -> Option<String> {
     let text = text.trim().trim_end_matches('/');
     let code = text.rsplit('/').next()?;
@@ -363,7 +358,6 @@ async fn inviteinfo(cx: CommandCx, text: &str) -> Result<(), UserError> {
     cx.reply_with(reply_of(card)?).await
 }
 
-/// The ids in a link to a message: server, channel and message.
 fn message_link(text: &str) -> Option<(u64, u64, u64)> {
     let path = text.trim().split("/channels/").nth(1)?;
     let mut parts = path.split('/').map(|part| part.trim().parse::<u64>().ok());
@@ -657,7 +651,6 @@ async fn channelinfo(cx: CommandCx, channel: ChannelId) -> Result<(), UserError>
     cx.reply_with(reply_of(card)?).await
 }
 
-/// The names a member went by, or the members who went by a name.
 async fn names(cx: CommandCx, args: NamesArgs) -> Result<(), UserError> {
     match (args.user, args.name) {
         (Some(_), Some(_)) => Err(UserError::message("utility-names-one")),
@@ -744,10 +737,8 @@ struct InvitePrune {
     max_uses: Option<i64>,
 }
 
-/// The most invites one run deletes.
 const MAX_PRUNED: usize = 200;
 
-/// Deletes the invites that were hardly used.
 async fn inviteprune(cx: CommandCx, args: InvitePrune) -> Result<(), UserError> {
     let max = args.max_uses.unwrap_or(1);
     if !(0..=1_000).contains(&max) {
@@ -816,7 +807,6 @@ async fn locate(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
     }
 }
 
-/// Moves a member to a voice channel, or everyone in a voice channel.
 async fn vcmove(cx: CommandCx, args: MoveArgs) -> Result<(), UserError> {
     match (args.user, args.from, args.channel) {
         (Some(user), None, Some(to)) => move_one(cx, user, to).await,
@@ -893,7 +883,6 @@ async fn move_all(cx: CommandCx, from: ChannelId, to: ChannelId) -> Result<(), U
     .await
 }
 
-/// Changes the nickname of a member, or takes it off.
 async fn nickname(cx: CommandCx, args: Nickname) -> Result<(), UserError> {
     cx.check_target(args.user).await?;
     let nickname = args
@@ -960,7 +949,6 @@ async fn disconnect(cx: CommandCx, user: UserId) -> Result<(), UserError> {
     .await
 }
 
-/// Writes down the account name and the nickname of a member when they differ from the last ones.
 async fn remember(
     ctx: &EventContext,
     user: &UserInfo,

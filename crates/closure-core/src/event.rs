@@ -60,10 +60,6 @@ pub struct AttachmentInfo {
 }
 
 /// A message in a guild. `created_at` is when it was sent, also on a `MessageUpdated` event.
-/// An update is read as a whole message: a field its payload leaves out comes out empty, and a
-/// payload without the fields Discord always sends is not delivered at all. Without the content
-/// intent `content` is empty; without member data `author_roles` is. Fields added after a
-/// release are `#[serde(default)]`, so an event serialised before them still parses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageInfo {
     pub id: MessageId,
@@ -493,9 +489,8 @@ impl CommandInvocation {
     }
 }
 
-/// The stable event model handed to modules. It is deliberately independent of Twilight's
-/// payload types so that gateway library upgrades and non-native modules do not leak
-/// into module code.
+/// The stable event model handed to modules. It is deliberately independent of Twilight's payload types
+/// so that gateway library upgrades and non-native modules do not leak into module code.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
@@ -618,8 +613,6 @@ pub enum Event {
     /// A context-menu command of the module was used on a user or a message.
     ContextCommand(ContextInvocation),
     /// A job the module scheduled is due (see [`crate::schedule`]). Only that module gets it.
-    /// Answering [`crate::subscription::Flow::Stop`] says the module cannot handle it and never
-    /// will: the job is dropped (a repeating one stops) instead of being finished.
     Scheduled(ScheduledJob),
     /// The configuration of the guild was reloaded and changed, or the guild came up at start-up.
     /// Every enabled module of the guild gets it; it needs no Discord intent.
@@ -681,9 +674,8 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    /// The Gateway intents Discord needs to send events of this kind (besides `GUILDS`, which the
-    /// bot always asks for). Some are privileged: they have to be switched on for the bot in the
-    /// Discord developer portal.
+    /// The Gateway intents Discord needs to send events of this kind (besides `GUILDS`, which the bot
+    /// always asks for).
     #[must_use]
     pub fn required_intents(self) -> Intents {
         match self {

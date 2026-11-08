@@ -138,8 +138,7 @@ fn new_module(id: &str, dry_run: bool) -> Result<bool> {
         print!("{}", scaffold::listing(&files));
         return Ok(true);
     }
-    // A failure leaves nothing behind: the directory did not exist, so it is taken away again and
-    // the same command can be run once more.
+    // A failure leaves nothing behind: the directory is taken away again, so the same command can be run once more.
     let made = (|| -> Result<()> {
         let mut written = Vec::new();
         for (path, content) in &files {

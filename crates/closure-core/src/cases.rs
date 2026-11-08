@@ -1,9 +1,8 @@
-//! Records of moderation (warnings, timeouts, kicks, bans, ...), numbered per guild.
-//!
-//! The numbers belong to the guild, not to a module: every module that holds the capability
-//! `cases` writes into the same sequence, so modules agree on a number without calling each
-//! other. A module holds a [`Cases`] bound to itself and the guild of the event and sees only
-//! that guild's cases. A case is never removed; it can be revoked, once.
+//! Records of moderation (warnings, timeouts, kicks, bans, ...), numbered per guild. The numbers belong
+//! to the guild, not to a module: every module that holds the capability `cases` writes into the same
+//! sequence, so modules agree on a number without calling each other. A module holds a [`Cases`] bound
+//! to itself and the guild of the event and sees only that guild's cases. A case is never removed; it
+//! can be revoked, once.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -105,9 +104,7 @@ pub enum CaseSource {
     Automod,
     /// Done by hand in Discord itself, not through the bot, and taken in from the audit log.
     Manual,
-    /// The dashboard.
     Dashboard,
-    /// A script.
     Script,
     /// An appeal that was accepted.
     Appeal,
@@ -330,9 +327,8 @@ pub trait CaseBackend: Send + Sync {
         Err(CaseError::Unavailable)
     }
 
-    /// The cases that match `filter`, newest first, below `before` if given, at most `limit`.
-    /// The default pages through [`Self::list_recent`]; a backend that can filter in its own query
-    /// should override it.
+    /// The cases that match `filter`, newest first, below `before` if given, at most `limit`. The default
+    /// pages through [`Self::list_recent`]; a backend that can filter in its own query should override it.
     async fn search(
         &self,
         guild: GuildId,
@@ -360,9 +356,8 @@ pub trait CaseBackend: Send + Sync {
         Ok(found)
     }
 
-    /// The cases of `kind` against `target` that stand at `now` (unix seconds): not revoked, and
-    /// not past their expiry. Newest first, at most `limit`. The default pages through
-    /// [`Self::list_for_target`]; a backend that can filter in its own query should override it.
+    /// The cases of `kind` against `target` that stand at `now` (unix seconds): not revoked, and not past
+    /// their expiry. Newest first, at most `limit`.
     async fn list_standing(
         &self,
         guild: GuildId,
@@ -544,9 +539,8 @@ impl Cases {
         self.backend.revoke(self.guild, number, by, reason).await
     }
 
-    /// Every case of `kind` against `target` that stands at `now` (unix seconds), newest first, at
-    /// most `limit`. Unlike [`Self::for_target`], the limit is not capped at [`MAX_PAGE`]: this
-    /// checks a state, it does not show a page.
+    /// Every case of `kind` against `target` that stands at `now` (unix seconds), newest first, at most
+    /// `limit`.
     pub async fn standing(
         &self,
         target: UserId,
@@ -861,7 +855,6 @@ mod tests {
         assert_eq!(mute.create(new_case(5, None)).await.unwrap().number, 2);
         assert_eq!(warn.create(new_case(5, None)).await.unwrap().number, 3);
         assert_eq!(elsewhere.create(new_case(5, None)).await.unwrap().number, 1);
-        // The case another module made is there to read.
         assert_eq!(warn.get(2).await.unwrap().unwrap().module, module("mute"));
         assert_eq!(warn.get(4).await.unwrap(), None);
     }
@@ -989,7 +982,6 @@ mod tests {
             warn.create(new_case(5, Some("a\0b"))).await,
             Err(CaseError::InvalidReason(_))
         ));
-        // A refused case takes no number.
         assert_eq!(warn.create(new_case(5, None)).await.unwrap().number, 3);
         assert!(matches!(
             warn.revoke(1, Id::new(9), Some("x".repeat(513))).await,

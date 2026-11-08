@@ -121,7 +121,6 @@ mod tests {
         }
         latency.record(8, ms(1000));
         let summary = latency.summary().unwrap_or_else(|| panic!("measured"));
-        // Shard 7 keeps 300..=700 ms, shard 8 keeps its single 1000 ms.
         assert_eq!(summary.samples, SAMPLES_PER_SHARD + 1);
         assert_eq!(summary.min, ms(300));
         assert_eq!(summary.max, ms(1000));

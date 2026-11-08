@@ -11,13 +11,11 @@ use serde_json::json;
 use twilight_model::guild::Role;
 use twilight_model::id::Id;
 
-/// The guild the harness runs its commands in.
 const GUILD: u64 = 1;
 const MODERATOR_ROLE: u64 = 1_100_000_000_000_000_001;
 const ADMIN_ROLE: u64 = 1_100_000_000_000_000_002;
 const MODERATOR: u64 = 298_765_432_109_876_543;
 const TARGET: u64 = 512_345_678_901_234_567;
-/// The channel the moderation log posts its case cards to.
 const LOG: u64 = 77;
 
 fn role(id: u64, position: i64) -> Role {
@@ -66,7 +64,6 @@ fn text(value: &str) -> CommandOptionValue {
     CommandOptionValue::String(value.to_owned())
 }
 
-/// The last reply of an action: its card, the case the log shows.
 fn card(replies: &[Reply]) -> &Reply {
     replies.last().expect("the action answers")
 }
@@ -149,14 +146,12 @@ async fn showcase_note_shows_its_case() {
     assert!(!card(&replies).embeds.is_empty());
 }
 
-/// A command a moderator runs, with the moderator role.
 fn moderator_runs(name: &str) -> Invocation {
     Invocation::new(name)
         .user(MODERATOR)
         .roles([MODERATOR_ROLE])
 }
 
-/// A command an admin runs, with the admin role.
 fn admin_runs(name: &str) -> Invocation {
     Invocation::new(name).user(MODERATOR).roles([ADMIN_ROLE])
 }

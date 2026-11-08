@@ -55,9 +55,7 @@ async fn lock(
     Ok(())
 }
 
-/// One key's writes take turns. An update or a delete waits for nothing else, so a guild that writes
-/// many keys does not queue them all behind one lock; only a new key also takes [`lock`], for the
-/// quota. The key lock is always taken first.
+/// One key's writes take turns.
 async fn lock_key(
     tx: &mut Transaction<'_, Postgres>,
     module: &ModuleId,
@@ -712,9 +710,9 @@ impl Db {
         Ok((entries, minutes))
     }
 
-    /// Deletes the per-minute history past the widest window in batches, for a bounded time: a
-    /// backlog of any size is worked off over several runs instead of in one statement that the
-    /// timeout would cancel and the next run would start over.
+    /// Deletes the per-minute history past the widest window in batches, for a bounded time: a backlog of
+    /// any size is worked off over several runs instead of in one statement that the timeout would cancel
+    /// and the next run would start over.
     async fn purge_counter_minutes(&self) -> Result<u64, DbError> {
         let started = std::time::Instant::now();
         let mut deleted = 0;
@@ -779,7 +777,6 @@ mod tests {
         assert_eq!(elsewhere.get::<serde_json::Value>("a").await.unwrap(), None);
         assert!(warn.delete("a").await.unwrap());
         assert!(!warn.delete("a").await.unwrap());
-        // `list` is by prefix, in key order, and treats `%` and `_` as ordinary characters.
         for key in ["case:2", "case:1", "case%x", "cased"] {
             warn.set(key, &key).await.unwrap();
         }
@@ -839,7 +836,6 @@ mod tests {
                 .iter()
                 .all(|(key, _)| key != "short")
         );
-        // An expired entry is missing for a write that expects none, and `purge` removes it.
         assert_eq!(
             store
                 .replace("short", &5, Expect::Missing, None)
@@ -877,8 +873,6 @@ mod tests {
         );
     }
 
-    /// Whether `call` waits while a writer holds its turn (of the key when one is given, else of
-    /// the module), and then finishes.
     async fn waits_for_the_writers_turn<F, T>(db: &Db, key: Option<&str>, call: F)
     where
         F: std::future::Future<Output = T> + Send + 'static,
@@ -964,8 +958,6 @@ mod tests {
     async fn legacy_restriction_lists_are_moved_into_the_shared_one(pool: PgPool) {
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
-        // The lists as the modules kept them before the shared one: member 7 in two of them, member 8
-        // with an older key and one already in the shared list, and member 9 with a list that ran out.
         sqlx::query(
             "INSERT INTO module_kv (module, guild_id, key, value, revision, expires_at)
              VALUES ('moderation', 1, 'stripped:7', '[800, 801]', 1, NULL),
@@ -978,7 +970,6 @@ mod tests {
         .await
         .unwrap();
 
-        // `migrate` applies the migration once; running its statements here checks what they do.
         sqlx::raw_sql(include_str!("../migrations/0009_restrictions_shared.sql"))
             .execute(&db.pool)
             .await
@@ -1012,8 +1003,6 @@ mod tests {
     async fn the_quota_of_entries_is_exact_under_concurrency(pool: PgPool) {
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
-        // Fill all but three places (a few rows, and the count the table keeps for them), then
-        // race eight writers for the three.
         sqlx::query(
             "INSERT INTO module_kv (module, guild_id, key, value, revision)
              SELECT 'warn', 1, 'k' || n, '1'::jsonb, 1 FROM generate_series(1, 5) AS n",
@@ -1104,7 +1093,6 @@ mod tests {
                 .unwrap(),
             5
         );
-        // Move what was added into the past: one hour and then a year ago.
         sqlx::query("UPDATE module_counters SET bucket = bucket - 60 WHERE bucket > 0")
             .execute(&db.pool)
             .await
@@ -1129,7 +1117,6 @@ mod tests {
             .unwrap();
         assert_eq!(db.purge_module_storage().await.unwrap().1, 1);
         assert_eq!(store.counter_total("warns", 7_u64).await.unwrap(), 5);
-        // Another subject, another module and another guild have their own.
         assert_eq!(store.counter_total("warns", 8_u64).await.unwrap(), 0);
         assert_eq!(
             self::store(&db, "mute", 1)
@@ -1205,7 +1192,6 @@ mod tests {
 
     #[sqlx::test]
     async fn the_database_and_the_memory_backend_agree(pool: PgPool) {
-        // Same calls, same answers: the memory backend is what tests of modules rely on.
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
         let memory = Arc::new(MemoryStorage::default());
@@ -1267,7 +1253,6 @@ mod tests {
             store.score_add("xp", 9_u64, 10).await.unwrap();
             assert_eq!(store.score("xp", 7_u64).await.unwrap(), 50);
             assert_eq!(store.score("xp", 99_u64).await.unwrap(), 0);
-            // The highest first, the lower subject first among equals.
             assert_eq!(store.score_top("xp", 2).await.unwrap(), [(7, 50), (8, 50)]);
             assert_eq!(store.score_above("xp", 50).await.unwrap(), 0);
             assert_eq!(store.score_above("xp", 10).await.unwrap(), 2);
@@ -1276,7 +1261,6 @@ mod tests {
             assert_eq!(store.score_count("xp").await.unwrap(), 2);
             store.score_put("xp", 9_u64, 70).await.unwrap();
             assert_eq!(store.score_top("xp", 1).await.unwrap(), [(9, 70)]);
-            // Another name, another guild's store: apart.
             assert_eq!(store.score_count("other").await.unwrap(), 0);
 
             assert!(store.set_add("giveaway", 1_u64).await.unwrap());
@@ -1296,7 +1280,6 @@ mod tests {
             drawn.dedup();
             assert_eq!(drawn.len(), 8, "each member once");
             assert_eq!(store.set_sample("giveaway", 100).await.unwrap().len(), 19);
-            // A walk in pages: ascending, past the cursor, and nothing is removed.
             assert_eq!(
                 store.set_after("giveaway", 0_u64, 3).await.unwrap(),
                 [1, 2, 3]
@@ -1313,7 +1296,6 @@ mod tests {
                     .is_empty()
             );
             assert_eq!(store.set_count("giveaway").await.unwrap(), 19);
-            // A queue: taken once, gone from the set.
             let mut first = store.set_take("giveaway", 5).await.unwrap();
             let rest = store.set_take("giveaway", 100).await.unwrap();
             assert_eq!((first.len(), rest.len()), (5, 14));

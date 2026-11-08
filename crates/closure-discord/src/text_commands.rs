@@ -42,8 +42,7 @@ pub(crate) enum Reading {
     },
 }
 
-/// Everything a message is read against: the guild's prefix and language, and the commands of the
-/// modules enabled in the guild.
+/// Everything a message is read against: the guild's prefix and language, and the commands of the modules enabled in the guild.
 pub(crate) struct Reader<'a> {
     pub prefix: &'a str,
     pub application: ApplicationId,
@@ -96,8 +95,7 @@ impl Reader<'_> {
         ))
     }
 
-    /// Reads the options from `words`, or `None` when they do not fit.
-    /// `line` is the text after the prefix: the words index into it.
+    /// Reads the options from `words`, or `None` when they do not fit; `line` is the text after the prefix, which the words index into.
     fn fill(
         message: &MessageInfo,
         options: &[OptionSpec],
@@ -183,8 +181,7 @@ impl Reader<'_> {
         }
     }
 
-    /// The slash command this text command stands for. Its token is the message itself, so a
-    /// reply goes to the message that asked (see [`InteractionToken::for_text_command`]).
+    /// The slash command this text command stands for; its token is the message itself, so a reply goes to the message that asked.
     fn invocation(
         &self,
         message: &MessageInfo,
@@ -211,8 +208,7 @@ impl Reader<'_> {
     }
 }
 
-/// A word after the prefix: its text with quotes and escapes taken out, whether any part of it
-/// was quoted, and where it starts in the line.
+/// A word after the prefix: its text with quotes and escapes removed, whether any part was quoted, and where it starts in the line.
 #[derive(Debug, PartialEq, Eq)]
 struct Word {
     text: String,
@@ -220,8 +216,7 @@ struct Word {
     start: usize,
 }
 
-/// Splits `line` as a shell would: whitespace separates words, `"..."` keeps its spaces, and a
-/// backslash takes the next character literally. An unclosed quote runs to the end of the line.
+/// Splits `line` like a shell: whitespace separates words, `"..."` keeps spaces, a backslash escapes the next character, and an unclosed quote runs to the end.
 fn words(line: &str) -> Vec<Word> {
     let mut words = Vec::new();
     let mut chars = line.char_indices().peekable();
@@ -265,8 +260,7 @@ struct Target<'s> {
     consumed: usize,
 }
 
-/// Picks the subcommand the first words name. `Err` carries the usage of the level that did not
-/// match, such as `auto <status|rule>`.
+/// Picks the subcommand the first words name; `Err` carries the usage of the level that did not match, such as `auto <status|rule>`.
 fn resolve<'s>(spec: &'s CommandSpec, words: &[Word]) -> Result<Target<'s>, String> {
     if spec.subcommands.is_empty() {
         return Ok(Target {
@@ -388,8 +382,7 @@ fn text(option: &OptionSpec, raw: &str) -> Option<String> {
         })
 }
 
-// The spec's bounds are `f64`; an integer beyond 2^53 is compared with a rounded bound, which
-// cannot make a value that is in range look out of it or the reverse for any bound a module sets.
+// The spec's bounds are `f64`; an integer beyond 2^53 is compared with a rounded bound, which cannot make an in-range value look out of range, or the reverse.
 #[allow(clippy::cast_precision_loss)]
 fn integer(option: &OptionSpec, raw: &str) -> Option<i64> {
     let number: i64 = raw.parse().ok()?;
@@ -456,10 +449,7 @@ fn role(raw: &str) -> Option<Id<RoleMarker>> {
     Id::new_checked(snowflake(raw, &["@&"])?)
 }
 
-/// The permissions the invoker has in the message's channel, as far as the cache knows: the owner
-/// has them all, and the roles and the channel's overwrites are applied. The roles come from the
-/// message, so one without member data counts as holding only `@everyone`. A thread is judged by
-/// its own overwrites, not its parent's.
+/// The permissions the invoker has in the message's channel, as far as the cache knows: the owner has them all; roles and channel overwrites apply; a message without member data counts as `@everyone` only; a thread uses its own overwrites.
 pub(crate) fn invoker_permissions(cache: &InMemoryCache, message: &MessageInfo) -> Permissions {
     let guild = message.guild_id;
     // The `@everyone` role has the guild's id.
@@ -505,8 +495,7 @@ struct Deletions {
     reply_after: Option<Duration>,
 }
 
-/// Stands in for the host's API for the one answer a text command cannot give: a form. The
-/// module is told so in the guild's language, and nothing is shown.
+/// Stands in for the host's API for the one answer a text command cannot give: a form. The module is told so in the guild's language, and nothing is shown.
 pub(crate) struct TextCommandApi {
     inner: Arc<dyn DiscordApi>,
     interactions: Arc<InteractionGuilds>,
@@ -600,9 +589,7 @@ impl TextCommandApi {
             .map_or(Locale::DEFAULT, |guild| self.settings.locale(guild))
     }
 
-    /// Posts `text` in the channel of a text command, as a reply to the command, and takes it back
-    /// after `NOTICE_LIFETIME`. A notice is what the host says about a command: nothing in it is
-    /// private.
+    /// Posts `text` in the channel of a text command as a reply to it, and takes it back after `NOTICE_LIFETIME`. A notice is host output, not private.
     async fn notice(
         &self,
         token: &InteractionToken,

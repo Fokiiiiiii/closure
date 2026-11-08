@@ -48,18 +48,13 @@ const MAX_TIMEOUT_SECONDS: u32 = 28 * 86_400;
 /// The most messages a ban deletes, 7 days in seconds. The argument's bounds are only a hint to
 /// Discord, so the module checks them too.
 const MAX_BAN_DELETE_SECONDS: u32 = 7 * 86_400;
-/// How many active warnings `/warnings` lists, the newest first.
 const SHOWN: usize = 10;
-/// How many cases `/case list` lists.
 const LISTED: usize = 10;
-/// How many cases a page of [`Cases::for_target`] holds at most.
 const PAGE: usize = 25;
-/// The most cases of one kind that stand against one member that are asked for.
 const MAX_STANDING: usize = 10_000;
 /// How many cases back an active warning is looked for. shortcut: a member with more cases
 /// than this has the older warnings left out of the count, upgrade with an index on the target.
 const SCAN: usize = 100;
-/// How many characters of a reason a list shows.
 const REASON_SHOWN: usize = 80;
 /// Discord's limit of a message is 2000 characters; `/warnings` stays below it.
 const MAX_CHARS: usize = 1900;
@@ -120,7 +115,6 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    /// The channel where requests for approval are put.
     fn approval_target(&self) -> Option<closure_sdk::ChannelId> {
         self.approval_channel
             .as_deref()
@@ -129,7 +123,6 @@ impl Config {
             .map(closure_sdk::ChannelId::new)
     }
 
-    /// The channel the exports of cases go to.
     fn export_target(&self) -> Option<closure_sdk::ChannelId> {
         self.export_channel
             .as_deref()
@@ -138,7 +131,6 @@ impl Config {
             .map(closure_sdk::ChannelId::new)
     }
 
-    /// The staff channel of the alert on a rejoin.
     fn alert_target(&self) -> Option<closure_sdk::ChannelId> {
         self.alert_channel
             .as_deref()
@@ -234,7 +226,7 @@ fn plan(rule: &Rule) -> Option<Escalation> {
     }
 }
 
-/// The rule that applies at `active` warnings: the first one that names that number.
+/// The first rule that names the number of active warnings.
 fn rule_for(rules: &[Rule], active: usize) -> Option<&Rule> {
     let active = u32::try_from(active).ok()?;
     rules.iter().find(|rule| rule.warns == Some(active))
@@ -354,9 +346,7 @@ fn stands(case: &Case, kind: &str, now: i64) -> bool {
     case.kind.as_str() == kind && state(case, now) == State::Active
 }
 
-/// The cases of `kind` against `target` that still stand, newest first, at most `wanted`. The
-/// store picks them, not a look back over the newest cases: a punishment still in force is found
-/// however many notes and warnings were written after it.
+/// Found in the store, so a punishment is found however many notes came after it.
 async fn active_cases(
     cases: &Cases,
     target: UserId,
@@ -382,7 +372,6 @@ fn reason_of(text: Option<String>) -> Option<String> {
     text.filter(|text| !text.trim().is_empty())
 }
 
-/// A reason as a list shows it: escaped and shortened.
 fn shorten(reason: &str) -> String {
     truncate(&escape(reason), REASON_SHOWN)
 }
@@ -500,7 +489,6 @@ async fn channel_created(ctx: EventContext, event: Event) -> Result<Flow, Module
     Ok(Flow::Continue)
 }
 
-/// The case of a punishment and its notes, the notes in the language of the reply.
 fn case_and_notes(punisher: &Punisher<'_>, done: Done) -> (Case, Vec<String>) {
     let notes = done
         .notes
@@ -510,7 +498,6 @@ fn case_and_notes(punisher: &Punisher<'_>, done: Done) -> (Case, Vec<String>) {
     (done.case, notes)
 }
 
-/// A reply with its notes, each after a space.
 fn with_notes(mut text: String, notes: &[String]) -> String {
     for note in notes {
         text.push(' ');
@@ -543,7 +530,6 @@ async fn record<I: InteractionRef + 'static>(
     Ok(case)
 }
 
-/// The seconds of a timeout, which Discord takes at most 28 days of.
 fn timeout_seconds(duration: Duration) -> Result<u32, UserError> {
     u32::try_from(duration.as_secs())
         .ok()
@@ -551,7 +537,6 @@ fn timeout_seconds(duration: Duration) -> Result<u32, UserError> {
         .ok_or_else(|| UserError::message("timeout-too-long"))
 }
 
-/// The seconds of messages a ban deletes, which Discord takes at most 7 days of.
 fn delete_seconds(days: i64) -> Result<u32, UserError> {
     match u32::try_from(days * DAY) {
         Ok(seconds) if seconds <= MAX_BAN_DELETE_SECONDS => Ok(seconds),
@@ -588,7 +573,6 @@ async fn escalate<I: InteractionRef + 'static>(
     Ok(case_and_notes(&punisher, done))
 }
 
-/// What an escalation does, in words, in the language of the moderator.
 fn escalation_phrase<I: InteractionRef + 'static>(cx: &Cx<I>, escalation: Escalation) -> String {
     match escalation {
         Escalation::Timeout(duration) => cx.t(
@@ -610,8 +594,6 @@ fn escalation_phrase<I: InteractionRef + 'static>(cx: &Cx<I>, escalation: Escala
     }
 }
 
-/// The line of the reply about the escalation that the warning `warning` brings about, if a rule
-/// asks for one. A failed escalation leaves the warning standing and says so.
 async fn escalation_line<I: InteractionRef + 'static>(
     cx: &Cx<I>,
     config: &Config,
@@ -711,7 +693,6 @@ async fn note<I: InteractionRef + 'static>(cx: Cx<I>, args: Note) -> Result<(), 
     .await
 }
 
-/// Shows the warnings of `user` that still count, newest first, to the one who asked.
 async fn show_warnings(cx: CommandCx, user: UserId) -> Result<(), UserError> {
     let now = cx.now();
     let found = active_cases(cx.cases(), user, "warn", now, SHOWN).await?;
@@ -747,7 +728,6 @@ async fn show_warnings(cx: CommandCx, user: UserId) -> Result<(), UserError> {
     cx.reply_private(text).await
 }
 
-/// Lists the warnings of a member that still count, newest first.
 async fn warnings(cx: CommandCx, args: Target) -> Result<(), UserError> {
     show_warnings(cx, args.user).await
 }
@@ -780,7 +760,6 @@ async fn show_case(cx: CommandCx, number: i64) -> Result<(), UserError> {
     .await
 }
 
-/// Lists the cases of a member, newest first, `before` a number if given.
 async fn case_list<I: InteractionRef + 'static>(
     cx: Cx<I>,
     user: UserId,
@@ -834,10 +813,7 @@ async fn case_revoke(cx: CommandCx, args: Revoke) -> Result<(), UserError> {
     .await
 }
 
-/// Times a member out. Discord's own timeout is 28 days at most, so a longer one is refused before
-/// anything is done; a timeout by role has no such limit. Without a reason or a duration, a
-/// template is asked for. The member stays in the server, so the direct message comes after the
-/// timeout.
+/// Times a member out; a timeout longer than Discord's 28 days is refused (a role timeout has no limit).
 async fn timeout<I: InteractionRef + 'static>(
     cx: Cx<I>,
     args: TimeoutArgs,
@@ -882,7 +858,6 @@ async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 }
 
 /// Kicks a member. The direct message comes first: a kicked member shares no server with the bot.
-/// Without a reason, a template is asked for.
 async fn kick<I: InteractionRef + 'static>(cx: Cx<I>, args: MemberReason) -> Result<(), UserError> {
     cx.defer(true).await?;
     cx.check_target(args.user).await?;
@@ -897,9 +872,6 @@ async fn kick<I: InteractionRef + 'static>(cx: Cx<I>, args: MemberReason) -> Res
     templates::punish(&cx, &config, punishment).await
 }
 
-/// Bans a member, for good or for a while. A timed ban gets a timer that lifts it when its time is
-/// up. The direct message comes first, as with a kick. Without a reason, or a duration on a ban
-/// that a template may give, a template is asked for.
 async fn ban<I: InteractionRef + 'static>(cx: Cx<I>, args: BanArgs) -> Result<(), UserError> {
     if args.soft == Some(true) {
         if args.duration.is_some() {
@@ -968,7 +940,6 @@ async fn unban(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 const REMOVE_ROLES_DOC: &str = "config-moderation-remove_roles_on_mute";
 const RESTORE_ROLES_DOC: &str = "config-moderation-restore_roles_on_mute";
 
-/// The schema of a setting that takes roles: `false`, `true`, or a list of role ids.
 fn role_list_setting(description: &str) -> serde_json::Value {
     json!({
         "oneOf": [
@@ -1323,7 +1294,6 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
         )?))
 }
 
-/// The commands that act on a channel and the ones that look at, or act on, many members.
 fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
     let long = Arc::new(channel_controls::LongState::default());
     menu::register(builder)
@@ -1365,7 +1335,6 @@ fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
         )
 }
 
-/// The module, still open for a test to build on.
 #[allow(
     clippy::too_many_lines,
     reason = "the declaration: each command and job in turn"
@@ -1486,7 +1455,6 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         .catalog(Locale::Ja, JA))
 }
 
-/// The module as the host loads it.
 pub fn module() -> Result<SdkModule, CoreError> {
     builder()?.build()
 }

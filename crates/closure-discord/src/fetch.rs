@@ -7,8 +7,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 
-/// Fetches over HTTPS with the platform's certificates. A redirect is an error, and a body stops at
-/// the limit.
+/// Fetches over HTTPS with the platform's certificates; a redirect is an error, and a body stops at the limit.
 pub struct HttpFetcher {
     client: Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>,
 }

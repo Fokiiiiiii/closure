@@ -1,10 +1,7 @@
-//! A guard against a nuke: an account (a stolen administrator, or a bot someone added) that
-//! deletes channels or roles, or bans members, faster than anybody does on purpose.
+//! A guard against a nuke: an account that deletes channels or roles, or bans, faster than anyone on purpose.
 //!
-//! The module counts each such change by whoever made it, as the audit log names them, in a short
-//! window. When one account reaches a limit, its powers are taken away (every role of it that
-//! carries moderator powers; a bot is kicked) and the staff are told. The owner of the server, the
-//! bot itself, and the accounts and roles the server listed as trusted are never touched.
+//! Changes are counted per account in a short window; a limit takes away its moderator roles (a bot is kicked).
+//! The owner, the bot, and the trusted accounts and roles are never touched.
 //!
 //! The counts are kept in memory: a window is a half minute, so a restart forgets at most that.
 
@@ -31,7 +28,6 @@ const JA: &str = include_str!("../locales/ja.ftl");
 
 /// How old an audit log entry may be and still be the change an event reports.
 const AUDIT_WINDOW_SECONDS: i64 = 60;
-/// How many of the newest entries of one kind are searched for the change.
 const AUDIT_LOOKUP_LIMIT: u16 = 50;
 /// How long an account that was acted on is not acted on again, so that the rest of a burst that
 /// is already stopped does not tell the staff once for each change.
@@ -50,7 +46,6 @@ const POWERS: Permissions = Permissions::ADMINISTRATOR
     .union(Permissions::MODERATE_MEMBERS)
     .union(Permissions::MANAGE_MESSAGES);
 
-/// What the module counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Change {
     ChannelDelete,
@@ -76,14 +71,11 @@ impl Change {
     }
 }
 
-/// What to do with an account that reached a limit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Response {
-    /// Take its powers away, and tell the staff.
     #[default]
     Strip,
-    /// Only tell the staff.
     Alert,
 }
 
@@ -94,14 +86,11 @@ struct Config {
     channel_deletes: u32,
     role_deletes: u32,
     bans: u32,
-    /// The window, such as 30s.
     window: String,
     response: Response,
     /// Where the staff are told; else the log channel of the server.
     alert_channel: Option<String>,
-    /// Accounts that are never acted on.
     exempt_users: Vec<String>,
-    /// Roles whose members are never acted on.
     exempt_roles: Vec<String>,
 }
 
@@ -191,7 +180,6 @@ fn first_to_act(guild: GuildId, user: UserId, now: i64) -> bool {
     true
 }
 
-/// The change an event reports, and the id of what it was done to.
 fn change_of(event: &Event) -> Option<(Change, u64)> {
     match event {
         Event::ChannelDeleted(channel) => Some((Change::ChannelDelete, channel.id.get())),
@@ -201,7 +189,6 @@ fn change_of(event: &Event) -> Option<(Change, u64)> {
     }
 }
 
-/// Who made the change, from the audit log. `None` when nobody can be named.
 async fn actor_of(ctx: &EventContext, change: Change, target: u64) -> Option<UserId> {
     let outcome = ctx
         .api
@@ -229,11 +216,8 @@ async fn actor_of(ctx: &EventContext, change: Change, target: u64) -> Option<Use
         .and_then(|entry| entry.user_id)
 }
 
-/// What came of acting on the account.
 struct Stopped {
-    /// Roles taken off.
     stripped: Vec<RoleId>,
-    /// Roles that could not be taken off.
     kept: usize,
     kicked: bool,
 }
@@ -285,7 +269,6 @@ async fn strip(ctx: &EventContext, user: UserId, reason: &str) -> Result<Stopped
     Ok(done)
 }
 
-/// Tells the staff what was found and what was done.
 async fn alert(
     ctx: &EventContext,
     config: &Config,
@@ -329,7 +312,6 @@ async fn alert(
     }
 }
 
-/// Whether the account is one the module never acts on.
 async fn exempt(ctx: &EventContext, config: &Config, user: UserId) -> bool {
     if Some(user) == ctx.bot() || ids(&config.exempt_users, UserId::new_checked).contains(&user) {
         return true;

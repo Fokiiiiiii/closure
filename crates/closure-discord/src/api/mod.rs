@@ -38,8 +38,7 @@ pub use guilds::joined_guilds;
 use crate::error::map_http_error;
 use crate::hierarchy::{CacheView, Preflight, preflight};
 
-/// How reads that failed transiently are repeated. Writes are never retried: repeating a ban
-/// or a message that may have gone through would be worse than reporting the failure.
+/// How reads that failed transiently are repeated; writes are never retried, since repeating a ban or a message that may have gone through would be worse.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
     pub max_retries: u32,
@@ -73,8 +72,7 @@ pub struct TwilightApi {
     cache: Option<Arc<dyn CacheView>>,
     retry: RetryPolicy,
     clock: Clock,
-    /// Guilds of channels learned from Discord. A channel never changes guild, so an entry
-    /// cannot go stale; the map is emptied when it reaches [`KNOWN_CHANNELS`].
+    /// Guilds of channels learned from Discord; a channel never changes guild, so an entry cannot go stale. Emptied when it reaches [`KNOWN_CHANNELS`].
     known_channels: Mutex<HashMap<ChannelId, GuildId>>,
     webhooks: WebhookRegistry,
     webhook_guilds: Mutex<
@@ -85,8 +83,7 @@ pub struct TwilightApi {
     >,
     webhook_gone: Mutex<HashMap<String, i64>>,
     webhook_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Lookups of a channel's guild that are under way, so concurrent first lookups of one
-    /// channel make one request.
+    /// Lookups of a channel's guild under way, so concurrent first lookups of one channel make one request.
     lookups: Mutex<HashMap<ChannelId, LookupCell>>,
     /// What the bot said in reply to text commands.
     text: interactions::TextReplies,
@@ -269,10 +266,7 @@ impl DiscordApi for TwilightApi {
             .and_then(|cache| cache.guild_owner(guild)))
     }
 
-    /// Answered from the cache, then from earlier answers of Discord; otherwise Discord is asked
-    /// (a `GetChannel`, counted and timed like any other action). A channel does not move
-    /// between guilds, so a remembered answer cannot go stale. Concurrent first lookups of the
-    /// same channel make one request and share its answer.
+    /// Answered from the cache or earlier Discord answers, otherwise by asking Discord (a `GetChannel`). A channel does not move between guilds, so a remembered answer cannot go stale.
     async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
         let lookup = |source: &'static str| {
             metrics::counter!("closure_channel_guild_lookups_total", "source" => source)
@@ -296,8 +290,7 @@ impl DiscordApi for TwilightApi {
             lookup("memory");
             return Ok(Some(guild));
         }
-        // Whoever comes first asks; the others who want the same channel meanwhile wait for that
-        // answer, a failure included, instead of asking again.
+        // Whoever comes first asks; the rest wait for its answer, a failure included, instead of asking again.
         let flight = Flight::join(&self.lookups, channel);
         let mut asked = false;
         let answer = flight
@@ -319,8 +312,7 @@ impl DiscordApi for TwilightApi {
 /// A lookup of the guild of a channel that is under way, shared by everyone who wants it.
 type LookupCell = Arc<OnceCell<Result<Option<GuildId>, DiscordError>>>;
 
-/// One caller's share in a lookup. The last one to leave takes the lookup off the list, also when
-/// the callers are given up on (their future dropped) before the answer came.
+/// One caller's share in a lookup; the last to leave removes the lookup, also when callers are dropped before the answer came.
 struct Flight<'a> {
     lookups: &'a Mutex<HashMap<ChannelId, LookupCell>>,
     channel: ChannelId,
@@ -347,8 +339,7 @@ impl<'a> Flight<'a> {
 impl Drop for Flight<'_> {
     fn drop(&mut self) {
         let mut lookups = self.lookups.lock().unwrap_or_else(PoisonError::into_inner);
-        // Joining happens under this lock too, so no new share appears while this is decided: the
-        // list's own reference and this one are all that is left when nobody else waits.
+        // Joining happens under this lock, so no new share appears while this is decided: the list's own reference and this one are all that is left when nobody else waits.
         if Arc::strong_count(&self.cell) <= 2
             && lookups
                 .get(&self.channel)
@@ -360,8 +351,7 @@ impl Drop for Flight<'_> {
 }
 
 impl TwilightApi {
-    /// Asks Discord (a `GetChannel`, counted and timed like any other action) and remembers the
-    /// guild it names.
+    /// Asks Discord (a `GetChannel`) and remembers the guild it names.
     async fn ask_discord(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError> {
         match self
             .execute(Action::GetChannel {
@@ -399,8 +389,7 @@ impl TwilightApi {
 
 impl TwilightApi {
     async fn execute_checked(&self, action: &Action) -> Result<Outcome, DiscordError> {
-        // A rank problem seen in the cache is only a suspicion (the cache may be stale): the
-        // request is sent anyway, and the suspicion explains a 403 should one come back.
+        // A rank problem seen in the cache is only a suspicion: the request is still sent, and the suspicion explains a 403 should one come back.
         let mut suspicion = None;
         if let Some(cache) = &self.cache {
             match preflight(cache.as_ref(), action) {

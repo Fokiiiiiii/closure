@@ -154,8 +154,7 @@ impl TwilightApi {
         read_list(request).await.map(Outcome::Bans)
     }
 
-    /// Refuses unless `user` is a member of `guild`: the cache is trusted when it knows, otherwise
-    /// Discord is asked.
+    /// Refuses unless `user` is a member of `guild`: the cache is trusted when it knows, otherwise Discord is asked.
     pub(super) async fn ensure_member(
         &self,
         guild: GuildId,

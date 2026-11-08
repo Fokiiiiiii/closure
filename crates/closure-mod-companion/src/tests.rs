@@ -79,7 +79,6 @@ async fn other_voice_channels_and_staying_put_change_nothing() {
 #[tokio::test]
 async fn what_the_member_had_of_their_own_is_given_back_and_not_deleted() {
     let harness = harness();
-    // The member has an overwrite of their own on the text channel: it allows 64 (add reactions).
     let channel = serde_json::from_value(serde_json::json!({
         "id": "31", "guild_id": "1", "type": 0, "name": "voice-text",
         "permission_overwrites": [{ "id": "7", "type": 1, "allow": "64", "deny": "0" }]
@@ -126,7 +125,6 @@ async fn moving_between_voice_channels_of_one_text_channel_keeps_what_the_member
     harness.set_config(serde_json::json!({"pairs": [
         {"voice": "30", "text": "31"}, {"voice": "32", "text": "31"}
     ]}));
-    // The overwrite the module makes shows up in the channel as it is read the second time.
     let with_shown = serde_json::from_value(serde_json::json!({
         "id": "31", "guild_id": "1", "type": 0, "name": "voice-text",
         "permission_overwrites": [{ "id": "7", "type": 1, "allow": "68608", "deny": "0" }]

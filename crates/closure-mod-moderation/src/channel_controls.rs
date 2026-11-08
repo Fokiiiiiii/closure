@@ -440,7 +440,6 @@ pub(crate) async fn restore_lock(cx: JobCx) -> Result<(), ModuleError> {
     Ok(())
 }
 
-/// The channels whose slowmode is longer than Discord allows, with its seconds.
 type LongChannels = HashMap<u64, i64>;
 const LONG_KEY: &str = "longslow";
 /// The longest slowmode Discord itself keeps; the bot keeps the rest.
@@ -536,7 +535,6 @@ async fn forget_long(state: &LongState, cx: &CommandCx, id: ChannelId) -> Result
     Ok(())
 }
 
-/// A message in a channel with a long slowmode: removed when the member's last one is too near.
 pub(crate) async fn enforce_long_slowmode(
     state: Arc<LongState>,
     ctx: EventContext,

@@ -4,10 +4,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// A language the bot can speak.
-///
-/// Adding a language means adding a variant here, a Discord tag mapping below and a catalog
-/// per module. Everything else falls back to [`Locale::DEFAULT`] when a translation is missing.
+/// A language the bot can speak. Adding a language means adding a variant here, a Discord tag mapping
+/// below and a catalog per module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -130,10 +128,6 @@ pub struct Catalog {
 }
 
 /// Looks up translated text.
-///
-/// Implementations must never fail or return an empty string: a missing translation falls
-/// back to [`Locale::DEFAULT`] and finally to the key itself, so a catalog mistake degrades
-/// a message instead of breaking a moderation action.
 pub trait Translator: Send + Sync {
     fn translate(&self, locale: Locale, namespace: &str, key: &str, args: &Args) -> String;
 

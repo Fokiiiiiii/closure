@@ -639,8 +639,7 @@ async fn a_failed_lookup_is_shared_by_those_waiting_and_not_remembered() {
     assert!(failed >= 1);
     assert_eq!(api.lookups_in_flight(), 0);
 
-    // The failure was not kept: whoever asks next gets the real answer. (How many requests it took
-    // depends on the order the waiters ran in, so only the answer is asserted here.)
+    // The failure was not kept: whoever asks next gets the real answer; how many requests it took depends on the waiters' order, so only the answer is asserted.
     assert_eq!(api.channel_guild(Id::new(100)).await, Ok(Some(Id::new(10))));
 }
 
@@ -783,8 +782,7 @@ mod scoped_client {
                 vec![(500, ""), (403, FORBIDDEN)],
             ),
             (
-                // Twilight resends a rate limited request itself and would never stop if the
-                // answer stayed 429, so the limit lifts here and the lookup is then refused.
+                // Twilight resends a rate limited request itself and would never stop if the answer stayed 429, so the limit lifts here and the lookup is then refused.
                 "rate limited, then forbidden",
                 vec![
                     (

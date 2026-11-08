@@ -19,8 +19,7 @@ impl TwilightApi {
         patch: &GuildPatch,
         reason: &Reason,
     ) -> Result<Outcome, DiscordError> {
-        // Discord sets the whole list of features, so the invites feature is added to or taken
-        // from the list it has now.
+        // Discord sets the whole feature list, so the invites feature is added to or removed from the current one.
         let features = match patch.invites_disabled {
             Some(disabled) => Some(self.features_with_invites(guild, disabled).await?),
             None => None,
@@ -66,7 +65,6 @@ impl TwilightApi {
 const PAGE: u16 = 200;
 
 /// Every guild the bot is currently in, read page by page from Discord.
-///
 /// Gateway events only report changes while connected, so after downtime this is what tells the
 /// bot which guilds it was added to or removed from in the meantime.
 pub async fn joined_guilds(http: &Client) -> Result<Vec<GuildId>, DiscordError> {

@@ -14,7 +14,6 @@ const LOG: u64 = 77;
 const ADMIN_ROLE: u64 = 500;
 const PLAIN_ROLE: u64 = 501;
 const TRUSTED_ROLE: u64 = 502;
-/// The owner the pretend Discord gives every server.
 const OWNER: u64 = 999_999_999;
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
@@ -72,7 +71,6 @@ fn config(changes: &Value) -> Value {
     config
 }
 
-/// An audit log entry of `kind` on `target`, made by `by` just now.
 fn audit(kind: AuditLogEventType, target: u64, by: u64) -> AuditLogEntry {
     let now_ms = u64::try_from(
         SystemTime::now()
@@ -105,7 +103,6 @@ fn channel(id: u64) -> ChannelInfo {
     }
 }
 
-/// `by` deletes the channels `ids`, one after the other.
 async fn delete_channels(harness: &Harness, by: u64, ids: &[u64]) {
     for id in ids {
         harness
@@ -176,7 +173,6 @@ async fn an_account_that_deletes_channels_in_a_burst_loses_its_powers_and_the_st
         "{told:?}"
     );
 
-    // The rest of the burst is not told again.
     delete_channels(&harness, nuker, &[14, 15, 16]).await;
     assert_eq!(alerts(&harness).len(), 1);
 }
@@ -289,7 +285,6 @@ async fn a_limit_of_zero_a_change_nobody_is_named_for_and_different_accounts_do_
     delete_channels(&off, 1_010, &[101, 102, 103, 104]).await;
     assert!(!took_any(&off, 1_010), "not watched");
 
-    // No entry names who deleted them: nobody is blamed.
     let unnamed = harness(&config(&json!({})));
     for id in [111, 112, 113, 114] {
         unnamed
@@ -299,7 +294,6 @@ async fn a_limit_of_zero_a_change_nobody_is_named_for_and_different_accounts_do_
     }
     assert!(alerts(&unnamed).is_empty());
 
-    // Two accounts at two deletions each are not one at four.
     let two = harness(&config(&json!({})));
     two.api()
         .set_member(Id::new(GUILD), member(1_011, &[ADMIN_ROLE], false));

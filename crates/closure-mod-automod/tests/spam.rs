@@ -20,7 +20,6 @@ use closure_sdk::testing::{Harness, Message};
 use common::*;
 use serde_json::{Value, json};
 
-/// A rule `flood` with one spam trigger, the actions given.
 fn flood(trigger: Value, actions: Value) -> closure_sdk::testing::Harness {
     with_rules(rules(&[("flood", rule(json!([trigger]), actions))]))
 }
@@ -227,8 +226,6 @@ async fn coordinated_spam_continues_when_a_target_has_left() {
     }
 }
 
-// ---- the window ----
-
 #[tokio::test]
 async fn messages_within_the_window_trip_on_the_amount_and_delete_every_counted_message() {
     let harness = flood(messages(3), delete());
@@ -378,8 +375,6 @@ async fn duplicates_counts_the_most_often_repeated_text() {
     assert_eq!(deletions(&distinct), 0);
 }
 
-// ---- the other measures ----
-
 #[tokio::test]
 async fn mentions_add_up_the_people_and_roles_each_message_mentions() {
     let trigger = json!({ "type": "spam", "measure": "mentions", "amount": 4, "within": "10s" });
@@ -476,8 +471,6 @@ async fn stickers_add_up_the_stickers_of_each_message() {
     assert_eq!(deletions(&harness), 2);
 }
 
-// ---- one burst, one hit ----
-
 #[tokio::test]
 async fn a_burst_fires_once_and_its_later_messages_are_removed_without_a_second_punishment() {
     let harness = flood(messages(3), json!([{ "do": "delete" }, { "do": "warn" }]));
@@ -536,9 +529,6 @@ async fn a_single_message_measure_without_a_window_needs_no_history() {
     assert_eq!(deletions(&harness), 1);
 }
 
-// ---- one burst, however many evaluations see it ----
-
-/// A rule that alerts the notify channel once two messages of a member are in the window.
 fn alerts_on_two() -> Harness {
     flood(
         messages(2),
@@ -546,7 +536,6 @@ fn alerts_on_two() -> Harness {
     )
 }
 
-/// A rule that alerts the notify channel once two members join within the window.
 fn alerts_on_two_joins() -> Harness {
     flood(
         json!({ "type": "member_join_spam", "amount": 2, "within": "30s" }),
@@ -564,8 +553,6 @@ async fn two_evaluations_of_one_burst_punish_once() {
     assert_eq!(texts_in(&harness, NOTIFY), vec!["burst".to_owned()]);
 }
 
-/// Two evaluations on two threads at once, repeated: the checks of a burst overlap, and it must
-/// still fire once in every round.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_messages_of_one_burst_on_two_threads_punish_once() {
     for round in 0..200 {

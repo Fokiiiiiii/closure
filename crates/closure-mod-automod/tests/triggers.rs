@@ -17,8 +17,6 @@ use std::time::{Duration, Instant};
 use common::*;
 use serde_json::json;
 
-// ---- words ----
-
 #[tokio::test]
 async fn words_contains_matches_japanese_inside_a_sentence() {
     let trigger = json!({ "type": "words", "words": ["バカ"], "whole_words": false });
@@ -81,8 +79,6 @@ async fn words_can_read_the_username_instead_of_the_message() {
     );
 }
 
-// ---- regex ----
-
 #[tokio::test]
 async fn regex_matches_case_insensitively_by_default() {
     let trigger = json!({ "type": "regex", "patterns": [r"free\s+nitro"] });
@@ -102,8 +98,6 @@ async fn regex_with_catastrophic_backtracking_finishes_at_once() {
         "a regex is linear in the text"
     );
 }
-
-// ---- links ----
 
 #[tokio::test]
 async fn links_any_hits_a_link_and_misses_plain_text() {
@@ -184,11 +178,8 @@ async fn loose_matching_finds_a_word_with_characters_between_its_letters() {
     assert!(!trips(loose, "dab").await, "in order");
     let wide = json!({ "type": "words", "words": ["bad"], "loose_matching": true, "loose_gap": 4 });
     assert!(trips(wide, "b....a....d").await);
-    // Without it a word has to stand on its own.
     assert!(!trips(json!({ "type": "words", "words": ["bad"] }), "b.a.d").await);
 }
-
-// ---- invites ----
 
 #[tokio::test]
 async fn invites_hit_unless_the_code_is_allowed_and_blocked_codes_always_hit() {
@@ -202,8 +193,6 @@ async fn invites_hit_unless_the_code_is_allowed_and_blocked_codes_always_hit() {
     assert!(!trips(json!({ "type": "invites" }), "no invite here").await);
 }
 
-/// Whether a rule with the invites trigger `trigger` deletes a message with `content`, when
-/// Discord says each of `known` leads to the server it is paired with.
 async fn trips_with_invites(
     trigger: serde_json::Value,
     content: &str,
@@ -243,7 +232,6 @@ async fn invites_to_this_server_are_fine_and_those_to_listed_servers_are_judged_
             .await
             .0
     );
-    // A blocked server wins over an allowed code, and over this server.
     let blocked = json!({
         "type": "invites", "allow_codes": ["abc"], "block_guilds": ["900"]
     });
@@ -252,7 +240,6 @@ async fn invites_to_this_server_are_fine_and_those_to_listed_servers_are_judged_
             .await
             .0
     );
-    // An invite Discord does not know leads nowhere, so it is not allowed.
     let unknown = json!({ "type": "invites", "allow_guilds": ["900"] });
     assert!(
         trips_with_invites(unknown, "discord.gg/gone", &other)
@@ -272,15 +259,12 @@ async fn the_server_of_an_invite_is_asked_once_and_only_when_a_rule_needs_it() {
     }
     assert_eq!(harness.api().invite_lookups(), 1);
 
-    // Codes alone decide a rule that names no server and turns the own server off.
     let codes = json!({ "type": "invites", "allow_own_server": false, "allow_codes": ["abc"] });
     assert_eq!(
         trips_with_invites(codes, "discord.gg/abc", &[]).await,
         (false, 0)
     );
 }
-
-// ---- attachments ----
 
 fn with_files(files: Vec<closure_sdk::AttachmentInfo>) -> closure_sdk::MessageInfo {
     let mut info = custom(MEMBER, CHANNEL, "");
@@ -336,8 +320,6 @@ async fn attachments_by_mime_type_with_wildcards() {
     );
     assert!(!trips_with(allowed, with_files(vec![file("a.png", Some("image/png"))])).await);
 }
-
-// ---- caps, repeats, stickers, any message ----
 
 #[tokio::test]
 async fn caps_need_enough_letters_before_they_count() {

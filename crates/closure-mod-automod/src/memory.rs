@@ -29,9 +29,7 @@ struct OwnRoleChange {
 pub struct Memory {
     /// Oldest first; bounded, and pruned by age.
     own_roles: Mutex<VecDeque<OwnRoleChange>>,
-    /// The last report of a missing permission, per guild and rule.
     reported: Mutex<HashMap<String, i64>>,
-    /// The slowmode last set for a channel, and when.
     slowmodes: Mutex<HashMap<ChannelId, (u16, i64)>>,
     /// The parent of each thread seen, by guild and thread: a lookup, not a scan.
     thread_parents: Mutex<HashMap<(GuildId, ChannelId), ChannelId>>,
@@ -114,7 +112,6 @@ impl Memory {
             .is_some_and(|(set, at)| *set == seconds && now - at < SLOWMODE_REPEAT_SECONDS)
     }
 
-    /// Remembers that the slowmode `seconds` was set on `channel` now.
     pub fn remember_slowmode(&self, channel: ChannelId, seconds: u16, now: i64) {
         let mut slowmodes = lock(&self.slowmodes);
         if slowmodes.len() >= MAX_REMEMBERED {

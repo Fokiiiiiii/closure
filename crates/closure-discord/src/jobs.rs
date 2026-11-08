@@ -16,17 +16,12 @@ use crate::dispatcher::{Dispatcher, JobOutcome};
 const POLL: Duration = Duration::from_secs(1);
 /// How many jobs are taken at once; a full batch is followed by another at once.
 const BATCH: usize = 50;
-/// How long a taken job is held for this runner. A job still not reported done after that is
-/// handed out again (the bot probably stopped while it ran), so it has to be longer than any
-/// handler may take, and than a job waits in a busy guild's queue.
+/// How long a taken job is held for this runner; a job not reported done by then is handed out again, so it must outlast any handler and a wait in a busy guild's queue.
 const LEASE: Duration = Duration::from_secs(300);
 /// How long a job that could not be run for no fault of its own waits.
 const POSTPONE: Duration = Duration::from_secs(30);
 
-/// Takes the jobs that are due and runs them until `stop` is cancelled. A job runs as a task of its
-/// own, so a slow one does not hold the next ones back: at most [`BATCH`] run at once, and a job is
-/// claimed only when there is a place for it, so its lease does not run while it waits. When `stop`
-/// is cancelled the jobs in flight are finished and reported first.
+/// Takes due jobs and runs them until `stop` is cancelled. Each runs as its own task, at most [`BATCH`] at once; a job is claimed only when there is room, so its lease does not run while it waits. On cancel, jobs in flight finish and are reported first.
 pub async fn run_jobs(
     backend: Arc<dyn SchedulerBackend>,
     dispatcher: Dispatcher,
@@ -96,8 +91,7 @@ pub async fn run_due(backend: &dyn SchedulerBackend, dispatcher: &Dispatcher) ->
 async fn run_one(backend: &dyn SchedulerBackend, dispatcher: &Dispatcher, job: ScheduledJob) {
     let (id, token, attempt) = (job.id, job.token, job.attempt);
     let (module, name) = (job.module.clone(), job.name.clone());
-    // While the job runs, its lease is kept up: one that waits long in a busy guild's queue, or
-    // runs long, is not handed out again, and a removal that cannot reach it is told so.
+    // While the job runs its lease is kept up, so a long wait or run is not handed out again; a removal that cannot reach it is told so.
     let outcome = {
         let run = dispatcher.run_job(job);
         tokio::pin!(run);

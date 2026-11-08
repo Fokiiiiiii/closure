@@ -177,8 +177,7 @@ pub struct OptionSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u16>,
     /// Discord asks the module for choices while the user types (see
-    /// [`crate::action::InteractionResponse::Autocomplete`]). Only for strings, integers and
-    /// numbers without fixed choices.
+    /// [`crate::action::InteractionResponse::Autocomplete`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autocomplete: bool,
 }
@@ -279,10 +278,8 @@ pub struct ContextCommandSpec {
     pub kind: ContextKind,
 }
 
-/// A slash command, as data.
-///
-/// Localised names and descriptions are not stored here: for command `ping` the catalog holds
-/// `command-ping` (the name) with a `.description` attribute, per locale.
+/// A slash command, as data. Localised names and descriptions are not stored here: for command `ping`
+/// the catalog holds `command-ping` (the name) with a `.description` attribute, per locale.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub name: String,
@@ -857,10 +854,6 @@ impl EventContext {
     }
 
     /// Deserialises the module's configuration into its own typed struct.
-    ///
-    /// The settings the SDK keeps for every module (who sees the replies, the administrator's
-    /// texts) are not the module's own and are left out, so that a module that refuses settings
-    /// it does not know can still read its own.
     pub fn parse_config<T: DeserializeOwned>(&self) -> Result<T, ModuleError> {
         let mut config = (*self.config).clone();
         if let Some(object) = config.as_object_mut() {
@@ -923,10 +916,8 @@ fn system_unix_now() -> i64 {
         })
 }
 
-/// A unit of bot functionality.
-///
-/// Implementations must be cheap to call concurrently: the dispatcher runs handlers for
-/// different guilds in parallel and applies a timeout to each call.
+/// A unit of bot functionality. Implementations must be cheap to call concurrently: the dispatcher runs
+/// handlers for different guilds in parallel and applies a timeout to each call.
 #[async_trait]
 pub trait Module: Send + Sync + 'static {
     fn manifest(&self) -> &ModuleManifest;
@@ -1030,7 +1021,6 @@ mod tests {
         }
     }
 
-    /// Whether a manifest whose only command `warn` holds `subcommands` is accepted.
     fn accepted(subcommands: Vec<SubcommandSpec>) -> bool {
         ModuleManifest::new(ModuleId::new("warn").unwrap(), "warn", "0.1.0")
             .command(CommandSpec {

@@ -8,10 +8,8 @@ use closure_sdk::{Case, ChannelId, Event, EventContext, MessageInfo, ModuleError
 /// One event, or one counter trigger that fired, as the rules read it.
 #[derive(Debug, Clone)]
 pub struct Context {
-    /// The member the event is about, when it has one.
     pub user: Option<Who>,
     pub channel: Option<ChannelId>,
-    /// The message, when the event is a message.
     pub message: Option<MessageInfo>,
     pub source: Source,
     /// Whether the message is new. An edit is only read by the triggers that read text.
@@ -34,13 +32,11 @@ pub struct Who {
 pub enum Join {
     /// Not looked up yet.
     NotLooked,
-    /// Unix seconds.
     At(i64),
     /// Discord does not know when the member joined.
     Unknown,
 }
 
-/// What happened.
 #[derive(Debug, Clone)]
 pub enum Source {
     Message,
@@ -58,7 +54,6 @@ pub enum Source {
         trigger: String,
         reverse: bool,
     },
-    /// The antiraid level changed, from `old` to `level`.
     Antiraid {
         level: String,
         old: String,
@@ -126,7 +121,6 @@ impl Who {
 }
 
 impl Context {
-    /// A message, new or edited.
     #[must_use]
     pub fn message(message: &MessageInfo, created: bool) -> Self {
         Self {
@@ -207,7 +201,6 @@ impl Context {
         }
     }
 
-    /// The member the event is about, when it is the user of the context.
     #[must_use]
     pub fn user_id(&self) -> Option<UserId> {
         self.user.as_ref().map(|who| who.id)

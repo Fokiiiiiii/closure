@@ -20,13 +20,9 @@ use twilight_model::guild::Permissions;
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
-/// The route of the buttons that give or take a role.
 const TOGGLE: &str = "toggle";
-/// The job that makes a role unpingable again.
 const UNPING: &str = "unping";
-/// How long a role can be pinged after `/pingrole`.
 const PING_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-/// The score that holds, for a role made pingable, when it is to be quiet again (unix seconds).
 const PING_UNTIL: &str = "ping-until";
 
 #[derive(Debug, Default, Deserialize)]
@@ -97,7 +93,6 @@ async fn restricted(ctx: &EventContext, role: RoleId) -> bool {
         .unwrap_or(true)
 }
 
-/// Gives or takes a role the server listed for its members.
 async fn self_service(cx: &CommandCx, role: RoleId, give: bool) -> Result<(), UserError> {
     let config: Config = cx.config()?;
     if !config.allows(role) {
@@ -375,7 +370,6 @@ fn emoji_text(emoji: &closure_core::action::Emoji) -> Vec<String> {
     }
 }
 
-/// Whether `user` holds the permission to pick roles for themselves (`roles.self`).
 async fn may_pick(ctx: &EventContext, user: UserId) -> bool {
     let Ok(member) = ctx.api.get_member(ctx.guild_id, user).await else {
         return false;

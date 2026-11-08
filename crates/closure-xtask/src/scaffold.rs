@@ -85,8 +85,7 @@ pub fn listing(files: &[(String, String)]) -> String {
     out
 }
 
-/// Formats the generated Rust files the way the workspace does. The template's line breaks depend
-/// on the length of the id, so rustfmt has the last word; a missing rustfmt is reported, not fatal.
+/// Formats the generated Rust files the way the workspace does; the template's line breaks depend on the id's length, so rustfmt has the last word, and a missing rustfmt is reported, not fatal.
 pub fn format_sources(paths: &[PathBuf]) -> Result<()> {
     let sources: Vec<&PathBuf> = paths
         .iter()

@@ -10,15 +10,8 @@ use crate::error::ConfigError;
 use crate::model::GuildOverrides;
 use crate::view::{self, BASIC_KEYS, View};
 
-/// The JSON Schema of the whole configuration document, with every registered module's own
-/// config schema embedded. Dashboards generate their forms from it and editors use it for
-/// completion; it is derived from the same types the parser uses, so it cannot drift.
-///
-/// A document holds only what differs from the defaults, so what is published is the schema of
-/// such an *override*, made from each module's own schema by [`relax`]. Its contract: **it never
-/// rejects an override that `ConfigCompiler` accepts.** It may accept one the compiler then
-/// refuses, because the compiler judges the result of merging the override into the defaults
-/// and the schema only sees the override.
+/// The JSON Schema of the configuration document, with each module's config schema embedded. Derived
+/// from the parser's own types, so it cannot drift. It describes an override (see `relax`).
 pub fn document_schema(registry: &ModuleRegistry) -> Result<Value, ConfigError> {
     document_schema_for(registry, View::Advanced)
 }
@@ -257,8 +250,8 @@ fn also_as_unit_variant_map(schema: &mut Value) {
 }
 
 /// The spellings of a language the parser takes besides the canonical ones: `auto` in any
-/// capitalisation, and a locale tag in any capitalisation, alone or followed by `-` or `_` and
-/// anything (`ja-JP`, `en_US`).
+/// capitalisation, and a locale tag in any capitalisation, alone or followed by `-` or `_` and anything
+/// (`ja-JP`, `en_US`).
 fn language_alias_pattern() -> String {
     let insensitive = |text: &str| -> String {
         text.chars()
@@ -297,11 +290,8 @@ fn published_config_schema(module: &str, schema: &Value) -> Value {
     let mut config = schema.clone();
     if let Value::Object(map) = &mut config {
         map.remove("$schema");
-        // A reference scope of its own: `#/$defs/..` in a module's schema means that schema's own
-        // definitions, not those of the document it is embedded in or of another module. Its name
-        // is the bot's to give, not the module's: a schema that refers only to itself has no use
-        // for one, and two modules (or one module and the document) with names that mean the
-        // same URI would be told apart by nothing.
+        // A reference scope of its own: `#/$defs/..` in a module's schema means that schema's own definitions,
+        // not those of the document it is embedded in or of another module.
         map.insert("$id".into(), json!(format!("urn:closure:module:{module}")));
     }
     relax(&mut config);
@@ -351,13 +341,8 @@ const UNSUPPORTED: [&str; 5] = [
     "$recursiveRef",
 ];
 
-/// Keywords that judge which keys an object has, how many, or what they are called, or the object
-/// as a whole (`dependencies` is the older spelling of `dependentRequired` and
-/// `dependentSchemas`). A sparse override lacks keys the defaults fill in and has `null` keys the
-/// merge drops, and weakening what sits under `not` makes it stricter, so these are dropped where
-/// values are merged. So are the `unevaluated*` keywords: they judge what no other keyword looked
-/// at, and the relaxing takes away or changes what looked at it (`if`, a branch cut off at the
-/// depth limit).
+/// Keywords that judge which keys an object has, how many, or what they are called, or the object as a
+/// whole (`dependencies` is the older spelling of `dependentRequired` and `dependentSchemas`).
 const DROPPED: [&str; 10] = [
     "required",
     "dependentRequired",
@@ -371,9 +356,7 @@ const DROPPED: [&str; 10] = [
     "not",
 ];
 
-/// How deep [`relax`] follows nesting and references. What is deeper allows anything, which keeps
-/// the contract (it can only let more through, since the keywords that would be turned around by
-/// it are dropped).
+/// How deep [`relax`] follows nesting and references.
 const MAX_DEPTH: usize = 128;
 
 /// Whether a module's config schema is one [`relax`] can translate faithfully. Checked when the
@@ -515,18 +498,8 @@ fn scan(schema: &Value, top: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Turns the schema of a configuration into the schema of an override of it.
-///
-/// Values are merged key by key into the defaults, `null` meaning "the default", and arrays are
-/// replaced whole. So, wherever values are merged: a property may be `null`, keywords that look
-/// at which keys exist, how many or what they are called are dropped, so are an object `const`
-/// or `enum` (a sparse override is never equal to one), `oneOf` and `if`/`then`/`else` are
-/// weakened to what any of their branches allows, and an unknown key may only be `null` (the
-/// merge drops it). A property may be a type defined elsewhere in the schema (`$ref` to `$defs`);
-/// a reference reached the way a property is gets a copy of the definition made the same way,
-/// and the original stays as it is for the places that need it strict, such as the items of a
-/// list. The same goes for `$ref: "#"`, the schema itself: reached the way a property is, it is
-/// the relaxed whole; reached anywhere else, it is a strict copy of the whole.
+/// Turns the schema of a configuration into the schema of an override of it. Values are merged key by
+/// key into the defaults, `null` meaning "the default", and arrays are replaced whole.
 fn relax(schema: &mut Value) {
     let mut copies = Copies::new(schema);
     copies.visit(schema, 0);
@@ -542,9 +515,9 @@ struct Copies {
     names: BTreeMap<(&'static str, String), String>,
     /// The copies, by `(where they are kept, name of the copy)`.
     made: BTreeMap<(&'static str, String), Value>,
-    /// What `$ref: "#"` is turned into while the schema is relaxed: a reference to the strict
-    /// copy of the whole schema, which stays where the places that need it strict are, and goes
-    /// back to `#` where the relaxed schema is wanted.
+    /// What `$ref: "#"` is turned into while the schema is relaxed: a reference to the strict copy of the
+    /// whole schema, which stays where the places that need it strict are, and goes back to `#` where the
+    /// relaxed schema is wanted.
     root_reference: String,
 }
 
@@ -727,9 +700,7 @@ fn point_root_references_at(schema: &mut Value, target: &str) -> bool {
 }
 
 /// Weakens `oneOf` and `if`/`then`/`else` to "any of the branches", as `allOf` entries, because a
-/// sparse override cannot say which branch applies once the defaults are filled in. `if` and a
-/// `then` or `else` without its partner say nothing the override can be held to, and are dropped;
-/// without an `if`, `then` and `else` are not looked at at all.
+/// sparse override cannot say which branch applies once the defaults are filled in.
 fn fold_conditionals(map: &mut Map<String, Value>) {
     let mut alternatives = Vec::new();
     if let Some(Value::Array(branches)) = map.remove("oneOf") {
@@ -748,10 +719,7 @@ fn fold_conditionals(map: &mut Map<String, Value>) {
     }
 }
 
-/// `(where, name)` of a `$ref` like `#/$defs/Name` that points into the schema itself. The
-/// reference is a URI fragment holding a JSON pointer, so it is read as one: percent escapes
-/// first, then the pointer's segments, then `~1` and `~0` in each. It must be exactly one name
-/// below `$defs` or `definitions`.
+/// `(where, name)` of a `$ref` like `#/$defs/Name` that points into the schema itself.
 fn local_definition(reference: &str) -> Option<(&'static str, String)> {
     let pointer = percent_decode(reference.strip_prefix('#')?)?;
     let mut segments = pointer.strip_prefix('/')?.split('/');
@@ -842,7 +810,6 @@ mod tests {
         ModuleRegistry::new(vec![module]).unwrap()
     }
 
-    /// A document that sets the `warn` module's config to `config`.
     fn document(config: &Value) -> Value {
         json!({ "modules": { "warn": { "config": config } } })
     }
@@ -852,8 +819,6 @@ mod tests {
             .expect("the published schema must build")
     }
 
-    /// Whether the compiler accepts this config of the `warn` module, after merging it into the
-    /// defaults.
     fn compiler_accepts(registry: &Arc<ModuleRegistry>, config: &Value) -> bool {
         let mut overrides = GuildOverrides::default();
         overrides.modules.insert(
@@ -869,9 +834,6 @@ mod tests {
             .is_ok()
     }
 
-    /// The contract of the published schema: it never rejects what the compiler accepts. Each
-    /// of `configs` must be accepted by the compiler (or the test proves nothing) and so by the
-    /// schema.
     fn assert_never_rejects_what_the_compiler_accepts(
         registry: &Arc<ModuleRegistry>,
         configs: &[Value],
@@ -980,7 +942,6 @@ mod tests {
             }),
             json!({ "a": 1, "b": 2 }),
         ));
-        // Each leaves out something the defaults fill in.
         assert_never_rejects_what_the_compiler_accepts(
             &registry,
             &[
@@ -1000,7 +961,6 @@ mod tests {
 
     #[test]
     fn conditionals_never_reject_what_the_compiler_accepts() {
-        // With the defaults mode "y" and limit 25, `else` (at least 20) applies unless mode is "x".
         let registry = Arc::new(registry_with_defaults(
             json!({
                 "type": "object",
@@ -1015,7 +975,6 @@ mod tests {
             &registry,
             &[
                 json!({}),
-                // The omission of `mode` is what a schema alone cannot judge.
                 json!({ "limit": 25 }),
                 json!({ "limit": 30 }),
                 json!({ "mode": "x", "limit": 5 }),
@@ -1062,7 +1021,6 @@ mod tests {
             }),
             json!({ "a": 1 }),
         ));
-        // The merge drops a `null` for a key nobody declared.
         assert_never_rejects_what_the_compiler_accepts(
             &registry,
             &[json!({ "unknown": null }), json!({ "a": 2 })],
@@ -1072,8 +1030,6 @@ mod tests {
         assert!(!compiler_accepts(&registry, &json!({ "unknown": 1 })));
     }
 
-    /// A module schema as `schemars` writes it: a nested type behind `$ref`, once as a property
-    /// and once as the items of a list.
     fn schema_with_definitions() -> Value {
         json!({
             "type": "object",
@@ -1103,10 +1059,8 @@ mod tests {
     fn null_resets_a_property_of_a_nested_type_but_not_an_item_of_a_list() {
         let validator = validator_of(&registry_with(schema_with_definitions()));
 
-        // The nested object is merged key by key, so `null` there means "the default".
         assert!(validator.is_valid(&document(&json!({ "inner": { "a": null } }))));
         assert!(validator.is_valid(&document(&json!({ "inner": null }))));
-        // A list is replaced as a whole, so `null` inside an item has no meaning.
         assert!(!validator.is_valid(&document(&json!({ "list": [{ "a": null }] }))));
         assert!(validator.is_valid(&document(&json!({ "list": [{ "a": 3 }] }))));
     }
@@ -1134,7 +1088,6 @@ mod tests {
 
     #[test]
     fn a_reference_to_the_root_follows_where_it_is_used() {
-        // `Vec<Self>` in a root type: schemars writes `{"$ref": "#"}` for the items.
         let registry = Arc::new(registry_with_defaults(
             json!({
                 "type": "object",
@@ -1185,7 +1138,6 @@ mod tests {
 
     #[test]
     fn the_name_of_a_copy_never_takes_the_name_of_a_definition() {
-        // The schema already has a definition called `A__nullable`.
         let registry = registry_with(json!({
             "type": "object",
             "properties": {
@@ -1208,7 +1160,6 @@ mod tests {
         let registry = registry();
         let validator = validator_of(&registry);
         let schema = document_schema(&registry).unwrap();
-        // Every field of the document: if `field: null` parses, the schema has to take it.
         for field in schema["properties"].as_object().unwrap().keys() {
             if crate::yaml::parse_overrides(&format!("{field}: null\n")).is_ok() {
                 assert!(
@@ -1217,7 +1168,6 @@ mod tests {
                 );
             }
         }
-        // And the fields of a module.
         for field in ["enabled", "capabilities", "config"] {
             let yaml = format!("modules:\n  warn:\n    {field}: null\n");
             assert!(crate::yaml::parse_overrides(&yaml).is_ok(), "{field}");
@@ -1226,13 +1176,11 @@ mod tests {
                 "`{field}: null` of a module parses but the schema rejects it"
             );
         }
-        // The document itself knows nothing of a field it does not have.
         assert!(!validator.is_valid(&json!({ "nonsense": null })));
     }
 
     #[test]
     fn keywords_that_count_or_name_keys_do_not_see_keys_the_merge_drops() {
-        // `ghost: null` is dropped by the merge, so the merged object is as it was by default.
         for (schema, default) in [
             (json!({ "type": "object", "maxProperties": 0 }), json!({})),
             (
@@ -1275,7 +1223,6 @@ mod tests {
                 json!({ "mode": "y" }),
             ],
         );
-        // A scalar enum is as strict as it was.
         assert!(!validator_of(&registry).is_valid(&document(&json!({ "mode": "z" }))));
     }
 
@@ -1294,7 +1241,6 @@ mod tests {
         }));
         let validator = validator_of(&registry);
         for field in ["slash", "wide", "tilde", "percent"] {
-            // `null` for `n` can only be accepted through the copy, so it was followed.
             assert!(
                 validator.is_valid(&document(&json!({ field: { "n": null } }))),
                 "{field}"
@@ -1308,8 +1254,6 @@ mod tests {
 
     #[test]
     fn a_nested_schema_resource_is_refused() {
-        // Another `$id` or `$schema` inside the schema would be a schema resource of its own, with
-        // definitions of its own, and a dialect of its own: nothing here translates that.
         for schema in [
             json!({ "properties": { "child": { "$id": "urn:example:child", "type": "object" } } }),
             json!({ "$defs": { "Child": { "$id": "urn:example:child" } } }),
@@ -1318,7 +1262,6 @@ mod tests {
             let error = check_supported(&schema).expect_err(&schema.to_string());
             assert!(error.contains("only supported at the top"), "{error}");
         }
-        // At the top they are fine, and so are properties that are *called* that.
         check_supported(
             &json!({ "$id": "urn:example:config", "properties": { "$id": { "type": "string" } } }),
         )
@@ -1327,8 +1270,6 @@ mod tests {
 
     #[test]
     fn what_lies_beyond_the_depth_limit_allows_anything() {
-        // A chain of definitions longer than the limit, each requiring its `child`, ending in a
-        // type that requires `v`. The override goes all the way down and leaves `v` out.
         let length = MAX_DEPTH + 40;
         let mut definitions = Map::new();
         let (mut default, mut over) = (json!({ "v": 1 }), json!({}));
@@ -1374,7 +1315,6 @@ mod tests {
                 json!({ "$ref": "urn:example:config#/$defs/X" }),
                 "urn:example:config#/$defs/X",
             ),
-            // `%2F` is a `/` once the fragment is read, so this goes deeper than one name.
             (json!({ "$ref": "#/$defs/a%2Fb" }), "a%2Fb"),
             (json!({ "$ref": "#/$defs/%ZZ" }), "%ZZ"),
             (json!({ "$ref": "#/$defs/" }), "#/$defs/"),
@@ -1400,22 +1340,16 @@ mod tests {
             json!({ "properties": { "a": { "$ref": "#" } } }),
             json!({ "properties": { "a": { "$ref": "#/$defs/A" } }, "$defs": { "A": {} } }),
             json!({ "properties": { "a": { "$ref": "#/definitions/A" } }, "definitions": { "A": {} } }),
-            // Data that happens to look like keywords is data.
             json!({ "default": { "$anchor": "x", "$ref": "elsewhere" }, "enum": [{ "$dynamicRef": "y" }] }),
-            // Names the way schemars writes them when they hold `/`, `~`, spaces or non-ASCII.
             json!({ "properties": { "a": { "$ref": "#/$defs/A~1B" }, "b": { "$ref": "#/$defs/%C3%BC%20x" } } }),
-            // What nobody here knows is an annotation, whatever it holds.
             json!({ "x-note": { "$ref": "https://example.invalid/help", "$anchor": "a" } }),
-            // A schema that names itself.
             json!({ "$id": "urn:example:config", "$schema": "https://json-schema.org/draft/2020-12/schema" }),
-            // A property is not a keyword, whatever it is called.
             json!({ "properties": { "$anchor": { "type": "string" }, "$ref": { "type": "string" } } }),
         ] {
             check_supported(&schema).unwrap_or_else(|error| panic!("{schema}: {error}"));
         }
     }
 
-    /// Whether some object in `value` has `key` set to exactly `wanted`.
     fn holds_member(value: &Value, key: &str, wanted: &Value) -> bool {
         match value {
             Value::Object(map) => {
@@ -1434,7 +1368,6 @@ mod tests {
             "type": "object",
             "properties": {
                 "role": { "type": "integer", "x-ui": hint },
-                // Other annotations with the `x-` prefix are passed through as they are.
                 "note": { "type": "string", "x-note": { "anything": [1, 2] } }
             }
         });
@@ -1570,8 +1503,6 @@ mod tests {
         assert!(validator.is_valid(&json!({ "language": "ja" })));
     }
 
-    /// Every document the parser takes and the compiler accepts, in the odd forms it takes them,
-    /// must satisfy the published schema as well.
     #[test]
     fn documents_the_parser_accepts_satisfy_the_published_schema() {
         let registry = Arc::new(registry());
@@ -1868,7 +1799,6 @@ mod tests {
         assert!(validator_of(&registry).is_valid(&document(&config)));
     }
 
-    /// A module whose basic settings are a top-level key and a nested one under an advanced object.
     fn layered_registry() -> ModuleRegistry {
         registry_with(json!({
             "type": "object",

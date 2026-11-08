@@ -32,11 +32,8 @@ use crate::module::{ModuleId, OptionChoice};
 pub trait DiscordApi: Send + Sync {
     async fn execute(&self, action: Action) -> Result<Outcome, DiscordError>;
 
-    /// The guild `channel` belongs to, or `None` for a channel outside any guild (a direct
-    /// message). Fails if Discord cannot say, e.g. the channel does not exist.
-    ///
-    /// This is what lets [`ApiClient`] keep actions that identify only a channel or a message
-    /// inside the guild the client is bound to.
+    /// The guild `channel` belongs to, or `None` outside any guild (a direct message). Fails when Discord
+    /// cannot say.
     async fn channel_guild(&self, channel: ChannelId) -> Result<Option<GuildId>, DiscordError>;
 
     /// The owner of `guild`, when it is known without asking Discord (from the cache).
@@ -55,9 +52,6 @@ pub trait DiscordApi: Send + Sync {
 }
 
 /// What a module holds instead of a raw HTTP client.
-///
-/// [`ApiClient::execute`] rejects actions the module has no capability for, validates the rest
-/// and only then forwards them, so a buggy or hostile module cannot exceed its grant.
 #[derive(Clone)]
 pub struct ApiClient {
     api: Arc<dyn DiscordApi>,
@@ -100,12 +94,8 @@ impl ApiClient {
         }
     }
 
-    /// Tells the client which guild each interaction token belongs to. A client that is bound
-    /// to a guild and has no such record refuses every interaction response.
-    ///
-    /// Only the host's setup does this, before the client is bound to a guild: once it is bound,
-    /// or already has a record, the call changes nothing. A module holds a bound client and
-    /// could otherwise swap in a record of its own, in which any token belongs to any guild.
+    /// Tells the client which guild each interaction token belongs to. A client that is bound to a guild
+    /// and has no such record refuses every interaction response.
     #[must_use]
     pub fn with_interactions(mut self, interactions: Arc<InteractionGuilds>) -> Self {
         if self.guild.is_some() || self.interactions.is_some() {
@@ -116,16 +106,8 @@ impl ApiClient {
         self
     }
 
-    /// Restricts the client to one guild: an action that targets a different guild is refused.
-    ///
-    /// Capabilities are granted per guild, so without this a module enabled with `ban_members`
-    /// in one guild could ban in any other. An action that names a guild is compared directly.
-    /// One that identifies only a channel or a message is checked by asking
-    /// [`DiscordApi::channel_guild`], and refused when the channel is in another guild, outside
-    /// any guild, or its guild cannot be determined; this also covers the channels an action
-    /// merely refers to (a parent category, an alert or exempt channel). Responses to an
-    /// interaction are answered only when the host recorded the token as coming from the
-    /// bound guild (see [`with_interactions`](Self::with_interactions)).
+    /// Restricts the client to one guild: an action that targets another guild is refused. Capabilities are
+    /// granted per guild, so without this a module could use them in any other guild.
     #[must_use]
     pub fn scoped_to(mut self, guild: GuildId) -> Self {
         // Only the first binding counts: a module holds a (cloneable) scoped client and must not
@@ -1249,7 +1231,6 @@ mod tests {
         api.set_owner(Id::new(2), Id::new(8));
         let bound = client(&api, &[]).scoped_to(Id::new(1));
         assert_eq!(bound.guild_owner().await, Ok(Some(Id::new(7))));
-        // A client bound to a guild never learns about another one's owner.
         assert_eq!(
             client(&api, &[]).scoped_to(Id::new(2)).guild_owner().await,
             Ok(Some(Id::new(8)))
@@ -1285,7 +1266,6 @@ mod tests {
             token: InteractionToken::new("t"),
             reply,
         };
-        // The client of module `test` may name `test:..` and nothing else.
         assert!(client.execute(action(invocation("test:go"))).await.is_ok());
         for other in ["warn:go", "tes:go", "test", "Test:go", "testing:go"] {
             let error = client.execute(action(invocation(other))).await.unwrap_err();
@@ -1337,12 +1317,10 @@ mod tests {
         };
         let other = module("linkexpand");
         assert!(other.execute(post(button("linkexpand:go"))).await.is_ok());
-        // Not the button of another module, and not the role button either.
         for id in ["roles:toggle:*:9", "warn:go"] {
             let error = other.execute(post(button(id))).await.unwrap_err();
             assert!(matches!(error, DiscordError::Invalid(_)), "{id}: {error:?}");
         }
-        // The module that posts what the dashboard wrote may name the role buttons, and no more.
         let poster = module("post");
         assert!(
             poster
@@ -1405,8 +1383,6 @@ mod tests {
             .unwrap();
     }
 
-    /// All ten actions that identify their target by a channel, aimed at `channel`.
-    // One of each channel-addressed action, so the guild boundary is tested for all of them.
     #[allow(clippy::too_many_lines)]
     fn channel_actions(channel: u64) -> Vec<Action> {
         let channel_id = Id::new(channel);
@@ -1787,7 +1763,6 @@ mod tests {
             client(&api, &[Capability::RespondToInteractions]).scoped_to(Id::new(1));
 
         for client in [with_record, without_record] {
-            // What a module holding the client could try.
             let client = client.with_interactions(Arc::clone(&forged));
             for make in [respond, followup, edit_response] {
                 let action = make("token-of-guild-2");
@@ -1804,8 +1779,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_module_cannot_carry_its_permission_from_one_guild_to_another() {
-        // One module, shared by both guilds: it may respond in guild 1 but not in guild 2. It
-        // keeps guild 1's client and uses it with a token it received in guild 2.
         let api = Arc::new(MockApi::default());
         let interactions = Arc::new(InteractionGuilds::default());
         assert!(
@@ -1836,7 +1809,6 @@ mod tests {
             "{result:?}"
         );
 
-        // Host code (no scope) is not confined.
         let host = self::client(&api, &[Capability::RespondToInteractions]);
         host.execute(respond("anything")).await.unwrap();
     }

@@ -279,11 +279,7 @@ async fn one_at_a_time<T>(ctx: &EventContext, target: UserId, work: impl Future<
     work.await
 }
 
-/// The role a restriction gives. A configured role that exists is used as it is. Otherwise the
-/// role Closure remembered, or else a new role with no permissions at all, which is then set up in
-/// every channel by a sync job. A role another party made is never adopted by its name: a role of
-/// the same name may grant access in channels that the name does not show.
-/// Unmarked legacy roles are replaced, with their IDs retained for lifting existing restrictions.
+/// The role a restriction gives: a configured role that exists, else a remembered or new role with no permissions (set up per channel by a sync). Roles made by others are never adopted by name.
 /// Only a role created and marked by Closure is reused automatically.
 pub async fn ensure_role(
     ctx: &EventContext,
@@ -328,9 +324,7 @@ impl Drop for GateEntry {
     }
 }
 
-/// Gives a remembered role the name and the colour of now, when they differ: a role made before the names
-/// were in the guild's language, or before the roles were red. A failure is logged, and the role is used as
-/// it is.
+/// Gives a remembered role the current name and colour when they differ; a failure is logged and the role is used as is.
 async fn refresh(ctx: &EventContext, roles: &[Role], role: RoleId, name: &str) {
     let Some(current) = roles.iter().find(|current| current.id == role) else {
         return;

@@ -1,11 +1,7 @@
 //! Bulk punishments: a ban, a kick, a timeout or an unban of many members, in the open.
 //!
-//! `/bulk start` shows what it would do first: how many, who is left out and why (the first
-//! members are checked), and about how long it takes. Nothing is done until somebody presses Run.
-//! The work is a queue (a set of the store) that a job takes from a few members at a time, so it
-//! survives a restart, can be cancelled between two batches, and is slow enough for Discord's
-//! limits. Each member is checked again when their turn comes: the permission of the moderator
-//! at the time they pressed Run, the roles, a bot or the owner. At the end the result is posted:
+//! `/bulk start` previews the count, the exclusions and the time; nothing runs until Run is pressed.
+//! The work is a stored queue run a few members per batch; each member is checked again on their turn.
 //! how many were done, left out and failed, and `/bulk retry` takes the failed ones again.
 
 use std::time::Duration;
@@ -27,22 +23,17 @@ use twilight_model::channel::message::component::ButtonStyle;
 
 use crate::{Config, delete_seconds};
 
-/// The route of the buttons, and the name of the job.
 pub(crate) const ROUTE: &str = "bulk";
 pub(crate) const JOB: &str = "bulk";
 /// The most members one operation takes: what a command option can hold.
 const MAX_MEMBERS: usize = 300;
 /// How many members the preview checks one by one; the rest are checked when their turn comes.
 const PREVIEW_CHECKED: usize = 25;
-/// How many members one run of the job does.
 const BATCH: usize = 5;
-/// The pause between two batches.
 const PAUSE: Duration = Duration::from_secs(2);
-/// How many problems an operation remembers by name.
 const MAX_PROBLEMS: usize = 30;
 /// How often a change of state is tried again when somebody else changed the operation first.
 const TRANSITION_TRIES: usize = 5;
-/// How long an operation is kept after its last change.
 const KEEP: Duration = Duration::from_hours(24 * 30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,7 +78,6 @@ impl What {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum State {
-    /// Shown, not started.
     Preview,
     /// Asked for, and waiting for a second moderator to approve it.
     Awaiting,
@@ -143,7 +133,6 @@ fn key(id: i64) -> String {
     format!("bulk:{id}")
 }
 
-/// The members still to do, and the members that failed and can be done again.
 fn queue(id: i64) -> String {
     format!("bulk-{id}")
 }
@@ -171,9 +160,7 @@ async fn save(ctx: &EventContext, id: i64, operation: &Operation) -> Result<(), 
         .map_err(|e| stored(&e))
 }
 
-/// Moves an operation from one of the states `from` to `to`, against the revision it was read at, so
-/// two who decide at once (a cancel and the next batch, an approval and a denial) do not both win.
-/// Whether it moved.
+/// Two who decide at once (a cancel and the next batch) do not both win.
 async fn transition(
     ctx: &EventContext,
     id: i64,
@@ -210,9 +197,7 @@ async fn transition(
     ))
 }
 
-/// Saves what a batch did (the counters) without taking back a decision made while it ran: the
-/// state is whatever it is now, except that a running operation whose queue is empty is done.
-/// Returns the state it was left in.
+/// Saves a batch's counters without undoing a decision made while it ran; a running operation with an empty queue is done.
 async fn record_progress(
     ctx: &EventContext,
     id: i64,
@@ -487,7 +472,6 @@ fn describe(
     closure_sdk::embed::truncate(&text, crate::MAX_CHARS)
 }
 
-/// How many members still wait.
 async fn waiting(ctx: &EventContext, id: i64) -> u32 {
     ctx.store()
         .set_count(&queue(id))
@@ -497,7 +481,6 @@ async fn waiting(ctx: &EventContext, id: i64) -> u32 {
         .unwrap_or(0)
 }
 
-/// The press of Run, Cancel or Retry.
 pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
     let data = cx.data();
     let Some((action, id)) = data
@@ -614,7 +597,6 @@ async fn schedule(cx: &ComponentCx, id: i64, after: Duration) -> Result<(), User
         .map_err(|e| user_error(&e))
 }
 
-/// Puts the members that failed back in the queue; how many.
 async fn retry_failed(
     ctx: &EventContext,
     id: i64,
@@ -863,7 +845,6 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
     }
 }
 
-/// Posts the result where the operation was started.
 async fn announce(ctx: &EventContext, id: i64, operation: &Operation) -> Result<(), ModuleError> {
     let say = |key: &str, args: &Args| ctx.t_in(ctx.locale, key, args);
     let text = describe(&say, id, operation, 0);
@@ -899,7 +880,6 @@ async fn needs_approval(cx: &ComponentCx, config: &Config, operation: &Operation
     cx.require("moderation.approve").await.is_err()
 }
 
-/// Puts the request in the channel for approvals, with Approve and Deny for the others.
 async fn ask_for_approval(
     cx: &ComponentCx,
     config: &Config,
@@ -942,7 +922,6 @@ async fn ask_for_approval(
         .await
 }
 
-/// Posts the request, with Approve and Deny for the others, in the channel for approvals.
 async fn post_request(
     api: &closure_core::client::ApiClient,
     module: &closure_core::module::ModuleId,
@@ -1057,7 +1036,6 @@ pub(crate) async fn request_ban<I: InteractionRef + 'static>(
     .await
 }
 
-/// A user from an id or a mention.
 fn parse_user(token: &str) -> Option<UserId> {
     let value = if let Some(value) = token.strip_prefix("<@") {
         value

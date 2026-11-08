@@ -194,8 +194,7 @@ impl TwilightApi {
         run(self.http.delete_webhook(webhook).reason(reason.as_str())).await
     }
 
-    /// The webhook's guild is read with its token first, as posting needs the token anyway. The
-    /// reply is the message that was posted.
+    /// Reads the webhook's guild first, as posting needs the token anyway; the reply is the message that was posted.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_webhook(
         &self,

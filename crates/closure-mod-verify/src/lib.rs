@@ -28,13 +28,9 @@ use twilight_model::guild::Permissions;
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 
-/// The route of the button of the panel.
 const PRESS: &str = "press";
-/// The route of the form with the sum.
 const ANSWER: &str = "answer";
-/// The job that kicks a member who did not verify.
 const EXPIRE: &str = "expire";
-/// How long a sum waits for its answer.
 const QUESTION_LIFE: Duration = Duration::from_mins(10);
 /// The longest time a member may have: Discord keeps a job for a year, this is a month.
 const MAX_KICK_AFTER: Duration = Duration::from_hours(30 * 24);
@@ -51,11 +47,9 @@ const BARRED: Permissions = Permissions::ADMINISTRATOR
     .union(Permissions::MANAGE_MESSAGES)
     .union(Permissions::MENTION_EVERYONE);
 
-/// What the member has to do.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Mode {
-    /// Press the button.
     #[default]
     Button,
     /// Answer a sum, so that a script that only presses buttons is not enough.
@@ -65,9 +59,7 @@ enum Mode {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct Config {
-    /// The role a verified member has.
     role: Option<String>,
-    /// The role a member has from the join until verified.
     unverified_role: Option<String>,
     mode: Mode,
     /// How long a member has to verify; `None`: for ever.
@@ -95,7 +87,6 @@ fn role_id(text: Option<&str>) -> Option<RoleId> {
     text?.parse::<u64>().ok().and_then(RoleId::new_checked)
 }
 
-/// The member the expiry job is about.
 #[derive(Debug, Serialize, Deserialize)]
 struct Expire {
     user: u64,

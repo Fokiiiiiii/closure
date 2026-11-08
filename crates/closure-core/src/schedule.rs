@@ -1,10 +1,6 @@
-//! Work a module asks to have done later: once, or again and again.
-//!
-//! A module holds a [`Scheduler`] bound to itself and the guild of the event. A job is a name
-//! and a JSON payload; when it is due the host delivers it to the module as an
-//! [`Event::Scheduled`](crate::event::Event::Scheduled). Delivery is *at least once*: if the bot
-//! stops while a job runs, or the handler fails, the job comes again (a failed one after a
-//! growing pause, up to [`MAX_ATTEMPTS`] times), so a handler has to be safe to run twice.
+//! Work a module asks to have done later: once, or again and again. A module holds a [`Scheduler`]
+//! bound to itself and the guild of the event. A job is a name and a JSON payload; when it is due the
+//! host delivers it to the module as an [`Event::Scheduled`](crate::event::Event::Scheduled).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -86,9 +82,7 @@ pub struct ScheduledJob {
     pub payload: serde_json::Value,
     /// Which try this is: 1 the first time.
     pub attempt: u32,
-    /// Tells this hand-out from every other one. What the host reports back about the job only
-    /// counts while the job is still held under this token: if the job was replaced (same key)
-    /// or handed out again meanwhile, the report is about something that is gone.
+    /// Tells this hand-out from every other one.
     pub token: i64,
 }
 
@@ -113,9 +107,7 @@ pub trait SchedulerBackend: Send + Sync {
         lease: Duration,
     ) -> Result<Vec<ScheduledJob>, ScheduleError>;
 
-    /// The job ran: a repeating one is set for its next time, any other is removed. Does nothing
-    /// unless the job is still held under `token` (see [`ScheduledJob::token`]); so do the
-    /// other calls that report on a handed-out job.
+    /// The job ran: a repeating one is set for its next time, any other is removed.
     async fn complete(&self, id: i64, token: i64) -> Result<(), ScheduleError>;
 
     /// The job could not be run for a reason that is not its fault (its module is switched off,
@@ -135,9 +127,8 @@ pub trait SchedulerBackend: Send + Sync {
     /// Removes a job that can never run (its module is gone).
     async fn discard(&self, id: i64, token: i64) -> Result<(), ScheduleError>;
 
-    /// Holds the job for this runner for `lease` more, while it still runs: a job that takes
-    /// longer than its first lease is not handed out a second time, nor taken for one that
-    /// nobody runs. Whether the runner still holds it (`false`: it was replaced or removed).
+    /// Holds the job for this runner for `lease` more, while it still runs: a job that takes longer than
+    /// its first lease is not handed out a second time, nor taken for one that nobody runs.
     async fn renew(&self, _id: i64, _token: i64, _lease: Duration) -> Result<bool, ScheduleError> {
         Ok(true)
     }
@@ -754,12 +745,10 @@ mod tests {
         assert_eq!(jobs[0].name, "expire");
         assert_eq!(jobs[0].payload, json!({ "user": 7 }));
         assert_eq!(jobs[0].attempt, 1);
-        // Being run: not handed out again, until the lease is over (the bot died meanwhile).
         assert!(f.due().await.is_empty());
         f.advance(61);
         let again = f.due().await.remove(0);
         assert_eq!(again.attempt, 2);
-        // The first hand-out is over; only the second can say how it went.
         f.backend.complete(jobs[0].id, jobs[0].token).await.unwrap();
         assert!(!f.backend.is_empty());
         f.backend.complete(again.id, again.token).await.unwrap();
@@ -812,7 +801,6 @@ mod tests {
             1,
             "a new run starts counting again"
         );
-        // A long stop does not make it catch up with every run it missed.
         f.advance(10_000);
         let job = f.due().await.remove(0);
         f.backend.complete(job.id, job.token).await.unwrap();
@@ -828,7 +816,6 @@ mod tests {
             .after(Duration::ZERO)
             .await
             .unwrap();
-        // Taken, never reported: the lease runs out each time.
         for attempt in 1..=MAX_ATTEMPTS {
             assert_eq!(f.due().await[0].attempt, attempt);
             f.advance(61);
@@ -923,7 +910,6 @@ mod tests {
         f.advance(10);
         assert_eq!(f.due().await[0].payload, json!(2));
 
-        // Others' keys are their own, and cancelling finds only the module's.
         f.scheduler("mute", 1)
             .job("x", &0)
             .unwrap()
@@ -996,7 +982,6 @@ mod tests {
             scheduler.job("x", &0).unwrap().after(Duration::ZERO).await,
             Err(ScheduleError::QuotaExceeded { limit: MAX_JOBS })
         );
-        // Another guild has its own room; a key that exists may still be replaced.
         f.scheduler("warn", 2)
             .job("x", &0)
             .unwrap()
@@ -1015,7 +1000,6 @@ mod tests {
             .await
             .unwrap();
         let old = f.due().await.remove(0);
-        // The handler sets the next one under the same key, then the old run is reported done.
         warn.job("cleanup", &2)
             .unwrap()
             .key("c")
@@ -1036,7 +1020,6 @@ mod tests {
             "and still due at its time"
         );
 
-        // Handed out again after the lease: the first hand-out can no longer report.
         let first = f.due().await;
         assert!(first.is_empty());
         f.advance(61);
@@ -1061,8 +1044,6 @@ mod tests {
             .await
             .unwrap();
         let job = f.due().await.remove(0);
-        // It fails and is tried again five seconds later; the next run is still a minute after
-        // the planned time, not after the retry.
         f.backend
             .retry(job.id, job.token, backoff(1), "boom")
             .await

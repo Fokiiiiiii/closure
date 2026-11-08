@@ -351,9 +351,8 @@ impl CaseBackend for Db {
 }
 
 impl Db {
-    /// Counts the cases made since `since` (unix seconds) in a guild, hidden ones left out: how
-    /// many of each kind, source and state, by day (UTC), and the moderators and members with the
-    /// most.
+    /// Counts the cases made since `since` (unix seconds) in a guild, hidden ones left out: how many of
+    /// each kind, source and state, by day (UTC), and the moderators and members with the most.
     pub async fn case_summary(
         &self,
         guild: GuildId,
@@ -488,7 +487,6 @@ mod tests {
         cases.iter().map(|case| case.number).collect()
     }
 
-    /// The case without the times, which the two backends take from their own clocks.
     fn tidy(case: &Case) -> Case {
         let mut case = case.clone();
         case.created_at = 0;
@@ -706,7 +704,6 @@ mod tests {
         );
     }
 
-    /// Runs the same calls and records what each answered, to compare the two backends.
     async fn script(cases: &Cases) -> Vec<String> {
         let mut log = Vec::new();
         log.push(format!(
@@ -774,7 +771,6 @@ mod tests {
 
     #[sqlx::test]
     async fn the_database_and_the_memory_backend_agree(pool: PgPool) {
-        // Same calls, same answers: the memory backend is what tests of modules rely on.
         let db = Db::from_pool(pool);
         db.migrate().await.unwrap();
         let granted: CapabilitySet = [Capability::Cases].into_iter().collect();
@@ -808,7 +804,6 @@ mod tests {
                 source
             );
         }
-        // Without a word about it, a case is a command.
         assert_eq!(
             cases.create(new_case(5, None)).await.unwrap().source,
             CaseSource::Command
@@ -867,7 +862,6 @@ mod tests {
         );
         assert_eq!(search(by(|f| f.target = Some(Id::new(5)))).await, [2, 1]);
         assert_eq!(search(by(|f| f.text = Some("RAID".into()))).await, [1]);
-        // The characters of a pattern mean themselves.
         assert_eq!(search(by(|f| f.text = Some("50%".into()))).await, [2]);
         assert_eq!(search(by(|f| f.text = Some("links_".into()))).await, [2]);
         assert_eq!(search(by(|f| f.text = Some("%".into()))).await, [2]);
@@ -875,7 +869,6 @@ mod tests {
             search(by(|f| f.state = Some(CaseState::Active))).await,
             [3, 2, 1]
         );
-        // Editing: the reason, the hiding, the moderator named.
         let edited = cases
             .edit(
                 2,
@@ -912,7 +905,6 @@ mod tests {
             "what is not named stays"
         );
         assert!(cases.edit(99, CaseEdit::default()).await.is_err());
-        // Revoked cases are found as such; deleting one removes it and keeps the numbers.
         cases.revoke(1, Id::new(9), None).await.unwrap();
         assert_eq!(
             search(by(|f| f.state = Some(CaseState::Revoked))).await,
@@ -960,7 +952,6 @@ mod tests {
             )
             .await
             .unwrap();
-        // Another server's cases are not counted.
         cases(&db, "moderation", 2)
             .create(new_case(10, None))
             .await

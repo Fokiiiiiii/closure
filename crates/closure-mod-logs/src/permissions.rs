@@ -7,7 +7,6 @@ use twilight_model::guild::Permissions;
 
 use crate::{code_block, label};
 
-/// An overwrite of a channel that differs between two states of the channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OverwriteChange {
     pub(crate) target: OverwriteTarget,
@@ -70,7 +69,6 @@ pub(crate) fn permission_diff(before: Permissions, after: Permissions) -> String
         .join(" ")
 }
 
-/// A changed overwrite as a field value: who it applies to, then what it allows and denies.
 pub(crate) fn overwrite_value(ctx: &EventContext, change: &OverwriteChange) -> String {
     let mut lines = Vec::new();
     let allowed = permission_diff(change.before.allow, change.after.allow);
@@ -88,7 +86,6 @@ pub(crate) fn overwrite_value(ctx: &EventContext, change: &OverwriteChange) -> S
     )
 }
 
-/// The role or member an overwrite applies to, as a mention.
 fn target_mention(target: OverwriteTarget) -> String {
     match target {
         OverwriteTarget::Role(role) => format!("<@&{}>", role.get()),
@@ -96,7 +93,6 @@ fn target_mention(target: OverwriteTarget) -> String {
     }
 }
 
-/// The id of the role or member an overwrite applies to, as the audit log names it.
 pub(crate) fn target_id(target: OverwriteTarget) -> u64 {
     match target {
         OverwriteTarget::Role(role) => role.get(),

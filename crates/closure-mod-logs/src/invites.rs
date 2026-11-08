@@ -11,7 +11,6 @@ use std::time::Duration;
 use closure_core::error::ModuleError;
 use closure_core::module::EventContext;
 
-/// Where the uses of the invites are kept, by code.
 const USES_KEY: &str = "invite-uses";
 /// How often the uses are looked at without a join, so that the count a join is compared with is
 /// not old.
@@ -24,11 +23,12 @@ const LISTED: usize = 3;
 
 type Uses = BTreeMap<String, u64>;
 
-/// What a join came by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Found {
-    /// One invite counted the join.
-    Invite { code: String, inviter: Option<u64> },
+    Invite {
+        code: String,
+        inviter: Option<u64>,
+    },
     /// Several invites counted a use since the last look: more than one member joined.
     Several(Vec<String>),
     /// No invite counted it: a vanity address, an invite that is gone, an integration, or no earlier
@@ -36,7 +36,6 @@ pub(crate) enum Found {
     Unknown,
 }
 
-/// Where the time of the last lookup is kept.
 const LOOKED_KEY: &str = "invite-looked-at";
 
 /// Whether this server may be looked up now; if so, the time is taken. The joins of one server are
@@ -50,7 +49,6 @@ async fn may_look(ctx: &EventContext) -> bool {
     ctx.store().set(LOOKED_KEY, &now).await.is_ok()
 }
 
-/// Reads the invites of the server: code, uses and who made it.
 async fn read(ctx: &EventContext) -> Result<Vec<(String, u64, Option<u64>)>, ModuleError> {
     let invites = ctx.api.list_invites(ctx.guild_id).await?;
     Ok(invites
@@ -65,7 +63,6 @@ async fn read(ctx: &EventContext) -> Result<Vec<(String, u64, Option<u64>)>, Mod
         .collect())
 }
 
-/// Keeps the uses of the invites as they are now.
 pub(crate) async fn snapshot(ctx: &EventContext) -> Result<(), ModuleError> {
     let uses: Uses = read(ctx)
         .await?

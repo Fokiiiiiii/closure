@@ -11,9 +11,7 @@ mod common;
 use closure_sdk::Locale;
 use common::*;
 
-/// A member with a realistic id: the replies name it, and the replay leaves out the test ids.
 const SHOWCASE_MEMBER: u64 = 512_345_678_901_234_567;
-/// The bot as the cards name it: the alert and the reply come from it.
 const SHOWCASE_BOT: u64 = 1_100_000_000_000_000_010;
 use serde_json::{Value, json};
 use twilight_model::id::Id;

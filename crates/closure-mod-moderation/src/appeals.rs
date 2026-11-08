@@ -1,7 +1,6 @@
-//! Appeals: a member whose punishment stands asks for it to be lifted, or a moderator files an appeal
-//! that came another way (a banned member cannot use a command). The appeal is written down as a
-//! note against the member and put in the channel for approvals, with the undo button of the
-//! punishment and a button to refuse. Each punishment is appealed once.
+//! Appeals: a member asks for a punishment to be lifted; a moderator may file one for them.
+//! The appeal is a note on the member, posted to the approvals channel with undo and refuse buttons.
+//! Each punishment is appealed once.
 
 use closure_core::action::Action;
 use closure_core::cases::{CaseKind, CaseSource, NewCase};
@@ -16,9 +15,7 @@ use crate::templates::text_reply;
 use crate::undo::{self, Kind};
 use crate::{Config, active_cases, mention};
 
-/// The route of the button that refuses an appeal.
 pub(crate) const ROUTE: &str = "appeal";
-/// The set of the punishments that were appealed already.
 const APPEALED: &str = "appealed";
 /// How much of the text the channel for approvals shows; the note keeps all of it.
 const SHOWN: usize = 900;

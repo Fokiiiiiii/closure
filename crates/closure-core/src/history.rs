@@ -1,10 +1,8 @@
-//! Recent messages of a guild, kept so modules can look at what was said before: spam by
-//! author, cleaning up a user's messages, logs of edits and deletions.
-//!
-//! The host records messages, and only for guilds where some enabled module holds the
-//! capability `message_history`; where none does, nothing is kept. A module holds a
-//! [`MessageHistory`] bound to itself and one guild, so it sees only that guild's messages.
-//! Messages older than the bot's retention are removed by [`HistoryBackend::purge_before`].
+//! Recent messages of a guild, kept so modules can look at what was said before: spam by author,
+//! cleaning up a user's messages, logs of edits and deletions. The host records messages, and only for
+//! guilds where some enabled module holds the capability `message_history`; where none does, nothing is
+//! kept. A module holds a [`MessageHistory`] bound to itself and one guild, so it sees only that
+//! guild's messages.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -115,9 +113,7 @@ pub fn check_text(message: &SavedMessage) -> Result<(), HistoryError> {
 /// first. Times are unix seconds.
 #[async_trait]
 pub trait HistoryBackend: Send + Sync {
-    /// Stores the message, or replaces the stored one with the same id. A replacement keeps the
-    /// time it was sent and the time it was deleted; an empty `content` keeps the stored text,
-    /// because Discord sends no text on an update without the content intent.
+    /// Stores the message, or replaces the stored one with the same id.
     async fn save(&self, message: &SavedMessage) -> Result<(), HistoryError>;
 
     /// Marks the messages deleted at `at`; the first time counts. Unknown ids are ignored.
@@ -157,12 +153,7 @@ pub trait HistoryBackend: Send + Sync {
     /// messages.
     async fn purge_before(&self, cutoff: i64) -> Result<u64, HistoryError>;
 
-    /// Keeps the file of an attachment of a message. `data` is `None` when the file could not be
-    /// fetched. Keeping the same attachment again replaces its file,
-    /// unless `data` is `None` and a file is already stored: then nothing changes.
-    /// Then the oldest stored files of the guild go past `max_bytes`, as [`Self::trim_files`] drops
-    /// them: a save returns with the guild within its limit (a backend may drop a little more, so
-    /// the saves after it need not trim at once).
+    /// Keeps the file of an attachment of a message. `data` is `None` when the file could not be fetched.
     #[allow(clippy::too_many_arguments)]
     async fn save_file(
         &self,
@@ -942,7 +933,6 @@ mod tests {
             content_type: None,
             url: format!("https://cdn.example/{id}.png"),
         };
-        // Attachment 2 is saved first but kept later: the time it was kept decides the order.
         backend
             .save_file(
                 guild,
@@ -975,7 +965,6 @@ mod tests {
             .map(|file| file.attachment.id)
             .collect();
         assert_eq!(listed, [1, 2]);
-        // Ten bytes are kept and five may stay: the oldest file goes, which is attachment 1.
         assert_eq!(backend.trim_files(guild, 5).await.unwrap(), 1);
         assert_eq!(backend.file_data(guild, message, 1).await.unwrap(), None);
         assert_eq!(
@@ -1020,7 +1009,6 @@ mod tests {
             .await
             .unwrap();
 
-        // The second save kept the limit by itself: nothing is left for a trim to drop.
         assert_eq!(backend.trim_files(guild, 8).await.unwrap(), 0);
         assert_eq!(backend.file_data(guild, message, 1).await.unwrap(), None);
         assert_eq!(

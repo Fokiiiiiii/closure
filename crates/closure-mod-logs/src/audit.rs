@@ -19,17 +19,14 @@ use crate::{Config, code_block, label};
 /// target from being named.
 const AUDIT_WINDOW_SECONDS: i64 = 60;
 
-/// How many of the newest entries of one kind are searched for the change.
 const AUDIT_LOOKUP_LIMIT: u16 = 50;
 
-/// The audit log entry of a change: who made it, and the reason they gave.
 pub(crate) struct AuditEntry {
     by: Option<UserId>,
     reason: Option<String>,
 }
 
 impl AuditEntry {
-    /// Whether the change was made by `user`, when it is known.
     pub(crate) fn made_by(&self, user: Option<UserId>) -> bool {
         self.by.is_some() && self.by == user
     }
@@ -162,7 +159,6 @@ async fn recent_entries(ctx: &EventContext, kind: AuditLogEventType) -> Option<V
     }
 }
 
-/// Whether an entry is recent enough to be the change an event reports.
 fn within_window(now: i64, entry: &AuditLogEntry) -> bool {
     now - snowflake_time(entry.id.get()) <= AUDIT_WINDOW_SECONDS
 }
@@ -189,7 +185,6 @@ pub(crate) async fn audit_of(
     })
 }
 
-/// Whether an entry's values match the event's change.
 fn changes_the_field(entry: &AuditLogEntry, event: &Event) -> bool {
     match event {
         Event::NicknameChanged { before, after, .. } => entry.changes.iter().any(|change| {
@@ -399,7 +394,6 @@ pub(crate) async fn bulk_audit_of(
 const MAX_FIELDS: usize = 25;
 const MAX_EMBED_CHARS: usize = 6000;
 
-/// How many characters the texts of the embed hold.
 fn used(embed: &twilight_model::channel::message::Embed) -> usize {
     let text = |value: &Option<String>| value.as_ref().map_or(0, |text| text.chars().count());
     text(&embed.title)

@@ -1,13 +1,9 @@
 //! A backup of the roles and channels of a server, and a way to bring back what is gone.
 //!
-//! `/backup create` keeps every role and channel (name, kind, category, topic, slowmode and the
-//! permission overwrites of roles). Once a day the module keeps them again by itself, except when
-//! the server has lost half of what the last backup held: that looks like a nuke, and the good
-//! backup stays. `/backup restore` creates again what the backup holds and the server lacks; what
-//! exists is left alone, so it is safe to run twice.
+//! `/backup create` keeps the roles and channels; a daily run keeps them again unless half of them are gone.
+//! `/backup restore` recreates what is missing; existing items are left alone, so it is safe to run twice.
 //!
-//! Not kept: the order of roles and channels, the roles of members, permission overwrites of
-//! members, threads, webhooks and messages.
+//! Not kept: role and channel order, member roles, member overwrites, threads, webhooks, messages.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -39,7 +35,6 @@ const SHRINK_LIMIT_PERCENT: usize = 50;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Config {
-    /// Whether the server is backed up once a day.
     daily: bool,
 }
 
@@ -49,7 +44,6 @@ impl Default for Config {
     }
 }
 
-/// What is known of the backup: when it was taken and what it holds.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Meta {
     at: i64,
@@ -150,7 +144,6 @@ fn saved_channel(channel: &Channel) -> Option<SavedChannel> {
     })
 }
 
-/// The roles and the channels the server has now.
 async fn current(ctx: &EventContext) -> Result<(Vec<Role>, Vec<Channel>), ModuleError> {
     let Outcome::Roles(roles) = ctx
         .api
@@ -242,7 +235,6 @@ async fn take(ctx: &EventContext, force: bool) -> Result<Option<Meta>, ModuleErr
     Ok(Some(meta))
 }
 
-/// What a restore did.
 #[derive(Debug, Default)]
 struct Restored {
     roles: usize,
@@ -299,7 +291,6 @@ async fn restore_roles(
     Ok(now_role)
 }
 
-/// Creates the channels of the backup the server lacks, categories first.
 async fn restore_channels(
     ctx: &EventContext,
     meta: &Meta,
@@ -379,7 +370,6 @@ async fn restore_channels(
     Ok(())
 }
 
-/// Creates again the roles and channels of the backup that the server lacks.
 async fn restore(ctx: &EventContext, meta: &Meta, reason: &str) -> Result<Restored, ModuleError> {
     let (roles, channels) = current(ctx).await?;
     let mut done = Restored::default();

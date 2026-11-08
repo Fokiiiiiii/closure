@@ -123,12 +123,8 @@ impl fmt::Debug for Args {
     }
 }
 
-/// The filter for log output: `RUST_LOG` (default `info`), and on top of it a hard cap that keeps
-/// `twilight_http` and its modules at `warn`.
-///
-/// Twilight's request spans carry the full request URL, which contains interaction tokens, and any
-/// event logged inside such a span prints it. The cap is a separate filter rather than a
-/// directive added to `RUST_LOG`, so no `RUST_LOG` value can lift it, however specific or broad.
+/// The log filter: `RUST_LOG` (default `info`), plus a hard cap that keeps `twilight_http` and its modules at `warn`.
+/// Twilight's request spans carry the full request URL, with interaction tokens, and any event logged inside such a span prints it. The cap is a separate filter rather than a directive added to `RUST_LOG`, so no `RUST_LOG` value can lift it.
 fn log_filter<S>(rust_log: Option<&str>) -> impl Filter<S> + use<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
@@ -249,8 +245,7 @@ mod tests {
         }
     }
 
-    /// Runs a request-like span (target `twilight_http`, URL with a token) containing an event of
-    /// the application, and returns what the logger wrote.
+    /// Runs a request-like span (target `twilight_http`, URL with a token) containing an event of the application, and returns what the logger wrote.
     fn log_with(rust_log: &str) -> String {
         use std::io::Write;
         use std::sync::{Arc, Mutex};

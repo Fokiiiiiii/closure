@@ -33,7 +33,6 @@ use twilight_model::id::Id;
 
 const LEVELS: [&str; 3] = ["calm", "low", "high"];
 
-/// A harness with antiraid set up as `antiraid` says, and the guild's text channels declared.
 fn raid(antiraid: Value) -> Harness {
     let harness = configured(json!({ "antiraid": antiraid }));
     text_channels(&harness);
@@ -49,7 +48,6 @@ fn text_channel(id: u64, slowmode: u16) -> Channel {
     .unwrap()
 }
 
-/// Channel 5 has a slowmode of 3 seconds, the others none.
 fn text_channels(harness: &Harness) {
     harness.api().set_channels(
         Id::new(GUILD),
@@ -71,14 +69,12 @@ fn role(id: u64, name: &str) -> Role {
     .unwrap()
 }
 
-/// The `/automod antiraid <sub>` command, run by a moderator.
 fn sub(path: &str) -> Invocation {
     Invocation::new("automod")
         .subcommand(path)
         .roles([MODERATOR_ROLE])
 }
 
-/// The same, run by an administrator.
 fn admin(path: &str) -> Invocation {
     sub(path).administrator()
 }
@@ -95,7 +91,6 @@ async fn clear(harness: &Harness) {
     harness.invoke(admin("antiraid clear")).await.unwrap();
 }
 
-/// The text of the replies: their content and the descriptions of their embeds.
 fn text_of(replies: &[Reply]) -> String {
     replies
         .iter()
@@ -115,7 +110,6 @@ async fn view(harness: &Harness) -> String {
     text_of(&harness.invoke(sub("antiraid view")).await.unwrap())
 }
 
-/// The slowmode each channel was asked to have, in the order the module asked.
 fn channel_edits(harness: &Harness) -> Vec<(u64, Option<u16>)> {
     harness
         .api()
@@ -130,7 +124,6 @@ fn channel_edits(harness: &Harness) -> Vec<(u64, Option<u16>)> {
         .collect()
 }
 
-/// The invites flag each guild edit asked for.
 fn guild_edits(harness: &Harness) -> Vec<Option<bool>> {
     harness
         .api()
@@ -143,7 +136,6 @@ fn guild_edits(harness: &Harness) -> Vec<Option<bool>> {
         .collect()
 }
 
-/// The role changes asked for, as (added, member, role).
 fn role_changes(harness: &Harness) -> Vec<(bool, u64, u64)> {
     harness
         .api()
@@ -190,8 +182,6 @@ fn words(word: &str) -> Value {
     json!({ "type": "words", "words": [word] })
 }
 
-// ---- configuration ----
-
 #[tokio::test]
 async fn an_invalid_antiraid_section_disables_antiraid_and_not_the_rules() {
     let harness = configured(json!({
@@ -218,8 +208,6 @@ async fn an_effect_for_a_level_that_does_not_exist_is_invalid() {
     assert!(guild_edits(&harness).is_empty());
     assert!(channel_edits(&harness).is_empty());
 }
-
-// ---- what a level changes ----
 
 #[tokio::test]
 async fn a_level_sets_the_slowmode_of_every_text_channel_and_clear_restores_the_originals() {
@@ -262,8 +250,6 @@ async fn a_failing_effect_is_counted_and_the_other_channels_still_change() {
         "levels": LEVELS,
         "effects": { "high": { "slowmode": { "seconds": 30 } } }
     }));
-    // The acknowledgement is the first call, the list of the channels the second; the first
-    // slowmode edit is the third.
     harness
         .api()
         .fail_nth(3, DiscordError::Forbidden("no".into()));
@@ -314,15 +300,12 @@ async fn a_change_is_announced_in_the_log_and_in_the_notify_channel_of_the_level
     );
 }
 
-// ---- the commands ----
-
 #[tokio::test]
 async fn setting_and_clearing_need_an_administrator_and_viewing_needs_a_moderator() {
     let harness = raid(json!({
         "levels": LEVELS,
         "effects": { "high": { "pause_invites": true } }
     }));
-    // A moderator may look, but not change the level.
     let _ = harness
         .invoke(sub("antiraid set").option("level", CommandOptionValue::String("high".into())))
         .await;
@@ -358,8 +341,6 @@ async fn the_status_shows_the_current_level() {
     );
 }
 
-// ---- expiry ----
-
 #[tokio::test]
 async fn an_expiry_returns_to_the_first_level_when_its_time_is_up() {
     let harness = raid(json!({
@@ -394,8 +375,6 @@ async fn an_expiry_does_not_undo_a_later_change() {
         "the later level stays"
     );
 }
-
-// ---- quarantine ----
 
 #[tokio::test]
 async fn a_member_who_joins_at_a_quarantining_level_gets_the_auto_created_role() {
@@ -497,8 +476,6 @@ async fn a_member_who_leaves_is_forgotten_by_the_quarantine() {
         "a member who left is not released again"
     );
 }
-
-// ---- the trigger and the action ----
 
 #[tokio::test]
 async fn a_trigger_fires_when_the_level_changes_to_one_it_names() {
@@ -679,8 +656,6 @@ async fn a_level_change_books_its_resume_before_it_makes_the_discord_changes() {
     );
 }
 
-// ---- the configuration as the host reads it ----
-
 #[test]
 fn the_schema_accepts_an_antiraid_section_and_rejects_its_bad_shapes() {
     let registry = Arc::new(
@@ -731,7 +706,6 @@ fn the_schema_accepts_an_antiraid_section_and_rejects_its_bad_shapes() {
     );
 }
 
-/// A member who joins, delivered as the gateway does, for the checks that need the error of a join.
 fn joining(user: u64) -> Event {
     Event::MemberJoined(MemberInfo {
         guild_id: Id::new(GUILD),
@@ -749,13 +723,10 @@ fn joining(user: u64) -> Event {
 
 #[tokio::test]
 async fn a_failed_effect_is_applied_again_when_the_same_level_is_set() {
-    // A change that stopped halfway (here: one slowmode edit failed) is not complete, and setting the
-    // level it is at again must make the missing changes.
     let harness = raid(json!({
         "levels": LEVELS,
         "effects": { "high": { "slowmode": { "seconds": 30 } } }
     }));
-    // The channel list is the first call; the first slowmode edit is the second.
     harness
         .api()
         .fail_nth(2, DiscordError::Forbidden("no".into()));
@@ -824,12 +795,10 @@ async fn an_expiry_of_an_earlier_change_does_nothing_when_a_later_change_made_in
         .invoke(set_invocation("high").option("duration", CommandOptionValue::String("1m".into())))
         .await
         .unwrap();
-    // Both changes happen in the same second, so their start times are equal.
     harness
         .invoke(set_invocation("low").option("duration", CommandOptionValue::String("10m".into())))
         .await
         .unwrap();
-    // The expiry of the first change, as if its cancellation had been lost.
     let level: Value = harness
         .store()
         .get("antiraid:level")
@@ -905,7 +874,6 @@ async fn a_pause_whose_intent_cannot_be_recorded_is_not_made_and_is_retried() {
         "levels": LEVELS,
         "effects": { "high": { "pause_invites": true } }
     }));
-    // The level is stored first, so only the new invites marker can be refused.
     set(&harness, "low").await;
     let mut filler: usize = 0;
     while harness
@@ -1021,7 +989,6 @@ async fn a_join_of_a_member_who_is_still_recorded_gives_the_role_again() {
         .set_roles(Id::new(GUILD), vec![role(ROLE, "Quarantine")]);
     set(&harness, "high").await;
     join(&harness, MEMBER).await;
-    // The record is still there, as if the leave had not forgotten the member.
     join(&harness, MEMBER).await;
     let given = role_changes(&harness)
         .iter()
@@ -1041,7 +1008,6 @@ async fn a_quarantine_of_many_thousands_still_takes_a_join_a_leave_and_a_release
         .set_roles(Id::new(GUILD), vec![role(ROLE, "Quarantine")]);
     set(&harness, "high").await;
     join(&harness, MEMBER).await;
-    // Far past what the first format held (4,998): the members are rows of a set.
     for n in 0..6_000_u64 {
         harness
             .store()
@@ -1144,7 +1110,6 @@ async fn the_revert_after_the_section_is_removed_books_its_resume() {
         .invoke(set_invocation("high").option("duration", CommandOptionValue::String("5m".into())))
         .await
         .unwrap();
-    // The resume booked with the level has run (and found nothing to do) before the expiry.
     harness.advance(std::time::Duration::from_secs(90));
     assert!(harness.run_due_jobs().await.iter().all(Result::is_ok));
     assert_eq!(harness.jobs(), 1, "only the expiry is left");

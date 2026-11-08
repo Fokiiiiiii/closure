@@ -1,5 +1,4 @@
-//! Values for the usual contexts of a module: a user, a guild, a message. The names follow
-//! the reference bot's where closure has the same data, and Discord ids are text, as they are there.
+//! Values for the usual module contexts: a user, a guild, a message. Discord ids are text.
 
 use std::collections::BTreeMap;
 

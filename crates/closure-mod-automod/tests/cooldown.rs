@@ -32,8 +32,6 @@ use twilight_model::id::Id;
 
 type Boxed<'a, T> = Pin<Box<dyn Future<Output = Result<T, StorageError>> + Send + 'a>>;
 
-/// Storage that yields before each call, so that evaluations running at once interleave wherever one
-/// of them waits on the storage.
 struct Yielding(MemoryStorage);
 
 impl StorageBackend for Yielding {
@@ -158,7 +156,6 @@ impl StorageBackend for Yielding {
     }
 }
 
-/// The context the module gets in the guild, over `storage` and the pretend Discord `api`.
 fn context(
     module: &impl Module,
     storage: &Arc<Yielding>,

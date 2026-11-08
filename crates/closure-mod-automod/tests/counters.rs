@@ -23,10 +23,8 @@ use common::*;
 use serde_json::{Value, json};
 use twilight_model::id::Id;
 
-/// A harness with these counters and rules.
 fn with(counters: Value, rules_: Value) -> Harness {
     let harness = configured(json!({ "counters": counters, "rules": rules_ }));
-    // Not members, so a change for them needs no role check; a test that needs one declares them.
     harness
         .api()
         .set_not_a_member(Id::new(GUILD), Id::new(MEMBER));
@@ -54,7 +52,6 @@ fn scoped_to(mut invocation: Invocation, user: Option<u64>, channel: Option<u64>
     invocation
 }
 
-/// `/automod counter <counter> action:<sub>` run by a moderator.
 fn command(sub: &str, counter: &str) -> Invocation {
     Invocation::new("automod")
         .subcommand("counter")
@@ -63,7 +60,6 @@ fn command(sub: &str, counter: &str) -> Invocation {
         .roles([MODERATOR_ROLE])
 }
 
-/// The text of the replies.
 fn text_of(replies: &[Reply]) -> String {
     replies
         .iter()
@@ -72,7 +68,6 @@ fn text_of(replies: &[Reply]) -> String {
         .join("\n")
 }
 
-/// The value a `view` shows for the scope, read from the reply (its text ends with `: <value>`).
 async fn value(harness: &Harness, counter: &str, user: Option<u64>, channel: Option<u64>) -> i64 {
     let replies = harness
         .invoke(scoped_to(command("view", counter), user, channel))
@@ -87,8 +82,6 @@ async fn value(harness: &Harness, counter: &str, user: Option<u64>, channel: Opt
         .parse()
         .unwrap_or_else(|_| panic!("the view shows a number: {text:?}"))
 }
-
-// ---- what the actions change ----
 
 #[tokio::test]
 async fn add_to_counter_keeps_a_count_for_each_member() {
@@ -112,7 +105,6 @@ async fn add_to_counter_keeps_a_count_for_each_member() {
     );
 }
 
-/// A role of the guild at a position, as Discord lists it.
 fn role_at(id: u64, position: i64) -> twilight_model::guild::Role {
     serde_json::from_value(json!({
         "id": id.to_string(),
@@ -244,8 +236,6 @@ async fn a_view_of_an_unknown_counter_says_so() {
     assert!(text_of(&replies).contains("missing"));
 }
 
-// ---- commands ----
-
 #[tokio::test]
 async fn add_and_set_change_the_value_the_view_shows() {
     let harness = with(json!({ "strikes": { "per_user": true } }), json!({}));
@@ -317,8 +307,6 @@ async fn the_counter_commands_need_the_permission() {
     );
 }
 
-// ---- decay ----
-
 #[tokio::test]
 async fn decay_lowers_the_value_as_time_passes() {
     let harness = with(
@@ -336,8 +324,6 @@ async fn decay_lowers_the_value_as_time_passes() {
     harness.advance(Duration::from_mins(3));
     assert_eq!(value(&harness, "strikes", Some(MEMBER), None).await, 2);
 }
-
-// ---- triggers ----
 
 #[tokio::test]
 async fn a_trigger_fires_once_when_its_condition_newly_holds() {

@@ -95,8 +95,7 @@ pub(crate) async fn get_access(
     ))
 }
 
-/// What `user` may do with the dashboard of `guild` as the stored settings `current` decide, at
-/// the moment of the call: the level, and whether `dashboard.edit` is allowed.
+/// The actor's access level on the dashboard of `guild`, and whether `dashboard.edit` is allowed, from the stored settings.
 pub(crate) async fn actor_access(
     state: &ApiState,
     guild: GuildId,

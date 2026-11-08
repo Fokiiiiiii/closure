@@ -8,15 +8,13 @@ use twilight_http::error::{Error, ErrorType};
 /// The longest retry hint we pass on; Discord never legitimately asks for more.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
 
-/// Discord's error code for "Cannot send messages to this user": the user closed direct messages
-/// from the bot or shares no server with it.
+/// Discord's error code for "Cannot send messages to this user": the user closed DMs or shares no server with the bot.
 const CANNOT_SEND_TO_USER: u64 = 50_007;
 
 /// Discord's error code for "Target user is not connected to voice".
 const TARGET_NOT_IN_VOICE: u64 = 40_032;
 
 /// Maps an HTTP status and Discord error body onto [`DiscordError`].
-///
 /// Kept free of Twilight types so every branch can be tested with plain values.
 pub(crate) fn classify(
     status: u16,

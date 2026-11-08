@@ -1,5 +1,4 @@
-//! The README names what the repository holds: a module added or a claim that stopped being true
-//! is caught here and not by a reader.
+//! Checks that the README names what the repository holds: a module added or a claim that stopped being true is caught here, not by a reader.
 
 #![allow(
     clippy::expect_used,

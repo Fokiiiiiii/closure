@@ -1,9 +1,8 @@
 //! The module's configuration: the server's settings, and the rules read one at a time.
 //!
-//! The JSON Schema refuses a bad rule when it is saved. This reading is the safety net: a rule
-//! that is still wrong is kept as [`Entry::Invalid`] with its reason, never runs, and is listed by
-//! `/automod status`. The rules are an object keyed by id, and they are checked in the order of
-//! their ids, since the configuration does not keep the order it was written in.
+//! The JSON Schema refuses a bad rule when saved; this reading keeps a still-wrong rule as
+//! [`Entry::Invalid`] with its reason, so it never runs and `/automod status` lists it.
+//! Rules are checked in id order, since the configuration does not keep the order they were written in.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -51,7 +50,6 @@ const MAX_NICKNAME_CHARS: usize = 100;
 /// The counter value Discord's counters hold at most.
 const MAX_COUNTER_VALUE: i64 = 2_147_483_647;
 
-/// The module's section of a guild's configuration.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -136,7 +134,6 @@ impl Default for Config {
     }
 }
 
-/// One counter as the configuration writes it.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CounterConfig {
@@ -173,7 +170,6 @@ pub struct FullTrigger {
     pub reverse_condition: Option<String>,
 }
 
-/// One rule of the configuration, read and checked.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
@@ -187,7 +183,6 @@ pub struct Rule {
     pub enabled: bool,
     /// Any one of them tripping trips the rule.
     pub triggers: Vec<Trigger>,
-    /// Run in order.
     pub actions: Vec<Action>,
     #[serde(default)]
     pub scope: Scope,
@@ -331,7 +326,6 @@ pub enum CaseName {
 }
 
 impl CaseName {
-    /// The kind as a case records it.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -363,7 +357,6 @@ pub struct CounterTrigger {
 #[serde(deny_unknown_fields)]
 pub struct Empty {}
 
-/// Words, found in the message or the username.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(
@@ -398,7 +391,6 @@ fn loose_gap_default() -> u8 {
     2
 }
 
-/// Regular expressions; a message trips when one of them matches.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(
@@ -421,7 +413,6 @@ pub struct Patterns {
     pub compiled: Vec<Regex>,
 }
 
-/// Links in the message.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(
@@ -450,7 +441,6 @@ pub struct Links {
     pub exclude: Vec<Regex>,
 }
 
-/// Invites to other servers in the message.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Invites {
@@ -483,7 +473,6 @@ impl Invites {
     }
 }
 
-/// Files attached to the message.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Attachments {
@@ -496,7 +485,6 @@ pub struct Attachments {
     /// When given, a file with any other extension trips the rule.
     #[serde(default)]
     pub allowed_extensions: Vec<String>,
-    /// `image/*` or an exact type.
     #[serde(default)]
     pub blocked_mime_types: Vec<String>,
     /// When given, a file of any other type (or of an unknown type) trips the rule.
@@ -504,7 +492,6 @@ pub struct Attachments {
     pub allowed_mime_types: Vec<String>,
 }
 
-/// Capital letters in the message.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Caps {
@@ -513,14 +500,12 @@ pub struct Caps {
     pub min_letters: u32,
 }
 
-/// One character repeated in a row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Repeat {
     pub max_run: u32,
 }
 
-/// Stickers in the message.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stickers {
@@ -555,7 +540,6 @@ pub struct Spam {
     pub group_identical_messages: bool,
 }
 
-/// What a spam trigger counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Measure {
@@ -567,7 +551,6 @@ pub enum Measure {
     Lines,
     Characters,
     Stickers,
-    /// The most often repeated text in the window.
     Duplicates,
 }
 
@@ -584,16 +567,12 @@ pub enum Target {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkMode {
-    /// Any link at all.
     #[default]
     Any,
-    /// Any link whose domain is not in the list.
     Allowlist,
-    /// Any link whose domain is in the list.
     Blocklist,
 }
 
-/// What a rule does once it hits, in the order given.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
@@ -626,13 +605,11 @@ pub enum Action {
         #[serde(default)]
         reason: Option<String>,
     },
-    /// A message in the channel of the hit. It mentions nobody.
     Reply {
         text: String,
         #[serde(default, deserialize_with = "readable_option")]
         auto_delete: Option<Duration>,
     },
-    /// A message in the channel given. It mentions nobody.
     Alert {
         #[serde(deserialize_with = "snowflake_field")]
         channel: ChannelId,
@@ -647,7 +624,6 @@ pub enum Action {
         #[serde(deserialize_with = "snowflake_list")]
         roles: Vec<RoleId>,
     },
-    /// The nickname of the member, a template.
     SetNickname {
         name: String,
     },
@@ -658,7 +634,6 @@ pub enum Action {
         #[serde(default, deserialize_with = "snowflake_list")]
         channels: Vec<ChannelId>,
     },
-    /// Temporarily changes one channel overwrite.
     ChangePermissions {
         #[serde(default, deserialize_with = "optional_channel")]
         channel: Option<ChannelId>,
@@ -689,7 +664,6 @@ pub enum Action {
     },
 }
 
-/// Why a rule is not run, or why the counters are not used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     /// The rule does not have the shape the schema describes; the parser says where.
@@ -707,7 +681,6 @@ pub enum Entry {
     Invalid { label: String, why: Problem },
 }
 
-/// The module's configuration as it is read: the rules, and the counters they may use.
 #[derive(Debug)]
 pub struct Setup {
     pub rules: Vec<Entry>,
@@ -1293,7 +1266,6 @@ fn compile_all(patterns: &[String], case_insensitive: bool) -> Result<Vec<Regex>
         .collect()
 }
 
-/// The duration a field is written with, such as `10m` or `1h 30m`.
 fn readable<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
     let text = String::deserialize(deserializer)?;
     duration::parse(&text).map_err(|error| D::Error::custom(format!("{text:?}: {error}")))
@@ -1348,7 +1320,6 @@ pub fn role_of(text: Option<&str>) -> Option<RoleId> {
     text.and_then(snowflake)
 }
 
-/// The key of a trigger's name, as the status and a dry run show it.
 pub fn trigger_key(trigger: &Trigger) -> &'static str {
     match trigger {
         Trigger::MemberJoin(_) => "trigger-member-join",
@@ -1377,7 +1348,6 @@ pub fn trigger_key(trigger: &Trigger) -> &'static str {
     }
 }
 
-/// The key of an action's name, as the status and a dry run show it.
 pub fn action_key(action: &Action) -> &'static str {
     match action {
         Action::Delete(_) => "action-delete",

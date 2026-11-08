@@ -51,8 +51,6 @@ async fn dm_template_from_automod_config() {
     assert_eq!(description.as_deref(), Some("custom <@7>"));
 }
 
-// ---- delete ----
-
 #[tokio::test]
 async fn delete_removes_the_message_with_a_single_delete_and_records_an_automod_case() {
     let harness = with_rules(spoiler_rule(delete()));
@@ -177,8 +175,6 @@ async fn the_actions_run_in_the_order_given() {
     assert_eq!(order, ["alert", "delete", "alert"]);
 }
 
-// ---- purge ----
-
 #[tokio::test]
 async fn purge_deletes_what_the_member_sent_within_the_window_from_the_history() {
     let harness = with_rules(rules(&[(
@@ -199,8 +195,6 @@ async fn purge_deletes_what_the_member_sent_within_the_window_from_the_history()
     assert!(!ids.contains(&9003), "older than the window: {ids:?}");
     assert!(!ids.contains(&9004), "another member's: {ids:?}");
 }
-
-// ---- punishments ----
 
 #[tokio::test]
 async fn warn_records_a_warning_that_expires_in_the_configured_days() {
@@ -250,7 +244,6 @@ async fn a_timeout_by_role_adds_the_role_instead() {
     );
 }
 
-/// A role of the guild, as the pretend Discord lists it.
 fn guild_role(id: u64, name: &str, position: i64, managed: bool) -> twilight_model::guild::Role {
     serde_json::from_value(json!({
         "id": id.to_string(), "name": name, "color": 0,
@@ -298,7 +291,6 @@ async fn a_timeout_role_named_like_moderations_is_not_adopted() {
         .api()
         .set_roles(Id::new(GUILD), vec![guild_role(700, "Mute", 1, false)]);
     say(&harness, MEMBER, "spoiler").await;
-    // A role of the same name that Closure did not make may grant access the name does not show.
     assert_eq!(
         count_actions(&harness, |a| matches!(a, Action::CreateRole { .. })),
         1
@@ -410,7 +402,6 @@ fn a_regex_that_does_not_compile_is_refused_at_the_path_of_its_rule() {
         .unwrap(),
     );
     let compiler = closure_config::ConfigCompiler::new(registry).unwrap();
-    // The problems of a document: none when it is accepted.
     let problems = |trigger: Value| {
         let config = json!({
             "rules": { "spoiler": { "triggers": [trigger], "actions": [{ "do": "delete" }] } }
@@ -505,8 +496,6 @@ async fn a_punishment_the_discord_refuses_leaves_no_case() {
     );
 }
 
-// ---- reply ----
-
 #[tokio::test]
 async fn reply_posts_the_text_and_mentions_nobody() {
     let harness = with_rules(spoiler_rule(
@@ -554,8 +543,6 @@ async fn reply_with_auto_delete_removes_the_reply_when_its_time_is_up() {
     assert_eq!(deletions(&harness), 1, "the reply is removed");
 }
 
-// ---- alert ----
-
 #[tokio::test]
 async fn alert_posts_its_text_to_the_channel_it_names() {
     let harness = with_rules(spoiler_rule(json!([
@@ -585,8 +572,6 @@ async fn alert_without_text_says_who_triggered_which_rule_and_what_was_found() {
     assert!(texts[0].contains("spoilers"), "{}", texts[0]);
     assert!(texts[0].contains("spoiler"), "{}", texts[0]);
 }
-
-// ---- templates ----
 
 #[tokio::test]
 async fn templates_fill_in_the_member_channel_rule_detail_link_guild_and_count() {
@@ -644,8 +629,6 @@ async fn a_punishment_without_a_reason_says_the_rule_and_what_was_found() {
         "{reason}"
     );
 }
-
-// ---- edits ----
 
 #[tokio::test]
 async fn an_edited_message_is_checked_and_an_update_without_content_is_ignored() {

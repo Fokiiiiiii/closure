@@ -55,7 +55,6 @@ impl MemberAccess for FakeAccess {
                         vec![]
                     },
                     administrator: false,
-                    // The owners; the others are members of the server with no say in it.
                     owner: matches!(user.get(), 1 | 123 | 9_223_372_036_854_775_807),
                 }),
             )
@@ -661,7 +660,6 @@ async fn a_member_who_may_not_edit_the_dashboard_cannot_save_even_past_the_guard
     )
     .await;
     assert_eq!(general.status, StatusCode::FORBIDDEN, "{}", general.text);
-    // Somebody who is not a member at all fares the same.
     let stranger = send(
         &app.router,
         put(GUILD, "\"0\"", "preset: small").header("x-closure-actor", "999"),
@@ -834,7 +832,6 @@ async fn an_address_that_keeps_failing_to_log_in_is_turned_away_even_with_the_ri
         .parse()
         .unwrap();
     assert!((1..=60).contains(&wait), "{wait}");
-    // Another address is not affected, and the probes need no token at all.
     assert_eq!(
         from("198.51.100.8:4000", TOKEN).await.status(),
         StatusCode::OK
@@ -1476,7 +1473,6 @@ async fn a_message_written_in_the_dashboard_is_sent_by_the_bot(pool: PgPool) {
     );
     assert_eq!(*sink.1.lock().unwrap(), [(5, Some("hello".to_owned()), 1)]);
 
-    // A channel that is not in the server, a message that cannot be sent, and a bad body.
     for (body, status) in [
         (
             json!({"channel_id": "9", "message": {"content": "x"}}),
@@ -1612,7 +1608,6 @@ async fn a_post_can_be_scheduled_listed_and_taken_back_and_buttons_are_checked(p
     assert_eq!(posts[0]["channel_id"], "5");
     assert_eq!(posts[0]["message"]["content"], "later");
 
-    // A time in the past or far ahead, and a button without a role, are refused.
     for bad in [
         json!({"channel_id": "5", "send_at": 5, "message": {"content": "x"}}),
         json!({"channel_id": "5", "send_at": later + 400 * 24 * 3600, "message": {"content": "x"}}),
@@ -1648,7 +1643,6 @@ async fn a_post_can_be_scheduled_listed_and_taken_back_and_buttons_are_checked(p
     .await;
     assert!(listed.json()["posts"].as_array().unwrap().is_empty());
 
-    // With `edit` the sink is told which message to replace.
     let edit = json!({"channel_id": "5", "edit": "123", "message": {"content": "new"}});
     let sent = send(&app.router, post_json(uri).body(&edit.to_string())).await;
     assert_eq!(sent.status, StatusCode::OK, "{}", sent.text);
@@ -1673,7 +1667,6 @@ async fn a_refused_send_says_why_and_a_bot_without_a_sink_is_unavailable(pool: P
         send(&app.router, post_json(uri).body(&body)).await.status,
         StatusCode::FORBIDDEN
     );
-    // Somebody who cannot edit the dashboard cannot send either.
     let denied = send(
         &app.router,
         post_json(uri).header("x-closure-actor", "999").body(&body),
@@ -1715,7 +1708,6 @@ async fn the_cases_of_a_server_are_listed_filtered_shown_counted_and_exported(po
     make_case(&app, "warn", 10, None).await;
     let base = "/v1/guilds/42/cases";
 
-    // Newest first, a page at a time, with the number to ask the next page after.
     let page = send(&app.router, call(Method::GET, &format!("{base}?limit=2"))).await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.text);
     let json = page.json();
@@ -1736,7 +1728,6 @@ async fn the_cases_of_a_server_are_listed_filtered_shown_counted_and_exported(po
     assert_eq!(rest.json()["cases"][0]["number"], 1);
     assert!(rest.json()["next_before"].is_null());
 
-    // Filters.
     for (query, expected) in [
         ("user=10", 2),
         ("kind=ban", 1),
@@ -1760,7 +1751,6 @@ async fn the_cases_of_a_server_are_listed_filtered_shown_counted_and_exported(po
         assert_eq!(response.status, StatusCode::BAD_REQUEST, "{bad}");
     }
 
-    // One case, and one that does not exist.
     let one = send(&app.router, call(Method::GET, &format!("{base}/2"))).await;
     assert_eq!(one.json()["kind"], "ban");
     assert_eq!(one.json()["state"], "active");
@@ -1771,7 +1761,6 @@ async fn the_cases_of_a_server_are_listed_filtered_shown_counted_and_exported(po
         StatusCode::NOT_FOUND
     );
 
-    // The counts.
     let summary = send(
         &app.router,
         call(Method::GET, &format!("{base}/summary?days=7")),
@@ -1791,7 +1780,6 @@ async fn the_cases_of_a_server_are_listed_filtered_shown_counted_and_exported(po
         StatusCode::BAD_REQUEST
     );
 
-    // The CSV: a header, a row for each case, and no cell that a spreadsheet would run.
     let csv = send(&app.router, call(Method::GET, &format!("{base}/export"))).await;
     assert_eq!(csv.status, StatusCode::OK);
     assert!(
@@ -1813,14 +1801,12 @@ async fn a_person_needs_to_be_a_moderator_to_read_and_the_dashboard_right_to_cha
     make_case(&app, "warn", 10, Some("spam")).await;
     let base = "/v1/guilds/42/cases";
 
-    // 3 is a member of the server with no say in it.
     let denied = send(
         &app.router,
         call(Method::GET, base).header("x-closure-actor", "3"),
     )
     .await;
     assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.text);
-    // 123 owns the server.
     let owner = |call: Call| call.header("x-closure-actor", "123");
     assert_eq!(
         send(&app.router, owner(call(Method::GET, base)))
@@ -1829,7 +1815,6 @@ async fn a_person_needs_to_be_a_moderator_to_read_and_the_dashboard_right_to_cha
         StatusCode::OK
     );
 
-    // A note is made in the name of the person; without one there is nobody to name.
     let note = r#"{"target":"10","reason":"asked twice"}"#;
     let anonymous = send(&app.router, post_json(base).body(note)).await;
     assert_eq!(
@@ -1850,7 +1835,6 @@ async fn a_person_needs_to_be_a_moderator_to_read_and_the_dashboard_right_to_cha
     .await;
     assert_eq!(empty.status, StatusCode::BAD_REQUEST);
 
-    // A reason is changed, and a case is hidden from the lists and shown again.
     let patch = |body: &str| {
         owner(call(Method::PATCH, &format!("{base}/1")).header("content-type", "application/json"))
             .body(body)

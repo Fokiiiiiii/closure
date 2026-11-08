@@ -449,8 +449,6 @@ async fn fill_scheduler(harness: &Harness) {
     }
 }
 
-// ---- kick ----
-
 #[tokio::test]
 async fn a_kick_is_messaged_first_then_kicked_and_recorded_with_the_moderator() {
     let harness = harness();
@@ -534,8 +532,6 @@ async fn a_kick_the_discord_refuses_leaves_no_case_and_no_log() {
     assert!(cases_of(&harness, MEMBER).await.is_empty());
     assert!(harness.sent_embeds().is_empty());
 }
-
-// ---- timeout ----
 
 #[tokio::test]
 async fn a_timeout_is_applied_before_the_direct_message_and_expires_with_its_case() {
@@ -788,8 +784,6 @@ fn member_with_roles(id: u64, roles: &[u64]) -> Member {
     .unwrap()
 }
 
-// ---- roles taken off and given back ----
-
 #[tokio::test]
 async fn a_lift_that_leaves_a_role_out_does_not_let_a_later_lift_give_it_back() {
     let harness = harness();
@@ -888,8 +882,6 @@ async fn a_role_taken_off_while_a_lift_gives_roles_back_is_given_back_later() {
         "900 was taken off while the lift ran, and must be given back by a later lift"
     );
 }
-
-// ---- ban and unban ----
 
 #[tokio::test]
 async fn a_permanent_ban_deletes_no_messages_by_default_and_schedules_nothing() {
@@ -1139,8 +1131,6 @@ async fn an_unban_without_a_ban_still_succeeds() {
     assert_eq!(sequence(&harness), ["unban"]);
 }
 
-// ---- voice mute ----
-
 #[tokio::test]
 async fn a_voice_mute_in_discord_is_recorded_and_messaged_after_it() {
     let harness = harness();
@@ -1356,8 +1346,6 @@ async fn a_voice_lift_by_role_is_done_when_the_member_or_role_is_gone() {
     assert_eq!(sequence(&harness), ["role+", "dm"]);
 }
 
-// ---- warn ----
-
 #[tokio::test]
 async fn a_warning_is_a_case_that_expires_and_its_direct_message_counts_the_active_ones() {
     let harness = harness();
@@ -1379,8 +1367,6 @@ async fn a_warning_is_a_case_that_expires_and_its_direct_message_counts_the_acti
     assert!(direct[1].contains("Active warnings: 2"), "{direct:?}");
     assert!(direct[1].contains("spam"), "{direct:?}");
 }
-
-// ---- moderator, bot and locale ----
 
 #[tokio::test]
 async fn the_bot_is_the_moderator_of_what_it_does_when_its_id_is_known() {
@@ -1533,8 +1519,6 @@ async fn a_punisher_can_answer_in_another_language_than_the_server() {
         "{replies:?}"
     );
 }
-
-// ---- the jobs, as rows scheduled before the move keep them ----
 
 #[tokio::test]
 async fn a_row_of_the_old_unban_job_lifts_the_ban_when_due() {
@@ -1711,8 +1695,6 @@ fn the_moderator_of_an_interaction_is_its_user() {
     );
 }
 
-// ---- undoing: a lift revokes the case it names ----
-
 /// An undo command for `user` that names `case`.
 fn undo_of(name: &str, user: u64, case: i64) -> Invocation {
     target(name, user).option("case", CommandOptionValue::Integer(case))
@@ -1877,8 +1859,6 @@ async fn without_undoing_a_voice_unmute_revokes_the_newest_mute_that_stands() {
         Some("removed by case #3")
     );
 }
-
-// ---- a lift does not end a newer punishment that still stands ----
 
 /// A case another module writes against `user` through `cases()`, as the module would.
 async fn other_module_case(
@@ -2047,8 +2027,6 @@ async fn a_timed_ban_lift_goes_on_when_only_its_own_ban_stands() {
     assert_eq!(sequence(&harness).last(), Some(&"unban"));
 }
 
-// ---- a role lift follows the newer punishment that still holds the member ----
-
 #[tokio::test]
 async fn a_role_timeout_lift_moves_to_the_end_of_a_newer_timeout_that_stands() {
     let harness = harness();
@@ -2191,8 +2169,6 @@ async fn a_voice_lift_by_discord_moves_to_the_end_of_a_newer_role_mute_that_stan
     assert_eq!(harness.jobs(), 0);
 }
 
-// ---- undoing an older case while a newer one stands ----
-
 #[tokio::test]
 async fn undoing_an_older_timeout_lifts_nothing_while_a_newer_one_stands() {
     let harness = harness();
@@ -2273,8 +2249,6 @@ async fn undoing_an_older_voice_mute_lifts_nothing_while_a_newer_one_stands() {
         "no lift recorded"
     );
 }
-
-// ---- a failure is reported, not hidden: the lift, the recording and the roles ----
 
 #[tokio::test]
 async fn an_undo_of_a_case_already_revoked_is_reported_not_hidden() {
@@ -2399,8 +2373,6 @@ async fn a_role_timeout_whose_roles_cannot_be_read_still_takes_the_timeout() {
     assert!(result.is_ok(), "{result:?}");
     assert!(!role_changed(&harness, 700, false), "no role was taken off");
 }
-
-// ---- a timed ban lift looks past the newest cases for an older ban that stands ----
 
 #[tokio::test]
 async fn a_timed_ban_lift_finds_an_older_ban_behind_a_hundred_other_cases() {

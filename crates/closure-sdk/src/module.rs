@@ -353,10 +353,7 @@ impl ModuleBuilder {
         self
     }
 
-    /// The Gateway intents the module needs for the events it handles (`GUILD_MESSAGES` for
-    /// messages, `GUILD_MEMBERS` for members, ...); the bot asks Discord for the union over all
-    /// its modules. A module that subscribes to events whose intent it does not declare is
-    /// refused when it is built, because Discord would never send it those events.
+    /// Gateway intents the module's events need; subscribing to an event without its intent is refused at build time.
     #[must_use]
     pub fn intents(mut self, intents: Intents) -> Self {
         self.manifest = self.manifest.intents(intents);
@@ -397,10 +394,7 @@ impl ModuleBuilder {
         self
     }
 
-    /// Handles an event kind (other than commands): the handler gets only the events that pass
-    /// the subscription's filter, after the modules with a higher priority, and says whether
-    /// the modules below it get the event too ([`Flow::Stop`] keeps it from them). A module has
-    /// one handler per kind; the capabilities the handler needs have to be declared too.
+    /// Handles an event kind (other than commands); gets only events passing the subscription filter, and `Flow::Stop` keeps it from lower-priority modules.
     #[must_use]
     pub fn on<F, Fut>(mut self, subscription: Subscription, handler: F) -> Self
     where
@@ -438,8 +432,7 @@ impl ModuleBuilder {
         self
     }
 
-    /// What happens when a button or select menu whose `custom_id` names `route` (see
-    /// [`CustomId`]) is used. Answer with `cx.update(..)`, `cx.reply_private(..)` or
+    /// Handles a button or select menu whose `custom_id` names `route`; a handler that answers nothing just acknowledges the click.
     /// `cx.show_modal(..)`; a handler that answers nothing just acknowledges the click.
     #[must_use]
     pub fn component<F, Fut>(mut self, route: &str, handler: F) -> Self
@@ -472,10 +465,7 @@ impl ModuleBuilder {
         self
     }
 
-    /// What happens when a job scheduled under `name` (`cx.scheduler().job(name, ..)`) is due.
-    /// The module gets the capability to schedule. A handler that fails is run again after a
-    /// growing pause, and when the bot stops while it runs it is run again too, so it has to be
-    /// safe to run twice. A job whose name has no handler (an old one) is dropped with a warning.
+    /// Handles a job scheduled under `name`; failures retry with a growing pause and a run may repeat after restart, so handlers must be idempotent. Jobs with no handler are dropped.
     #[must_use]
     pub fn job<F, Fut>(mut self, name: &str, handler: F) -> Self
     where
@@ -491,10 +481,7 @@ impl ModuleBuilder {
         self
     }
 
-    /// What offers the choices of `option` of the command at `path` (`warn`, or `warn list all`
-    /// for a subcommand) while the user types in it. The option is published as autocompleted.
-    /// A user who may not run the command gets no choices, and so does a handler that fails
-    /// (the failure is logged).
+    /// Offers the choices of `option` of the command at `path` while the user types; none for users who may not run it or when the handler fails.
     #[must_use]
     pub fn autocomplete<F, Fut>(mut self, path: &str, option: &str, handler: F) -> Self
     where
@@ -564,9 +551,7 @@ impl ModuleBuilder {
         self
     }
 
-    /// Adds a command made of subcommands (`/warn add`, `/warn list`). Calls with the same name
-    /// add to one command, which may mix plain subcommands and groups; the description of the first
-    /// call stands.
+    /// Adds a command made of subcommands (`/warn add`); calls with the same name add to one command, and the first description stands.
     #[must_use]
     pub fn group(
         mut self,
@@ -595,9 +580,7 @@ impl ModuleBuilder {
         self
     }
 
-    /// Adds a command made of groups of subcommands, two levels deep (`/warn list all`). The
-    /// route of a subcommand is its group and its name, separated by a space. Like [`Self::group`],
-    /// it adds to a command of the same name.
+    /// Adds a command of subcommand groups, two levels deep (`/warn list all`).
     #[must_use]
     pub fn groups(
         mut self,
@@ -777,8 +760,7 @@ impl ModuleBuilder {
         }
     }
 
-    /// The checks of the context-menu commands and the autocompletes, and the marking of the
-    /// options that are autocompleted in the published commands.
+    /// Checks context commands and autocompletes, and marks the autocompleted options.
     fn check_interactions(&mut self) {
         for route in self.contexts.values() {
             if let Some(key) = &route.requires
@@ -848,8 +830,7 @@ impl ModuleBuilder {
                 ));
             }
         }
-        // Every module gets the settings the SDK reserves: who sees its replies (see
-        // `Cx::reply_with`) and the administrator's texts (see `TEXTS_KEY`).
+        // Every module gets the reserved settings: reply visibility and the administrator's texts.
         for key in [REPLIES, TEXTS_KEY] {
             let declared = self
                 .manifest
@@ -921,8 +902,7 @@ impl ModuleBuilder {
     }
 }
 
-/// Marks the option `option` of the command `command` (of its subcommand `sub`, `group sub` for a
-/// subcommand of a group) as autocompleted. Returns why that is not possible.
+/// Marks option `option` of command `command` (`group sub` for a subcommand of a group) as autocompleted; returns why not possible.
 fn mark_autocomplete(
     commands: &mut [CommandSpec],
     command: &str,
@@ -961,9 +941,7 @@ fn mark_autocomplete(
     Ok(())
 }
 
-/// A module made with [`ModuleBuilder`]. It answers its commands: checks the permission and
-/// the cooldown, reads the options, runs the handler, and tells the user in their language
-/// when they are not allowed, have to wait, or the handler gives them a message.
+/// A module made with [`ModuleBuilder`]: answers commands, checks permission and cooldown, and tells refused users why in their language.
 pub struct SdkModule {
     manifest: ModuleManifest,
     routes: HashMap<(String, Option<String>), Route>,
@@ -1030,8 +1008,7 @@ impl SdkModule {
         Ok(Flow::Continue)
     }
 
-    /// A context-menu command was used: the permission and the cooldown are checked as for a
-    /// command, then the handler runs and answers like a command does.
+    /// Runs a context-menu command after the same permission and cooldown checks as a command.
     async fn on_context(
         &self,
         ctx: &EventContext,
@@ -1080,9 +1057,7 @@ impl SdkModule {
         (route.run)(cx.clone()).await
     }
 
-    /// A user typing in an option. The choices come from the handler of that option, and none
-    /// when the user may not run the command, there is no handler, or the handler fails (which
-    /// is logged). Discord has to be answered in any case.
+    /// A user typing in an option: the handler's choices, or none when the user may not run the command or the handler fails (logged).
     async fn on_autocomplete(
         &self,
         ctx: &EventContext,

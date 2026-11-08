@@ -1,13 +1,4 @@
-//! Running the commands of a module in a test, without Discord.
-//!
-//! ```ignore
-//! let harness = Harness::new(my_module_builder())?;
-//! harness.permissions(|p| { p.role_levels.insert(Id::new(10), Level::MODERATOR); });
-//! let replies = harness
-//!     .invoke(Invocation::new("warn").roles([10]).option("user", CommandOptionValue::User(Id::new(7))))
-//!     .await?;
-//! assert_eq!(replies[0].content, "Warned.");
-//! ```
+//! Runs a module's commands in tests without Discord, through the `Harness`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -159,8 +150,7 @@ pub enum ReplyKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
     pub kind: ReplyKind,
-    /// The text: the content of the message, else the description of its first embed (where
-    /// the SDK's replies put their text), else empty.
+    /// The message content, else the first embed's description (where SDK replies put text), else empty.
     pub content: String,
     pub ephemeral: bool,
     /// Buttons and menus (for a modal: its inputs).
@@ -551,8 +541,7 @@ const OTHER_OWNER: u64 = 999_999_999;
 const BOT: u64 = 9_999;
 
 impl Harness {
-    /// Builds the module on a clock the test controls ([`Self::advance`]) and makes its
-    /// messages available in every language it has a catalog for.
+    /// Builds the module on a test clock (see [`Self::advance`]); messages are in every catalog language.
     pub fn new(builder: ModuleBuilder) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let elapsed = Arc::new(Mutex::new(Duration::ZERO));
         let start = Instant::now();
@@ -616,8 +605,7 @@ impl Harness {
         })
     }
 
-    /// Another module in the same pretend server, as the modules of one bot are: it shares the
-    /// Discord, the storage, the cases, the scheduler and the clock with `self`.
+    /// Another module in the same pretend server, sharing Discord, storage, cases, scheduler and clock.
     pub fn sibling(
         &self,
         builder: ModuleBuilder,
@@ -714,8 +702,7 @@ impl Harness {
         *self.locale.lock().unwrap_or_else(PoisonError::into_inner) = locale;
     }
 
-    /// The bot's own user id that the module's contexts carry (`9999` unless changed); `None`
-    /// when the host does not know it.
+    /// The bot's own user id as the module's contexts carry it (`9999` unless changed); `None` if unknown.
     #[must_use]
     pub fn bot_id(&self) -> Option<UserId> {
         *self.bot.lock().unwrap_or_else(PoisonError::into_inner)
@@ -748,8 +735,7 @@ impl Harness {
         )
     }
 
-    /// The state the modules of the bot share in the guild of the invocations (the restriction
-    /// roles are registered in it).
+    /// The state the bot's modules share in the guild (restriction roles are registered in it).
     #[must_use]
     pub fn restrictions(&self) -> Store {
         Store::restrictions(
@@ -782,8 +768,7 @@ impl Harness {
         )
     }
 
-    /// Keeps `message` in the history of the guild of the invocations, as the host would have
-    /// recorded it. Its `guild_id` is set to that guild.
+    /// Keeps `message` in the guild's history as the host would record it, with `guild_id` set.
     pub async fn seed_message(&self, mut message: SavedMessage) -> Result<(), HistoryError> {
         message.guild_id = Id::new(GUILD);
         self.history.save(&message).await
@@ -807,9 +792,7 @@ impl Harness {
         self.scheduler.len()
     }
 
-    /// Runs the jobs that are due now, the way the host does: a job that succeeds is done (a
-    /// repeating one is set for its next time), one that fails comes again after its pause.
-    /// Returns how each job ended, in the order they were due.
+    /// Runs the due jobs as the host does: a success is done (repeating ones are rescheduled), a failure retries after its pause.
     pub async fn run_due_jobs(&self) -> Vec<Result<(), ModuleError>> {
         let due = self
             .scheduler
@@ -980,8 +963,7 @@ impl Harness {
         }
     }
 
-    /// Delivers an event the way the dispatcher would: only if the module subscribed to its kind
-    /// and the event passes the filter. `None` when it was not delivered.
+    /// Delivers an event as the dispatcher would: only if subscribed and passing the filter; `None` otherwise.
     pub async fn emit(&self, event: Event) -> Result<Option<Flow>, ModuleError> {
         let manifest = self.module.manifest();
         let wanted = manifest
@@ -1035,8 +1017,7 @@ impl Harness {
         self.deliver(guild, Event::Modal(event)).await
     }
 
-    /// Delivers a message posted in the guild, the way the dispatcher would: `None` when the
-    /// module did not subscribe to message creation, or its filter left the message out.
+    /// Delivers a guild message; `None` when the module did not subscribe or its filter dropped it.
     pub async fn message(&self, message: Message) -> Result<Option<Flow>, ModuleError> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let info = MessageInfo {
@@ -1075,8 +1056,7 @@ impl Harness {
         self.emit(Event::MessageCreated(info)).await
     }
 
-    /// Delivers a member's role change, with the roles the gateway reports as added and removed.
-    /// `None` when the module did not subscribe to it or its filter left it out.
+    /// Delivers a role change with the roles the gateway reports as added and removed; `None` when not subscribed or filtered.
     pub async fn roles_changed(
         &self,
         user: u64,
@@ -1182,8 +1162,7 @@ impl Harness {
         }
     }
 
-    /// A new interaction of `guild`: its number and its recorded token. Somebody owns the server
-    /// in every run; it is `user` only when `owner` says so.
+    /// A new interaction in `guild`: somebody owns the server in every run, unless `owner` says `user` does.
     fn new_interaction(
         &self,
         guild: GuildId,
@@ -1229,8 +1208,7 @@ impl Harness {
         self.deliver(guild, Event::ContextCommand(event)).await
     }
 
-    /// Asks the module for the choices of an option while the user types, and returns them. Empty
-    /// when the module answered with none (or did not answer with choices at all).
+    /// Asks for the choices of an option while the user types; empty when the module gives none.
     pub async fn autocomplete(&self, query: Autocomplete) -> Result<Vec<Choice>, ModuleError> {
         let guild: GuildId = Id::new(GUILD);
         let (number, token) = self.new_interaction(guild, Id::new(query.user), false);
