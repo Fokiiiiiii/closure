@@ -7,7 +7,7 @@ closure は、小さく厳格な「核」を中心に作られたモデレーシ
 核を弱めることなくモジュールとして追加できます。
 
 **現状:** 基盤（コア、設定、Discord 層、HTTP API、Lua と WebAssembly のスクリプト実行）の上に、
-17 のモジュール（moderation、automod、logs、diagnostics、welcome、roles、verify、guard、tags、remind、channels、
+18 のモジュール（moderation、automod、logs、diagnostics、welcome、roles、verify、guard、sticky、tags、remind、channels、
 companion、persist、phishing、post、utility、dashboard）が実装されています。ダッシュボード本体は別プロジェクトの
 [closure-dashboard](https://github.com/Fokiiiiiii/closure-dashboard) です。
 

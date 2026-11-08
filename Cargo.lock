@@ -468,6 +468,7 @@ dependencies = [
  "closure-mod-post",
  "closure-mod-remind",
  "closure-mod-roles",
+ "closure-mod-sticky",
  "closure-mod-tags",
  "closure-mod-utility",
  "closure-mod-verify",
@@ -784,6 +785,20 @@ dependencies = [
 
 [[package]]
 name = "closure-mod-roles"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
+]
+
+[[package]]
+name = "closure-mod-sticky"
 version = "0.1.0"
 dependencies = [
  "closure-core",
