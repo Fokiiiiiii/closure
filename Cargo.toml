@@ -37,6 +37,7 @@ closure-mod-tags = { path = "crates/closure-mod-tags" }
 closure-mod-welcome = { path = "crates/closure-mod-welcome" }
 closure-mod-verify = { path = "crates/closure-mod-verify" }
 closure-mod-guard = { path = "crates/closure-mod-guard" }
+closure-mod-honeypot = { path = "crates/closure-mod-honeypot" }
 closure-mod-dehoist = { path = "crates/closure-mod-dehoist" }
 closure-mod-follow = { path = "crates/closure-mod-follow" }
 closure-mod-backup = { path = "crates/closure-mod-backup" }

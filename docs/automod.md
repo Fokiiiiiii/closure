@@ -527,6 +527,21 @@ members are quarantined (moderators). `set <level> [duration]` and `clear` chang
 `release <user>` and `release-all` take members out of the quarantine (moderators). `/automod status` shows
 the level.
 
+### Heat
+
+Heat is one server-wide counter that every sign of a raid feeds with an amount of its own, and that
+cools by itself (`decay`). Two counter triggers raise the antiraid level when the value passes a
+limit, and each level lasts for a `duration`, after which the calm level comes back. The ready
+example, [`examples/heat.yaml`](examples/heat.yaml), counts joins (2), joins of accounts made within an
+hour (3 more) and messages with an invite (4), warms the server at 20 (slowmode) and heats it at 50
+(slowmode, invites paused, quarantine). Copy it into the `config` of the automod module and change
+the amounts and limits; add a rule with `add_to_counter` for any other sign. A test keeps the
+example valid.
+
+Decay is applied when the value is read or changed, so a level ends by its `duration`, not by the
+value falling. A trigger fires when the value newly passes its limit: a raid that goes on while the
+value stays above the limit does not raise the level again until it has fallen below it once.
+
 ### Dry run
 
 With `dry_run: true` nothing is done: no deletion, no punishment, no case, no cooldown, and a burst

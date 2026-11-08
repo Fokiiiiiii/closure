@@ -27,6 +27,7 @@ pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
         Arc::new(closure_mod_roles::module()?),
         Arc::new(closure_mod_verify::module()?),
         Arc::new(closure_mod_guard::module()?),
+        Arc::new(closure_mod_honeypot::module()?),
         Arc::new(closure_mod_dehoist::module()?),
         Arc::new(closure_mod_follow::module()?),
         Arc::new(closure_mod_backup::module()?),

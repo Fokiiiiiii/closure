@@ -1,0 +1,35 @@
+# Heat: one number for the whole server that rises with each sign of a raid and cools by itself.
+# This is the `config` of the automod module. Change the amounts and the limits to fit the server.
+counters:
+  heat:
+    decay: { amount: 1, every: 10s }
+    triggers:
+      warm: ">= 20"
+      hot: ">= 50"
+
+antiraid:
+  levels: [calm, low, high]
+  effects:
+    low:
+      slowmode: { seconds: 10 }
+    high:
+      slowmode: { seconds: 30 }
+      pause_invites: true
+      quarantine: {}
+
+rules:
+  heat_join:
+    triggers: [{ type: member_join }]
+    actions: [{ do: add_to_counter, counter: heat, amount: 2 }]
+  heat_new_account:
+    triggers: [{ type: member_join, only_new: true }]
+    actions: [{ do: add_to_counter, counter: heat, amount: 3 }]
+  heat_invite:
+    triggers: [{ type: invites }]
+    actions: [{ do: add_to_counter, counter: heat, amount: 4 }]
+  heat_warm:
+    triggers: [{ type: counter, counter: heat, trigger: warm }]
+    actions: [{ do: set_antiraid_level, level: low, duration: 10m }]
+  heat_hot:
+    triggers: [{ type: counter, counter: heat, trigger: hot }]
+    actions: [{ do: set_antiraid_level, level: high, duration: 30m }]

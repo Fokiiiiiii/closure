@@ -37,6 +37,7 @@ closure-mod-persist.workspace = true
 closure-mod-roles.workspace = true
 closure-mod-verify.workspace = true
 closure-mod-guard.workspace = true
+closure-mod-honeypot.workspace = true
 closure-mod-dehoist.workspace = true
 closure-mod-follow.workspace = true
 closure-mod-backup.workspace = true
