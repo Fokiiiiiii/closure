@@ -1135,6 +1135,31 @@ async fn a_quarantine_written_in_the_first_format_is_moved_and_released() {
 }
 
 #[tokio::test]
+async fn the_revert_after_the_section_is_removed_books_its_resume() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "slowmode": { "seconds": 30 } } }
+    }));
+    harness
+        .invoke(set_invocation("high").option("duration", CommandOptionValue::String("5m".into())))
+        .await
+        .unwrap();
+    // The resume booked with the level has run (and found nothing to do) before the expiry.
+    harness.advance(std::time::Duration::from_secs(90));
+    assert!(harness.run_due_jobs().await.iter().all(Result::is_ok));
+    assert_eq!(harness.jobs(), 1, "only the expiry is left");
+
+    harness.set_config(json!({ "rules": {} }));
+    harness.advance(std::time::Duration::from_secs(300));
+    assert!(harness.run_due_jobs().await.iter().all(Result::is_ok));
+    assert_eq!(
+        harness.jobs(),
+        1,
+        "the revert books a resume before it puts the changes back, so that a stop in between cannot lose the retry"
+    );
+}
+
+#[tokio::test]
 async fn an_expiry_after_the_section_is_removed_still_reverts_the_stored_changes() {
     let harness = raid(json!({
         "levels": LEVELS,

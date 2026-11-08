@@ -725,9 +725,6 @@ async fn revert_locked(ctx: &EventContext, generation: u64) -> Result<Option<Cha
     if old.generation != generation || old.until.is_none() {
         return Ok(None);
     }
-    let mut tally = Tally::default();
-    slowmodes(ctx, None, &mut tally).await;
-    let invites_paused = invites(ctx, false, generation, &mut tally).await;
     let calm = old
         .calm
         .clone()
@@ -743,7 +740,15 @@ async fn revert_locked(ctx: &EventContext, generation: u64) -> Result<Option<Cha
         calm: Some(calm.clone()),
         tries: 0,
     };
+    // As for a level that is set: the record goes first and the resume is booked before the
+    // changes are put back, so that a stop in between cannot leave them without a retry. The
+    // section is gone, but the changes it made are still there; the job does nothing once the
+    // level is applied.
     let revision = write_level(store, &level, revision).await?;
+    let booked = schedule_resume(ctx, level.generation).await;
+    let mut tally = Tally::default();
+    slowmodes(ctx, None, &mut tally).await;
+    let invites_paused = invites(ctx, false, generation, &mut tally).await;
     let gap = settle(
         store,
         &level,
@@ -751,10 +756,8 @@ async fn revert_locked(ctx: &EventContext, generation: u64) -> Result<Option<Cha
         (tally.failed > 0).then_some(Gap::Failed),
     )
     .await;
-    // What could not be put back is tried again, as for a level that is set: the section is gone,
-    // but the changes it made are still there.
-    if gap.is_some() {
-        schedule_resume(ctx, level.generation).await?;
+    if gap.is_some() && booked.is_err() {
+        tally.failed += 1;
     }
     let change = Change {
         old: old.name,
