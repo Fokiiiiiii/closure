@@ -35,6 +35,7 @@ closure-mod-utility = { path = "crates/closure-mod-utility" }
 closure-mod-companion = { path = "crates/closure-mod-companion" }
 closure-mod-tags = { path = "crates/closure-mod-tags" }
 closure-mod-welcome = { path = "crates/closure-mod-welcome" }
+closure-mod-verify = { path = "crates/closure-mod-verify" }
 
 anyhow = "1"
 async-trait = "0.1"

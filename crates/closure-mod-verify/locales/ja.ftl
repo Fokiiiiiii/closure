@@ -1,0 +1,21 @@
+command-verify = verify
+    .description = 参加するために押すパネルを投稿します
+permission-verify-panel = 認証パネルを投稿する
+config-verify-role = 認証済みのメンバーが持つロール。
+config-verify-unverified_role = 参加から認証までの間に付けるロール。空にすると、参加時には何も付けません。
+config-verify-mode = メンバーが行うこと。ボタンを押す、または先に簡単な計算に答える。
+config-verify-kick_after = 認証までの猶予。過ぎるとキックします（例: 1d）。空にすると無期限です。
+verify-panel = ボタンを押すとサーバーに入れます。
+verify-button = 認証する
+verify-modal-title = 質問です
+verify-question = { $left } + { $right } = ?
+verify-done = 認証しました。ようこそ！
+verify-already = すでに認証済みです。
+verify-wrong = 答えが違います。もう一度ボタンを押すと新しい質問が出ます。
+verify-not-set = このサーバーでは認証が設定されていません。
+verify-unsafe-role = 認証ロールにモデレーター権限があるか、処罰用のロールのため、ボタンでは付けられません。スタッフに連絡してください。
+verify-cannot = Bot がそのロールを付けられません。スタッフに連絡してください。
+verify-unavailable = 今は認証できません。少し待ってからもう一度お試しください。
+verify-reason = ボタンで認証
+verify-reason-join = 認証待ちの新規メンバー
+verify-kick-reason = 期限内に認証しなかった

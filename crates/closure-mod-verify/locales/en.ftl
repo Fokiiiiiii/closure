@@ -1,0 +1,21 @@
+command-verify = verify
+    .description = Post the panel members press to get in
+permission-verify-panel = Post the verification panel
+config-verify-role = The role a verified member has.
+config-verify-unverified_role = A role a member has from the join until verified. Left empty, members get nothing at the join.
+config-verify-mode = What a member does: press the button, or answer a small sum first.
+config-verify-kick_after = How long a member has to verify before being kicked, such as 1d. Left empty, never.
+verify-panel = Press the button to enter the server.
+verify-button = Verify
+verify-modal-title = One question
+verify-question = { $left } + { $right } = ?
+verify-done = You are verified. Welcome!
+verify-already = You are verified already.
+verify-wrong = That is not the answer. Press the button again for a new question.
+verify-not-set = Verification is not set up in this server.
+verify-unsafe-role = The verified role has moderator powers or belongs to a punishment, so it cannot be given by a button. Ask the staff.
+verify-cannot = The bot cannot give that role. Ask the staff.
+verify-unavailable = Verification is not available now. Try again in a moment.
+verify-reason = Verified with the button
+verify-reason-join = A new member waits for verification
+verify-kick-reason = Did not verify in time

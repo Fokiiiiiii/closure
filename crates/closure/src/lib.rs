@@ -26,6 +26,7 @@ pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
         Arc::new(closure_mod_welcome::module()?),
         Arc::new(closure_mod_remind::module()?),
         Arc::new(closure_mod_roles::module()?),
+        Arc::new(closure_mod_verify::module()?),
         Arc::new(closure_mod_post::module()?),
         Arc::new(closure_mod_phishing::module(Arc::new(
             closure_discord::AntiFish::new(),

@@ -469,6 +469,7 @@ dependencies = [
  "closure-mod-roles",
  "closure-mod-tags",
  "closure-mod-utility",
+ "closure-mod-verify",
  "closure-mod-welcome",
  "closure-plugins",
  "closure-script",
@@ -802,6 +803,20 @@ dependencies = [
  "tracing",
  "twilight-model",
  "twilight-util",
+]
+
+[[package]]
+name = "closure-mod-verify"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
 ]
 
 [[package]]
