@@ -461,6 +461,7 @@ dependencies = [
  "closure-mod-companion",
  "closure-mod-dashboard",
  "closure-mod-diagnostics",
+ "closure-mod-follow",
  "closure-mod-guard",
  "closure-mod-logs",
  "closure-mod-moderation",
@@ -695,6 +696,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "closure-mod-follow"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
 ]
 
 [[package]]
