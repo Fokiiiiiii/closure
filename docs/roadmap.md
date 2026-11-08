@@ -189,3 +189,21 @@ with closure's state beside it (done, partly, missing, left out on purpose).
 Everything above comes after the open items of the audit of 2026-11-06 that touch the same code
 (the punishment state machine, the jobs and outbox, the quarantine table): those are the ground the
 new moderation stands on.
+
+## Under load: what the load test found (planned, not started)
+
+Measured with [the load test](loadtest.md): several servers of hundreds of thousands of members,
+a raid and then spam, under Discord's limit of 50 requests a second for the whole bot. In order of
+value:
+
+1. **Fewer requests for a join.** The quarantine of a joiner lists the roles and reads the member
+   again, though the join event holds the roles and the role list is the same for every joiner. A
+   short-lived per-server cache of the role list and of the bot's own member, and the roles from the
+   event, bring a quarantined join down to the one request that gives the role.
+2. **Choose what is shed.** A full server queue drops the newest event whatever it is. The events
+   that carry a raid (joins, and the messages that trip a rule) should not be shed before chat; a
+   lane or a larger share of the queue for them.
+3. **Say less during a raid.** Each join sends a welcome and a log entry. While the antiraid level
+   is raised, the welcome could stop and the log entries could be gathered into one message.
+4. **A queue per server measured in cost, not in events.** An event that waits for Discord holds a
+   place for seconds; a count of waiting requests would show a stalled server sooner.
