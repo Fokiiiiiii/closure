@@ -364,7 +364,7 @@ Ask for a punishment to be lifted
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `text` | 理由 | string | yes | max_length 1000 | Why the punishment should be lifted |
+| `text` | 理由 | string | yes | max_length 400 | Why the punishment should be lifted |
 | `user` | ユーザー | user | no | - | The member, for an appeal that came another way (moderators) |
 
 ### `/unban`

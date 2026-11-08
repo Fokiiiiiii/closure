@@ -153,6 +153,8 @@ pub struct MockApi {
     /// The guilds whose invites are switched off by an edit, as the pretend Discord reports them.
     invites_disabled: Mutex<HashSet<GuildId>>,
     lookups: Mutex<usize>,
+    /// The invites each guild has, as the pretend Discord lists them.
+    guild_invites: Mutex<HashMap<GuildId, Vec<Invite>>>,
     /// Who reacted to each message the test declared reactors for, by id, oldest id first.
     reactors: Mutex<HashMap<(ChannelId, MessageId), Vec<UserId>>>,
     /// The entries of the pretend Discord's audit log, oldest first.
@@ -283,7 +285,12 @@ impl MockApi {
                 *limit,
             ))),
             Action::ListThreadMembers { .. } => Ok(Outcome::ThreadMembers(vec![])),
-            Action::ListInvites { .. } => Ok(Outcome::Invites(vec![])),
+            Action::ListInvites { guild_id } => Ok(Outcome::Invites(
+                lock(&self.guild_invites)
+                    .get(guild_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )),
             Action::ListWebhooks { .. } => Ok(Outcome::Webhooks(vec![])),
             Action::SearchMembers { .. } | Action::ListMembers { .. } => {
                 Ok(Outcome::Members(vec![]))
@@ -412,6 +419,32 @@ impl MockApi {
             users: Vec::new(),
             webhooks: Vec::new(),
         }
+    }
+
+    /// Declares the invites of `guild`: each a code, how often it was used, and who made it.
+    pub fn set_guild_invites(&self, guild: GuildId, invites: &[(&str, u64, Option<UserId>)]) {
+        let list = invites
+            .iter()
+            .map(|(code, uses, inviter)| {
+                let mut value = serde_json::json!({
+                    "code": code, "type": 0, "uses": uses,
+                    "guild": {
+                        "id": guild.to_string(), "name": "server", "features": [],
+                        "splash": null, "banner": null, "description": null, "icon": null,
+                        "verification_level": 0, "nsfw_level": 0, "vanity_url_code": null,
+                    },
+                });
+                if let Some(user) = inviter {
+                    value["inviter"] = serde_json::json!({
+                        "id": user.get().to_string(), "username": "inviter",
+                        "discriminator": "0", "avatar": null,
+                    });
+                }
+                serde_json::from_value(value)
+                    .unwrap_or_else(|error| panic!("a test invite: {error}"))
+            })
+            .collect();
+        lock(&self.guild_invites).insert(guild, list);
     }
 
     /// Declares who reacted to a message, for `GetReactionUsers`: Discord lists them by user id,

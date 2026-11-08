@@ -11,6 +11,7 @@ Roles that members take themselves, and roles that moderators hand out.
 - `read_guild`
 - `manage_roles`
 - `respond_to_interactions`
+- `storage`
 - `schedule`
 
 ## Permissions

@@ -7,7 +7,7 @@ use closure_core::capability::Capability;
 use closure_core::error::{CoreError, DiscordError, ModuleError};
 use closure_core::event::{
     AttachmentInfo, ChannelId, ChannelInfo, Event, EventKind, MemberInfo, MessageId, MessageInfo,
-    RoleId, RoleInfo, RolesChange, StageInfo, StickerInfo, ThreadInfo, UserInfo,
+    RoleId, RoleInfo, RolesChange, StageInfo, StickerInfo, ThreadInfo, UserId, UserInfo,
 };
 use closure_core::history::SavedMessage;
 use closure_core::locale::Locale;
@@ -25,6 +25,7 @@ use twilight_model::channel::message::Embed;
 use twilight_model::id::Id;
 
 mod audit;
+mod invites;
 mod permissions;
 use audit::{add_audit, audit_of, bulk_audit_of, change_audit_of, deletion_audit_of};
 
@@ -174,8 +175,42 @@ struct Config {
     emojis: bool,
     stickers: bool,
     stage_instances: bool,
+    /// Whether a join names the invite the member came by.
+    #[serde(default)]
+    invite_tracking: bool,
+    /// Channels whose messages, and whose own changes, are not logged.
+    #[serde(default)]
+    ignored_channels: Vec<String>,
+    /// Roles whose changes, and whose members' messages and role changes, are not logged.
+    #[serde(default)]
+    ignored_roles: Vec<String>,
+    /// Members of whom nothing is logged.
+    #[serde(default)]
+    ignored_users: Vec<String>,
+    /// Channels of their own for a kind of entry; the others go where `channel` or `webhook` says.
+    #[serde(default)]
+    routes: Routes,
 }
 
+/// A channel for each kind of entry.
+#[derive(Debug, Default, Deserialize)]
+struct Routes {
+    /// Edits and deletions of messages.
+    messages: Option<String>,
+    /// Joins, departures, nicknames and roles of members.
+    members: Option<String>,
+    /// Bans, unbans and timeouts.
+    moderation: Option<String>,
+    /// Channels, threads, roles, emojis, stickers and stages.
+    server: Option<String>,
+    /// Members in voice channels.
+    voice: Option<String>,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the schema and the defaults of every setting, side by side"
+)]
 fn settings() -> (serde_json::Value, serde_json::Value) {
     let schema = json!({
         "type": "object",
@@ -209,6 +244,45 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
               "emojis": { "type": "boolean", "description": "config-logs-emojis", "x-ui": { "level": "basic" } },
               "stickers": { "type": "boolean", "description": "config-logs-stickers", "x-ui": { "level": "basic" } },
               "stage_instances": { "type": "boolean", "description": "config-logs-stage_instances", "x-ui": { "level": "basic" } },
+            "invite_tracking": {
+                "type": "boolean",
+                "description": "config-logs-invite_tracking",
+                "x-ui": { "level": "basic" }
+            },
+            "ignored_channels": {
+                "type": "array",
+                "maxItems": 200,
+                "items": { "type": "string", "pattern": "^[0-9]{1,20}$" },
+                "description": "config-logs-ignored_channels",
+                "x-ui": { "level": "basic" }
+            },
+            "ignored_roles": {
+                "type": "array",
+                "maxItems": 100,
+                "items": { "type": "string", "pattern": "^[0-9]{1,20}$" },
+                "description": "config-logs-ignored_roles",
+                "x-ui": { "level": "basic" }
+            },
+            "ignored_users": {
+                "type": "array",
+                "maxItems": 200,
+                "items": { "type": "string", "pattern": "^[0-9]{1,20}$" },
+                "description": "config-logs-ignored_users",
+                "x-ui": { "level": "basic" }
+            },
+            "routes": {
+                "type": "object",
+                "properties": {
+                    "messages": { "type": ["string", "null"], "pattern": "^[0-9]{1,20}$", "description": "config-logs-routes-messages", "x-ui": { "level": "basic" } },
+                    "members": { "type": ["string", "null"], "pattern": "^[0-9]{1,20}$", "description": "config-logs-routes-members", "x-ui": { "level": "basic" } },
+                    "moderation": { "type": ["string", "null"], "pattern": "^[0-9]{1,20}$", "description": "config-logs-routes-moderation", "x-ui": { "level": "basic" } },
+                    "server": { "type": ["string", "null"], "pattern": "^[0-9]{1,20}$", "description": "config-logs-routes-server", "x-ui": { "level": "basic" } },
+                    "voice": { "type": ["string", "null"], "pattern": "^[0-9]{1,20}$", "description": "config-logs-routes-voice", "x-ui": { "level": "basic" } }
+                },
+                "additionalProperties": false,
+                "description": "config-logs-routes",
+                "x-ui": { "level": "basic" }
+            },
             "keep_attachments": {
                 "type": "boolean",
                 "description": "config-logs-keep_attachments",
@@ -236,7 +310,12 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
         "emojis": true,
         "stickers": true,
         "stage_instances": true,
-        "keep_attachments": false
+        "keep_attachments": false,
+        "invite_tracking": true,
+        "ignored_channels": [],
+        "ignored_roles": [],
+        "ignored_users": [],
+        "routes": { "messages": null, "members": null, "moderation": null, "server": null, "voice": null }
     });
     (schema, defaults)
 }
@@ -249,7 +328,14 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .capability(Capability::ReadMessageHistory)
             .capability(Capability::KeepAttachments)
             .capability(Capability::ReadAuditLog)
+            // Reading the invites of the server (to tell which one a member joined with) is the
+            // capability that also lets a module make and delete them; this module only reads.
+            .capability(Capability::ManageInvites)
+            // The uses of the invites at the last look are kept in the module's storage.
+            .capability(Capability::Storage)
             .job("retry_log", retry_post)
+            .job("invite_snapshot", invite_snapshot)
+            .on(Subscription::new(EventKind::GuildAvailable), watch_invites)
             .intents(
                 Intents::GUILD_MESSAGES
                     | Intents::GUILD_MEMBERS
@@ -309,12 +395,156 @@ async fn audit_within_deadline(
     }
 }
 
+/// The kinds of entries that can have a channel of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    Messages,
+    Members,
+    Moderation,
+    Server,
+    Voice,
+}
+
+/// Which kind of entry an event gives, if a log shows it at all.
+fn group_of(event: &Event) -> Option<Group> {
+    Some(match event {
+        Event::MessageUpdated(_)
+        | Event::MessageDeleted { .. }
+        | Event::MessagesBulkDeleted { .. } => Group::Messages,
+        Event::MemberJoined(_)
+        | Event::MemberLeft { .. }
+        | Event::NicknameChanged { .. }
+        | Event::RolesChanged(_) => Group::Members,
+        Event::BanAdded { .. } | Event::BanRemoved { .. } | Event::TimeoutChanged { .. } => {
+            Group::Moderation
+        }
+        Event::VoiceStateChanged { .. } => Group::Voice,
+        Event::ChannelCreated(_)
+        | Event::ChannelChanged { .. }
+        | Event::ChannelDeleted(_)
+        | Event::ThreadCreated(_)
+        | Event::ThreadArchived(_)
+        | Event::ThreadUnarchived(_)
+        | Event::ThreadDeleted { .. }
+        | Event::RoleCreated(_)
+        | Event::RoleChanged { .. }
+        | Event::RoleDeleted { .. }
+        | Event::EmojiCreated(_)
+        | Event::EmojiDeleted(_)
+        | Event::EmojiUpdated { .. }
+        | Event::StickerCreated(_)
+        | Event::StickerDeleted(_)
+        | Event::StickerUpdated { .. }
+        | Event::StageCreated(_)
+        | Event::StageDeleted(_)
+        | Event::StageUpdated { .. } => Group::Server,
+        _ => return None,
+    })
+}
+
+/// The channel of its own that the entries of `group` have, if the server set one.
+fn route(config: &Config, group: Group) -> Result<Option<Destination>, ModuleError> {
+    let routes = &config.routes;
+    let text = match group {
+        Group::Messages => &routes.messages,
+        Group::Members => &routes.members,
+        Group::Moderation => &routes.moderation,
+        Group::Server => &routes.server,
+        Group::Voice => &routes.voice,
+    };
+    let Some(text) = text.as_deref() else {
+        return Ok(None);
+    };
+    text.parse::<u64>()
+        .ok()
+        .and_then(Id::new_checked)
+        .map(|channel| Some(Destination::Channel(channel)))
+        .ok_or_else(|| ModuleError::Config(format!("`{text}` is not a channel id")))
+}
+
+fn id_set(list: &[String]) -> std::collections::HashSet<u64> {
+    list.iter().filter_map(|id| id.parse().ok()).collect()
+}
+
+/// Whether the server asked for nothing to be logged about this event: the channel it happened in,
+/// the member it is about, or a role of that member or of the change. Only what the event, or the
+/// history of a deleted message, tells is used: no member is looked up for it.
+async fn is_ignored(ctx: &EventContext, config: &Config, event: &Event) -> bool {
+    let channels = id_set(&config.ignored_channels);
+    let roles = id_set(&config.ignored_roles);
+    let users = id_set(&config.ignored_users);
+    if channels.is_empty() && roles.is_empty() && users.is_empty() {
+        return false;
+    }
+    let channel = |id: ChannelId| channels.contains(&id.get());
+    let user = |id: UserId| users.contains(&id.get());
+    let role = |id: &RoleId| roles.contains(&id.get());
+    match event {
+        Event::MessageUpdated(message) => {
+            channel(message.channel_id)
+                || user(message.author.id)
+                || message.author_roles.iter().any(role)
+        }
+        Event::MessageDeleted {
+            channel_id,
+            message_id,
+            ..
+        } => {
+            channel(*channel_id)
+                || match ctx.history().get(*channel_id, *message_id).await {
+                    Ok(Some(saved)) => user(saved.author),
+                    _ => false,
+                }
+        }
+        Event::MessagesBulkDeleted { channel_id, .. } => channel(*channel_id),
+        Event::MemberJoined(member) => user(member.user.id) || member.roles.iter().any(role),
+        Event::MemberLeft { user: who, .. }
+        | Event::BanAdded { user: who, .. }
+        | Event::BanRemoved { user: who, .. }
+        | Event::NicknameChanged { user: who, .. }
+        | Event::TimeoutChanged { user: who, .. } => user(who.id),
+        Event::VoiceStateChanged {
+            user: who,
+            before,
+            after,
+            ..
+        } => user(who.id) || before.is_some_and(channel) || after.is_some_and(channel),
+        Event::RolesChanged(change) => {
+            user(change.user.id) || change.added.iter().any(role) || change.removed.iter().any(role)
+        }
+        Event::ChannelCreated(info) | Event::ChannelDeleted(info) => {
+            channel(info.id) || info.parent_id.is_some_and(channel)
+        }
+        Event::ChannelChanged { after, .. } => {
+            channel(after.id) || after.parent_id.is_some_and(channel)
+        }
+        Event::ThreadCreated(thread)
+        | Event::ThreadArchived(thread)
+        | Event::ThreadUnarchived(thread) => {
+            channel(thread.id) || thread.parent_id.is_some_and(channel)
+        }
+        Event::ThreadDeleted {
+            thread_id,
+            parent_id,
+            ..
+        } => channel(*thread_id) || channel(*parent_id),
+        Event::RoleCreated(info) | Event::RoleChanged { after: info, .. } => role(&info.id),
+        Event::RoleDeleted { role_id, .. } => role(role_id),
+        _ => false,
+    }
+}
+
 async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     let config: Config = parse_module_config(&ctx)?;
-    let Some(channel) = destination(&ctx, &config)? else {
+    let default = destination(&ctx, &config)?;
+    let Some(group) = group_of(&event) else {
         return Ok(Flow::Continue);
     };
-    if about_a_bot(&ctx, &event).await {
+    // A channel of its own for this kind of entry comes before the one for all of them.
+    let Some(channel) = route(&config, group)?.or(default) else {
+        return Ok(Flow::Continue);
+    };
+    if about_a_bot(&ctx, &event).await || is_ignored(&ctx, &config, &event).await {
         return Ok(Flow::Continue);
     }
     let entries = match &event {
@@ -348,7 +578,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
                 .collect()
         }
         Event::MemberJoined(member) if config.member_joins => {
-            vec![joined_entry(&ctx, member)?]
+            vec![joined(&ctx, &config, member).await?]
         }
         Event::MemberLeft { user, .. } if config.member_leaves => {
             let kick = audit_within_deadline(audit_of(&ctx, &config, &event)).await;
@@ -851,10 +1081,92 @@ fn unkept_card(ctx: &EventContext, channel: u64, message: u64) -> EmbedBuilder {
 }
 
 /// A join: the member, when the account was made and how old it is, and when the member joined.
-fn joined_entry(ctx: &EventContext, member: &MemberInfo) -> Result<LogEntry, ModuleError> {
+/// The entry of a join, with the invite the member came by when the server asked for it.
+async fn joined(
+    ctx: &EventContext,
+    config: &Config,
+    member: &MemberInfo,
+) -> Result<LogEntry, ModuleError> {
+    // A bot is added by hand with a link of its own, not by an invite.
+    let invite = if config.invite_tracking && !member.user.bot {
+        invites::joined_with(ctx).await
+    } else {
+        None
+    };
+    joined_entry(ctx, member, invite.as_ref())
+}
+
+/// What the invite field of a join says.
+fn invite_text(ctx: &EventContext, found: &invites::Found) -> String {
+    match found {
+        invites::Found::Invite { code, inviter } => {
+            let link = format!("discord.gg/{}", escape_code(code));
+            match inviter {
+                Some(user) => ctx.t_in(
+                    ctx.locale,
+                    "logs-invite-by",
+                    &Args::new()
+                        .with("link", link)
+                        .with("user", format!("<@{user}>")),
+                ),
+                None => link,
+            }
+        }
+        invites::Found::Several(codes) => ctx.t_in(
+            ctx.locale,
+            "logs-invite-several",
+            &Args::new().with(
+                "links",
+                codes
+                    .iter()
+                    .map(|code| format!("discord.gg/{}", escape_code(code)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        ),
+        invites::Found::Unknown => label(ctx, "logs-invite-unknown"),
+    }
+}
+
+/// An invite code is letters and digits; anything else is not shown as it is.
+fn escape_code(code: &str) -> String {
+    code.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// Starts the periodic look at the invites when the server comes up.
+async fn watch_invites(ctx: EventContext, _: Event) -> Result<Flow, ModuleError> {
+    ctx.scheduler()
+        .job("invite_snapshot", &())
+        .map_err(|error| ModuleError::other(error.to_string()))?
+        .key("invite_snapshot")
+        .every(invites::SNAPSHOT_EVERY, std::time::Duration::ZERO)
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    Ok(Flow::Continue)
+}
+
+/// Keeps the uses of the invites, so that the next join is compared with a recent count.
+async fn invite_snapshot(cx: JobCx) -> Result<(), ModuleError> {
+    let config: Config = parse_module_config(cx.ctx())?;
+    if config.member_joins && config.invite_tracking {
+        // Not being allowed to read the invites is not a fault of the job.
+        if let Err(error) = invites::snapshot(cx.ctx()).await {
+            tracing::debug!(%error, "could not look at the invites");
+        }
+    }
+    Ok(())
+}
+
+fn joined_entry(
+    ctx: &EventContext,
+    member: &MemberInfo,
+    invite: Option<&invites::Found>,
+) -> Result<LogEntry, ModuleError> {
     let now = ctx.now();
     let created = duration::snowflake_time(member.user.id.get());
-    let card = member_card(ctx, "logs-joined", Color::Success, &member.user)
+    let mut card = member_card(ctx, "logs-joined", Color::Success, &member.user)
         .field(
             label(ctx, "logs-created"),
             duration::timestamp(created, TimeStyle::ShortDateTime),
@@ -870,6 +1182,9 @@ fn joined_entry(ctx: &EventContext, member: &MemberInfo) -> Result<LogEntry, Mod
             duration::timestamp(member.joined_at.unwrap_or(now), TimeStyle::ShortDateTime),
             true,
         );
+    if let Some(found) = invite {
+        card = card.field(label(ctx, "logs-invite"), invite_text(ctx, found), false);
+    }
     Ok(LogEntry {
         embed: build(card)?,
         files: Vec::new(),

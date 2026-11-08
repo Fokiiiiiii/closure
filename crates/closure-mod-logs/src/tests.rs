@@ -490,6 +490,8 @@ async fn unavailable_webhooks_fall_back_or_fail_without_retry() {
     ] {
         for fallback in [false, true] {
             let harness = Harness::new(builder().unwrap()).unwrap();
+            // The first call that fails must be the post, not a look at the invites.
+            harness.set_config(config(None, true));
             if fallback {
                 harness.set_log_channel(LOG);
             }
@@ -520,6 +522,7 @@ async fn unavailable_webhooks_fall_back_or_fail_without_retry() {
 #[tokio::test]
 async fn webhook_retry_keeps_destination_after_policy_changes() {
     let harness = harness();
+    harness.set_config(config(None, true));
     harness.set_log_webhook("original");
     harness
         .api()
@@ -552,6 +555,7 @@ async fn webhook_retry_keeps_destination_after_policy_changes() {
 #[tokio::test]
 async fn failed_log_post_is_sent_after_retry() {
     let harness = harness();
+    harness.set_config(config(None, true));
     harness
         .api()
         .fail_nth(1, DiscordError::Transient("offline".into()));
@@ -2162,4 +2166,189 @@ async fn a_slow_audit_lookup_still_posts_without_an_actor() {
         })
         .unwrap();
     assert!(!posted.contains("<@9>"));
+}
+
+fn ban(user: u64) -> Event {
+    Event::BanAdded {
+        guild_id: Id::new(GUILD),
+        user: UserInfo {
+            id: Id::new(user),
+            name: "someone".into(),
+            bot: false,
+        },
+    }
+}
+
+#[tokio::test]
+async fn a_kind_of_entry_goes_to_its_own_channel_and_the_others_to_the_usual_one() {
+    let harness = harness();
+    // The harness knows only the channels it was given: register the other one first.
+    harness.set_log_channel(OTHER_LOG);
+    harness.set_log_channel(LOG);
+    let mut settings = config(None, true);
+    settings["routes"] = json!({ "messages": OTHER_LOG.to_string(), "moderation": null });
+    harness.set_config(settings);
+
+    harness.emit(deleted(12)).await.unwrap();
+    harness.emit(ban(6)).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 2, "{posted:?}", posted = posted.len());
+    assert_eq!(
+        posted[0].channel, OTHER_LOG,
+        "the message goes to its route"
+    );
+    assert_eq!(
+        posted[1].channel, LOG,
+        "a kind without a route goes the usual way"
+    );
+}
+
+#[tokio::test]
+async fn a_route_works_without_any_other_channel() {
+    let harness = Harness::new(builder().unwrap()).unwrap();
+    harness
+        .api()
+        .add_channel(Id::new(OTHER_LOG), Some(Id::new(GUILD)));
+    let mut settings = config(None, true);
+    settings["routes"] = json!({ "moderation": OTHER_LOG.to_string() });
+    harness.set_config(settings);
+
+    harness.emit(ban(6)).await.unwrap();
+    harness.emit(deleted(12)).await.unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "only the kind with a channel is posted");
+    assert_eq!(posted[0].channel, OTHER_LOG);
+}
+
+#[tokio::test]
+async fn nothing_is_logged_for_an_ignored_channel_member_or_role() {
+    let harness = harness();
+    let mut settings = config(None, true);
+    settings["ignored_channels"] = json!([CHANNEL.to_string()]);
+    settings["ignored_users"] = json!(["6"]);
+    settings["ignored_roles"] = json!(["900"]);
+    harness.set_config(settings);
+
+    // A message deleted in an ignored channel, a ban of an ignored member, an ignored role changed.
+    harness.emit(deleted(12)).await.unwrap();
+    harness.emit(ban(6)).await.unwrap();
+    harness
+        .emit(Event::RolesChanged(RolesChange {
+            guild_id: Id::new(GUILD),
+            user: UserInfo {
+                id: Id::new(8),
+                name: "other".into(),
+                bot: false,
+            },
+            added: vec![Id::new(900)],
+            removed: Vec::new(),
+        }))
+        .await
+        .unwrap();
+    assert!(sent(&harness).is_empty(), "nothing is posted");
+
+    // Anybody else is logged as before.
+    harness.emit(ban(7)).await.unwrap();
+    assert_eq!(sent(&harness).len(), 1);
+}
+
+#[tokio::test]
+async fn the_messages_of_an_ignored_member_are_left_out_even_when_deleted() {
+    let harness = harness();
+    let mut settings = config(None, true);
+    settings["ignored_users"] = json!(["5"]);
+    harness.set_config(settings);
+    harness
+        .seed_message(saved(40, "private", Vec::new()))
+        .await
+        .unwrap();
+
+    harness.emit(deleted(40)).await.unwrap();
+    assert!(sent(&harness).is_empty(), "the history knows who wrote it");
+}
+
+fn join(user: u64, bot: bool) -> Event {
+    Event::MemberJoined(MemberInfo {
+        guild_id: Id::new(GUILD),
+        user: UserInfo {
+            id: Id::new(user),
+            name: "newcomer".into(),
+            bot,
+        },
+        roles: Vec::new(),
+        nick: None,
+        joined_at: None,
+        timed_out_until: None,
+    })
+}
+
+fn tracking() -> Harness {
+    let harness = harness();
+    let mut settings = config(None, true);
+    settings["invite_tracking"] = json!(true);
+    harness.set_config(settings);
+    harness
+}
+
+#[tokio::test]
+async fn a_join_names_the_invite_whose_count_went_up() {
+    let harness = tracking();
+    let guild = Id::new(GUILD);
+    harness
+        .api()
+        .set_guild_invites(guild, &[("abc", 3, Some(Id::new(9))), ("def", 1, None)]);
+    // The first look has nothing to compare with.
+    harness.emit(join(40, false)).await.unwrap();
+    assert!(sent(&harness)[0].embeds.contains("Unknown"));
+
+    harness.advance(std::time::Duration::from_secs(10));
+    harness
+        .api()
+        .set_guild_invites(guild, &[("abc", 4, Some(Id::new(9))), ("def", 1, None)]);
+    harness.emit(join(41, false)).await.unwrap();
+    let embeds = &sent(&harness)[1].embeds;
+    assert!(embeds.contains("discord.gg/abc"), "{embeds}");
+    assert!(embeds.contains("<@9>"), "{embeds}");
+
+    // Two counted at once are told as a choice, not named.
+    harness.advance(std::time::Duration::from_secs(10));
+    harness
+        .api()
+        .set_guild_invites(guild, &[("abc", 5, Some(Id::new(9))), ("def", 2, None)]);
+    harness.emit(join(42, false)).await.unwrap();
+    let embeds = &sent(&harness)[2].embeds;
+    assert!(embeds.contains("One of"), "{embeds}");
+    assert!(
+        embeds.contains("discord.gg/abc") && embeds.contains("discord.gg/def"),
+        "{embeds}"
+    );
+}
+
+#[tokio::test]
+async fn a_bot_a_burst_and_a_switched_off_setting_do_not_look_at_the_invites() {
+    let harness = tracking();
+    harness
+        .api()
+        .set_guild_invites(Id::new(GUILD), &[("abc", 1, None)]);
+    harness.emit(join(50, true)).await.unwrap();
+    assert!(
+        !sent(&harness)[0].embeds.contains("Invite"),
+        "a bot has no invite"
+    );
+
+    // Two joins in one moment: the second is not looked up.
+    harness.emit(join(51, false)).await.unwrap();
+    harness.emit(join(52, false)).await.unwrap();
+    assert!(sent(&harness)[1].embeds.contains("Invite"));
+    assert!(!sent(&harness)[2].embeds.contains("Invite"));
+
+    let off = Harness::new(builder().unwrap()).unwrap();
+    off.set_log_channel(LOG);
+    off.set_config(config(None, true));
+    off.api()
+        .set_guild_invites(Id::new(GUILD), &[("abc", 1, None)]);
+    off.emit(join(53, false)).await.unwrap();
+    assert!(!sent(&off)[0].embeds.contains("Invite"));
 }

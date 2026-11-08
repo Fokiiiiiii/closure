@@ -7,8 +7,10 @@ A text channel that only the people in a voice channel can see.
 
 ## Capabilities
 
+- `read_guild`
 - `manage_channels`
 - `respond_to_interactions`
+- `storage`
 
 ## Permissions
 
