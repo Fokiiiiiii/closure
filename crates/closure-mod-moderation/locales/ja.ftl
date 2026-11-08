@@ -453,3 +453,6 @@ option-clear-files = files
     .description = はい: ファイルが付いたメッセージだけ
 option-clear-pinned = pinned
     .description = はい: ピン留めしたメッセージも消す
+command-mywarnings = 自分の警告
+    .description = 自分の有効な警告を表示します
+permission-moderation-mywarnings = 自分の警告を見る

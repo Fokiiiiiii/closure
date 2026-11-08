@@ -264,6 +264,32 @@ async fn showcase_voice_unmute_shows_its_case() {
 }
 
 #[tokio::test]
+async fn mywarnings_shows_a_member_their_own_warnings_privately() {
+    let h = harness();
+    h.invoke(
+        moderator_runs("warn")
+            .option("user", user(TARGET))
+            .option("reason", text("spam links in #general")),
+    )
+    .await
+    .unwrap();
+
+    let replies = h
+        .invoke(Invocation::new("mywarnings").user(TARGET))
+        .await
+        .unwrap();
+    let reply = card(&replies);
+    assert!(reply.ephemeral);
+    assert!(reply.content.contains("spam links"), "{}", reply.content);
+
+    let replies = h
+        .invoke(Invocation::new("mywarnings").user(MODERATOR))
+        .await
+        .unwrap();
+    assert!(!card(&replies).content.contains("spam links"));
+}
+
+#[tokio::test]
 async fn showcase_warnings_lists_the_active_warnings() {
     let h = harness();
     h.invoke(

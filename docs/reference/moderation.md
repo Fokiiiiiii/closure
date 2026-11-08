@@ -39,6 +39,7 @@ Warn members, note about them, and look at and revoke the cases of a server.
 | `moderation.hidecase` | 75 | Hide cases from the lists |
 | `moderation.deletecase` | 75 | Delete cases for good |
 | `moderation.appeal` | 1 | Appeal a punishment |
+| `moderation.mywarnings` | 1 | See your own warnings |
 | `moderation.appeals` | 50 | Decide on appeals and file them for others |
 | `moderation.approve` | 75 | Approve what another moderator asked for |
 | `moderation.export` | 75 | Export cases as a file |
@@ -86,6 +87,15 @@ Show the active warnings of a member
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member |
+
+### `/mywarnings`
+
+Show your own active warnings
+
+- Japanese name: `自分の警告`
+- Japanese description: 自分の有効な警告を表示します
+
+This command takes no options.
 
 ### `/clear`
 

@@ -711,22 +711,19 @@ async fn note<I: InteractionRef + 'static>(cx: Cx<I>, args: Note) -> Result<(), 
     .await
 }
 
-/// Lists the warnings of a member that still count, newest first.
-async fn warnings(cx: CommandCx, args: Target) -> Result<(), UserError> {
+/// Shows the warnings of `user` that still count, newest first, to the one who asked.
+async fn show_warnings(cx: CommandCx, user: UserId) -> Result<(), UserError> {
     let now = cx.now();
-    let found = active_cases(cx.cases(), args.user, "warn", now, SHOWN).await?;
+    let found = active_cases(cx.cases(), user, "warn", now, SHOWN).await?;
     if found.is_empty() {
         return cx
-            .reply_private_t(
-                "warnings-none",
-                &Args::new().with("user", mention(args.user)),
-            )
+            .reply_private_t("warnings-none", &Args::new().with("user", mention(user)))
             .await;
     }
     let mut text = cx.t(
         "warnings-header",
         &Args::new()
-            .with("user", mention(args.user))
+            .with("user", mention(user))
             .with("count", count(found.len())),
     );
     for case in &found {
@@ -748,6 +745,17 @@ async fn warnings(cx: CommandCx, args: Target) -> Result<(), UserError> {
         text.push_str(&line);
     }
     cx.reply_private(text).await
+}
+
+/// Lists the warnings of a member that still count, newest first.
+async fn warnings(cx: CommandCx, args: Target) -> Result<(), UserError> {
+    show_warnings(cx, args.user).await
+}
+
+/// The same list for the member who asks, who needs no power for it.
+async fn mywarnings(cx: CommandCx, (): ()) -> Result<(), UserError> {
+    let user = cx.user().id;
+    show_warnings(cx, user).await
 }
 
 /// Shows a case the way the log does, or lists the cases of a member.
@@ -1259,6 +1267,11 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
             "permission-moderation-appeal",
         )?)
         .permission(PermissionSpec::new(
+            "moderation.mywarnings",
+            Level::GENERAL,
+            "permission-moderation-mywarnings",
+        )?)
+        .permission(PermissionSpec::new(
             "moderation.appeals",
             Level::MODERATOR,
             "permission-moderation-appeals",
@@ -1413,6 +1426,11 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             Command::<Target>::new("warnings")
                 .requires("moderation.cases")
                 .handler(warnings),
+        )
+        .command(
+            Command::<()>::new("mywarnings")
+                .requires("moderation.mywarnings")
+                .handler(mywarnings),
         )
         .command(
             Command::<clear::Clear>::new("clear")

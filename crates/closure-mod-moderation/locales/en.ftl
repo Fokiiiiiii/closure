@@ -462,3 +462,6 @@ option-clear-files = files
     .description = Yes: only the messages with a file
 option-clear-pinned = pinned
     .description = Yes: pinned messages are deleted too
+command-mywarnings = mywarnings
+    .description = Show your own active warnings
+permission-moderation-mywarnings = See your own warnings
