@@ -282,6 +282,29 @@ fn lua_state_is_fresh_and_host_failures_propagate() {
 }
 
 #[test]
+fn a_pattern_that_could_backtrack_for_long_is_refused_and_ordinary_ones_work() {
+    let source = r"function on_event(e)
+        local words = string.rep('a', 64)
+        local ok, err = pcall(string.find, words, string.rep('a?', 30) .. string.rep('a', 30) .. 'b')
+        assert(not ok and err:find('too expensive'))
+        ok, err = pcall(string.find, words, string.rep('(.-)', 8) .. 'b')
+        assert(not ok and err:find('too expensive'))
+        assert(('ban @user spam'):match('^(%S+)%s+(%S+)%s+(.*)$') == 'ban')
+        assert(('a-b-c'):gsub('%-', '+') == 'a+b+c')
+        assert(('x[1]'):find('[1]', 1, true) == 2)
+        assert(('key=value'):match('^(%w+)=(%w+)$') == 'key')
+        assert(('aaa'):find('a?a?a?aaa') == 1)
+        return {}
+    end";
+    let started = Instant::now();
+    LuaRuntime::new(source.as_bytes())
+        .unwrap()
+        .call(json!({}), Arc::new(Host::default()), budget())
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
 fn lua_memory_limit_blocks_single_allocation() {
     let runtime =
         LuaRuntime::new(b"function on_event(e) return {string.rep('x', 2000000)} end").unwrap();
