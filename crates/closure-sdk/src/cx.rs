@@ -296,6 +296,24 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.interaction.user()
     }
 
+    /// The id of the interaction: unique to it, so a module can name what waits for its answer.
+    #[must_use]
+    pub fn interaction_id(&self) -> closure_core::event::InteractionId {
+        self.interaction.interaction_id()
+    }
+
+    /// The token that answers the interaction.
+    #[must_use]
+    pub fn token(&self) -> &closure_core::event::InteractionToken {
+        self.interaction.token()
+    }
+
+    /// The channel it happened in.
+    #[must_use]
+    pub fn channel_id(&self) -> closure_core::event::ChannelId {
+        self.interaction.channel_id()
+    }
+
     #[must_use]
     pub fn guild_id(&self) -> GuildId {
         self.ctx.guild_id

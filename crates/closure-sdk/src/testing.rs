@@ -245,6 +245,8 @@ pub struct Submit {
     custom_id: String,
     fields: Vec<(String, String)>,
     user: u64,
+    roles: Vec<u64>,
+    administrator: bool,
 }
 
 impl Submit {
@@ -254,6 +256,8 @@ impl Submit {
             custom_id: custom_id.into(),
             fields: Vec::new(),
             user: 100,
+            roles: Vec::new(),
+            administrator: false,
         }
     }
 
@@ -267,6 +271,19 @@ impl Submit {
     #[must_use]
     pub fn user(mut self, id: u64) -> Self {
         self.user = id;
+        self
+    }
+
+    /// The roles of the user who sends the form.
+    #[must_use]
+    pub fn roles(mut self, roles: impl IntoIterator<Item = u64>) -> Self {
+        self.roles = roles.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn administrator(mut self) -> Self {
+        self.administrator = true;
         self
     }
 }
@@ -1009,8 +1026,8 @@ impl Harness {
             guild_id: guild,
             channel_id: Id::new(5),
             user: tester(submit.user),
-            roles: Vec::new(),
-            invoker_permissions: Permissions::empty(),
+            roles: submit.roles.iter().map(|id| Id::new(*id)).collect(),
+            invoker_permissions: administrator_if(submit.administrator),
             locale: None,
             custom_id: submit.custom_id,
             fields: submit.fields,

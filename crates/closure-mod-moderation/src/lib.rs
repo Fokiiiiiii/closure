@@ -31,6 +31,7 @@ mod channel_controls;
 mod clear;
 mod history;
 mod manual;
+mod menu;
 mod rejoin;
 mod restrict;
 mod softban;
@@ -387,7 +388,7 @@ fn shorten(reason: &str) -> String {
 }
 
 /// A reason in a list, with the words for no reason when there is none.
-fn listed_reason(cx: &CommandCx, reason: Option<&str>) -> String {
+fn listed_reason<I: InteractionRef + 'static>(cx: &Cx<I>, reason: Option<&str>) -> String {
     reason.map_or_else(|| cx.t("reason-none", &Args::new()), shorten)
 }
 
@@ -560,8 +561,8 @@ fn delete_seconds(days: i64) -> Result<u32, UserError> {
 
 /// Carries out the escalation that the warning `warning` brought about, at `active` active
 /// warnings. The reason is kept in the case, so it is written in the server language.
-async fn escalate(
-    cx: &CommandCx,
+async fn escalate<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     escalation: Escalation,
@@ -588,7 +589,7 @@ async fn escalate(
 }
 
 /// What an escalation does, in words, in the language of the moderator.
-fn escalation_phrase(cx: &CommandCx, escalation: Escalation) -> String {
+fn escalation_phrase<I: InteractionRef + 'static>(cx: &Cx<I>, escalation: Escalation) -> String {
     match escalation {
         Escalation::Timeout(duration) => cx.t(
             "escalation-timeout",
@@ -611,8 +612,8 @@ fn escalation_phrase(cx: &CommandCx, escalation: Escalation) -> String {
 
 /// The line of the reply about the escalation that the warning `warning` brings about, if a rule
 /// asks for one. A failed escalation leaves the warning standing and says so.
-async fn escalation_line(
-    cx: &CommandCx,
+async fn escalation_line<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     active: usize,
@@ -647,7 +648,7 @@ async fn escalation_line(
 
 /// Warns a member. The warning is a case that expires after `warn_expire_days`. Once it brings the
 /// member to a number of active warnings that a rule names, that rule's action follows.
-async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
+async fn warn<I: InteractionRef + 'static>(cx: Cx<I>, args: Warn) -> Result<(), UserError> {
     // Acknowledged first: the work below may outlast Discord's three seconds.
     cx.defer(true).await?;
     cx.check_target(args.user).await?;
@@ -698,7 +699,7 @@ async fn warn(cx: CommandCx, args: Warn) -> Result<(), UserError> {
 }
 
 /// Notes something about a member. A note is a case without expiry and is not a warning.
-async fn note(cx: CommandCx, args: Note) -> Result<(), UserError> {
+async fn note<I: InteractionRef + 'static>(cx: Cx<I>, args: Note) -> Result<(), UserError> {
     let case = record(&cx, "note", args.user, Some(args.text), None).await?;
     cx.say_private_t(
         Tone::Success,
@@ -772,7 +773,11 @@ async fn show_case(cx: CommandCx, number: i64) -> Result<(), UserError> {
 }
 
 /// Lists the cases of a member, newest first, `before` a number if given.
-async fn case_list(cx: CommandCx, user: UserId, before: Option<i64>) -> Result<(), UserError> {
+async fn case_list<I: InteractionRef + 'static>(
+    cx: Cx<I>,
+    user: UserId,
+    before: Option<i64>,
+) -> Result<(), UserError> {
     let mut cases = cx.cases().for_target(user, before, LISTED).await?;
     // A hidden case is shown by its number only.
     cases.retain(|case| !case.hidden);
@@ -825,7 +830,10 @@ async fn case_revoke(cx: CommandCx, args: Revoke) -> Result<(), UserError> {
 /// anything is done; a timeout by role has no such limit. Without a reason or a duration, a
 /// template is asked for. The member stays in the server, so the direct message comes after the
 /// timeout.
-async fn timeout(cx: CommandCx, args: TimeoutArgs) -> Result<(), UserError> {
+async fn timeout<I: InteractionRef + 'static>(
+    cx: Cx<I>,
+    args: TimeoutArgs,
+) -> Result<(), UserError> {
     cx.defer(true).await?;
     // Resolved first: a moment that has passed is refused before anything else is asked.
     let duration = args
@@ -867,7 +875,7 @@ async fn untimeout(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 
 /// Kicks a member. The direct message comes first: a kicked member shares no server with the bot.
 /// Without a reason, a template is asked for.
-async fn kick(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
+async fn kick<I: InteractionRef + 'static>(cx: Cx<I>, args: MemberReason) -> Result<(), UserError> {
     cx.defer(true).await?;
     cx.check_target(args.user).await?;
     let config: Config = cx.config()?;
@@ -884,7 +892,7 @@ async fn kick(cx: CommandCx, args: MemberReason) -> Result<(), UserError> {
 /// Bans a member, for good or for a while. A timed ban gets a timer that lifts it when its time is
 /// up. The direct message comes first, as with a kick. Without a reason, or a duration on a ban
 /// that a template may give, a template is asked for.
-async fn ban(cx: CommandCx, args: BanArgs) -> Result<(), UserError> {
+async fn ban<I: InteractionRef + 'static>(cx: Cx<I>, args: BanArgs) -> Result<(), UserError> {
     if args.soft == Some(true) {
         if args.duration.is_some() {
             return Err(UserError::message("ban-soft-no-duration"));
@@ -1305,7 +1313,7 @@ fn permissions(builder: ModuleBuilder) -> Result<ModuleBuilder, CoreError> {
 /// The commands that act on a channel and the ones that look at, or act on, many members.
 fn moderator_tools(builder: ModuleBuilder) -> ModuleBuilder {
     let long = Arc::new(channel_controls::LongState::default());
-    builder
+    menu::register(builder)
         .job(bulk::JOB, bulk::step)
         .job(
             "channel_restore_slowmode",

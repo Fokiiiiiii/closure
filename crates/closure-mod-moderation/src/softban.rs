@@ -6,13 +6,13 @@
 
 use closure_core::action::Reason;
 use closure_core::cases::{CaseKind, CaseSource, NewCase};
-use closure_sdk::{Args, CommandCx, Tone, UserError, UserId, punish};
+use closure_sdk::{Args, Cx, InteractionRef, Tone, UserError, UserId, punish};
 
 use crate::{delete_seconds, mention, reason_of};
 
 /// Bans, deletes the messages of `delete_days` (one by default), and lifts the ban.
-pub(crate) async fn softban(
-    cx: CommandCx,
+pub(crate) async fn softban<I: InteractionRef + 'static>(
+    cx: Cx<I>,
     user: UserId,
     reason: Option<String>,
     delete_days: Option<i64>,

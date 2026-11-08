@@ -17,8 +17,9 @@ use closure_sdk::duration::parse as parse_duration;
 use closure_sdk::punish::{Moderator, Punisher};
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{
-    Args, ChannelId, CommandArgs, CommandCx, ComponentCx, EventContext, InteractionReply, JobCx,
-    ModuleError, RoleId, TargetProblem, UserError, UserId, check_target_of,
+    Args, ChannelId, CommandArgs, CommandCx, ComponentCx, Cx, EventContext, InteractionRef,
+    InteractionReply, JobCx, ModuleError, RoleId, TargetProblem, UserError, UserId,
+    check_target_of,
 };
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Component;
@@ -381,7 +382,7 @@ pub(crate) async fn start(cx: CommandCx, args: Start) -> Result<(), UserError> {
         reason: args.reason.clone(),
         seconds,
         delete_days: u32::try_from(days).unwrap_or(0),
-        channel: cx.invocation().channel_id.get(),
+        channel: cx.channel_id().get(),
         total: u32::try_from(users.len()).unwrap_or(u32::MAX),
         done: 0,
         skipped: 0,
@@ -979,8 +980,8 @@ async fn post_request(
 
 /// A ban for good that needs a second moderator: asked for in the channel for approvals, and done
 /// by the bulk machinery once somebody else approves it.
-pub(crate) async fn request_ban(
-    cx: &CommandCx,
+pub(crate) async fn request_ban<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     user: UserId,
     reason: String,
@@ -1007,7 +1008,7 @@ pub(crate) async fn request_ban(
         reason: reason.clone(),
         seconds: None,
         delete_days: u32::try_from(days).unwrap_or(0),
-        channel: cx.invocation().channel_id.get(),
+        channel: cx.channel_id().get(),
         total: 1,
         done: 0,
         skipped: 0,

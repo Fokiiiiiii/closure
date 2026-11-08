@@ -12,7 +12,10 @@ use closure_core::module::Module;
 use closure_core::registry::ModuleRegistry;
 use closure_i18n::missing_keys;
 use closure_mod_moderation::{builder, module};
-use closure_sdk::testing::{Click, Harness, Invocation, Message, Reply, ReplyKind};
+use closure_sdk::testing::{
+    Click, ContextUse, Harness, Invocation, Message, Reply, ReplyKind, Submit,
+};
+use closure_sdk::ui::CustomId;
 use closure_sdk::{CaseKind, Event, EventKind, Level, Locale, ModuleError, NewCase};
 use serde_json::json;
 use twilight_model::channel::message::Component;
@@ -5868,4 +5871,201 @@ async fn a_voice_mute_and_the_lifts_can_be_written_down_by_hand_and_other_kinds_
     }
     harness.invoke(add_case("mute-forever")).await.unwrap();
     assert!(harness.cases().get(5).await.unwrap().is_none());
+}
+
+// ---- the member menu ----
+
+fn menu_form(action: &str, target: u64, invoker: u64) -> String {
+    CustomId::new("menu_do")
+        .only_for(Id::new(invoker))
+        .data(format!("{action}:{target}"))
+        .encode(&closure_core::module::ModuleId::new("moderation").unwrap())
+}
+
+async fn open_menu(harness: &Harness) -> Vec<Reply> {
+    harness
+        .context_command(
+            ContextUse::on_user("Moderate", MEMBER)
+                .roles([MODERATOR_ROLE])
+                .user(MODERATOR),
+        )
+        .await
+        .unwrap()
+}
+
+fn form(action: &str, fields: &[(&str, &str)]) -> Submit {
+    let mut submit = Submit::new(menu_form(action, MEMBER, MODERATOR))
+        .user(MODERATOR)
+        .roles([MODERATOR_ROLE]);
+    for (name, value) in fields {
+        submit = submit.field(&format!("moderation:{name}"), value);
+    }
+    submit
+}
+
+#[tokio::test]
+async fn the_member_menu_opens_a_form_from_a_button_and_the_form_warns() {
+    let harness = harness();
+    let opened = open_menu(&harness).await;
+    let reply = opened.last().expect("the menu");
+    assert!(reply.ephemeral);
+    let buttons = reply.custom_ids();
+    assert_eq!(buttons.len(), 6, "warn, note, timeout, kick, ban, cases");
+
+    let pressed = harness
+        .click(
+            Click::new(buttons[0].clone())
+                .user(MODERATOR)
+                .roles([MODERATOR_ROLE]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        pressed.last().unwrap().kind,
+        ReplyKind::Modal,
+        "{pressed:?}"
+    );
+
+    let sent = harness
+        .submit(form("warn", &[("reason", "spam")]))
+        .await
+        .unwrap();
+    let case = harness.cases().get(1).await.unwrap().expect("a case");
+    assert_eq!(case.kind.as_str(), "warn");
+    assert_eq!(case.target, Id::new(MEMBER));
+    assert_eq!(case.moderator, Id::new(MODERATOR));
+    assert_eq!(case.reason.as_deref(), Some("spam"));
+    assert!(text(&sent).contains("#1") || !sent.is_empty(), "{sent:?}");
+}
+
+#[tokio::test]
+async fn the_member_menu_times_out_bans_and_notes_through_the_forms() {
+    let harness = harness();
+    harness
+        .submit(form("timeout", &[("duration", "1h"), ("reason", "flood")]))
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.cases().get(1).await.unwrap().unwrap().kind.as_str(),
+        "timeout"
+    );
+    // A ban is for an administrator, as the command is.
+    let banned = harness
+        .submit(
+            form(
+                "ban",
+                &[("reason", "raid"), ("duration", ""), ("days", "1")],
+            )
+            .roles([ADMIN_ROLE]),
+        )
+        .await
+        .unwrap();
+    let ban_case = harness
+        .cases()
+        .get(2)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("the ban: {banned:?}"));
+    assert_eq!(ban_case.kind.as_str(), "ban");
+    assert!(
+        harness
+            .actions()
+            .iter()
+            .any(|action| matches!(action, Action::Ban { .. })),
+        "the member was banned"
+    );
+    harness
+        .submit(form("note", &[("text", "seen twice")]))
+        .await
+        .unwrap();
+    let note = harness.cases().get(3).await.unwrap().expect("the note");
+    assert_eq!(note.kind.as_str(), "note");
+    assert_eq!(note.reason.as_deref(), Some("seen twice"));
+}
+
+#[tokio::test]
+async fn a_form_with_a_bad_length_or_days_does_nothing_and_says_so() {
+    let harness = harness();
+    let bad_length = harness
+        .submit(form("timeout", &[("duration", "soon"), ("reason", "x")]))
+        .await
+        .unwrap();
+    assert!(
+        text(&bad_length).contains("length of time"),
+        "{bad_length:?}"
+    );
+    let bad_days = harness
+        .submit(form("ban", &[("reason", "x"), ("days", "9")]).roles([ADMIN_ROLE]))
+        .await
+        .unwrap();
+    assert!(text(&bad_days).contains("0 to 7"), "{bad_days:?}");
+    let empty_note = harness
+        .submit(form("note", &[("text", "  ")]))
+        .await
+        .unwrap();
+    assert!(text(&empty_note).contains("needs a text"), "{empty_note:?}");
+    assert!(harness.cases().get(1).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn the_member_menu_gives_nobody_more_than_they_had() {
+    let harness = harness();
+    // Without the role, the form is refused for the level.
+    let denied = harness
+        .submit(
+            Submit::new(menu_form("ban", MEMBER, UNPRIVILEGED))
+                .user(UNPRIVILEGED)
+                .field("moderation:reason", "x"),
+        )
+        .await
+        .unwrap();
+    assert!(text(&denied).contains("level"), "{denied:?}");
+    assert!(harness.cases().get(1).await.unwrap().is_none());
+
+    // The buttons are the moderator's: somebody else pressing one gets no form.
+    let opened = open_menu(&harness).await;
+    let buttons = opened.last().unwrap().custom_ids();
+    let stolen = harness
+        .click(
+            Click::new(buttons[4].clone())
+                .user(UNPRIVILEGED)
+                .roles([MODERATOR_ROLE]),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        stolen.last().map(|reply| reply.kind),
+        Some(ReplyKind::Modal)
+    );
+
+    // Nor does the menu open on oneself.
+    let on_self = harness
+        .context_command(
+            ContextUse::on_user("Moderate", MODERATOR)
+                .roles([MODERATOR_ROLE])
+                .user(MODERATOR),
+        )
+        .await
+        .unwrap();
+    assert!(
+        on_self.last().unwrap().custom_ids().is_empty(),
+        "{on_self:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_cases_button_lists_the_cases_of_the_member() {
+    let harness = harness();
+    harness.invoke(warn(MEMBER, Some("first"))).await.unwrap();
+    let opened = open_menu(&harness).await;
+    let buttons = opened.last().unwrap().custom_ids();
+    let listed = harness
+        .click(
+            Click::new(buttons[5].clone())
+                .user(MODERATOR)
+                .roles([MODERATOR_ROLE]),
+        )
+        .await
+        .unwrap();
+    assert!(text(&listed).contains("first"), "{listed:?}");
 }

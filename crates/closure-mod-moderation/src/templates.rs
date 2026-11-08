@@ -14,7 +14,7 @@ use closure_sdk::embed::truncate;
 use closure_sdk::punish::Method;
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{
-    Args, Case, Color, CommandCx, ComponentCx, Cx, EmbedBuilder, InteractionRef, InteractionReply,
+    Args, Case, Color, ComponentCx, Cx, EmbedBuilder, InteractionRef, InteractionReply,
     ModuleError, Reason, Span, UserError, UserId, modlog,
 };
 use serde::{Deserialize, Serialize};
@@ -258,8 +258,8 @@ fn describe<I: InteractionRef + 'static>(cx: &Cx<I>, template: &Usable) -> Strin
 /// Asks the moderator for a template when the command leaves out the reason, or a timeout's duration,
 /// and a usable template can give it. The punishment waits in the store until the pick. Without a
 /// template it runs as it is: without a reason, unless the server requires one.
-async fn offer(
-    cx: &CommandCx,
+async fn offer<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     punishment: Punishment,
 ) -> Result<Option<Punishment>, UserError> {
@@ -268,7 +268,7 @@ async fn offer(
         return Ok(Some(punishment));
     }
     // A text command cannot show a picker: it runs with the reason it was given, or with none.
-    let templates = if cx.invocation().token.text_command_message().is_some() {
+    let templates = if cx.token().text_command_message().is_some() {
         Vec::new()
     } else {
         usable(config, punishment.kind)
@@ -283,7 +283,7 @@ async fn offer(
         return Ok(Some(punishment));
     }
     // The command's interaction is unique to it, so it names the waiting punishment.
-    let token = cx.invocation().interaction_id.get().to_string();
+    let token = cx.interaction_id().get().to_string();
     cx.store()
         .set_for(&pending_key(&token), &punishment, PENDING_FOR)
         .await?;
@@ -321,8 +321,8 @@ async fn offer(
 
 /// Runs a punishment that a command asked for: a template is picked first when the command left
 /// something out. The reply is private, as the replies of the commands are.
-pub(crate) async fn punish(
-    cx: &CommandCx,
+pub(crate) async fn punish<I: InteractionRef + 'static>(
+    cx: &Cx<I>,
     config: &Config,
     punishment: Punishment,
 ) -> Result<(), UserError> {
