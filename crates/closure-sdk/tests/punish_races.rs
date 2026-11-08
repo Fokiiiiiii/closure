@@ -1124,3 +1124,77 @@ async fn restriction_recovery_precedes_an_older_lift_timer() {
         );
     }
 }
+
+fn plain_role(id: u64, position: i64) -> twilight_model::guild::Role {
+    serde_json::from_value(json!({
+        "id": id.to_string(), "name": "role", "color": 0, "hoist": false, "managed": false,
+        "mentionable": false, "permissions": "0", "position": position, "flags": 0,
+        "icon": null, "unicode_emoji": null, "tags": null,
+        "colors": { "primary_color": 0, "secondary_color": null, "tertiary_color": null }
+    }))
+    .unwrap()
+}
+
+fn bare_member(id: u64) -> twilight_model::guild::Member {
+    serde_json::from_value(json!({
+        "deaf": false, "mute": false, "flags": 0, "roles": [],
+        "user": { "id": id.to_string(), "username": "member", "discriminator": "0",
+                  "avatar": null, "bot": false },
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_role_lift_that_stopped_after_the_role_was_off_gives_the_other_roles_back() {
+    let _guard = TEST_LOCK.lock().await;
+    let (harness, ctx, _api) = ban_recovery_fixture().await;
+    let guild = ctx.guild_id;
+    harness.api().set_roles(
+        guild,
+        vec![plain_role(30, 5), plain_role(40, 3), plain_role(41, 2)],
+    );
+    // The member has lost the timeout role already, and the roles the timeout had taken off wait to
+    // be given back: the lift stopped between the two.
+    harness.api().set_member(guild, bare_member(7));
+    ctx.restrictions()
+        .set_for("stripped:7", &vec![40_u64, 41], Duration::from_hours(24))
+        .await
+        .unwrap();
+    ctx.store()
+        .set(
+            "untimeout-intent:7",
+            &json!({
+                "kind": "untimeout", "target": 7, "moderator": ctx.bot().unwrap().get(),
+                "reason": null, "case_before": 0, "undoing": null,
+                "method": serde_json::to_value(Method::Role).unwrap(), "role": 30,
+                "restore": serde_json::to_value(punish::RoleSelection::All).unwrap()
+            }),
+        )
+        .await
+        .unwrap();
+
+    run_ban_recovery(&ctx).await;
+
+    let given: Vec<u64> = harness
+        .api()
+        .actions()
+        .into_iter()
+        .filter_map(|action| match action {
+            Action::AddRole {
+                user_id, role_id, ..
+            } if user_id.get() == 7 => Some(role_id.get()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        given.contains(&40) && given.contains(&41),
+        "the roles taken off come back: {given:?}"
+    );
+    assert!(
+        ctx.store()
+            .entry("untimeout-intent:7")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

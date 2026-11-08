@@ -718,6 +718,7 @@ impl<'a> Punisher<'a> {
             undoing: self.undoing,
             method: how.map(|(method, _)| method),
             role: how.and_then(|(_, role)| role).map(RoleId::get),
+            restore: how.map(|_| self.settings.strip.restore.clone()),
         };
         match self
             .ctx
@@ -1476,6 +1477,9 @@ struct ActionIntent {
     method: Option<Method>,
     #[serde(default)]
     role: Option<u64>,
+    /// What a lift of a role punishment gives back, for the finish of a lift that stopped halfway.
+    #[serde(default)]
+    restore: Option<RoleSelection>,
 }
 
 fn action_intent_key(kind: &str, user: UserId) -> String {
@@ -1963,6 +1967,7 @@ pub async fn remember_softban(
         undoing: None,
         method: None,
         role: None,
+        restore: None,
     };
     ctx.store()
         .set(&action_intent_key("softban", target), &intent)
@@ -2011,6 +2016,43 @@ async fn reconcile_softban(ctx: &EventContext, key: &str) -> Result<(), UserErro
     reconcile_action(ctx, key).await
 }
 
+/// The steps of a lift by role that come after the role is off: the older dedicated roles, the
+/// timer, and the roles the punishment took off. A lift that stopped after taking the role off is
+/// finished here, as the lift does it, so that the member does not stay without them. Every step
+/// can be done again.
+async fn finish_role_lift(
+    ctx: &EventContext,
+    intent: &ActionIntent,
+    target: UserId,
+) -> Result<(), UserError> {
+    let (which, kind, timer) = match intent.kind.as_str() {
+        "untimeout" => (RestrictionRole::Timeout, "timeout", untimeout_key(target)),
+        "vcunmute" => (RestrictionRole::Voice, "vcmute", voice_key(target)),
+        _ => return Ok(()),
+    };
+    let (Some(Method::Role), Some(role)) =
+        (intent.method, intent.role.and_then(RoleId::new_checked))
+    else {
+        return Ok(());
+    };
+    let reason = Reason::truncated(
+        &intent
+            .reason
+            .clone()
+            .unwrap_or_else(|| ctx.t_core(ctx.locale, "punish-reason-none", &Args::new())),
+    );
+    remove_legacy(ctx, which, target, role, reason).await?;
+    let _ = ctx.scheduler().cancel(&timer).await;
+    let lifting = active_cases(ctx.cases(), target, kind, ctx.now(), 1)
+        .await?
+        .len();
+    let selection = intent.restore.clone().unwrap_or(RoleSelection::All);
+    if let Err(error) = restore_when_free(ctx, target, which, lifting, &selection).await {
+        tracing::warn!(user = %target, %error, "could not give back the roles of a lifted punishment");
+    }
+    Ok(())
+}
+
 /// Finishes a kick or an unban that stopped between Discord and its case: when the member is gone
 /// (kick) or no longer banned (unban) the action was done, so its case is made if it is missing.
 async fn reconcile_action(ctx: &EventContext, key: &str) -> Result<(), UserError> {
@@ -2026,6 +2068,7 @@ async fn reconcile_action(ctx: &EventContext, key: &str) -> Result<(), UserError
         ctx.store().delete(key).await?;
         return Ok(());
     }
+    finish_role_lift(ctx, &intent, target).await?;
     let mut before = None;
     let case = loop {
         let cases = ctx.cases().for_target(target, before, 100).await?;
