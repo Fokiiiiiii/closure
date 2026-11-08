@@ -392,6 +392,14 @@ impl MockApi {
         }
     }
 
+    /// Adds a message a test made itself (its author, text, files, pin), as Discord holds it.
+    pub fn put_channel_message(&self, message: Message) {
+        lock(&self.channel_messages)
+            .entry(message.channel_id)
+            .or_default()
+            .push(message);
+    }
+
     /// Adds an entry to the guild's audit log, as Discord would have it.
     pub fn add_audit_entry(&self, entry: AuditLogEntry) {
         lock(&self.audit_log).push(entry);

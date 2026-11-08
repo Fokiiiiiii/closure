@@ -89,14 +89,20 @@ Show the active warnings of a member
 
 ### `/clear`
 
-Delete the newest messages of the channel
+Delete the newest messages of the channel, all of them or only those that fit
 
 - Japanese name: `一括削除`
-- Japanese description: チャンネルの新しいメッセージを消します
+- Japanese description: チャンネルの新しいメッセージを消します（条件で絞り込めます）
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `count` | 件数 | integer | yes | - | How many messages, from 1 to 100 |
+| `user` | user | user | no | - | Only the messages of this member |
+| `bots` | bots | boolean | no | - | Yes: only the messages of bots |
+| `contains` | contains | string | no | max_length 100 | Only the messages that contain this text |
+| `links` | links | boolean | no | - | Yes: only the messages with a link or an invite |
+| `files` | files | boolean | no | - | Yes: only the messages with a file |
+| `pinned` | pinned | boolean | no | - | Yes: pinned messages are deleted too |
 
 ### `/bulk`
 
