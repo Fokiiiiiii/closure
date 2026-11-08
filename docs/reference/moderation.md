@@ -195,7 +195,7 @@ Record a case by hand, such as a note or something done elsewhere
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member |
-| `kind` | 種類 | string | yes | - | note, warn, kick, ban, timeout or softban |
+| `kind` | 種類 | string | yes | - | note, warn, kick, ban, timeout, softban, vcmute, unban, untimeout or vcunmute |
 | `reason` | 理由 | string | no | max_length 512 | Why |
 
 #### `/case update`

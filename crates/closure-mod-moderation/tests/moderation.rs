@@ -5837,3 +5837,35 @@ async fn a_long_slowmode_spares_the_exempt_roles_and_a_short_one_replaces_it() {
     harness.message(say()).await.unwrap();
     assert_eq!(deleted_in(&harness, SLOW_CHANNEL), 0);
 }
+
+fn add_case(kind: &str) -> Invocation {
+    Invocation::new("case")
+        .subcommand("add")
+        .option("user", user(MEMBER))
+        .option("kind", CommandOptionValue::String(kind.to_owned()))
+        .option("reason", CommandOptionValue::String("by hand".to_owned()))
+        .roles([ADMIN_ROLE])
+        .user(MODERATOR)
+}
+
+#[tokio::test]
+async fn a_voice_mute_and_the_lifts_can_be_written_down_by_hand_and_other_kinds_cannot() {
+    let harness = harness();
+    for (index, kind) in ["vcmute", "unban", "untimeout", "vcunmute"]
+        .into_iter()
+        .enumerate()
+    {
+        let replies = harness.invoke(add_case(kind)).await.unwrap();
+        assert!(text(&replies).contains('#'), "{kind}: {replies:?}");
+        let case = harness
+            .cases()
+            .get(i64::try_from(index).unwrap() + 1)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{kind} was recorded"));
+        assert_eq!(case.kind.as_str(), kind);
+        assert!(case.revoked.is_none(), "a lift written down undoes nothing");
+    }
+    harness.invoke(add_case("mute-forever")).await.unwrap();
+    assert!(harness.cases().get(5).await.unwrap().is_none());
+}

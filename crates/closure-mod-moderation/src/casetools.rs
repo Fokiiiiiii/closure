@@ -15,14 +15,26 @@ use crate::{Config, listed_reason, mention, not_found, reason_of, state};
 
 /// How many cases one page of a search lists.
 const PAGE: usize = 10;
-/// The kinds a case recorded by hand may be of.
-const KINDS: [&str; 6] = ["note", "warn", "kick", "ban", "timeout", "softban"];
+/// The kinds a case recorded by hand may be of. A lift (`unban`, `untimeout`, `vcunmute`) is only
+/// written down: it undoes nothing, as the commands that lift do.
+const KINDS: [&str; 10] = [
+    "note",
+    "warn",
+    "kick",
+    "ban",
+    "timeout",
+    "softban",
+    "vcmute",
+    "unban",
+    "untimeout",
+    "vcunmute",
+];
 
 #[derive(CommandArgs)]
 pub(crate) struct Add {
     /// Member
     user: UserId,
-    /// What it is: note, warn, kick, ban, timeout or softban
+    /// What it is: note, warn, kick, ban, timeout, softban, vcmute, unban, untimeout or vcunmute
     kind: String,
     /// Why
     #[arg(max_length = 512)]
@@ -100,9 +112,10 @@ pub(crate) async fn add(cx: CommandCx, args: Add) -> Result<(), UserError> {
     // A recorded ban or timeout counts as a standing punishment, so it takes the permission of the
     // punishment itself and not only the one to add cases.
     cx.require(match kind.as_str() {
-        "ban" | "softban" => "moderation.ban",
+        "ban" | "softban" | "unban" => "moderation.ban",
         "kick" => "moderation.kick",
-        "timeout" => "moderation.timeout",
+        "timeout" | "untimeout" => "moderation.timeout",
+        "vcmute" | "vcunmute" => "moderation.voice",
         "warn" => "moderation.warn",
         _ => "moderation.note",
     })
