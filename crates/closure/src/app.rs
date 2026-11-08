@@ -539,6 +539,9 @@ fn start_storage_upkeep(
                 Ok(_) => {}
                 Err(error) => tracing::warn!(%error, "could not remove old messages"),
             }
+            if let Err(error) = db.purge_requests().await {
+                tracing::warn!(%error, "could not remove old API requests");
+            }
             if let Err(error) = db.purge_member_activity().await {
                 tracing::warn!(%error, "could not remove old member activity");
             }
@@ -791,11 +794,23 @@ pub async fn run(args: Args) -> Result<()> {
     if let Some(task) = started.changes_task {
         stop_task(task, "configuration changes").await;
     }
-    if let Some(task) = started.jobs_task {
-        stop_task(task, "scheduled jobs").await;
+    let mut jobs_task = started.jobs_task;
+    let jobs_stopped = match jobs_task.as_mut() {
+        Some(task) => tokio::time::timeout(TASK_STOP_TIMEOUT, task).await.is_ok(),
+        None => true,
+    };
+    if !jobs_stopped {
+        tracing::warn!(
+            "scheduled jobs are still running; the dispatcher is drained before they are stopped"
+        );
     }
     if let Some(dispatcher) = &started.dispatcher {
         dispatcher.shutdown(DISPATCHER_DRAIN_TIMEOUT).await;
+    }
+    // A job the dispatcher was still running has handed back its result by now. Aborting the
+    // runner earlier would lose that result, and the job would be run again after a restart.
+    if let (false, Some(task)) = (jobs_stopped, jobs_task) {
+        stop_task(task, "scheduled jobs").await;
     }
     if let Some(hooks) = &started.hooks {
         hooks.finish_attachments(ATTACHMENT_STOP_TIMEOUT).await;

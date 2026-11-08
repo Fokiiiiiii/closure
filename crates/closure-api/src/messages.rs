@@ -14,6 +14,7 @@ use closure_core::event::{ChannelId, GuildId, MessageId};
 use closure_core::message::MessageSpec;
 use closure_core::module::ModuleId;
 use closure_core::schedule::{NewJob, RunAt, ScheduleError, SchedulerBackend};
+use closure_db::Claim;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use twilight_model::channel::message::{Component, Embed};
@@ -154,53 +155,149 @@ pub(crate) async fn send(
     let (content, embeds, components) = spec
         .into_post(now(), &str::to_owned)
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    if let Some(at) = body.send_at {
-        return schedule(
-            &state,
-            guild,
-            at,
-            json!({
-                "channel": channel.to_string(),
-                "edit": edit.map(|id| id.to_string()),
-                "message": body.message,
-            }),
-        )
-        .await;
+    let claimed = match claim(&state, guild, &headers, &body).await? {
+        Claimed::Answered(response) => return Ok(Json(response)),
+        Claimed::Fresh(who, key) => Some((who, key)),
+        Claimed::Unkeyed => None,
+    };
+    let outcome: Result<Json<Value>, ApiError> = async {
+        if let Some(at) = body.send_at {
+            return schedule(
+                &state,
+                guild,
+                at,
+                json!({
+                    "channel": channel.to_string(),
+                    "edit": edit.map(|id| id.to_string()),
+                    "message": body.message,
+                }),
+            )
+            .await;
+        }
+        let channel_id = ChannelId::new(channel);
+        let sent = sink
+            .send(
+                channel_id,
+                edit.map(MessageId::new),
+                Post {
+                    content,
+                    embeds,
+                    components,
+                },
+            )
+            .await
+            .map_err(|failure| match failure {
+                SendFailure::Forbidden => {
+                    ApiError::Forbidden("the bot cannot write in that channel".into())
+                }
+                SendFailure::NotFound => {
+                    ApiError::NotFound("that channel or message no longer exists".into())
+                }
+                SendFailure::Unavailable => ApiError::Unavailable,
+                SendFailure::Rejected(why) => ApiError::BadRequest(why),
+            })?;
+        tracing::info!(
+            guild = raw,
+            channel,
+            message = sent.id,
+            edited = edit.is_some(),
+            "a message was sent from the dashboard"
+        );
+        Ok(Json(json!({
+            "id": sent.id.to_string(),
+            "channel_id": channel.to_string(),
+            "url": format!("https://discord.com/channels/{raw}/{channel}/{}", sent.id),
+        })))
     }
-    let channel_id = ChannelId::new(channel);
-    let sent = sink
-        .send(
-            channel_id,
-            edit.map(MessageId::new),
-            Post {
-                content,
-                embeds,
-                components,
-            },
-        )
-        .await
-        .map_err(|failure| match failure {
-            SendFailure::Forbidden => {
-                ApiError::Forbidden("the bot cannot write in that channel".into())
-            }
-            SendFailure::NotFound => {
-                ApiError::NotFound("that channel or message no longer exists".into())
-            }
-            SendFailure::Unavailable => ApiError::Unavailable,
-            SendFailure::Rejected(why) => ApiError::BadRequest(why),
-        })?;
-    tracing::info!(
-        guild = raw,
-        channel,
-        message = sent.id,
-        edited = edit.is_some(),
-        "a message was sent from the dashboard"
-    );
-    Ok(Json(json!({
-        "id": sent.id.to_string(),
-        "channel_id": channel.to_string(),
-        "url": format!("https://discord.com/channels/{raw}/{channel}/{}", sent.id),
-    })))
+    .await;
+    if let Some((who, key)) = claimed {
+        record_outcome(&state, guild, &who, &key, &outcome).await;
+    }
+    outcome
+}
+
+/// Claims the key of a keyed send.
+async fn claim(
+    state: &ApiState,
+    guild: GuildId,
+    headers: &HeaderMap,
+    body: &SendBody,
+) -> Result<Claimed, ApiError> {
+    let Some(key) = request_key(headers)? else {
+        return Ok(Claimed::Unkeyed);
+    };
+    let who = actor(headers)?.map_or_else(String::new, |user| user.to_string());
+    let request = json!({
+        "channel_id": body.channel_id,
+        "message": body.message,
+        "edit": body.edit,
+        "send_at": body.send_at,
+    });
+    match state
+        .inner
+        .db
+        .claim_request(guild, &who, &key, &request)
+        .await?
+    {
+        Claim::Fresh => Ok(Claimed::Fresh(who, key)),
+        Claim::Done(response) => Ok(Claimed::Answered(response)),
+        Claim::Pending => Err(ApiError::Conflict(
+            "that message was already sent or is being sent; its result is not known".into(),
+        )),
+        Claim::Different => Err(ApiError::BadRequest(
+            "that key was used for another message".into(),
+        )),
+    }
+}
+
+/// What claiming the key of a send came to.
+enum Claimed {
+    Unkeyed,
+    Fresh(String, String),
+    Answered(Value),
+}
+
+/// The key that makes a send happen once (`Idempotency-Key`), if the caller gave one.
+fn request_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get("idempotency-key") else {
+        return Ok(None);
+    };
+    value
+        .to_str()
+        .ok()
+        .filter(|key| {
+            (1..=64).contains(&key.len())
+                && key
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        .map(|key| Some(key.to_owned()))
+        .ok_or_else(|| {
+            ApiError::BadRequest("Idempotency-Key must be 1 to 64 letters, digits, - or _".into())
+        })
+}
+
+/// Keeps what a keyed send answered, or gives the key up when the send surely had no effect. Any
+/// other failure may come after the message went out, so the key stays and a repeat is told that
+/// the result is not known instead of sending twice.
+async fn record_outcome(
+    state: &ApiState,
+    guild: GuildId,
+    who: &str,
+    key: &str,
+    outcome: &Result<Json<Value>, ApiError>,
+) {
+    let db = &state.inner.db;
+    let recorded = match outcome {
+        Ok(Json(response)) => db.finish_request(guild, who, key, response).await,
+        Err(ApiError::BadRequest(_) | ApiError::Forbidden(_) | ApiError::NotFound(_)) => {
+            db.release_request(guild, who, key).await
+        }
+        Err(_) => Ok(()),
+    };
+    if let Err(error) = recorded {
+        tracing::warn!(%error, "could not record the result of a keyed send");
+    }
 }
 
 /// Keeps `payload` for the `post` module to send at `at`.

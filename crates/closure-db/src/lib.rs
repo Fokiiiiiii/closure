@@ -16,6 +16,8 @@ mod history;
 #[path = "history_file_tests.rs"]
 mod history_file_tests;
 mod ids;
+mod requests;
+pub use requests::{Claim, REQUESTS_KEPT};
 mod scheduler;
 pub use scheduler::{ScheduledPost, Withdrawn};
 mod stats;
@@ -147,6 +149,7 @@ mod tests {
         assert_eq!(
             tables,
             [
+                "api_requests",
                 "audit_events",
                 "cases",
                 "guild_case_numbers",

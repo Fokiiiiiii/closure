@@ -1513,6 +1513,70 @@ async fn a_message_written_in_the_dashboard_is_sent_by_the_bot(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_message_sent_with_a_key_is_sent_once(pool: PgPool) {
+    let sink = Arc::new(FakeSink(Ok(Sent { id: 77 }), std::sync::Mutex::default()));
+    let app = app_built(
+        pool,
+        GatewayStatus { ready: 1, total: 1 },
+        true,
+        Some(Arc::clone(&sink) as Arc<dyn MessageSink>),
+    );
+    app.db.register_guild(Id::new(GUILD)).await.unwrap();
+    let uri = "/v1/guilds/42/messages";
+    let body = json!({"channel_id": "5", "message": {"content": "hello"}}).to_string();
+    let first = send(
+        &app.router,
+        post_json(uri)
+            .header("idempotency-key", "form-1")
+            .body(&body),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text);
+    // The same form sent again (a restart of the dashboard, a retry) gets the first answer.
+    let again = send(
+        &app.router,
+        post_json(uri)
+            .header("idempotency-key", "form-1")
+            .body(&body),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.text);
+    assert_eq!(again.json(), first.json());
+    assert_eq!(sink.1.lock().unwrap().len(), 1, "it was sent once");
+    // The key of another message, and a key that is not one.
+    let other = json!({"channel_id": "5", "message": {"content": "other"}}).to_string();
+    let reused = send(
+        &app.router,
+        post_json(uri)
+            .header("idempotency-key", "form-1")
+            .body(&other),
+    )
+    .await;
+    assert_eq!(reused.status, StatusCode::BAD_REQUEST);
+    let bad = send(
+        &app.router,
+        post_json(uri)
+            .header("idempotency-key", "no good")
+            .body(&body),
+    )
+    .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    assert_eq!(sink.1.lock().unwrap().len(), 1);
+    // A send that surely failed gives its key up, so that it can be tried again.
+    let missing = json!({"channel_id": "9", "message": {"content": "x"}}).to_string();
+    for _ in 0..2 {
+        let response = send(
+            &app.router,
+            post_json(uri)
+                .header("idempotency-key", "form-2")
+                .body(&missing),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+    }
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
 async fn a_post_can_be_scheduled_listed_and_taken_back_and_buttons_are_checked(pool: PgPool) {
     let sink = Arc::new(FakeSink(Ok(Sent { id: 77 }), std::sync::Mutex::default()));
     let app = app_built(
