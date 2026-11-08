@@ -195,19 +195,30 @@ fn heat_config() -> Value {
 
 fn guild_yaml(log_channel: u64) -> String {
     let channel = log_channel.to_string();
-    serde_json::to_string(&json!({
-        "modules": {
-            "automod": { "enabled": true, "config": heat_config() },
-            "logs": { "enabled": true, "config": { "channel": channel } },
-            "welcome": { "enabled": true, "config": { "channel": channel, "message": "hi {username}" } },
-            "guard": { "enabled": true },
-            "persist": { "enabled": true },
-            "dehoist": { "enabled": true },
-            "honeypot": { "enabled": true },
-            "moderation": { "enabled": true },
-        }
-    }))
-    .unwrap()
+    let all = json!({
+        "automod": { "enabled": true, "config": heat_config() },
+        "logs": { "enabled": true, "config": { "channel": channel } },
+        "welcome": { "enabled": true, "config": { "channel": channel, "message": "hi {username}" } },
+        "guard": { "enabled": true },
+        "persist": { "enabled": true },
+        "dehoist": { "enabled": true },
+        "honeypot": { "enabled": true },
+        "moderation": { "enabled": true },
+    });
+    // LOAD_MODULES names the modules to switch on (comma separated); the default is all of them.
+    let chosen = std::env::var("LOAD_MODULES").ok();
+    let modules: serde_json::Map<String, Value> = all
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| {
+            chosen
+                .as_deref()
+                .is_none_or(|list| list.split(',').any(|item| item == name.as_str()))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    serde_json::to_string(&json!({ "modules": modules })).unwrap()
 }
 
 fn guild_id(index: u64) -> GuildId {
@@ -513,29 +524,40 @@ async fn several_large_servers_take_a_raid_and_then_spam() {
         })
     };
 
-    let phases = [
-        Phase {
-            name: "ordinary chat",
-            seconds: 15.0 * length,
-            chat: 100.0,
-            joins: 5.0,
-            spam: 0.0,
-        },
-        Phase {
-            name: "raid",
+    // LOAD_JOINS_ONLY measures what a join costs on its own.
+    let phases: Vec<Phase> = if std::env::var("LOAD_JOINS_ONLY").is_ok() {
+        vec![Phase {
+            name: "joins only",
             seconds: 10.0 * length,
-            chat: 100.0,
-            joins: 2_000.0,
-            spam: 400.0,
-        },
-        Phase {
-            name: "spam goes on",
-            seconds: 15.0 * length,
-            chat: 100.0,
-            joins: 20.0,
-            spam: 1_500.0,
-        },
-    ];
+            chat: 0.0,
+            joins: 40.0,
+            spam: 0.0,
+        }]
+    } else {
+        vec![
+            Phase {
+                name: "ordinary chat",
+                seconds: 15.0 * length,
+                chat: 100.0,
+                joins: 5.0,
+                spam: 0.0,
+            },
+            Phase {
+                name: "raid",
+                seconds: 10.0 * length,
+                chat: 100.0,
+                joins: 2_000.0,
+                spam: 400.0,
+            },
+            Phase {
+                name: "spam goes on",
+                seconds: 15.0 * length,
+                chat: 100.0,
+                joins: 20.0,
+                spam: 1_500.0,
+            },
+        ]
+    };
     println!(
         "\n{guilds} servers, {members} accounts each, rates x{scale}, memory at start {:.0} MB",
         resident_megabytes()
@@ -618,6 +640,16 @@ async fn several_large_servers_take_a_raid_and_then_spam() {
     println!("\nrows written:");
     for (table, count) in rows {
         println!("  {table:<28} {count}");
+    }
+    let cases: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT kind::text, source::text, count(*) FROM cases GROUP BY 1, 2 ORDER BY 3 DESC",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    println!("\ncases by kind and source:");
+    for (kind, source, count) in cases {
+        println!("  {kind:<12} {source:<12} {count}");
     }
     let wedged: Vec<String> = modules()
         .unwrap()

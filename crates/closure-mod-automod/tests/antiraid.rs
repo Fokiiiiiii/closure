@@ -455,6 +455,57 @@ async fn release_removes_the_quarantine_of_one_member_or_of_all() {
     assert!(role_changes(&harness).contains(&(false, OTHER_MEMBER, ROLE)));
 }
 
+fn role_lists(harness: &Harness) -> usize {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter(|action| matches!(action, Action::ListRoles { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn the_quarantine_role_is_looked_up_once_for_a_run_of_joins() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": {} } }
+    }));
+    set(&harness, "high").await;
+    join(&harness, MEMBER).await;
+    let after_first = role_lists(&harness);
+    for member in 100..110 {
+        join(&harness, member).await;
+    }
+    assert_eq!(
+        role_lists(&harness),
+        after_first,
+        "the roles of the server are not listed again for each joiner"
+    );
+    let given = role_changes(&harness)
+        .iter()
+        .filter(|(added, _, _)| *added)
+        .count();
+    assert_eq!(given, 11, "every joiner still gets the role");
+}
+
+#[tokio::test]
+async fn a_quarantine_role_that_cannot_be_given_is_looked_up_again_at_the_next_join() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": {} } }
+    }));
+    set(&harness, "high").await;
+    join(&harness, MEMBER).await;
+    let before = role_lists(&harness);
+    harness.api().fail_nth(1, DiscordError::NotFound);
+    let _ = harness.emit(joining(OTHER_MEMBER)).await;
+    join(&harness, 101).await;
+    assert!(
+        role_lists(&harness) > before,
+        "after a failure the role is looked up again"
+    );
+}
+
 #[tokio::test]
 async fn a_member_who_leaves_is_forgotten_by_the_quarantine() {
     let harness = raid(json!({

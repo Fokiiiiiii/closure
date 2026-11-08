@@ -17,6 +17,18 @@ const MAX_REMEMBERED: usize = 1_024;
 /// How many threads are followed, for all the guilds together.
 const MAX_THREADS_REMEMBERED: usize = 100_000;
 
+/// The quarantine role found for a guild, the role the server configured when it was found, and
+/// the time after which it is looked up again.
+#[derive(Debug, Clone, Copy)]
+struct FoundRole {
+    role: RoleId,
+    configured: Option<RoleId>,
+    until: i64,
+}
+
+/// How long a joiner may be given the quarantine role found last, before the role is looked up again.
+const QUARANTINE_ROLE_SECONDS: i64 = 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OwnRoleChange {
     guild: GuildId,
@@ -33,6 +45,9 @@ pub struct Memory {
     slowmodes: Mutex<HashMap<ChannelId, (u16, i64)>>,
     /// The parent of each thread seen, by guild and thread: a lookup, not a scan.
     thread_parents: Mutex<HashMap<(GuildId, ChannelId), ChannelId>>,
+    /// The quarantine role of each guild with the role that was configured and the time it is
+    /// asked about again.
+    quarantine_roles: Mutex<HashMap<GuildId, FoundRole>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -59,6 +74,41 @@ impl Memory {
             .get(&(guild, channel))
             .copied()
             .unwrap_or(channel)
+    }
+
+    /// The quarantine role of the guild when it was looked up lately for the same configured role.
+    pub fn quarantine_role(
+        &self,
+        guild: GuildId,
+        configured: Option<RoleId>,
+        now: i64,
+    ) -> Option<RoleId> {
+        lock(&self.quarantine_roles)
+            .get(&guild)
+            .filter(|found| found.configured == configured && now < found.until)
+            .map(|found| found.role)
+    }
+
+    pub fn remember_quarantine_role(
+        &self,
+        guild: GuildId,
+        configured: Option<RoleId>,
+        role: RoleId,
+        now: i64,
+    ) {
+        lock(&self.quarantine_roles).insert(
+            guild,
+            FoundRole {
+                role,
+                configured,
+                until: now + QUARANTINE_ROLE_SECONDS,
+            },
+        );
+    }
+
+    /// The role could not be given: the next join looks the role up again.
+    pub fn forget_quarantine_role(&self, guild: GuildId) {
+        lock(&self.quarantine_roles).remove(&guild);
     }
 
     /// Remembers that the bot is about to give or take `role` from `user`.

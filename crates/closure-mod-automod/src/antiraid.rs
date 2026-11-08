@@ -1344,9 +1344,16 @@ async fn quarantine_join(
     else {
         return Ok(());
     };
-    let role = ensure_role(ctx, RestrictionRole::Quarantine, quarantine.role)
-        .await
-        .map_err(|error| ModuleError::other(error.to_string()))?;
+    let role = if let Some(role) = memory.quarantine_role(ctx.guild_id, quarantine.role, ctx.now())
+    {
+        role
+    } else {
+        let role = ensure_role(ctx, RestrictionRole::Quarantine, quarantine.role)
+            .await
+            .map_err(|error| ModuleError::other(error.to_string()))?;
+        memory.remember_quarantine_role(ctx.guild_id, quarantine.role, role, ctx.now());
+        role
+    };
     let held = held_for(store, user.get()).await?;
     let fresh = held.is_empty();
     if !held.iter().any(|entry| {
@@ -1363,6 +1370,7 @@ async fn quarantine_join(
         .await?;
     }
     if let Err(error) = give(ctx, memory, user, role).await {
+        memory.forget_quarantine_role(ctx.guild_id);
         if fresh {
             forget(store, user.get()).await?;
         }
