@@ -7,8 +7,8 @@ events, Discord actions, per-server configuration, translations — is provided 
 new features are modules that cannot weaken it.
 
 **Status:** the foundation is in place (core, configuration, Discord layer, HTTP API, Lua and
-WebAssembly script host), and eighteen modules are built on it: moderation, automod, logs,
-diagnostics, welcome, roles, verify, guard, sticky, tags, remind, channels, companion, persist, phishing, post,
+WebAssembly script host), and nineteen modules are built on it: moderation, automod, logs,
+diagnostics, welcome, roles, verify, guard, sticky, backup, tags, remind, channels, companion, persist, phishing, post,
 utility and dashboard. The dashboard itself is a separate project,
 [closure-dashboard](https://github.com/Fokiiiiiii/closure-dashboard).
 
