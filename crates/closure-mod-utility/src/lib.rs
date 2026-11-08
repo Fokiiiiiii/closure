@@ -58,10 +58,19 @@ struct NamesArgs {
 
 #[derive(CommandArgs)]
 struct Info {
-    /// A role to tell about; the server when both are left out.
+    /// A role to tell about; the server when everything is left out.
     role: Option<RoleId>,
     /// A channel to tell about.
     channel: Option<ChannelId>,
+    /// An invite (its link or its code) to look at before anybody follows it.
+    #[arg(max_length = 120)]
+    invite: Option<String>,
+    /// A message of this server (its link) to tell about.
+    #[arg(max_length = 140)]
+    message: Option<String>,
+    /// An emoji (written out, or its id) to tell about.
+    #[arg(max_length = 80)]
+    emoji: Option<String>,
 }
 
 #[derive(CommandArgs)]
@@ -268,14 +277,223 @@ async fn avatar(cx: CommandCx, args: MaybeUser) -> Result<(), UserError> {
     }
 }
 
-/// Tells about a role, a channel, or the server.
+/// Tells about a role, a channel, an invite, a message, an emoji, or the server.
 async fn info(cx: CommandCx, args: Info) -> Result<(), UserError> {
-    match (args.role, args.channel) {
-        (Some(_), Some(_)) => Err(UserError::message("utility-info-one")),
-        (Some(role), None) => roleinfo(cx, role).await,
-        (None, Some(channel)) => channelinfo(cx, channel).await,
-        (None, None) => serverinfo(cx, ()).await,
+    let named = usize::from(args.role.is_some())
+        + usize::from(args.channel.is_some())
+        + usize::from(args.invite.is_some())
+        + usize::from(args.message.is_some())
+        + usize::from(args.emoji.is_some());
+    if named > 1 {
+        return Err(UserError::message("utility-info-one"));
     }
+    if let Some(role) = args.role {
+        return roleinfo(cx, role).await;
+    }
+    if let Some(channel) = args.channel {
+        return channelinfo(cx, channel).await;
+    }
+    if let Some(invite) = args.invite {
+        return inviteinfo(cx, &invite).await;
+    }
+    if let Some(message) = args.message {
+        return messageinfo(cx, &message).await;
+    }
+    if let Some(emoji) = args.emoji {
+        return emojiinfo(&cx, &emoji).await;
+    }
+    serverinfo(cx, ()).await
+}
+
+/// The code of an invite given as a link or as the code itself: letters, digits and dashes.
+fn invite_code(text: &str) -> Option<String> {
+    let text = text.trim().trim_end_matches('/');
+    let code = text.rsplit('/').next()?;
+    let valid = (2..=32).contains(&code.len())
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    valid.then(|| code.to_owned())
+}
+
+/// What an invite leads to, so that a scam link can be told before somebody follows it.
+async fn inviteinfo(cx: CommandCx, text: &str) -> Result<(), UserError> {
+    let Some(code) = invite_code(text) else {
+        return Err(UserError::message("utility-bad-invite"));
+    };
+    let outcome = cx
+        .api()
+        .execute(Action::GetInvite { code: code.clone() })
+        .await;
+    let invite = match outcome {
+        Ok(Outcome::Invite(invite)) => invite,
+        Ok(_) => return Err(UserError::message("utility-unavailable")),
+        Err(closure_sdk::DiscordError::NotFound) => {
+            return Err(UserError::message("utility-invite-gone"));
+        }
+        Err(error) => return Err(failed(&error)),
+    };
+    let say = |key: &str| cx.t(key, &Args::new());
+    let mut card = EmbedBuilder::new().title(format!("discord.gg/{code}"));
+    if let Some(guild) = &invite.guild {
+        card = card
+            .field(
+                say("utility-server"),
+                closure_sdk::embed::escape(&guild.name),
+                true,
+            )
+            .field(say("utility-id"), guild.id.get().to_string(), true);
+    }
+    if let Some(channel) = &invite.channel {
+        card = card.field(
+            say("utility-channel"),
+            closure_sdk::embed::escape(channel.name.as_deref().unwrap_or("")),
+            true,
+        );
+    }
+    if let Some(members) = invite.approximate_member_count {
+        card = card.field(say("utility-members"), members.to_string(), true);
+    }
+    if let Some(inviter) = &invite.inviter {
+        card = card.field(say("utility-inviter"), format!("<@{}>", inviter.id), true);
+    }
+    if let Some(expires) = invite.expires_at {
+        card = card.field(say("utility-expires"), moment(expires.as_secs()), true);
+    }
+    cx.reply_with(reply_of(card)?).await
+}
+
+/// The ids in a link to a message: server, channel and message.
+fn message_link(text: &str) -> Option<(u64, u64, u64)> {
+    let path = text.trim().split("/channels/").nth(1)?;
+    let mut parts = path.split('/').map(|part| part.trim().parse::<u64>().ok());
+    let guild = parts.next()??;
+    let channel = parts.next()??;
+    let message = parts.next()??;
+    (guild > 0 && channel > 0 && message > 0).then_some((guild, channel, message))
+}
+
+/// A message of this server: who wrote it, when, where, and what is on it. Only for somebody who
+/// may see the channel it is in.
+async fn messageinfo(cx: CommandCx, text: &str) -> Result<(), UserError> {
+    let Some((guild, channel_id, message_id)) = message_link(text) else {
+        return Err(UserError::message("utility-bad-message"));
+    };
+    if guild != cx.guild_id().get() {
+        return Err(UserError::message("utility-other-server"));
+    }
+    let Outcome::Channel(channel) = cx
+        .api()
+        .execute(Action::GetChannel {
+            channel_id: ChannelId::new(channel_id),
+        })
+        .await
+        .map_err(|e| failed(&e))?
+    else {
+        return Err(UserError::message("utility-unavailable"));
+    };
+    // Said as if there were no such message: one in a channel the invoker cannot see stays unknown.
+    if !invoker_sees(&cx, &channel).await? {
+        return Err(UserError::message("utility-not-found"));
+    }
+    let message = cx
+        .api()
+        .get_message(
+            ChannelId::new(channel_id),
+            closure_core::event::MessageId::new(message_id),
+        )
+        .await
+        .map_err(|e| match e {
+            closure_sdk::DiscordError::NotFound => UserError::message("utility-not-found"),
+            other => failed(&other),
+        })?;
+    let say = |key: &str| cx.t(key, &Args::new());
+    let yes_no = |on: bool| say(if on { "utility-yes" } else { "utility-no" });
+    let link = format!("https://discord.com/channels/{guild}/{channel_id}/{message_id}");
+    let mut card = EmbedBuilder::new()
+        .title(link)
+        .field(
+            say("utility-author"),
+            format!("<@{}>", message.author.id),
+            true,
+        )
+        .field(say("utility-channel"), format!("<#{channel_id}>"), true)
+        .field(say("utility-created"), moment(created_at(message_id)), true)
+        .field(
+            say("utility-attachments"),
+            message.attachments.len().to_string(),
+            true,
+        )
+        .field(
+            say("utility-embeds"),
+            message.embeds.len().to_string(),
+            true,
+        )
+        .field(say("utility-pinned"), yes_no(message.pinned), true);
+    if message.edited_timestamp.is_some() {
+        card = card.field(say("utility-edited"), yes_no(true), true);
+    }
+    if !message.reactions.is_empty() {
+        let total: u64 = message.reactions.iter().map(|r| r.count).sum();
+        card = card.field(say("utility-reactions"), total.to_string(), true);
+    }
+    if let Some(to) = message
+        .reference
+        .as_ref()
+        .and_then(|reply| reply.message_id)
+    {
+        card = card.field(say("utility-reply-to"), to.get().to_string(), true);
+    }
+    if !message.content.is_empty() {
+        card = card.description(closure_sdk::embed::escape(
+            &message.content.chars().take(300).collect::<String>(),
+        ));
+    }
+    cx.reply_with(reply_of(card)?).await
+}
+
+/// The id of an emoji written as `<:name:id>`, `<a:name:id>`, `name:id` or the id alone, with its
+/// name and whether it moves.
+fn emoji_of(text: &str) -> Option<(u64, Option<String>, bool)> {
+    let text = text.trim().trim_start_matches('<').trim_end_matches('>');
+    let animated = text.starts_with("a:");
+    let text = text.strip_prefix("a:").unwrap_or(text);
+    let text = text.strip_prefix(':').unwrap_or(text);
+    let (name, id) = match text.rsplit_once(':') {
+        Some((name, id)) => (Some(name.to_owned()).filter(|n| !n.is_empty()), id),
+        None => (None, text),
+    };
+    let id = id.parse::<u64>().ok().filter(|id| *id > 0)?;
+    Some((id, name, animated))
+}
+
+/// What can be told of an emoji from how it is written: its id, its name, when it was made and
+/// where its picture is. Whether the server has it is not asked.
+async fn emojiinfo(cx: &CommandCx, text: &str) -> Result<(), UserError> {
+    let Some((id, name, animated)) = emoji_of(text) else {
+        return Err(UserError::message("utility-bad-emoji"));
+    };
+    let say = |key: &str| cx.t(key, &Args::new());
+    let extension = if animated { "gif" } else { "png" };
+    let card = EmbedBuilder::new()
+        .title(name.unwrap_or_else(|| id.to_string()))
+        .field(say("utility-id"), id.to_string(), true)
+        .field(
+            say("utility-animated"),
+            say(if animated {
+                "utility-yes"
+            } else {
+                "utility-no"
+            }),
+            true,
+        )
+        .field(say("utility-created"), moment(created_at(id)), true)
+        .field(
+            say("utility-picture"),
+            format!("https://cdn.discordapp.com/emojis/{id}.{extension}"),
+            false,
+        );
+    cx.reply_with(reply_of(card)?).await
 }
 
 async fn serverinfo(cx: CommandCx, (): ()) -> Result<(), UserError> {
@@ -839,6 +1057,8 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
     Ok(
         ModuleBuilder::new("utility", "Utility", env!("CARGO_PKG_VERSION"))?
             .capability(closure_sdk::Capability::ReadGuild)
+            // `/info message` reads one message, and only for somebody who can see its channel.
+            .capability(closure_sdk::Capability::ReadMessages)
             .capability(closure_sdk::Capability::MoveMembers)
             .capability(closure_sdk::Capability::ManageNicknames)
             .capability(closure_sdk::Capability::Storage)

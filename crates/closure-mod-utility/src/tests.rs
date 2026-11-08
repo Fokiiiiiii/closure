@@ -474,3 +474,123 @@ async fn a_moderator_changes_and_resets_a_nickname_and_an_id_tells_its_age() {
             .contains("not an id")
     );
 }
+
+fn info_of(option: &str, value: &str) -> Invocation {
+    Invocation::new("info")
+        .option(option, CommandOptionValue::String(value.to_owned()))
+        .user(50)
+}
+
+#[tokio::test]
+async fn an_invite_is_described_by_its_code_or_its_link_and_a_bad_one_is_refused() {
+    let harness = harness();
+    harness.api().set_invite("abcDEF12", GuildId::new(5));
+    for given in [
+        "abcDEF12",
+        "https://discord.gg/abcDEF12",
+        "discord.com/invite/abcDEF12/",
+    ] {
+        let shown = harness.invoke(info_of("invite", given)).await.unwrap();
+        let card = &shown[0].embeds[0];
+        assert_eq!(
+            card.title.as_deref(),
+            Some("discord.gg/abcDEF12"),
+            "{given}"
+        );
+        assert!(
+            card.fields.iter().any(|field| field.value.contains('5')),
+            "the server it leads to: {card:?}"
+        );
+    }
+    let gone = harness
+        .invoke(info_of("invite", "nosuchcode"))
+        .await
+        .unwrap();
+    assert!(gone[0].content.contains("does not exist"), "{gone:?}");
+    let bad = harness
+        .invoke(info_of("invite", "not an invite!"))
+        .await
+        .unwrap();
+    assert!(bad[0].content.contains("not an invite"), "{bad:?}");
+}
+
+#[tokio::test]
+async fn a_message_is_described_only_in_this_server_and_only_when_its_channel_is_visible() {
+    let link = |guild: u64| format!("https://discord.com/channels/{guild}/30/900");
+    let open = harness();
+    open.api().set_channels(Id::new(1), vec![text_channel(30)]);
+    open.api()
+        .set_roles(Id::new(1), vec![everyone_with("1024")]);
+    let shown = open.invoke(info_of("message", &link(1))).await.unwrap();
+    let card = &shown[0].embeds[0];
+    assert!(
+        card.title
+            .as_deref()
+            .is_some_and(|title| title.ends_with("/30/900")),
+        "{shown:?}"
+    );
+    assert!(
+        card.fields
+            .iter()
+            .any(|field| field.value.contains("<#30>"))
+    );
+
+    let elsewhere = open.invoke(info_of("message", &link(2))).await.unwrap();
+    assert!(
+        elsewhere[0].content.contains("another server"),
+        "{elsewhere:?}"
+    );
+
+    let bad = open.invoke(info_of("message", "somewhere")).await.unwrap();
+    assert!(bad[0].content.contains("not a link"), "{bad:?}");
+
+    // A channel nobody may see: the message is as unknown as one that is not there.
+    let hidden = harness();
+    hidden
+        .api()
+        .set_channels(Id::new(1), vec![text_channel(30)]);
+    hidden.api().set_roles(Id::new(1), vec![everyone_with("0")]);
+    let refused = hidden.invoke(info_of("message", &link(1))).await.unwrap();
+    assert!(
+        refused[0].content.contains("could not be found"),
+        "{refused:?}"
+    );
+    assert!(
+        !refused[0].content.contains("/30/900") && refused[0].embeds[0].fields.is_empty(),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_emoji_is_described_from_how_it_is_written_and_only_one_thing_at_a_time() {
+    let harness = harness();
+    for (given, title, animated) in [
+        ("<:party:123456789012345678>", "party", "no"),
+        ("<a:dance:123456789012345678>", "dance", "yes"),
+        ("123456789012345678", "123456789012345678", "no"),
+    ] {
+        let shown = harness.invoke(info_of("emoji", given)).await.unwrap();
+        let card = &shown[0].embeds[0];
+        assert_eq!(card.title.as_deref(), Some(title), "{given}");
+        assert!(
+            card.fields.iter().any(|field| field.value == animated),
+            "{given}"
+        );
+        assert!(
+            card.fields
+                .iter()
+                .any(|field| field.value.contains("cdn.discordapp.com"))
+        );
+    }
+    let bad = harness.invoke(info_of("emoji", "smile")).await.unwrap();
+    assert!(bad[0].content.contains("Write the emoji"), "{bad:?}");
+
+    let two = harness
+        .invoke(
+            info_of("emoji", "123456789012345678")
+                .option("invite", CommandOptionValue::String("abcDEF12".into())),
+        )
+        .await
+        .unwrap();
+    assert!(two[0].content.contains("only one"), "{two:?}");
+}

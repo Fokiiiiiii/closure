@@ -11,6 +11,7 @@ Commands that tell about the server, a role, a channel or a member, the names a 
 - `manage_nicknames`
 - `respond_to_interactions`
 - `storage`
+- `read_messages`
 - `move_members`
 
 ## Permissions
@@ -26,15 +27,18 @@ Commands that tell about the server, a role, a channel or a member, the names a 
 
 ### `/info`
 
-Show facts about a role, a channel, or this server
+Show facts about a role, a channel, an invite, a message, an emoji, or this server
 
 - Japanese name: `info`
-- Japanese description: ロール、チャンネル、またはこのサーバーの情報を表示します
+- Japanese description: ロール、チャンネル、招待、メッセージ、絵文字、またはこのサーバーの情報を表示します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `role` | role | role | no | - | A role to tell about |
 | `channel` | channel | channel | no | - | A channel to tell about |
+| `invite` | invite | string | no | max_length 120 | An invite (its link or its code) to look at before anybody follows it |
+| `message` | message | string | no | max_length 140 | A message of this server (its link) to tell about |
+| `emoji` | emoji | string | no | max_length 80 | An emoji (written out, or its id) to tell about |
 
 ### `/avatar`
 
