@@ -11,6 +11,7 @@
 
 mod access;
 mod auth;
+mod cases;
 mod config;
 mod directory;
 mod error;
@@ -183,6 +184,16 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/guilds/{guild_id}/config/history", get(config::history))
         .route("/v1/guilds/{guild_id}/messages", post(messages::send))
+        .route(
+            "/v1/guilds/{guild_id}/cases",
+            get(cases::list).post(cases::add_note),
+        )
+        .route("/v1/guilds/{guild_id}/cases/summary", get(cases::summary))
+        .route("/v1/guilds/{guild_id}/cases/export", get(cases::export))
+        .route(
+            "/v1/guilds/{guild_id}/cases/{number}",
+            get(cases::get).patch(cases::change),
+        )
         .route(
             "/v1/guilds/{guild_id}/scheduled-posts",
             get(messages::scheduled),

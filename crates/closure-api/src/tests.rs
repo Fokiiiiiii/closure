@@ -1687,3 +1687,193 @@ async fn a_refused_send_says_why_and_a_bot_without_a_sink_is_unavailable(pool: P
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
+
+async fn make_case(app: &App, kind: &str, target: u64, reason: Option<&str>) {
+    closure_core::cases::CaseBackend::create(
+        &app.db,
+        &ModuleId::new("moderation").unwrap(),
+        Id::new(GUILD),
+        closure_core::cases::NewCase {
+            source: closure_core::cases::CaseSource::Command,
+            kind: closure_core::cases::CaseKind::new(kind).unwrap(),
+            target: Id::new(target),
+            moderator: Id::new(9),
+            reason: reason.map(str::to_owned),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn the_cases_of_a_server_are_listed_filtered_shown_counted_and_exported(pool: PgPool) {
+    let app = app(pool).await;
+    app.db.register_guild(Id::new(GUILD)).await.unwrap();
+    make_case(&app, "warn", 10, Some("spam")).await;
+    make_case(&app, "ban", 11, Some("=cmd|' /C calc'!A0")).await;
+    make_case(&app, "warn", 10, None).await;
+    let base = "/v1/guilds/42/cases";
+
+    // Newest first, a page at a time, with the number to ask the next page after.
+    let page = send(&app.router, call(Method::GET, &format!("{base}?limit=2"))).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    let json = page.json();
+    let numbers: Vec<i64> = json["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|case| case["number"].as_i64().unwrap())
+        .collect();
+    assert_eq!(numbers, [3, 2]);
+    assert_eq!(json["next_before"], 2);
+    assert_eq!(json["cases"][0]["target"], "10", "ids are texts");
+    let rest = send(
+        &app.router,
+        call(Method::GET, &format!("{base}?limit=2&before=2")),
+    )
+    .await;
+    assert_eq!(rest.json()["cases"][0]["number"], 1);
+    assert!(rest.json()["next_before"].is_null());
+
+    // Filters.
+    for (query, expected) in [
+        ("user=10", 2),
+        ("kind=ban", 1),
+        ("text=SPAM", 1),
+        ("state=active", 3),
+        ("state=revoked", 0),
+        ("moderator=9", 3),
+        ("source=command", 3),
+        ("source=appeal", 0),
+    ] {
+        let found = send(&app.router, call(Method::GET, &format!("{base}?{query}"))).await;
+        assert_eq!(found.status, StatusCode::OK, "{query}: {}", found.text);
+        assert_eq!(
+            found.json()["cases"].as_array().unwrap().len(),
+            expected,
+            "{query}"
+        );
+    }
+    for bad in ["user=x", "state=gone", "source=nowhere", "kind=NOT%20OK!"] {
+        let response = send(&app.router, call(Method::GET, &format!("{base}?{bad}"))).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    // One case, and one that does not exist.
+    let one = send(&app.router, call(Method::GET, &format!("{base}/2"))).await;
+    assert_eq!(one.json()["kind"], "ban");
+    assert_eq!(one.json()["state"], "active");
+    assert_eq!(
+        send(&app.router, call(Method::GET, &format!("{base}/99")))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+
+    // The counts.
+    let summary = send(
+        &app.router,
+        call(Method::GET, &format!("{base}/summary?days=7")),
+    )
+    .await;
+    assert_eq!(summary.status, StatusCode::OK, "{}", summary.text);
+    assert_eq!(summary.json()["total"], 3);
+    assert_eq!(summary.json()["by_kind"]["warn"], 2);
+    assert_eq!(summary.json()["targets"][0]["id"], "10");
+    assert_eq!(
+        send(
+            &app.router,
+            call(Method::GET, &format!("{base}/summary?days=0"))
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+
+    // The CSV: a header, a row for each case, and no cell that a spreadsheet would run.
+    let csv = send(&app.router, call(Method::GET, &format!("{base}/export"))).await;
+    assert_eq!(csv.status, StatusCode::OK);
+    assert!(
+        csv.headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/csv")
+    );
+    assert_eq!(csv.text.lines().count(), 4, "{}", csv.text);
+    assert!(csv.text.contains("\"'=cmd|"), "{}", csv.text);
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn a_person_needs_to_be_a_moderator_to_read_and_the_dashboard_right_to_change_cases(
+    pool: PgPool,
+) {
+    let app = app(pool).await;
+    app.db.register_guild(Id::new(GUILD)).await.unwrap();
+    make_case(&app, "warn", 10, Some("spam")).await;
+    let base = "/v1/guilds/42/cases";
+
+    // 3 is a member of the server with no say in it.
+    let denied = send(
+        &app.router,
+        call(Method::GET, base).header("x-closure-actor", "3"),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.text);
+    // 123 owns the server.
+    let owner = |call: Call| call.header("x-closure-actor", "123");
+    assert_eq!(
+        send(&app.router, owner(call(Method::GET, base)))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    // A note is made in the name of the person; without one there is nobody to name.
+    let note = r#"{"target":"10","reason":"asked twice"}"#;
+    let anonymous = send(&app.router, post_json(base).body(note)).await;
+    assert_eq!(
+        anonymous.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        anonymous.text
+    );
+    let made = send(&app.router, owner(post_json(base)).body(note)).await;
+    assert_eq!(made.status, StatusCode::OK, "{}", made.text);
+    assert_eq!(made.json()["kind"], "note");
+    assert_eq!(made.json()["source"], "dashboard");
+    assert_eq!(made.json()["moderator"], "123");
+    let empty = send(
+        &app.router,
+        owner(post_json(base)).body(r#"{"target":"10","reason":" "}"#),
+    )
+    .await;
+    assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+
+    // A reason is changed, and a case is hidden from the lists and shown again.
+    let patch = |body: &str| {
+        owner(call(Method::PATCH, &format!("{base}/1")).header("content-type", "application/json"))
+            .body(body)
+    };
+    let edited = send(&app.router, patch(r#"{"reason":"spam, twice"}"#)).await;
+    assert_eq!(edited.json()["reason"], "spam, twice");
+    let hidden = send(&app.router, patch(r#"{"hidden":true}"#)).await;
+    assert_eq!(hidden.json()["hidden"], true);
+    let listed = send(&app.router, owner(call(Method::GET, base))).await;
+    assert_eq!(
+        listed.json()["cases"].as_array().unwrap().len(),
+        1,
+        "the hidden case is left out"
+    );
+    let all = send(
+        &app.router,
+        owner(call(Method::GET, &format!("{base}?hidden=true"))),
+    )
+    .await;
+    assert_eq!(all.json()["cases"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        send(&app.router, patch("{}")).await.status,
+        StatusCode::BAD_REQUEST,
+        "a change says what changes"
+    );
+}

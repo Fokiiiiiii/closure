@@ -350,6 +350,105 @@ impl CaseBackend for Db {
     }
 }
 
+impl Db {
+    /// Counts the cases made since `since` (unix seconds) in a guild, hidden ones left out: how
+    /// many of each kind, source and state, by day (UTC), and the moderators and members with the
+    /// most.
+    pub async fn case_summary(
+        &self,
+        guild: GuildId,
+        since: i64,
+    ) -> Result<serde_json::Value, crate::DbError> {
+        use serde_json::{Map, Value, json};
+        let guild = to_db(guild)?;
+        let counts = |rows: Vec<(String, i64)>| -> Value {
+            Value::Object(
+                rows.into_iter()
+                    .map(|(name, count)| (name, json!(count)))
+                    .collect::<Map<_, _>>(),
+            )
+        };
+        let by_kind: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT kind, count(*) FROM cases
+             WHERE guild_id = $1 AND NOT hidden AND created_at >= to_timestamp($2)
+             GROUP BY kind ORDER BY count(*) DESC, kind",
+        )
+        .bind(guild)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        let by_source: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT source, count(*) FROM cases
+             WHERE guild_id = $1 AND NOT hidden AND created_at >= to_timestamp($2)
+             GROUP BY source ORDER BY count(*) DESC, source",
+        )
+        .bind(guild)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        let (active, expired, revoked): (i64, i64, i64) = sqlx::query_as(
+            "SELECT
+               count(*) FILTER (WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())),
+               count(*) FILTER (WHERE revoked_at IS NULL AND expires_at <= now()),
+               count(*) FILTER (WHERE revoked_at IS NOT NULL)
+             FROM cases
+             WHERE guild_id = $1 AND NOT hidden AND created_at >= to_timestamp($2)",
+        )
+        .bind(guild)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?;
+        let daily: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT extract(epoch FROM date_trunc('day', created_at AT TIME ZONE 'UTC'))::bigint, count(*)
+             FROM cases
+             WHERE guild_id = $1 AND NOT hidden AND created_at >= to_timestamp($2)
+             GROUP BY 1 ORDER BY 1",
+        )
+        .bind(guild)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        let moderators: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT moderator, count(*) FROM cases
+             WHERE guild_id = $1 AND NOT hidden AND created_at >= to_timestamp($2)
+             GROUP BY moderator ORDER BY count(*) DESC, moderator LIMIT 5",
+        )
+        .bind(guild)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        let targets: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT target, count(*) FROM cases
+             WHERE guild_id = $1 AND NOT hidden AND created_at >= to_timestamp($2)
+             GROUP BY target ORDER BY count(*) DESC, target LIMIT 5",
+        )
+        .bind(guild)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        let people = |rows: Vec<(i64, i64)>| -> Value {
+            Value::Array(
+                rows.into_iter()
+                    .map(|(id, count)| json!({ "id": id.to_string(), "count": count }))
+                    .collect(),
+            )
+        };
+        Ok(json!({
+            "since": since,
+            "total": active + expired + revoked,
+            "by_kind": counts(by_kind),
+            "by_source": counts(by_source),
+            "by_state": { "active": active, "expired": expired, "revoked": revoked },
+            "daily": daily
+                .into_iter()
+                .map(|(day, count)| json!({ "day": day, "count": count }))
+                .collect::<Vec<_>>(),
+            "moderators": people(moderators),
+            "targets": people(targets),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -826,5 +925,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(next.number, 4, "a deleted number is not given again");
+    }
+
+    #[sqlx::test]
+    async fn the_summary_counts_kinds_sources_states_and_people_without_hidden_cases(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let moderation = cases(&db, "moderation", 1);
+        for target in [10, 10, 11] {
+            moderation
+                .create(new_case(target, Some("spam")))
+                .await
+                .unwrap();
+        }
+        let ban = moderation
+            .create(NewCase {
+                kind: CaseKind::new("ban").unwrap(),
+                ..new_case(12, None)
+            })
+            .await
+            .unwrap();
+        moderation
+            .revoke(ban.number, Id::new(9), None)
+            .await
+            .unwrap();
+        let hidden = moderation.create(new_case(13, None)).await.unwrap();
+        moderation
+            .edit(
+                hidden.number,
+                closure_core::cases::CaseEdit {
+                    hidden: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Another server's cases are not counted.
+        cases(&db, "moderation", 2)
+            .create(new_case(10, None))
+            .await
+            .unwrap();
+
+        let summary = db.case_summary(Id::new(1), 0).await.unwrap();
+        assert_eq!(summary["total"], 4);
+        assert_eq!(summary["by_kind"]["warn"], 3);
+        assert_eq!(summary["by_kind"]["ban"], 1);
+        assert_eq!(summary["by_source"]["command"], 4);
+        assert_eq!(summary["by_state"]["active"], 3);
+        assert_eq!(summary["by_state"]["revoked"], 1);
+        assert_eq!(summary["targets"][0]["id"], "10");
+        assert_eq!(summary["targets"][0]["count"], 2);
+        assert_eq!(summary["moderators"][0]["id"], "9");
+        assert_eq!(summary["daily"].as_array().unwrap().len(), 1);
+        let later = db.case_summary(Id::new(1), 4_000_000_000).await.unwrap();
+        assert_eq!(later["total"], 0);
     }
 }
