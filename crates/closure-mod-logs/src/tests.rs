@@ -2352,3 +2352,46 @@ async fn a_bot_a_burst_and_a_switched_off_setting_do_not_look_at_the_invites() {
     off.emit(join(53, false)).await.unwrap();
     assert!(!sent(&off)[0].embeds.contains("Invite"));
 }
+
+#[tokio::test]
+async fn a_kind_of_entry_can_go_to_a_webhook_of_its_own() {
+    let harness = harness();
+    let mut settings = config(None, true);
+    settings["webhook_routes"] = json!({ "messages": "messages-hook" });
+    harness.set_config(settings);
+
+    harness.emit(deleted(12)).await.unwrap();
+    assert!(
+        harness
+            .actions()
+            .iter()
+            .any(|a| matches!(a, Action::SendViaWebhook { name, .. } if name == "messages-hook")),
+        "{:?}",
+        harness.actions()
+    );
+
+    // A kind without a webhook goes the usual way, to the log channel.
+    harness.emit(ban(6)).await.unwrap();
+    assert_eq!(sent(&harness).last().map(|post| post.channel), Some(LOG));
+}
+
+#[tokio::test]
+async fn a_webhook_that_is_gone_sends_the_entry_to_the_channel_of_its_kind() {
+    let harness = harness();
+    harness
+        .api()
+        .add_channel(Id::new(OTHER_LOG), Some(Id::new(GUILD)));
+    let mut settings = config(None, true);
+    settings["webhook_routes"] = json!({ "members": "gone-hook" });
+    settings["routes"] = json!({ "members": OTHER_LOG.to_string() });
+    harness.set_config(settings);
+    harness.api().fail_nth(1, DiscordError::WebhookGone);
+
+    harness.emit(join(60, false)).await.unwrap();
+
+    assert_eq!(
+        sent(&harness).last().map(|post| post.channel),
+        Some(OTHER_LOG),
+        "the channel of the kind takes it"
+    );
+}

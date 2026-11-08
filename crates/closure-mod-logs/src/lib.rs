@@ -190,6 +190,10 @@ struct Config {
     /// Channels of their own for a kind of entry; the others go where `channel` or `webhook` says.
     #[serde(default)]
     routes: Routes,
+    /// Webhooks of their own for a kind of entry, by name; they come before the channels above, and
+    /// the channel of the kind (or the usual one) takes the entry if the webhook is gone.
+    #[serde(default)]
+    webhook_routes: Routes,
 }
 
 /// A channel for each kind of entry.
@@ -244,6 +248,19 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
               "emojis": { "type": "boolean", "description": "config-logs-emojis", "x-ui": { "level": "basic" } },
               "stickers": { "type": "boolean", "description": "config-logs-stickers", "x-ui": { "level": "basic" } },
               "stage_instances": { "type": "boolean", "description": "config-logs-stage_instances", "x-ui": { "level": "basic" } },
+            "webhook_routes": {
+                "type": "object",
+                "properties": {
+                    "messages": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,32}$", "description": "config-logs-webhook_routes-messages", "x-ui": { "level": "basic" } },
+                    "members": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,32}$", "description": "config-logs-webhook_routes-members", "x-ui": { "level": "basic" } },
+                    "moderation": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,32}$", "description": "config-logs-webhook_routes-moderation", "x-ui": { "level": "basic" } },
+                    "server": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,32}$", "description": "config-logs-webhook_routes-server", "x-ui": { "level": "basic" } },
+                    "voice": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,32}$", "description": "config-logs-webhook_routes-voice", "x-ui": { "level": "basic" } }
+                },
+                "additionalProperties": false,
+                "description": "config-logs-webhook_routes",
+                "x-ui": { "level": "basic" }
+            },
             "invite_tracking": {
                 "type": "boolean",
                 "description": "config-logs-invite_tracking",
@@ -315,7 +332,8 @@ fn settings() -> (serde_json::Value, serde_json::Value) {
         "ignored_channels": [],
         "ignored_roles": [],
         "ignored_users": [],
-        "routes": { "messages": null, "members": null, "moderation": null, "server": null, "voice": null }
+        "routes": { "messages": null, "members": null, "moderation": null, "server": null, "voice": null },
+        "webhook_routes": { "messages": null, "members": null, "moderation": null, "server": null, "voice": null }
     });
     (schema, defaults)
 }
@@ -442,24 +460,40 @@ fn group_of(event: &Event) -> Option<Group> {
     })
 }
 
-/// The channel of its own that the entries of `group` have, if the server set one.
-fn route(config: &Config, group: Group) -> Result<Option<Destination>, ModuleError> {
-    let routes = &config.routes;
-    let text = match group {
+fn pick(routes: &Routes, group: Group) -> Option<&str> {
+    match group {
         Group::Messages => &routes.messages,
         Group::Members => &routes.members,
         Group::Moderation => &routes.moderation,
         Group::Server => &routes.server,
         Group::Voice => &routes.voice,
-    };
-    let Some(text) = text.as_deref() else {
-        return Ok(None);
-    };
-    text.parse::<u64>()
-        .ok()
-        .and_then(Id::new_checked)
-        .map(|channel| Some(Destination::Channel(channel)))
-        .ok_or_else(|| ModuleError::Config(format!("`{text}` is not a channel id")))
+    }
+    .as_deref()
+}
+
+/// Where the entries of `group` go when the server set a place of their own for them: a webhook,
+/// whose channel of the kind (or else the usual log channel) takes the entry if the webhook is
+/// gone, or a channel.
+fn route(
+    ctx: &EventContext,
+    config: &Config,
+    group: Group,
+) -> Result<Option<Destination>, ModuleError> {
+    let channel = pick(&config.routes, group)
+        .map(|text| {
+            text.parse::<u64>()
+                .ok()
+                .and_then(Id::new_checked)
+                .ok_or_else(|| ModuleError::Config(format!("`{text}` is not a channel id")))
+        })
+        .transpose()?;
+    if let Some(name) = pick(&config.webhook_routes, group) {
+        return Ok(Some(Destination::Webhook {
+            name: name.to_owned(),
+            fallback: channel.or(ctx.policy().log_channel),
+        }));
+    }
+    Ok(channel.map(Destination::Channel))
 }
 
 fn id_set(list: &[String]) -> std::collections::HashSet<u64> {
@@ -541,7 +575,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
         return Ok(Flow::Continue);
     };
     // A channel of its own for this kind of entry comes before the one for all of them.
-    let Some(channel) = route(&config, group)?.or(default) else {
+    let Some(channel) = route(&ctx, &config, group)?.or(default) else {
         return Ok(Flow::Continue);
     };
     if about_a_bot(&ctx, &event).await || is_ignored(&ctx, &config, &event).await {

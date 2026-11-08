@@ -55,6 +55,7 @@ Set under `modules.logs.config` in a server's configuration; see [configuration]
 | `threads` | boolean | `true` | - | Post the creation, changes and removal of threads. |
 | `voice` | boolean | `false` | - | Post members joining, leaving and moving between voice channels. |
 | `webhook` | any | `null` | - | The named webhook the entries are posted with. |
+| `webhook_routes` | object | `{"members":null,"messages":null,"moderation":null,"server":null,"voice":null}` | - | Webhooks of their own for kinds of entries, by name. A webhook comes before the channel of the same kind; if it is gone, the entry goes to that channel, or else to the usual one. |
 
 Default configuration:
 
@@ -88,6 +89,13 @@ Default configuration:
   "stickers": true,
   "threads": true,
   "voice": false,
-  "webhook": null
+  "webhook": null,
+  "webhook_routes": {
+    "members": null,
+    "messages": null,
+    "moderation": null,
+    "server": null,
+    "voice": null
+  }
 }
 ```
