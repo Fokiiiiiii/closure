@@ -1,7 +1,7 @@
 # Inventory: the reference bot's moderation against closure
 
-Read on 2026-11-06 from `ZeppelinBot/Zeppelin` (`backend/src/plugins/*`, the command files of each
-plugin and `ModActions/types.ts`). A command is **here** when closure has a command or an
+Read on 2026-11-06 from the reference bot's source (the command files of each plugin and
+`ModActions/types.ts`). A command is **here** when closure has a command or an
 equivalent that does the same, **partly** when something of it is here, **missing** when nothing
 is, and **left out** when it is left out on purpose (see [parity](parity.md)). The order of
 building is in the [roadmap](roadmap.md#moderation-next-work-the-owners-list-and-the-rest-of-the-reference-bot-planned-not-started).

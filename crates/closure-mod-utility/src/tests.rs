@@ -594,3 +594,43 @@ async fn an_emoji_is_described_from_how_it_is_written_and_only_one_thing_at_a_ti
         .unwrap();
     assert!(two[0].content.contains("only one"), "{two:?}");
 }
+
+#[tokio::test]
+async fn inviteprune_deletes_only_the_invites_used_few_times_and_only_for_an_admin() {
+    const ADMIN: u64 = 201;
+    let harness = harness();
+    harness.permissions(|permissions| {
+        permissions.role_levels.insert(Id::new(ADMIN), Level::ADMIN);
+    });
+    harness.api().set_guild_invites(
+        GuildId::new(1),
+        &[
+            ("unused", 0, None),
+            ("once", 1, None),
+            ("popular", 40, None),
+        ],
+    );
+    let prune = |roles: u64, max: Option<i64>| {
+        let invocation = Invocation::new("inviteprune").user(50).roles([roles]);
+        match max {
+            Some(max) => invocation.option("max_uses", CommandOptionValue::Integer(max)),
+            None => invocation,
+        }
+    };
+    let deleted = |harness: &Harness| -> Vec<String> {
+        harness
+            .actions()
+            .iter()
+            .filter_map(|action| match action {
+                Action::DeleteInvite { code, .. } => Some(code.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let _ = harness.invoke(prune(MODERATOR, None)).await;
+    assert!(deleted(&harness).is_empty(), "a moderator may not");
+
+    harness.invoke(prune(ADMIN, None)).await.unwrap();
+    assert_eq!(deleted(&harness), vec!["unused", "once"]);
+}

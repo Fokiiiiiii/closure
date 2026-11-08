@@ -738,6 +738,60 @@ async fn find_name(cx: CommandCx, name: String) -> Result<(), UserError> {
         .await
 }
 
+#[derive(CommandArgs)]
+struct InvitePrune {
+    /// Invites used this many times or fewer are deleted; 1 when left out
+    max_uses: Option<i64>,
+}
+
+/// The most invites one run deletes.
+const MAX_PRUNED: usize = 200;
+
+/// Deletes the invites that were hardly used.
+async fn inviteprune(cx: CommandCx, args: InvitePrune) -> Result<(), UserError> {
+    let max = args.max_uses.unwrap_or(1);
+    if !(0..=1_000).contains(&max) {
+        return Err(UserError::message("inviteprune-range"));
+    }
+    cx.defer(true).await?;
+    let ctx = cx.ctx();
+    let Outcome::Invites(invites) = ctx
+        .api
+        .execute(Action::ListInvites {
+            guild_id: ctx.guild_id,
+        })
+        .await
+        .map_err(|error| internal(&error))?
+    else {
+        return Err(UserError::message("inviteprune-failed"));
+    };
+    let reason = Reason::truncated(&cx.t("inviteprune-reason", &Args::new()));
+    let mut deleted = 0_usize;
+    let unused = invites
+        .iter()
+        .filter(|invite| {
+            invite
+                .uses
+                .is_some_and(|uses| i64::try_from(uses).is_ok_and(|uses| uses <= max))
+        })
+        .take(MAX_PRUNED);
+    for invite in unused {
+        if ctx
+            .api
+            .delete_invite(ctx.guild_id, invite.code.clone(), reason.clone())
+            .await
+            .is_ok()
+        {
+            deleted += 1;
+        }
+    }
+    cx.reply_private_t(
+        "inviteprune-done",
+        &Args::new().with("count", i64::try_from(deleted).unwrap_or(i64::MAX)),
+    )
+    .await
+}
+
 async fn locate(cx: CommandCx, args: OneUser) -> Result<(), UserError> {
     let place = cx
         .store()
@@ -1061,6 +1115,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .capability(closure_sdk::Capability::ReadMessages)
             .capability(closure_sdk::Capability::MoveMembers)
             .capability(closure_sdk::Capability::ManageNicknames)
+            .capability(closure_sdk::Capability::ManageInvites)
             .capability(closure_sdk::Capability::Storage)
             .capability(closure_sdk::Capability::RespondToInteractions)
             .intents(Intents::GUILD_MEMBERS | Intents::GUILD_VOICE_STATES)
@@ -1078,6 +1133,11 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 "utility.search",
                 Level::MODERATOR,
                 "permission-utility-search",
+            )?)
+            .permission(PermissionSpec::new(
+                "utility.invites",
+                Level::ADMIN,
+                "permission-utility-invites",
             )?)
             .permission(PermissionSpec::new(
                 "utility.voice",
@@ -1108,6 +1168,11 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
                 Command::<Snowflake>::new("snowflake")
                     .requires("utility.info")
                     .handler(snowflake),
+            )
+            .command(
+                Command::<InvitePrune>::new("inviteprune")
+                    .requires("utility.invites")
+                    .handler(inviteprune),
             )
             .command(
                 Command::<OneUser>::new("locate")

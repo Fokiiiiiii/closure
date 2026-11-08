@@ -460,6 +460,7 @@ dependencies = [
  "closure-mod-channels",
  "closure-mod-companion",
  "closure-mod-dashboard",
+ "closure-mod-dehoist",
  "closure-mod-diagnostics",
  "closure-mod-follow",
  "closure-mod-guard",
@@ -684,6 +685,20 @@ version = "0.1.0"
 dependencies = [
  "closure-core",
  "closure-sdk",
+]
+
+[[package]]
+name = "closure-mod-dehoist"
+version = "0.1.0"
+dependencies = [
+ "closure-core",
+ "closure-i18n",
+ "closure-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "twilight-model",
 ]
 
 [[package]]

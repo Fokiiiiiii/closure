@@ -13,6 +13,7 @@ Commands that tell about the server, a role, a channel or a member, the names a 
 - `storage`
 - `read_messages`
 - `move_members`
+- `manage_invites`
 
 ## Permissions
 
@@ -21,6 +22,7 @@ Commands that tell about the server, a role, a channel or a member, the names a 
 | `utility.info` | 1 | Use the commands that show information |
 | `utility.nickname` | 50 | Change the nickname of a member |
 | `utility.search` | 50 | Find members by the names they went by |
+| `utility.invites` | 75 | Delete invites that were hardly used |
 | `utility.voice` | 50 | Move and disconnect members in voice |
 
 ## Commands
@@ -85,6 +87,17 @@ Tell when a Discord id was made
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `id` | id | string | yes | max_length 20 | The id of a user, channel, role, message or the like |
+
+### `/inviteprune`
+
+Delete the invites that were used few times
+
+- Japanese name: `招待整理`
+- Japanese description: 使用回数の少ない招待を削除します
+
+| Option | Japanese name | Type | Required | Limits | Description |
+|---|---|---|---|---|---|
+| `max_uses` | 使用回数 | integer | no | - | Invites used this many times or fewer are deleted; 1 when left out |
 
 ### `/locate`
 
