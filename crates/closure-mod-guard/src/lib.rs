@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use closure_core::action::{Action, AuditLogQuery, Outcome, Reason};
 use closure_core::error::DiscordError;
@@ -15,10 +16,10 @@ use closure_core::module::EventContext;
 use closure_core::subscription::Flow;
 use closure_sdk::duration::{parse as parse_duration, snowflake_time};
 use closure_sdk::{
-    Args, Capability, CoreError, Intents, Locale, ModuleBuilder, ModuleError, SdkModule,
+    Args, Capability, CoreError, Intents, JobCx, Locale, ModuleBuilder, ModuleError, SdkModule,
     Subscription, parse_module_config,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use twilight_model::guild::Permissions;
 use twilight_model::guild::audit_log::{AuditLogEntry, AuditLogEventType};
@@ -29,6 +30,14 @@ const JA: &str = include_str!("../locales/ja.ftl");
 /// How old an audit log entry may be and still be the change an event reports.
 const AUDIT_WINDOW_SECONDS: i64 = 60;
 const AUDIT_LOOKUP_LIMIT: u16 = 50;
+/// Discord writes an audit log entry a moment after it sends the event, so a change whose account
+/// is not named yet is looked at again after each of these.
+const RECHECK: &str = "recheck";
+const RECHECK_AFTER: [Duration; 3] = [
+    Duration::from_secs(3),
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+];
 /// How long an account that was acted on is not acted on again, so that the rest of a burst that
 /// is already stopped does not tell the staff once for each change.
 const QUIET: i64 = 600;
@@ -46,7 +55,7 @@ const POWERS: Permissions = Permissions::ADMINISTRATOR
     .union(Permissions::MODERATE_MEMBERS)
     .union(Permissions::MANAGE_MESSAGES);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum Change {
     ChannelDelete,
     RoleDelete,
@@ -374,29 +383,76 @@ async fn exempt(ctx: &EventContext, config: &Config, user: UserId) -> bool {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct Recheck {
+    change: Change,
+    target: u64,
+    attempt: usize,
+}
+
 async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     let Some((change, target)) = change_of(&event) else {
         return Ok(Flow::Continue);
     };
-    let config: Config = parse_module_config(&ctx)?;
-    let limit = config.limit(change);
-    if limit == 0 {
-        return Ok(Flow::Continue);
+    look(&ctx, change, target, 0).await?;
+    Ok(Flow::Continue)
+}
+
+/// Names who made the change and acts on it; when the audit log does not name anyone yet, looks
+/// again later.
+async fn look(
+    ctx: &EventContext,
+    change: Change,
+    target: u64,
+    attempt: usize,
+) -> Result<(), ModuleError> {
+    let config: Config = parse_module_config(ctx)?;
+    if config.limit(change) == 0 {
+        return Ok(());
     }
-    let Some((user, happened)) = actor_of(&ctx, change, target).await else {
-        return Ok(Flow::Continue);
+    if let Some(found) = actor_of(ctx, change, target).await {
+        act(ctx, &config, change, found).await;
+        return Ok(());
+    }
+    let Some(delay) = RECHECK_AFTER.get(attempt) else {
+        return Ok(());
     };
+    ctx.scheduler()
+        .job(
+            RECHECK,
+            &Recheck {
+                change,
+                target,
+                attempt: attempt + 1,
+            },
+        )
+        .map_err(|error| ModuleError::other(error.to_string()))?
+        .key(&format!("recheck:{}:{target}:{attempt}", change.key()))
+        .after(*delay)
+        .await
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    Ok(())
+}
+
+async fn recheck(cx: JobCx) -> Result<(), ModuleError> {
+    let payload: Recheck = cx.payload()?;
+    look(cx.ctx(), payload.change, payload.target, payload.attempt).await
+}
+
+async fn act(ctx: &EventContext, config: &Config, change: Change, found: (UserId, i64)) {
+    let (user, happened) = found;
+    let limit = config.limit(change);
     let seen = count(ctx.guild_id, user, change, happened, config.window());
     if seen < usize::try_from(limit).unwrap_or(usize::MAX) {
-        return Ok(Flow::Continue);
+        return;
     }
-    if exempt(&ctx, &config, user).await || !first_to_act(ctx.guild_id, user, ctx.now()) {
-        return Ok(Flow::Continue);
+    if exempt(ctx, config, user).await || !first_to_act(ctx.guild_id, user, ctx.now()) {
+        return;
     }
     forget(ctx.guild_id, user);
     let reason = ctx.t_in(ctx.locale, "guard-reason", &Args::new());
     let done = match config.response {
-        Response::Strip => match strip(&ctx, user, &reason).await {
+        Response::Strip => match strip(ctx, user, &reason).await {
             Ok(done) => Some(done),
             Err(error) => {
                 tracing::warn!(%error, "could not stop an account that nukes");
@@ -414,11 +470,10 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     if done.as_ref().is_some_and(|done| done.kept > 0) {
         give_back(ctx.guild_id, user);
         if !first_to_alert(ctx.guild_id, user, ctx.now()) {
-            return Ok(Flow::Continue);
+            return;
         }
     }
-    alert(&ctx, &config, (user, change, seen), done.as_ref()).await;
-    Ok(Flow::Continue)
+    alert(ctx, config, (user, change, seen), done.as_ref()).await;
 }
 
 fn snowflake_list(description: &str) -> serde_json::Value {
@@ -489,11 +544,13 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .capability(Capability::KickMembers)
             .capability(Capability::SendMessages)
             .capability(Capability::ReadGuild)
+            .capability(Capability::Schedule)
             .intents(Intents::GUILD_MODERATION)
             .config(schema, defaults)
             .on(Subscription::new(EventKind::ChannelDeleted), on_event)
             .on(Subscription::new(EventKind::RoleDeleted), on_event)
             .on(Subscription::new(EventKind::BanAdded), on_event)
+            .job(RECHECK, recheck)
             .catalog(Locale::En, EN)
             .catalog(Locale::Ja, JA),
     )

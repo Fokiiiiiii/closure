@@ -11,6 +11,7 @@
 - `manage_roles`
 - `read_audit_log`
 - `respond_to_interactions`
+- `schedule`
 
 ## Permissions
 

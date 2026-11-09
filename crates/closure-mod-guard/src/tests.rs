@@ -371,3 +371,37 @@ async fn changes_are_counted_when_they_happened_not_when_the_bot_got_to_them() {
     assert!(!took_any(&harness, admin), "a calm pace is not a burst");
     assert!(alerts(&harness).is_empty());
 }
+
+#[tokio::test]
+async fn a_change_the_audit_log_does_not_name_yet_is_looked_at_again() {
+    let harness = harness(&config(&json!({ "channel_deletes": 1 })));
+    let admin = 1_401;
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(admin, &[ADMIN_ROLE], false));
+    harness
+        .emit(Event::ChannelDeleted(channel(41)))
+        .await
+        .unwrap();
+    assert!(!took_any(&harness, admin), "nobody is named yet");
+    harness
+        .api()
+        .add_audit_entry(audit(AuditLogEventType::ChannelDelete, 41, admin));
+    harness.advance(std::time::Duration::from_secs(3));
+    assert!(harness.run_due_jobs().await.iter().all(Result::is_ok));
+    assert!(took_role(&harness, admin, ADMIN_ROLE));
+}
+
+#[tokio::test]
+async fn a_change_nobody_is_ever_named_for_is_looked_at_a_few_times_and_then_left() {
+    let harness = harness(&config(&json!({ "channel_deletes": 1 })));
+    harness
+        .emit(Event::ChannelDeleted(channel(41)))
+        .await
+        .unwrap();
+    for seconds in [3, 10, 30] {
+        harness.advance(std::time::Duration::from_secs(seconds));
+        assert!(harness.run_due_jobs().await.iter().all(Result::is_ok));
+    }
+    assert_eq!(harness.jobs(), 0);
+}
