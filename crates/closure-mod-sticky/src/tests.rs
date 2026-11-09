@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use closure_core::action::Action;
+use closure_core::error::DiscordError;
 use closure_sdk::testing::{Harness, Message};
 use serde_json::json;
 use twilight_model::id::Id;
@@ -102,5 +103,91 @@ async fn a_text_taken_off_the_channel_is_not_posted() {
         .unwrap();
     harness.set_config(json!({ "stickies": [], "delay": "5s" }));
     settle(&harness).await;
+    assert_eq!(sent(&harness), 0);
+}
+
+#[tokio::test]
+async fn a_posted_text_is_listed_for_removal_from_the_start() {
+    let harness = harness();
+    harness
+        .message(Message::new(7, CHANNEL).content("hi"))
+        .await
+        .unwrap();
+    settle(&harness).await;
+    let posted: u64 = harness.store().get("last:42").await.unwrap().unwrap();
+    let listed: Vec<u64> = harness
+        .store()
+        .get("stale:42")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(listed.contains(&posted));
+}
+
+#[tokio::test]
+async fn an_old_message_whose_delete_fails_is_deleted_by_a_later_repost() {
+    let harness = harness();
+    harness
+        .message(Message::new(7, CHANNEL).content("hi"))
+        .await
+        .unwrap();
+    settle(&harness).await;
+    let first: u64 = harness.store().get("last:42").await.unwrap().unwrap();
+
+    harness
+        .api()
+        .fail_nth(1, DiscordError::Forbidden("no".into()));
+    harness
+        .message(Message::new(8, CHANNEL).content("again"))
+        .await
+        .unwrap();
+    settle(&harness).await;
+    let listed: Vec<u64> = harness
+        .store()
+        .get("stale:42")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        listed.contains(&first),
+        "a message whose delete failed stays listed"
+    );
+
+    harness
+        .message(Message::new(9, CHANNEL).content("third"))
+        .await
+        .unwrap();
+    settle(&harness).await;
+    let listed: Vec<u64> = harness
+        .store()
+        .get("stale:42")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(!listed.contains(&first));
+    let deletes = harness
+        .actions()
+        .iter()
+        .filter(|action| matches!(action, Action::DeleteMessage { message_id, .. } if message_id.get() == first))
+        .count();
+    assert_eq!(deletes, 1, "the next repost deletes it");
+}
+
+#[tokio::test]
+async fn a_backlog_of_undeleted_messages_stops_new_posts() {
+    let harness = harness();
+    let backlog: Vec<u64> = (1000..1020).collect();
+    harness.store().set("stale:42", &backlog).await.unwrap();
+    harness
+        .api()
+        .fail_with(DiscordError::Forbidden("no".into()));
+    harness
+        .message(Message::new(7, CHANNEL).content("hi"))
+        .await
+        .unwrap();
+    harness.advance(Duration::from_secs(6));
+    let ran = harness.run_due_jobs().await;
+    assert_eq!(ran.len(), 1);
+    assert!(ran.iter().all(Result::is_err), "{ran:?}");
     assert_eq!(sent(&harness), 0);
 }

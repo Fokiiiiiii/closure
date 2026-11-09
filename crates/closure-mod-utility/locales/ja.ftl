@@ -121,4 +121,5 @@ option-inviteprune-max_uses = 使用回数
 inviteprune-range = 使用回数は 0 から 1000 の間で指定してください。
 inviteprune-failed = 招待を読み込めませんでした。
 inviteprune-reason = 整理: ほとんど使われていない招待
-inviteprune-done = 招待を { $count } 件削除しました。
+inviteprune-done = 招待を { $deleted } 件削除しました。失敗 { $failed } 件。
+inviteprune-more = あと { $remaining } 件。もう一度実行してください。

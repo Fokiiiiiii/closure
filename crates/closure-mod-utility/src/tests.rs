@@ -648,3 +648,28 @@ async fn inviteprune_deletes_only_the_invites_used_few_times_and_only_for_an_adm
     harness.invoke(prune(ADMIN, None)).await.unwrap();
     assert_eq!(deleted(&harness), vec!["unused", "once"]);
 }
+
+#[tokio::test]
+async fn inviteprune_takes_at_most_fifty_and_says_how_many_are_left() {
+    const ADMIN: u64 = 201;
+    let harness = harness();
+    harness.permissions(|permissions| {
+        permissions.role_levels.insert(Id::new(ADMIN), Level::ADMIN);
+    });
+    let codes: Vec<String> = (0..120).map(|n| format!("code{n:03}")).collect();
+    let invites: Vec<(&str, u64, Option<UserId>)> =
+        codes.iter().map(|code| (code.as_str(), 0, None)).collect();
+    harness.api().set_guild_invites(GuildId::new(1), &invites);
+    let reply = harness
+        .invoke(Invocation::new("inviteprune").user(50).roles([ADMIN]))
+        .await
+        .unwrap();
+    let deletes = harness
+        .actions()
+        .iter()
+        .filter(|action| matches!(action, Action::DeleteInvite { .. }))
+        .count();
+    assert_eq!(deletes, 50);
+    let last = reply.last().expect("a reply");
+    assert!(last.content.contains("70 more"), "{reply:?}");
+}

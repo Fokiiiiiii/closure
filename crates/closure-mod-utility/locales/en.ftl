@@ -121,4 +121,5 @@ option-inviteprune-max_uses = max_uses
 inviteprune-range = max_uses must be from 0 to 1000.
 inviteprune-failed = The invites could not be read.
 inviteprune-reason = Pruned: the invite was hardly used
-inviteprune-done = Deleted { $count } invite(s).
+inviteprune-done = Deleted { $deleted } invite(s). Failed: { $failed }.
+inviteprune-more = { $remaining } more invite(s) are left. Run it again.

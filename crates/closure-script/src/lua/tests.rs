@@ -305,6 +305,25 @@ fn a_pattern_that_could_backtrack_for_long_is_refused_and_ordinary_ones_work() {
 }
 
 #[test]
+fn an_escaped_class_with_a_quantifier_is_costed_like_a_literal() {
+    let source = r"function on_event(e)
+        local words = string.rep('a', 64)
+        local ok, err = pcall(string.find, words, 'a*a*a*a*b')
+        assert(not ok and err:find('too expensive'))
+        ok, err = pcall(string.find, words, '%a*%a*%a*%a*b')
+        assert(not ok and err:find('too expensive'))
+        ok, err = pcall(string.find, words, '%a*a*a*a*b')
+        assert(not ok and err:find('too expensive'))
+        assert(string.find(words, '%a%a') == 1)
+        return {}
+    end";
+    LuaRuntime::new(source.as_bytes())
+        .unwrap()
+        .call(json!({}), Arc::new(Host::default()), budget())
+        .unwrap();
+}
+
+#[test]
 fn lua_memory_limit_blocks_single_allocation() {
     let runtime =
         LuaRuntime::new(b"function on_event(e) return {string.rep('x', 2000000)} end").unwrap();

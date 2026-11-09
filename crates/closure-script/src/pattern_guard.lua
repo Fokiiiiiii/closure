@@ -10,24 +10,24 @@ local function weight(p)
   local anchored = p:sub(1, 1) == '^'
   if anchored then i = 2 end
   while i <= n do
-    local c = p:sub(i, i)
-    if c == '%' then
-      local d = p:sub(i + 1, i + 1)
-      if d == 'b' then q = q + 1; i = i + 4
-      elseif d == 'f' then i = i + 2
-      else i = i + 2 end
-    elseif c == '(' or c == ')' then
-      i = i + 1
+    local c, d = p:sub(i, i), p:sub(i + 1, i + 1)
+    if c == '%' and d == 'b' then q = q + 1; i = i + 4
+    elseif c == '%' and d == 'f' then i = i + 2
+    elseif c == '(' or c == ')' then i = i + 1
     else
-      if c == '[' then
-        i = i + 1
-        if p:sub(i, i) == '^' then i = i + 1 end
-        repeat
-          if p:sub(i, i) == '%' then i = i + 1 end
+      if c == '%' then i = i + 2
+      else
+        if c == '[' then
           i = i + 1
-        until i > n or p:sub(i, i) == ']'
+          if p:sub(i, i) == '^' then i = i + 1 end
+          repeat
+            if p:sub(i, i) == '%' then i = i + 1 end
+            i = i + 1
+          until i > n or p:sub(i, i) == ']'
+        end
+        i = i + 1
       end
-      i = i + 1
+      -- an escaped class, a set and a literal take the same quantifier
       local m = p:sub(i, i)
       if m == '*' or m == '+' or m == '-' then q = q + 1; i = i + 1
       elseif m == '?' then k = k + 1; i = i + 1 end

@@ -17,3 +17,5 @@ follow-none = フォロー中のメンバーはいません。
 follow-list = フォロー中: { $users }
 follow-notice = 🔊 { $user } が { $channel } に参加しました。
 follow-failed = 保存できませんでした。少し待ってからもう一度お試しください。
+follow-full-member = このメンバーは既にフォロワーが上限に達しています。
+follow-full-moderator = フォローできる上限に達しています。先に 1 人の解除をしてください。

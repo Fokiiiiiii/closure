@@ -152,3 +152,15 @@ async fn a_new_account_adds_more_heat_than_an_old_one() {
         "a new account: the join and the bonus for its age"
     );
 }
+
+#[tokio::test]
+async fn adding_heat_keeps_no_case_for_each_join() {
+    let harness = configured(config());
+    for index in 0..3 {
+        harness.emit(joining(index, true)).await.unwrap();
+    }
+    assert!(
+        harness.cases().get(1).await.unwrap().is_none(),
+        "a join that only warms the server is no case"
+    );
+}

@@ -163,6 +163,8 @@ pub struct CaseEdit {
     pub reason: Option<String>,
     pub hidden: Option<bool>,
     pub moderator: Option<UserId>,
+    /// Who makes the change, for the trail of the edit; `None` for the bot itself.
+    pub editor: Option<UserId>,
 }
 
 /// Where a case stands at a time, for a search.

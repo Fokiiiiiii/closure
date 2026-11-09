@@ -154,6 +154,7 @@ pub(crate) async fn update(cx: CommandCx, args: Update) -> Result<(), UserError>
                 reason,
                 hidden: None,
                 moderator: args.moderator,
+                editor: Some(cx.user().id),
             },
         )
         .await
@@ -176,6 +177,7 @@ async fn hide_or_show(cx: &CommandCx, number: i64, hidden: bool) -> Result<(), U
             number,
             CaseEdit {
                 hidden: Some(hidden),
+                editor: Some(cx.user().id),
                 ..CaseEdit::default()
             },
         )

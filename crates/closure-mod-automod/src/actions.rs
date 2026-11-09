@@ -52,6 +52,8 @@ pub struct Deps<'a> {
 enum Ran {
     /// Nothing to act on in this context, so nothing was done.
     Skipped,
+    /// Only a count was changed: that is no event to keep a case of, however often it happens.
+    State,
     Other,
     Punished,
 }
@@ -93,6 +95,7 @@ pub async fn apply(deps: &Deps<'_>, rule: &Rule, hit: &Hit, context: &Context) -
         }
         match run(deps, &punisher, rule, hit, context, action).await {
             Ok((Ran::Skipped, _)) => {}
+            Ok((Ran::State, more)) => applied.fired.extend(more),
             Ok((outcome, more)) => {
                 ran = true;
                 did_punish |= outcome == Ran::Punished;
@@ -618,7 +621,7 @@ async fn change_counter(
     }
     let change = counter::change(deps.ctx, deps.counters, name, channel, user, op).await?;
     let fired = counter::fired(&change, name, channel, who);
-    Ok((Ran::Other, fired))
+    Ok((Ran::State, fired))
 }
 
 /// The result of a punishment as an action's, with the notes of it left out.

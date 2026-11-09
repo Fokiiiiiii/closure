@@ -5,6 +5,7 @@
 
 ## Capabilities
 
+- `read_guild`
 - `respond_to_interactions`
 - `storage`
 - `send_direct_messages`

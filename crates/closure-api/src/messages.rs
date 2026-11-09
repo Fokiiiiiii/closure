@@ -314,15 +314,8 @@ async fn schedule(
     }
     let _one_at_a_time = SCHEDULING.lock().await;
     // Those that failed wait for nobody: they do not take a place of the limit.
-    let waiting = state
-        .inner
-        .db
-        .scheduled_posts(guild)
-        .await?
-        .iter()
-        .filter(|post| !post.failed)
-        .count();
-    if waiting >= MAX_SCHEDULED {
+    let waiting = state.inner.db.scheduled_post_count(guild).await?;
+    if usize::try_from(waiting).unwrap_or(usize::MAX) >= MAX_SCHEDULED {
         return Err(ApiError::BadRequest(format!(
             "at most {MAX_SCHEDULED} posts can wait at once"
         )));

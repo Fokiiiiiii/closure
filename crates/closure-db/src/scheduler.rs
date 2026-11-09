@@ -95,13 +95,25 @@ impl Db {
         })
     }
 
+    /// How many posts of `guild` wait for their time: the ones that failed for good do not count.
+    pub async fn scheduled_post_count(&self, guild: GuildId) -> Result<i64, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM scheduled_jobs
+             WHERE module = 'post' AND guild_id = $1 AND name = 'send' AND dedupe_key IS NOT NULL
+               AND state <> 'failed'",
+        )
+        .bind(to_db(guild)?)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     /// The posts of `guild` that wait for their time, soonest first.
     pub async fn scheduled_posts(&self, guild: GuildId) -> Result<Vec<ScheduledPost>, DbError> {
         let rows: Vec<(String, i64, serde_json::Value, bool)> = sqlx::query_as(
             "SELECT dedupe_key, extract(epoch FROM run_at)::bigint, payload, state = 'failed'
              FROM scheduled_jobs
              WHERE module = 'post' AND guild_id = $1 AND name = 'send' AND dedupe_key IS NOT NULL
-             ORDER BY run_at, id LIMIT 100",
+             ORDER BY state = 'failed', run_at, id LIMIT 100",
         )
         .bind(to_db(guild)?)
         .fetch_all(&self.pool)
@@ -647,6 +659,30 @@ mod tests {
             db.withdraw_post(guild, "broken").await.unwrap(),
             Withdrawn::Removed
         );
+    }
+
+    #[sqlx::test]
+    async fn old_failed_posts_do_not_hide_waiting_ones_from_the_list(pool: PgPool) {
+        let db = database(pool.clone()).await;
+        sqlx::query(
+            "INSERT INTO scheduled_jobs (module, guild_id, name, payload, run_at, planned_at, dedupe_key, state)
+             SELECT 'post', 1, 'send', '1', now() - interval '1 day', now() - interval '1 day', 'old' || n, 'failed'
+             FROM generate_series(1, 100) AS n",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        scheduler(&db, "post", 1)
+            .job("send", &1)
+            .unwrap()
+            .key("p1")
+            .after(Duration::from_secs(100))
+            .await
+            .unwrap();
+        let guild = closure_core::event::GuildId::new(1);
+        let listed = db.scheduled_posts(guild).await.unwrap();
+        assert!(listed.iter().any(|post| post.key == "p1" && !post.failed));
+        assert_eq!(db.scheduled_post_count(guild).await.unwrap(), 1);
     }
 
     #[sqlx::test]

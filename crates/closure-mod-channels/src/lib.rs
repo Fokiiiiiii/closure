@@ -229,21 +229,16 @@ async fn protected(ctx: &EventContext, channel: closure_core::event::ChannelId) 
         names.push(name.to_owned());
     }
     if let Some(config) = logs {
-        for (key, webhook) in [("channel", false), ("webhook", true)] {
-            match config.get(key) {
-                None | Some(serde_json::Value::Null) => {}
-                Some(serde_json::Value::String(value)) if webhook && !value.is_empty() => {
-                    names.push(value.clone());
-                }
-                Some(serde_json::Value::String(value)) if !webhook => {
-                    let Some(id) = value.parse::<u64>().ok().and_then(Id::new_checked) else {
-                        return true;
-                    };
-                    channels.push(id);
-                }
-                _ => return true,
-            }
+        let Some((texts, webhooks)) = log_destinations(&config) else {
+            return true;
+        };
+        for text in texts {
+            let Some(id) = text.parse::<u64>().ok().and_then(Id::new_checked) else {
+                return true;
+            };
+            channels.push(id);
         }
+        names.extend(webhooks);
     }
     for name in names {
         match ctx.api.webhook_channel(&name).await {
@@ -252,6 +247,38 @@ async fn protected(ctx: &EventContext, channel: closure_core::event::ChannelId) 
         }
     }
     channels.contains(&channel)
+}
+
+/// The channel texts and webhook names the logs module can post to, as its configuration spells
+/// them. `None` when a value has another shape, so that the caller protects everything.
+fn log_destinations(config: &serde_json::Value) -> Option<(Vec<String>, Vec<String>)> {
+    let mut channels = Vec::new();
+    let mut webhooks = Vec::new();
+    collect_text(config.get("channel"), &mut channels)?;
+    collect_text(config.get("webhook"), &mut webhooks)?;
+    for (key, out) in [("routes", &mut channels), ("webhook_routes", &mut webhooks)] {
+        match config.get(key) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::Object(routes)) => {
+                for value in routes.values() {
+                    collect_text(Some(value), out)?;
+                }
+            }
+            Some(_) => return None,
+        }
+    }
+    Some((channels, webhooks))
+}
+
+fn collect_text(value: Option<&serde_json::Value>, out: &mut Vec<String>) -> Option<()> {
+    match value {
+        None | Some(serde_json::Value::Null) => Some(()),
+        Some(serde_json::Value::String(text)) => {
+            out.push(text.clone());
+            Some(())
+        }
+        Some(_) => None,
+    }
 }
 
 async fn on_event(
@@ -301,7 +328,7 @@ async fn on_event(
             )
             .await
             .map_err(|e| ModuleError::other(e.to_string()))?;
-        start_cursor(&state, &ctx, message.channel_id.get(), bucket_of(due)).await?;
+        reserve_cursor(&ctx, message.channel_id.get(), bucket_of(due)).await?;
         ensure_sweep(&state, &ctx).await?;
     }
     let mut reactions = config
@@ -344,43 +371,32 @@ const SWEEP_STEPS: i64 = 720;
 #[derive(Default)]
 struct Sweeps {
     ensured: Mutex<HashSet<u64>>,
-    started: Mutex<HashSet<u64>>,
 }
 
-/// Puts the cursor of a channel's sweep just before its first set when there is none yet, so that
-/// a sweep that comes late (or after a restart) starts from the oldest message that waits and not
-/// from now.
-async fn start_cursor(
-    state: &Sweeps,
-    ctx: &EventContext,
-    channel: u64,
-    bucket: i64,
-) -> Result<(), ModuleError> {
-    if state
-        .started
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .contains(&channel)
-    {
-        return Ok(());
-    }
+/// Moves the cursor of a channel's sweep back to just before a set reserved before it, so that a
+/// message with a shorter delay is still swept when it falls due, whatever cursor a later one left.
+async fn reserve_cursor(ctx: &EventContext, channel: u64, bucket: i64) -> Result<(), ModuleError> {
     let store = ctx.store();
     let held: Option<i64> = store
         .get(&cursor_key(channel))
         .await
         .map_err(|e| ModuleError::other(e.to_string()))?;
-    if held.is_none() {
+    if let Some(cursor) = cursor_for_reserved(held, bucket) {
         store
-            .set(&cursor_key(channel), &(bucket - 1))
+            .set(&cursor_key(channel), &cursor)
             .await
             .map_err(|e| ModuleError::other(e.to_string()))?;
     }
-    state
-        .started
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(channel);
     Ok(())
+}
+
+/// The cursor to store when a set of `bucket` is reserved, or `None` when the held cursor already
+/// stops before it.
+fn cursor_for_reserved(held: Option<i64>, bucket: i64) -> Option<i64> {
+    match held {
+        Some(cursor) if cursor < bucket => None,
+        _ => Some(bucket - 1),
+    }
 }
 
 /// The number of the set a deletion at `due` (Unix seconds) belongs to: the first whose end is not
@@ -573,5 +589,30 @@ mod tests {
         assert!(super::first_protected_warning(u64::MAX, u64::MAX));
         assert!(!super::first_protected_warning(u64::MAX, u64::MAX));
         assert!(super::first_protected_warning(u64::MAX - 1, u64::MAX));
+    }
+
+    #[test]
+    fn a_reserved_bucket_before_the_cursor_moves_the_cursor_back() {
+        assert_eq!(super::cursor_for_reserved(None, 100), Some(99));
+        assert_eq!(super::cursor_for_reserved(Some(500), 100), Some(99));
+        assert_eq!(super::cursor_for_reserved(Some(99), 100), None);
+        assert_eq!(super::cursor_for_reserved(Some(98), 100), None);
+    }
+
+    #[test]
+    fn log_destinations_include_the_routes_and_the_webhook_routes() {
+        let config = serde_json::json!({
+            "channel": "1",
+            "webhook": "main",
+            "routes": { "messages": "2", "voice": null },
+            "webhook_routes": { "moderation": "mods" },
+        });
+        assert_eq!(
+            super::log_destinations(&config),
+            Some((
+                vec!["1".to_owned(), "2".to_owned()],
+                vec!["main".to_owned(), "mods".to_owned()],
+            ))
+        );
     }
 }

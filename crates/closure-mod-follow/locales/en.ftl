@@ -17,3 +17,5 @@ follow-none = You follow nobody.
 follow-list = You follow: { $users }
 follow-notice = 🔊 { $user } joined { $channel }.
 follow-failed = Could not save that. Try again in a moment.
+follow-full-member = That member already has the maximum number of followers.
+follow-full-moderator = You already follow the maximum number of members. Stop following one first.

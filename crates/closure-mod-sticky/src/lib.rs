@@ -29,6 +29,8 @@ const REPOST: &str = "repost";
 /// Discord's limit for the text of a message.
 const MAX_TEXT: usize = 2_000;
 const MAX_STICKIES: usize = 25;
+/// Posted messages not yet deleted; a repost waits while this many are left.
+const MAX_STALE: usize = 20;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -80,6 +82,10 @@ fn last_key(channel: ChannelId) -> String {
     format!("last:{channel}")
 }
 
+fn stale_key(channel: ChannelId) -> String {
+    format!("stale:{channel}")
+}
+
 fn stored(error: &closure_core::storage::StorageError) -> ModuleError {
     ModuleError::other(error.to_string())
 }
@@ -126,18 +132,53 @@ async fn repost(cx: JobCx) -> Result<(), ModuleError> {
         return Ok(());
     };
     let store = ctx.store();
+    let mut stale: Vec<u64> = store
+        .get(&stale_key(channel))
+        .await
+        .map_err(|e| stored(&e))?
+        .unwrap_or_default();
     let last: Option<u64> = store
         .get(&last_key(channel))
         .await
         .map_err(|e| stored(&e))?;
-    if let Some(old) = last.and_then(MessageId::new_checked) {
+    if let Some(old) = last.filter(|old| !stale.contains(old)) {
+        stale.push(old);
+    }
+    // Listed before anything is deleted, so that a failed delete leaves it to a later repost.
+    store
+        .set(&stale_key(channel), &stale)
+        .await
+        .map_err(|e| stored(&e))?;
+    let mut pending = Vec::new();
+    for id in stale {
+        let Some(message) = MessageId::new_checked(id) else {
+            continue;
+        };
         let reason = Reason::truncated(&ctx.t_in(ctx.locale, "sticky-reason", &Args::new()));
-        match ctx.api.delete_message(channel, old, reason).await {
+        match ctx.api.delete_message(channel, message, reason).await {
             Ok(()) | Err(DiscordError::NotFound) => {}
-            Err(error) => tracing::warn!(%error, "could not delete the old sticky message"),
+            Err(error) => {
+                tracing::warn!(%error, "could not delete an old sticky message");
+                pending.push(id);
+            }
         }
     }
+    if pending.len() >= MAX_STALE {
+        store
+            .set(&stale_key(channel), &pending)
+            .await
+            .map_err(|e| stored(&e))?;
+        return Err(ModuleError::other(
+            "too many sticky messages could not be deleted; the repost waits",
+        ));
+    }
     let posted = ctx.api.send_message(channel, text).await?;
+    // Listed before it becomes the last, so that a failed write of last does not leave it untracked.
+    pending.push(posted.id.get());
+    store
+        .set(&stale_key(channel), &pending)
+        .await
+        .map_err(|e| stored(&e))?;
     store
         .set(&last_key(channel), &posted.id.get())
         .await

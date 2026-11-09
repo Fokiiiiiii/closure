@@ -433,6 +433,7 @@ pub(crate) async fn change(
                 reason: body.reason,
                 hidden: body.hidden,
                 moderator: None,
+                editor: who.person,
             },
         )
         .await

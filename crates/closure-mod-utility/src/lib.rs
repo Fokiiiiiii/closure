@@ -758,7 +758,7 @@ struct InvitePrune {
     max_uses: Option<i64>,
 }
 
-const MAX_PRUNED: usize = 200;
+const MAX_PRUNED: usize = 50;
 
 async fn inviteprune(cx: CommandCx, args: InvitePrune) -> Result<(), UserError> {
     let max = args.max_uses.unwrap_or(1);
@@ -778,16 +778,18 @@ async fn inviteprune(cx: CommandCx, args: InvitePrune) -> Result<(), UserError> 
         return Err(UserError::message("inviteprune-failed"));
     };
     let reason = Reason::truncated(&cx.t("inviteprune-reason", &Args::new()));
-    let mut deleted = 0_usize;
-    let unused = invites
+    let matching: Vec<_> = invites
         .iter()
         .filter(|invite| {
             invite
                 .uses
                 .is_some_and(|uses| i64::try_from(uses).is_ok_and(|uses| uses <= max))
         })
-        .take(MAX_PRUNED);
-    for invite in unused {
+        .collect();
+    let (batch, rest) = matching.split_at(matching.len().min(MAX_PRUNED));
+    let mut deleted = 0_usize;
+    let mut failed = 0_usize;
+    for invite in batch {
         if ctx
             .api
             .delete_invite(ctx.guild_id, invite.code.clone(), reason.clone())
@@ -795,13 +797,25 @@ async fn inviteprune(cx: CommandCx, args: InvitePrune) -> Result<(), UserError> 
             .is_ok()
         {
             deleted += 1;
+        } else {
+            failed += 1;
         }
     }
-    cx.reply_private_t(
+    let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+    let mut text = cx.t(
         "inviteprune-done",
-        &Args::new().with("count", i64::try_from(deleted).unwrap_or(i64::MAX)),
-    )
-    .await
+        &Args::new()
+            .with("deleted", count(deleted))
+            .with("failed", count(failed)),
+    );
+    if !rest.is_empty() {
+        text.push('\n');
+        text.push_str(&cx.t(
+            "inviteprune-more",
+            &Args::new().with("remaining", count(rest.len())),
+        ));
+    }
+    cx.reply_private(text).await
 }
 
 async fn locate(cx: CommandCx, args: OneUser) -> Result<(), UserError> {

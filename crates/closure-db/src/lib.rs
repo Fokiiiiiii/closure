@@ -145,6 +145,7 @@ mod tests {
             [
                 "api_requests",
                 "audit_events",
+                "case_edits",
                 "cases",
                 "guild_case_numbers",
                 "guild_config",

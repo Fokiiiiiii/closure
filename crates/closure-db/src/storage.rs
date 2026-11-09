@@ -108,17 +108,32 @@ impl StorageBackend for Db {
         let guild = guild_id(guild)?;
         let mut tx = self.pool.begin().await.map_err(backend)?;
         lock_key(&mut tx, module, guild, key).await?;
-        // An expired entry is as good as none.
-        sqlx::query(
-            "DELETE FROM module_kv
+        // An expired entry is as good as none. Taking it away moves the count the table keeps, so
+        // the turn of the module comes first, as for a new key: the two orders of locks differ
+        // otherwise, and an expired key and a new one wait for each other.
+        let expired: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM module_kv
              WHERE module = $1 AND guild_id = $2 AND key = $3 AND expires_at <= now()",
         )
         .bind(module.as_str())
         .bind(guild)
         .bind(key)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(backend)?;
+        if expired.is_some() {
+            lock(&mut tx, module, guild).await?;
+            sqlx::query(
+                "DELETE FROM module_kv
+                 WHERE module = $1 AND guild_id = $2 AND key = $3 AND expires_at <= now()",
+            )
+            .bind(module.as_str())
+            .bind(guild)
+            .bind(key)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        }
         let current: Option<i64> = sqlx::query_scalar(
             "SELECT revision FROM module_kv WHERE module = $1 AND guild_id = $2 AND key = $3",
         )
@@ -757,6 +772,32 @@ mod tests {
             ModuleId::new(module).unwrap(),
             Id::new(guild),
         )
+    }
+
+    #[sqlx::test]
+    async fn an_expired_key_and_a_new_key_written_together_do_not_deadlock(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        for round in 0..3 {
+            let first = store(&db, "warn", 1);
+            for key in 0..40 {
+                first
+                    .set_for(&format!("old{round}:{key}"), &key, Duration::from_secs(1))
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(1_200)).await;
+            let mut tasks = Vec::new();
+            for key in 0..40 {
+                for name in [format!("old{round}:{key}"), format!("new{round}:{key}")] {
+                    let writer = store(&db, "warn", 1);
+                    tasks.push(tokio::spawn(async move { writer.set(&name, &key).await }));
+                }
+            }
+            for task in tasks {
+                task.await.unwrap().unwrap();
+            }
+        }
     }
 
     #[sqlx::test]

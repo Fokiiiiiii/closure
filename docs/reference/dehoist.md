@@ -8,6 +8,7 @@
 - `read_guild`
 - `manage_nicknames`
 - `respond_to_interactions`
+- `storage`
 
 ## Permissions
 

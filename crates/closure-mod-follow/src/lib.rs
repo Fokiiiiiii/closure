@@ -2,10 +2,17 @@
 //! time that member joins a voice channel or moves to another.
 //!
 //! Two sets in the module's storage keep it: `follow:<member>` holds the moderators who follow
-//! the member, and `following:<moderator>` holds the members a moderator follows (for the list).
+//! the member and is the source of truth, and `following:<moderator>` holds the members a
+//! moderator follows, as an index for the list.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use closure_core::error::DiscordError;
 use closure_core::event::{Event, EventKind, UserId};
 use closure_core::module::EventContext;
+use closure_core::permission::Actor;
 use closure_core::subscription::Flow;
 use closure_sdk::{
     Args, Capability, Command, CommandArgs, CommandCx, CoreError, Intents, Level, Locale,
@@ -16,7 +23,12 @@ const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 
 const MAX_FOLLOWERS: usize = 25;
-const MAX_LISTED: usize = 50;
+const MAX_FOLLOWING: usize = 50;
+const NOTICE_WINDOW: Duration = Duration::from_secs(10);
+const MAX_NOTICE_ENTRIES: usize = 1024;
+
+/// The last time (unix seconds) each member's moderators were told, by member.
+type NoticeTable = Arc<Mutex<HashMap<u64, i64>>>;
 
 #[derive(CommandArgs)]
 struct Target {
@@ -37,9 +49,33 @@ fn failed(error: &closure_core::storage::StorageError) -> UserError {
     UserError::message("follow-failed")
 }
 
+fn is_full(count: u64, limit: usize) -> bool {
+    usize::try_from(count).is_ok_and(|count| count >= limit)
+}
+
 async fn add(cx: CommandCx, args: Target) -> Result<(), UserError> {
     let (moderator, user) = (cx.user().id.get(), args.user.get());
     let store = cx.store();
+    let already = store
+        .set_has(&followers_of(user), moderator)
+        .await
+        .map_err(|e| failed(&e))?;
+    if !already {
+        let followers = store
+            .set_count(&followers_of(user))
+            .await
+            .map_err(|e| failed(&e))?;
+        if is_full(followers, MAX_FOLLOWERS) {
+            return Err(UserError::message("follow-full-member"));
+        }
+        let following = store
+            .set_count(&following_of(moderator))
+            .await
+            .map_err(|e| failed(&e))?;
+        if is_full(following, MAX_FOLLOWING) {
+            return Err(UserError::message("follow-full-moderator"));
+        }
+    }
     store
         .set_add(&followers_of(user), moderator)
         .await
@@ -59,11 +95,11 @@ async fn remove(cx: CommandCx, args: Target) -> Result<(), UserError> {
     let (moderator, user) = (cx.user().id.get(), args.user.get());
     let store = cx.store();
     store
-        .set_remove(&followers_of(user), moderator)
+        .set_remove(&following_of(moderator), user)
         .await
         .map_err(|e| failed(&e))?;
     store
-        .set_remove(&following_of(moderator), user)
+        .set_remove(&followers_of(user), moderator)
         .await
         .map_err(|e| failed(&e))?;
     cx.reply_private_t(
@@ -74,11 +110,27 @@ async fn remove(cx: CommandCx, args: Target) -> Result<(), UserError> {
 }
 
 async fn list(cx: CommandCx, (): ()) -> Result<(), UserError> {
-    let followed = cx
-        .store()
-        .set_sample(&following_of(cx.user().id.get()), MAX_LISTED)
+    let moderator = cx.user().id.get();
+    let store = cx.store();
+    let mut followed = Vec::new();
+    for user in store
+        .set_sample(&following_of(moderator), MAX_FOLLOWING)
         .await
-        .map_err(|e| failed(&e))?;
+        .map_err(|e| failed(&e))?
+    {
+        if store
+            .set_has(&followers_of(user), moderator)
+            .await
+            .map_err(|e| failed(&e))?
+        {
+            followed.push(user);
+        } else {
+            store
+                .set_remove(&following_of(moderator), user)
+                .await
+                .map_err(|e| failed(&e))?;
+        }
+    }
     if followed.is_empty() {
         return cx.reply_private_t("follow-none", &Args::new()).await;
     }
@@ -87,7 +139,59 @@ async fn list(cx: CommandCx, (): ()) -> Result<(), UserError> {
         .await
 }
 
-async fn on_voice(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
+/// Whether a notice about `member` was not sent within the last window; records the time if so.
+fn claim_notice(notices: &NoticeTable, member: u64, now: i64) -> bool {
+    let window = i64::try_from(NOTICE_WINDOW.as_secs()).unwrap_or(i64::MAX);
+    let mut last = notices.lock().unwrap_or_else(PoisonError::into_inner);
+    if last.get(&member).is_some_and(|at| now - *at < window) {
+        return false;
+    }
+    if !last.contains_key(&member) && last.len() >= MAX_NOTICE_ENTRIES {
+        last.retain(|_, at| now - *at < window);
+        if last.len() >= MAX_NOTICE_ENTRIES {
+            let oldest = last.iter().min_by_key(|(_, at)| **at).map(|(id, _)| *id);
+            if let Some(oldest) = oldest {
+                last.remove(&oldest);
+            }
+        }
+    }
+    last.insert(member, now);
+    true
+}
+
+/// Whether the moderator still holds `follow.use`; a moderator we cannot check is not told.
+async fn holds_follow_permission(
+    ctx: &EventContext,
+    moderator: UserId,
+    owner: Option<UserId>,
+) -> Result<bool, DiscordError> {
+    let member = ctx.api.get_member(ctx.guild_id, moderator).await?;
+    let actor = Actor {
+        user: moderator,
+        roles: member.roles,
+        administrator: false,
+        owner: owner == Some(moderator),
+    };
+    Ok(ctx.permissions().level_of(&actor) >= Level::MODERATOR)
+}
+
+/// Ends a follow of a moderator who lost the permission; the index goes first, as in `remove`.
+async fn revoke(ctx: &EventContext, member: u64, moderator: u64) {
+    let store = ctx.store();
+    if let Err(error) = store.set_remove(&following_of(moderator), member).await {
+        tracing::warn!(%error, "could not drop a follow of a moderator without the permission");
+        return;
+    }
+    if let Err(error) = store.set_remove(&followers_of(member), moderator).await {
+        tracing::warn!(%error, "could not drop a follow of a moderator without the permission");
+    }
+}
+
+async fn on_voice(
+    ctx: EventContext,
+    event: Event,
+    notices: NoticeTable,
+) -> Result<Flow, ModuleError> {
     let Event::VoiceStateChanged {
         user,
         before,
@@ -100,12 +204,34 @@ async fn on_voice(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     if before == Some(channel) || user.bot {
         return Ok(Flow::Continue);
     }
+    let member = user.id.get();
     let moderators = ctx
         .store()
-        .set_sample(&followers_of(user.id.get()), MAX_FOLLOWERS)
+        .set_sample(&followers_of(member), MAX_FOLLOWERS)
         .await
         .map_err(|e| ModuleError::other(e.to_string()))?;
+    if moderators.is_empty() || !claim_notice(&notices, member, ctx.now()) {
+        return Ok(Flow::Continue);
+    }
+    let owner = match ctx.api.guild_owner().await {
+        Ok(owner) => owner,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the guild owner; follow notices skipped");
+            return Ok(Flow::Continue);
+        }
+    };
     for moderator in moderators.into_iter().filter_map(UserId::new_checked) {
+        match holds_follow_permission(&ctx, moderator, owner).await {
+            Ok(true) => {}
+            Ok(false) => {
+                revoke(&ctx, member, moderator.get()).await;
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not check a follower's permission; not told");
+                continue;
+            }
+        }
         let text = ctx.t_in(
             ctx.locale,
             "follow-notice",
@@ -126,26 +252,31 @@ async fn on_voice(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
 
 /// The module before it is built, so that tests can run it on the SDK's pretend Discord.
 pub fn builder() -> Result<ModuleBuilder, CoreError> {
+    let notices: NoticeTable = Arc::new(Mutex::new(HashMap::new()));
     Ok(
         ModuleBuilder::new("follow", "Follow", env!("CARGO_PKG_VERSION"))?
             .capability(Capability::Storage)
             .capability(Capability::SendDirectMessages)
+            // The member's roles, read at delivery to check each follower still holds the permission.
+            .capability(Capability::ReadGuild)
             .intents(Intents::GUILD_VOICE_STATES)
             .permission(PermissionSpec::new(
                 "follow.use",
                 Level::MODERATOR,
                 "permission-follow-use",
             )?)
-            .on(Subscription::new(EventKind::VoiceStateChanged), on_voice)
+            .on(
+                Subscription::new(EventKind::VoiceStateChanged),
+                move |ctx, event| on_voice(ctx, event, Arc::clone(&notices)),
+            )
             .group(
                 "follow",
                 [
                     Command::<Target>::new("add")
                         .requires("follow.use")
                         .handler(add),
-                    Command::<Target>::new("remove")
-                        .requires("follow.use")
-                        .handler(remove),
+                    // Without the permission a moderator must still be able to stop following.
+                    Command::<Target>::new("remove").handler(remove),
                     Command::<()>::new("list")
                         .requires("follow.use")
                         .handler(list),

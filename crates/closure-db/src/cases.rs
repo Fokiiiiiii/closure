@@ -263,24 +263,60 @@ impl CaseBackend for Db {
             .moderator
             .map(|user| to_db(user).map_err(backend))
             .transpose()?;
-        let row: Option<CaseRow> = sqlx::query_as(concat!(
+        let editor = change
+            .editor
+            .map(|user| to_db(user).map_err(backend))
+            .transpose()?;
+        let guild = to_db(guild).map_err(backend)?;
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        // The old values are read and the row changed in one turn, so the trail is the truth.
+        let before: Option<(Option<String>, bool, i64)> = sqlx::query_as(
+            "SELECT reason, hidden, moderator FROM cases
+             WHERE guild_id = $1 AND number = $2 FOR UPDATE",
+        )
+        .bind(guild)
+        .bind(number)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?;
+        let Some((old_reason, old_hidden, old_moderator)) = before else {
+            return Err(CaseError::NotFound);
+        };
+        let row: CaseRow = sqlx::query_as(concat!(
             "UPDATE cases SET reason = COALESCE($3, reason), hidden = COALESCE($4, hidden),
                               moderator = COALESCE($5, moderator)
              WHERE guild_id = $1 AND number = $2
              RETURNING ",
             case_columns!()
         ))
-        .bind(to_db(guild).map_err(backend)?)
+        .bind(guild)
         .bind(number)
         .bind(change.reason)
         .bind(change.hidden)
         .bind(moderator)
-        .fetch_optional(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(backend)?;
-        row.map(case_from_row)
-            .transpose()?
-            .ok_or(CaseError::NotFound)
+        let case = case_from_row(row)?;
+        sqlx::query(
+            "INSERT INTO case_edits (guild_id, case_number, editor, old_reason, new_reason,
+                                     old_hidden, new_hidden, old_moderator, new_moderator)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(guild)
+        .bind(number)
+        .bind(editor)
+        .bind(old_reason)
+        .bind(case.reason.clone())
+        .bind(old_hidden)
+        .bind(case.hidden)
+        .bind(old_moderator)
+        .bind(to_db(case.moderator).map_err(backend)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(case)
     }
 
     async fn delete(&self, guild: GuildId, number: i64) -> Result<bool, CaseError> {
@@ -876,10 +912,23 @@ mod tests {
                     reason: Some("links".into()),
                     hidden: Some(true),
                     moderator: Some(Id::new(7)),
+                    editor: Some(Id::new(8)),
                 },
             )
             .await
             .unwrap();
+        let trail: (i64, Option<i64>, Option<String>, bool) = sqlx::query_as(
+            "SELECT count(*), max(editor), max(old_reason), bool_or(new_hidden)
+             FROM case_edits WHERE guild_id = 1 AND case_number = 2",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (trail.0, trail.1, trail.2.is_some(), trail.3),
+            (1, Some(8), true, true),
+            "the edit leaves who made it and what it was"
+        );
         assert_eq!(edited.reason.as_deref(), Some("links"));
         assert!(edited.hidden);
         assert_eq!(edited.moderator, Id::new(7));

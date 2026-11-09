@@ -2,7 +2,10 @@
 //! The module takes those symbols off the nickname of a member who joins or changes their name,
 //! and `/dehoist` does the same for the members already there.
 
+use std::future::Future;
+
 use closure_core::action::{Action, Outcome, Reason};
+use closure_core::error::DiscordError;
 use closure_core::event::{Event, EventKind, GuildId, UserId};
 use closure_core::module::EventContext;
 use closure_core::subscription::Flow;
@@ -18,10 +21,14 @@ const JA: &str = include_str!("../locales/ja.ftl");
 const MAX_NICKNAME: usize = 32;
 /// Members read from Discord at a time.
 const PAGE: u16 = 1_000;
-/// The most pages a sweep reads.
+/// The most pages a sweep reads in one run.
 const MAX_PAGES: usize = 100;
-/// The most names a sweep changes; a larger server is swept again.
-const MAX_CHANGES: usize = 500;
+/// Names a sweep tries to change, counting the ones Discord refuses; a larger server is swept again.
+const MAX_ATTEMPTS: usize = 500;
+/// Refusals (no permission) in a row after which a sweep stops.
+const MAX_REFUSALS: usize = 5;
+/// Where the next sweep resumes: the last member the previous one went past.
+const CURSOR: &str = "sweep-cursor";
 
 /// The symbols that sort before every letter and digit.
 fn hoisting(c: char) -> bool {
@@ -38,12 +45,22 @@ fn dehoisted(name: &str, fallback: &str) -> Option<String> {
     Some(clean.chars().take(MAX_NICKNAME).collect())
 }
 
+/// The name a member is shown by. An event carries no global name, so an event without a nickname
+/// has nothing to judge by.
+fn shown_name<'a>(
+    nick: Option<&'a str>,
+    global_name: Option<&'a str>,
+    username: Option<&'a str>,
+) -> Option<&'a str> {
+    nick.or(global_name).or(username)
+}
+
 async fn rename(
     ctx: &EventContext,
     guild_id: GuildId,
     user_id: UserId,
     nickname: String,
-) -> Result<(), closure_core::error::DiscordError> {
+) -> Result<(), DiscordError> {
     let reason = Reason::truncated(&ctx.t_in(ctx.locale, "dehoist-reason", &Args::new()));
     ctx.api
         .execute(Action::SetNickname {
@@ -60,9 +77,10 @@ async fn on_member(ctx: EventContext, event: Event) -> Result<Flow, ModuleError>
     let (Event::MemberJoined(member) | Event::MemberUpdated(member)) = event else {
         return Ok(Flow::Continue);
     };
-    let shown = member.nick.as_deref().unwrap_or(&member.user.name);
     let fallback = ctx.t_in(ctx.locale, "dehoist-fallback", &Args::new());
-    let Some(clean) = dehoisted(shown, &fallback) else {
+    let Some(clean) = shown_name(member.nick.as_deref(), None, None)
+        .and_then(|shown| dehoisted(shown, &fallback))
+    else {
         return Ok(Flow::Continue);
     };
     // A member above the bot cannot be renamed; that is not an error worth more than a trace.
@@ -72,12 +90,78 @@ async fn on_member(ctx: EventContext, event: Event) -> Result<Flow, ModuleError>
     Ok(Flow::Continue)
 }
 
+/// Whether a sweep ran out of something before it reached the end of the members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Budget,
+    Refused,
+}
+
+/// What a sweep has done so far; `last` is the last member it is past.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Pass {
+    changed: usize,
+    attempts: usize,
+    refusals: usize,
+    last: Option<UserId>,
+    stop: Option<Stop>,
+}
+
+/// Cleans the shown names of one page, in order, until the attempt budget or a run of refusals
+/// stops it.
+async fn clean_page<F, Fut>(
+    shown: &[(UserId, Option<String>)],
+    fallback: &str,
+    pass: &mut Pass,
+    mut rename: F,
+) where
+    F: FnMut(UserId, String) -> Fut,
+    Fut: Future<Output = Result<(), DiscordError>>,
+{
+    for (id, name) in shown {
+        let Some(clean) = name.as_deref().and_then(|name| dehoisted(name, fallback)) else {
+            pass.last = Some(*id);
+            continue;
+        };
+        if pass.attempts >= MAX_ATTEMPTS {
+            pass.stop = Some(Stop::Budget);
+            return;
+        }
+        pass.attempts += 1;
+        match rename(*id, clean).await {
+            Ok(()) => {
+                pass.changed += 1;
+                pass.refusals = 0;
+                pass.last = Some(*id);
+            }
+            Err(DiscordError::Forbidden(_)) => {
+                pass.refusals += 1;
+                if pass.refusals >= MAX_REFUSALS {
+                    pass.stop = Some(Stop::Refused);
+                    return;
+                }
+                pass.last = Some(*id);
+            }
+            Err(_) => {
+                pass.refusals = 0;
+                pass.last = Some(*id);
+            }
+        }
+    }
+}
+
 async fn sweep(cx: CommandCx, (): ()) -> Result<(), UserError> {
     cx.defer(true).await?;
     let ctx = cx.ctx();
     let fallback = cx.t("dehoist-fallback", &Args::new());
-    let (mut changed, mut after) = (0_usize, None);
-    'pages: for _ in 0..MAX_PAGES {
+    let store = ctx.store();
+    let mut after = store
+        .get::<u64>(CURSOR)
+        .await?
+        .and_then(UserId::new_checked);
+    let mut pass = Pass::default();
+    let mut finished = false;
+    for _ in 0..MAX_PAGES {
         let Ok(Outcome::Members(members)) = ctx
             .api
             .execute(Action::ListMembers {
@@ -89,37 +173,47 @@ async fn sweep(cx: CommandCx, (): ()) -> Result<(), UserError> {
         else {
             break;
         };
-        let Some(last) = members.last() else { break };
-        after = Some(last.user.id);
-        let full = members.len() >= usize::from(PAGE);
-        for member in &members {
-            let shown = member
-                .nick
-                .as_deref()
-                .or(member.user.global_name.as_deref())
-                .unwrap_or(&member.user.name);
-            let Some(clean) = dehoisted(shown, &fallback) else {
-                continue;
-            };
-            if rename(ctx, ctx.guild_id, member.user.id, clean)
-                .await
-                .is_ok()
-            {
-                changed += 1;
-                if changed >= MAX_CHANGES {
-                    break 'pages;
-                }
-            }
-        }
-        if !full {
+        if members.is_empty() {
+            finished = true;
             break;
         }
+        let shown: Vec<(UserId, Option<String>)> = members
+            .iter()
+            .map(|member| {
+                let name = shown_name(
+                    member.nick.as_deref(),
+                    member.user.global_name.as_deref(),
+                    Some(member.user.name.as_str()),
+                );
+                (member.user.id, name.map(str::to_owned))
+            })
+            .collect();
+        clean_page(&shown, &fallback, &mut pass, |user, clean| {
+            rename(ctx, ctx.guild_id, user, clean)
+        })
+        .await;
+        if pass.stop.is_some() {
+            break;
+        }
+        if members.len() < usize::from(PAGE) {
+            finished = true;
+            break;
+        }
+        after = members.last().map(|member| member.user.id);
     }
-    cx.reply_private_t(
-        "dehoist-done",
-        &Args::new().with("count", i64::try_from(changed).unwrap_or(i64::MAX)),
-    )
-    .await
+    if finished {
+        store.delete(CURSOR).await?;
+    } else if let Some(last) = pass.last {
+        store.set(CURSOR, &last.get()).await?;
+    }
+    let count = i64::try_from(pass.changed).unwrap_or(i64::MAX);
+    let key = match pass.stop {
+        Some(Stop::Refused) => "dehoist-refused",
+        None if finished => "dehoist-done",
+        Some(Stop::Budget) | None => "dehoist-partial",
+    };
+    cx.reply_private_t(key, &Args::new().with("count", count))
+        .await
 }
 
 /// The module before it is built, so that tests can run it on the SDK's pretend Discord.
@@ -128,6 +222,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         ModuleBuilder::new("dehoist", "Dehoist", env!("CARGO_PKG_VERSION"))?
             .capability(Capability::ManageNicknames)
             .capability(Capability::ReadGuild)
+            .capability(Capability::Storage)
             .intents(Intents::GUILD_MEMBERS)
             .permission(PermissionSpec::new(
                 "dehoist.sweep",
