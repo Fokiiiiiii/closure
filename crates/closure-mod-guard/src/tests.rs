@@ -303,3 +303,71 @@ async fn a_limit_of_zero_a_change_nobody_is_named_for_and_different_accounts_do_
     delete_channels(&two, 1_012, &[123, 124]).await;
     assert!(alerts(&two).is_empty());
 }
+
+#[tokio::test]
+async fn a_failed_attempt_to_stop_an_account_does_not_hold_back_the_next_one() {
+    let harness = harness(&config(&json!({})));
+    let nuker = 1_201;
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(nuker, &[ADMIN_ROLE], false));
+    delete_channels(&harness, nuker, &[11, 12]).await;
+
+    // The calls of the third deletion: the audit log, the member, the roles, then the role that
+    // goes, which is the fourth. It fails once, so the powerful role stays.
+    harness
+        .api()
+        .fail_nth(4, closure_core::error::DiscordError::Forbidden("no".into()));
+    delete_channels(&harness, nuker, &[13]).await;
+    assert!(
+        !took_role(&harness, nuker, ADMIN_ROLE),
+        "the first attempt failed"
+    );
+
+    // The account goes on: the next deletions try again, and this time the role goes.
+    delete_channels(&harness, nuker, &[14, 15, 16]).await;
+    assert!(
+        took_role(&harness, nuker, ADMIN_ROLE),
+        "a failure is no reason to leave the account alone for ten minutes"
+    );
+}
+
+/// A deletion that happened `ago` seconds ago, as the audit log has it.
+fn audit_ago(kind: AuditLogEventType, target: u64, by: u64, ago: u64) -> AuditLogEntry {
+    let mut entry = audit(kind, target, by);
+    let now_ms = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    entry.id = Id::new((now_ms - ago * 1_000 - DISCORD_EPOCH_MS) << 22);
+    entry
+}
+
+#[tokio::test]
+async fn changes_are_counted_when_they_happened_not_when_the_bot_got_to_them() {
+    // Three deletions 20 seconds apart never make three in a window of 30 seconds. The bot reads
+    // the events late and all at once, and must not take them for a burst.
+    let harness = harness(&config(&json!({ "window": "30s" })));
+    let admin = 1_301;
+    harness
+        .api()
+        .set_member(Id::new(GUILD), member(admin, &[ADMIN_ROLE], false));
+    for (index, ago) in [40_u64, 20, 0].into_iter().enumerate() {
+        let target = 31 + index as u64;
+        harness.api().add_audit_entry(audit_ago(
+            AuditLogEventType::ChannelDelete,
+            target,
+            admin,
+            ago,
+        ));
+        harness
+            .emit(Event::ChannelDeleted(channel(target)))
+            .await
+            .unwrap();
+    }
+    assert!(!took_any(&harness, admin), "a calm pace is not a burst");
+    assert!(alerts(&harness).is_empty());
+}

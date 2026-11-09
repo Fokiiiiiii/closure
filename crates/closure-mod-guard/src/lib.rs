@@ -135,6 +135,29 @@ fn ids<T>(list: &[String], make: impl Fn(u64) -> Option<T>) -> Vec<T> {
 type Followed = HashMap<(GuildId, UserId, Change), Vec<i64>>;
 type Quiet = HashMap<(GuildId, UserId), i64>;
 
+/// How often the staff are told about an account that could not be stopped.
+const ALERT_EVERY: i64 = 60;
+static ALERTED: Mutex<Option<Quiet>> = Mutex::new(None);
+
+/// Whether the staff may be told now about an account that could not be stopped.
+fn first_to_alert(guild: GuildId, user: UserId, now: i64) -> bool {
+    let mut told = ALERTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let map = told.get_or_insert_with(HashMap::new);
+    if map.len() >= MAX_FOLLOWED {
+        map.clear();
+    }
+    if map
+        .get(&(guild, user))
+        .is_some_and(|at| now - *at < ALERT_EVERY)
+    {
+        return false;
+    }
+    map.insert((guild, user), now);
+    true
+}
+
 static COUNTS: Mutex<Option<Followed>> = Mutex::new(None);
 static ACTED: Mutex<Option<Quiet>> = Mutex::new(None);
 
@@ -180,6 +203,18 @@ fn first_to_act(guild: GuildId, user: UserId, now: i64) -> bool {
     true
 }
 
+/// Gives the turn back, so that the account is acted on again by its next change: used when what was
+/// done to it did not take its powers away.
+fn give_back(guild: GuildId, user: UserId) {
+    if let Some(map) = ACTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        map.remove(&(guild, user));
+    }
+}
+
 fn change_of(event: &Event) -> Option<(Change, u64)> {
     match event {
         Event::ChannelDeleted(channel) => Some((Change::ChannelDelete, channel.id.get())),
@@ -189,7 +224,9 @@ fn change_of(event: &Event) -> Option<(Change, u64)> {
     }
 }
 
-async fn actor_of(ctx: &EventContext, change: Change, target: u64) -> Option<UserId> {
+/// Who made the change, and when it happened: the time of the audit log entry, which is the time
+/// to count by, since the bot may read the events long after they happened.
+async fn actor_of(ctx: &EventContext, change: Change, target: u64) -> Option<(UserId, i64)> {
     let outcome = ctx
         .api
         .execute(Action::GetAuditLog {
@@ -213,7 +250,11 @@ async fn actor_of(ctx: &EventContext, change: Change, target: u64) -> Option<Use
             entry.target_id.is_some_and(|id| id.get() == target)
                 && now - snowflake_time(entry.id.get()) <= AUDIT_WINDOW_SECONDS
         })
-        .and_then(|entry| entry.user_id)
+        .and_then(|entry| {
+            entry
+                .user_id
+                .map(|user| (user, snowflake_time(entry.id.get())))
+        })
 }
 
 struct Stopped {
@@ -342,10 +383,10 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
     if limit == 0 {
         return Ok(Flow::Continue);
     }
-    let Some(user) = actor_of(&ctx, change, target).await else {
+    let Some((user, happened)) = actor_of(&ctx, change, target).await else {
         return Ok(Flow::Continue);
     };
-    let seen = count(ctx.guild_id, user, change, ctx.now(), config.window());
+    let seen = count(ctx.guild_id, user, change, happened, config.window());
     if seen < usize::try_from(limit).unwrap_or(usize::MAX) {
         return Ok(Flow::Continue);
     }
@@ -368,6 +409,14 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
         },
         Response::Alert => None,
     };
+    // A stop that left a powerful role (or failed) is no reason to leave the account alone for
+    // the quiet time: its next change tries again. The staff are told at most once a minute then.
+    if done.as_ref().is_some_and(|done| done.kept > 0) {
+        give_back(ctx.guild_id, user);
+        if !first_to_alert(ctx.guild_id, user, ctx.now()) {
+            return Ok(Flow::Continue);
+        }
+    }
     alert(&ctx, &config, (user, change, seen), done.as_ref()).await;
     Ok(Flow::Continue)
 }

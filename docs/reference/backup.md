@@ -54,7 +54,7 @@ Set under `modules.backup.config` in a server's configuration; see [configuratio
 
 | Key | Type | Default | Widget | Description |
 |---|---|---|---|---|
-| `daily` | boolean | `true` | - | Back up the roles and channels once a day. A backup that would lose half of what the last one holds is not taken, so a nuke cannot replace the good backup. |
+| `daily` | boolean | `true` | - | Back up the roles and channels once a day. A backup that would hold less than half of what the last one holds is not taken, so a nuke cannot replace the good backup. |
 | `replies` | string | - | - | Who sees the replies of the module's commands: "private" only the user who used the command, "public" everyone in the channel. Unset: as the module chose. |
 | `texts` | any | - | entries | Replaces the module's texts by message id; {name} is filled in with the argument name. An empty or non-text value keeps the default. |
 

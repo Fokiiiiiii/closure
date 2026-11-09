@@ -236,6 +236,77 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn the_entries_with_19_digit_ids_that_0015_left_are_moved_by_0019(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        // A 19-digit id, the largest id a BIGINT holds, one above it, and an entry that cannot
+        // be copied (it names no experience).
+        for (module, key, value) in [
+            ("leveling", "xp:1300000000000000000", r#"{"xp": 50}"#),
+            ("leveling", "xp:9223372036854775807", r#"{"xp": 7}"#),
+            ("leveling", "xp:9223372036854775808", r#"{"xp": 9}"#),
+            ("leveling", "xp:1300000000000000001", r#"{"last": 1}"#),
+            ("giveaway", "e:1400000000000000000:1300000000000000000", "1"),
+            (
+                "starboard",
+                "post:300",
+                r#"{"board": 20, "post": 1500000000000000000}"#,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO module_kv (module, guild_id, key, value, revision)
+                 VALUES ($1, 1, $2, $3::jsonb, nextval('module_kv_revisions'))",
+            )
+            .bind(module)
+            .bind(key)
+            .bind(value)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::raw_sql(include_str!("../migrations/0019_backfill_long_ids.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let xp: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT subject, value FROM module_scores WHERE name = 'xp' ORDER BY subject",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(xp, [(1_300_000_000_000_000_000, 50), (i64::MAX, 7)]);
+        let entered: Vec<(String, i64)> =
+            sqlx::query_as("SELECT name, member FROM module_sets ORDER BY member")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            entered,
+            [(
+                "e-1400000000000000000".to_owned(),
+                1_300_000_000_000_000_000
+            )]
+        );
+        let post: i64 = sqlx::query_scalar(
+            "SELECT value FROM module_scores WHERE module = 'starboard' AND subject = 300",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(post, 1_500_000_000_000_000_000);
+        let left: Vec<String> = sqlx::query_scalar("SELECT key FROM module_kv ORDER BY key")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            left,
+            ["xp:1300000000000000001", "xp:9223372036854775808"],
+            "what cannot be copied is kept, not lost"
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn the_counts_of_usage_are_made_right_again_by_0017(pool: PgPool) {
         let db = Db::from_pool(pool.clone());
         db.migrate().await.unwrap();

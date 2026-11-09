@@ -11,6 +11,7 @@ use std::time::Duration;
 use closure_core::action::{Action, ChannelKind, NewChannel, Outcome, Reason};
 use closure_core::event::{Event, EventKind, MessageInfo, RoleId, UserId};
 use closure_core::module::EventContext;
+use closure_core::permission::Actor;
 use closure_core::subscription::Flow;
 use closure_sdk::duration::parse as parse_duration;
 use closure_sdk::punish::{Moderator, Punisher, Settings};
@@ -213,6 +214,16 @@ async fn exempt(ctx: &EventContext, config: &Config, message: &MessageInfo) -> b
         .iter()
         .any(|role| message.author_roles.contains(role))
     {
+        return true;
+    }
+    // A moderator by the server's own settings has no power of Discord's to show for it.
+    let actor = Actor {
+        user: author,
+        roles: message.author_roles.clone(),
+        administrator: false,
+        owner: false,
+    };
+    if ctx.permissions().level_of(&actor) >= Level::MODERATOR {
         return true;
     }
     match ctx.api.get_guild(ctx.guild_id).await {

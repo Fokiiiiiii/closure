@@ -18,15 +18,21 @@ antiraid:
       quarantine: {}
 
 rules:
+  # The rules are checked in the order of their ids, and the first that trips stops the rest unless
+  # it says `continue_after_match`. The three that add heat all say it, so that a join that
+  # adds for its age as well as for itself, and any rule of your own, still runs.
   heat_join:
     triggers: [{ type: member_join }]
     actions: [{ do: add_to_counter, counter: heat, amount: 2 }]
+    continue_after_match: true
   heat_new_account:
     triggers: [{ type: member_join, only_new: true }]
     actions: [{ do: add_to_counter, counter: heat, amount: 3 }]
+    continue_after_match: true
   heat_invite:
     triggers: [{ type: invites }]
     actions: [{ do: add_to_counter, counter: heat, amount: 4 }]
+    continue_after_match: true
   heat_warm:
     triggers: [{ type: counter, counter: heat, trigger: warm }]
     actions: [{ do: set_antiraid_level, level: low, duration: 10m }]

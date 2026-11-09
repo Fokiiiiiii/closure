@@ -11,6 +11,7 @@ use closure_core::action::{Action, Outcome, Reason};
 use closure_core::error::DiscordError;
 use closure_core::event::{Event, EventKind, RoleId, UserId};
 use closure_core::module::EventContext;
+use closure_core::permission::Actor;
 use closure_core::subscription::Flow;
 use closure_sdk::duration::parse as parse_duration;
 use closure_sdk::punish::{Moderator, Punisher, Settings};
@@ -126,9 +127,47 @@ async fn safe_to_give(ctx: &EventContext, role: RoleId) -> bool {
         .find(|known| known.id == role)
         .is_none_or(|known| known.permissions.intersects(BARRED));
     !powerful
+        && !is_moderator_role(ctx, role)
         && !closure_sdk::punish::is_restriction_role(ctx, role)
             .await
             .unwrap_or(true)
+}
+
+/// Whether the server's own settings make the role a moderator's, as its holders' powers in closure
+/// do not show in the permissions of Discord.
+fn is_moderator_role(ctx: &EventContext, role: RoleId) -> bool {
+    holds_moderator_level(ctx, UserId::new(1), &[role])
+}
+
+/// Whether holders of these roles reach the moderator level by the server's settings.
+fn holds_moderator_level(ctx: &EventContext, user: UserId, roles: &[RoleId]) -> bool {
+    let actor = Actor {
+        user,
+        roles: roles.to_vec(),
+        administrator: false,
+        owner: false,
+    };
+    ctx.permissions().level_of(&actor) >= Level::MODERATOR
+}
+
+/// Whether one of the roles carries a power that makes its holder one of the staff in Discord's own
+/// terms. A role that cannot be looked up counts as one: a member is not kicked on a guess.
+async fn holds_powerful_role(ctx: &EventContext, roles: &[RoleId]) -> bool {
+    let Ok(Outcome::Roles(known)) = ctx
+        .api
+        .execute(Action::ListRoles {
+            guild_id: ctx.guild_id,
+        })
+        .await
+    else {
+        return true;
+    };
+    roles.iter().any(|held| {
+        known
+            .iter()
+            .find(|role| role.id == *held)
+            .is_some_and(|role| role.permissions.intersects(BARRED))
+    })
 }
 
 /// Makes the member verified: the verified role on, the unverified role off, the expiry gone.
@@ -149,7 +188,7 @@ async fn grant<I: InteractionRef + 'static>(cx: &Cx<I>) -> Result<(), UserError>
         .add_role(guild, user, role, reason()?)
         .await
         .map_err(|error| failed(&error))?;
-    if let Some(unverified) = config.unverified() {
+    if let Some(unverified) = config.unverified().filter(|unverified| *unverified != role) {
         // A member who never had it, or who lost it, is as good as done.
         let _ = cx
             .api()
@@ -168,6 +207,18 @@ async fn press(cx: ComponentCx) -> Result<(), UserError> {
         return Err(UserError::message("verify-not-set"));
     };
     if cx.click().roles.contains(&role) {
+        // A member who is verified but kept the unverified role (taking it off failed once) is
+        // set right by the press; it is the only way they have to ask.
+        if let Some(unverified) = config.unverified().filter(|unverified| *unverified != role)
+            && cx.click().roles.contains(&unverified)
+        {
+            let reason = Reason::new(cx.t("verify-reason", &Args::new()))
+                .map_err(|_| UserError::message("verify-unavailable"))?;
+            let _ = cx
+                .api()
+                .remove_role(cx.guild_id(), cx.user().id, unverified, reason)
+                .await;
+        }
         return cx.reply_private_t("verify-already", &Args::new()).await;
     }
     if config.mode == Mode::Button {
@@ -228,14 +279,19 @@ async fn joined(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
     if member.user.bot || member.roles.contains(&role) {
         return Ok(Flow::Continue);
     }
-    if let Some(unverified) = config.unverified() {
-        let reason = Reason::new(ctx.t_in(ctx.locale, "verify-reason-join", &Args::new()))?;
-        if let Err(error) = ctx
-            .api
-            .add_role(ctx.guild_id, member.user.id, unverified, reason)
-            .await
-        {
-            tracing::warn!(%error, "could not give the unverified role");
+    if let Some(unverified) = config.unverified().filter(|unverified| *unverified != role) {
+        if safe_to_give(&ctx, unverified).await {
+            let reason = Reason::new(ctx.t_in(ctx.locale, "verify-reason-join", &Args::new()))?;
+            if let Err(error) = ctx
+                .api
+                .add_role(ctx.guild_id, member.user.id, unverified, reason)
+                .await
+            {
+                tracing::warn!(%error, "could not give the unverified role");
+            }
+        } else {
+            // The time still runs: only the role is not given.
+            tracing::warn!("the unverified role is not one to hand out: it is not given");
         }
     }
     if let Some(time) = config.deadline() {
@@ -266,6 +322,10 @@ async fn expire(cx: JobCx) -> Result<(), ModuleError> {
     let Some(role) = config.verified() else {
         return Ok(());
     };
+    // The server may have turned the time off since the member joined.
+    if config.deadline().is_none() {
+        return Ok(());
+    }
     let member = match ctx.api.get_member(ctx.guild_id, user).await {
         Ok(member) => member,
         // Gone already.
@@ -273,6 +333,12 @@ async fn expire(cx: JobCx) -> Result<(), ModuleError> {
         Err(error) => return Err(ModuleError::Discord(error)),
     };
     if member.roles.contains(&role) {
+        return Ok(());
+    }
+    // A member made a moderator since the join is staff, whatever role the gate asks for.
+    if holds_moderator_level(ctx, user, &member.roles)
+        || holds_powerful_role(ctx, &member.roles).await
+    {
         return Ok(());
     }
     let settings = Settings {

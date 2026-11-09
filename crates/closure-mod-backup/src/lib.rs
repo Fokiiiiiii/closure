@@ -240,6 +240,9 @@ struct Restored {
     roles: usize,
     channels: usize,
     failed: usize,
+    /// What was made, by the id the role or channel had in the backup.
+    made_roles: HashMap<u64, u64>,
+    made_channels: HashMap<u64, u64>,
 }
 
 /// Creates the roles of the backup the server lacks; the id each role of the backup has now.
@@ -279,6 +282,7 @@ async fn restore_roles(
         match created {
             Ok(Outcome::Role(role)) => {
                 now_role.insert(*id, role.id.get());
+                done.made_roles.insert(*id, role.id.get());
                 done.roles += 1;
             }
             Ok(_) => done.failed += 1,
@@ -319,6 +323,14 @@ async fn restore_channels(
     missing.sort_by_key(|channel| channel.kind != ChannelKind::Category);
     let mut now_channel: HashMap<u64, u64> = have_channels.iter().map(|id| (*id, *id)).collect();
     for saved in missing {
+        // A channel whose category is in the backup but could not be made waits for the next
+        // restore, so that it is not made at the top and left there.
+        if saved.parent.is_some_and(|parent| {
+            meta.channels.contains(&parent) && !now_channel.contains_key(&parent)
+        }) {
+            done.failed += 1;
+            continue;
+        }
         let overwrites = saved
             .overwrites
             .iter()
@@ -358,6 +370,7 @@ async fn restore_channels(
         match created {
             Ok(Outcome::Channel(channel)) => {
                 now_channel.insert(saved.id, channel.id.get());
+                done.made_channels.insert(saved.id, channel.id.get());
                 done.channels += 1;
             }
             Ok(_) => done.failed += 1,
@@ -366,6 +379,74 @@ async fn restore_channels(
                 done.failed += 1;
             }
         }
+    }
+    Ok(())
+}
+
+/// Names what a restore made in the backup, so that a second restore finds it there. What could
+/// not be made keeps its record under its old id, to be made at the next restore. The new records
+/// are written first and the old ones go last, so that a stop at any point leaves a backup that
+/// is whole.
+async fn rebase(ctx: &EventContext, meta: &Meta, done: &Restored) -> Result<(), ModuleError> {
+    let store = ctx.store();
+    let swap = |id: u64, made: &HashMap<u64, u64>| made.get(&id).copied().unwrap_or(id);
+    let mut stale = Vec::new();
+    for id in &meta.roles {
+        let Some(mut saved) = store
+            .get::<SavedRole>(&role_key(*id))
+            .await
+            .map_err(|e| stored(&e))?
+        else {
+            continue;
+        };
+        let now = swap(*id, &done.made_roles);
+        if now != *id {
+            saved.id = now;
+            store
+                .set(&role_key(now), &saved)
+                .await
+                .map_err(|e| stored(&e))?;
+            stale.push(role_key(*id));
+        }
+    }
+    for id in &meta.channels {
+        let Some(mut saved) = store
+            .get::<SavedChannel>(&channel_key(*id))
+            .await
+            .map_err(|e| stored(&e))?
+        else {
+            continue;
+        };
+        let now = swap(*id, &done.made_channels);
+        saved.id = now;
+        saved.parent = saved.parent.map(|parent| swap(parent, &done.made_channels));
+        for overwrite in &mut saved.overwrites {
+            overwrite.role = swap(overwrite.role, &done.made_roles);
+        }
+        store
+            .set(&channel_key(now), &saved)
+            .await
+            .map_err(|e| stored(&e))?;
+        if now != *id {
+            stale.push(channel_key(*id));
+        }
+    }
+    let next = Meta {
+        at: meta.at,
+        roles: meta
+            .roles
+            .iter()
+            .map(|id| swap(*id, &done.made_roles))
+            .collect(),
+        channels: meta
+            .channels
+            .iter()
+            .map(|id| swap(*id, &done.made_channels))
+            .collect(),
+    };
+    store.set(META, &next).await.map_err(|e| stored(&e))?;
+    for key in stale {
+        store.delete(&key).await.map_err(|e| stored(&e))?;
     }
     Ok(())
 }
@@ -421,9 +502,7 @@ async fn restore_command(cx: CommandCx, (): ()) -> Result<(), UserError> {
     let done = restore(cx.ctx(), &meta, &reason)
         .await
         .map_err(|error| failure(&error))?;
-    // What was created has new ids, so the backup is taken again to name them: a second restore
-    // then finds everything there.
-    take(cx.ctx(), true)
+    rebase(cx.ctx(), &meta, &done)
         .await
         .map_err(|error| failure(&error))?;
     cx.reply_private_t(

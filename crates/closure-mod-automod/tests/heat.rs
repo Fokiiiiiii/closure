@@ -14,8 +14,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use closure_config::{ConfigCompiler, parse_overrides};
 use closure_core::module::Module;
 use closure_core::registry::ModuleRegistry;
+use closure_sdk::CommandOptionValue;
 use closure_sdk::Event;
-use closure_sdk::testing::Harness;
+use closure_sdk::testing::{Harness, Invocation};
 use common::{GUILD, configured, unix_now};
 use serde_json::Value;
 use twilight_model::id::Id;
@@ -119,5 +120,35 @@ async fn heat_raises_the_level_step_by_step_and_it_falls_back() {
     assert!(
         !level(&harness).await.contains("high"),
         "the calm level comes back"
+    );
+}
+
+/// The value of the heat counter, as `/automod counter` shows it.
+async fn heat(harness: &Harness) -> i64 {
+    let replies = harness
+        .invoke(
+            Invocation::new("automod")
+                .subcommand("counter")
+                .option("counter", CommandOptionValue::String("heat".to_owned()))
+                .option("action", CommandOptionValue::String("view".to_owned()))
+                .roles([common::MODERATOR_ROLE]),
+        )
+        .await
+        .unwrap();
+    let text: String = replies.iter().map(|reply| reply.content.clone()).collect();
+    let (_, number) = text.rsplit_once(": ").expect("the view shows a value");
+    number.trim().parse().expect("the view shows a number")
+}
+
+#[tokio::test]
+async fn a_new_account_adds_more_heat_than_an_old_one() {
+    let harness = configured(config());
+    harness.emit(joining(0, true)).await.unwrap();
+    assert_eq!(heat(&harness).await, 2, "an old account: the join");
+    harness.emit(joining(1, false)).await.unwrap();
+    assert_eq!(
+        heat(&harness).await,
+        2 + 5,
+        "a new account: the join and the bonus for its age"
     );
 }

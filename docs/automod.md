@@ -536,7 +536,12 @@ example, [`examples/heat.yaml`](examples/heat.yaml), counts joins (2), joins of 
 hour (3 more) and messages with an invite (4), warms the server at 20 (slowmode) and heats it at 50
 (slowmode, invites paused, quarantine). Copy it into the `config` of the automod module and change
 the amounts and limits; add a rule with `add_to_counter` for any other sign. A test keeps the
-example valid.
+example valid and checks that a new account adds more than an old one.
+
+The rules are checked in the order of their ids, and the first that trips stops the rest, so a
+rule that only adds heat needs `continue_after_match: true` (the three of the example have it).
+Without it the rules after it never see that event: a general rule on every join would hide the
+rule for new accounts, and every punishment of your own that is named after it.
 
 Decay is applied when the value is read or changed, so a level ends by its `duration`, not by the
 value falling. A trigger fires when the value newly passes its limit: a raid that goes on while the

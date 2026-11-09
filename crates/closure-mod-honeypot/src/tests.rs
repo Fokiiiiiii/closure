@@ -13,6 +13,8 @@ const OTHER: u64 = 41;
 const ADMIN_ROLE: u64 = 300;
 const MOD_ROLE: u64 = 301;
 const PLAIN_ROLE: u64 = 302;
+/// A role that the server made a moderator in closure; it carries no power of Discord's own.
+const CLOSURE_MOD_ROLE: u64 = 303;
 const SPAMMER: u64 = 7;
 
 fn role(id: u64, permissions: u64) -> Role {
@@ -31,6 +33,9 @@ fn harness(config: &Value) -> Harness {
         permissions
             .role_levels
             .insert(Id::new(ADMIN_ROLE), Level::ADMIN);
+        permissions
+            .role_levels
+            .insert(Id::new(CLOSURE_MOD_ROLE), Level::MODERATOR);
     });
     harness.api().set_guild_name(Id::new(GUILD), "server");
     // 4: BAN_MEMBERS.
@@ -186,4 +191,27 @@ async fn create_makes_a_channel_with_a_warning_and_sets_it_as_a_honeypot() {
         .await
         .unwrap();
     assert!(listed.last().unwrap().content.contains("<#"));
+}
+
+#[tokio::test]
+async fn a_moderator_by_closures_own_settings_is_not_punished_either() {
+    let harness = harness(&config(&json!({})));
+    trap(&harness).await;
+    harness
+        .message(
+            Message::new(11, TRAP)
+                .roles([CLOSURE_MOD_ROLE])
+                .content("oops"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        bans(&harness),
+        0,
+        "no power of Discord's own, but a moderator here"
+    );
+    assert_eq!(
+        count(&harness, |a| matches!(a, Action::DeleteMessage { .. })),
+        0
+    );
 }

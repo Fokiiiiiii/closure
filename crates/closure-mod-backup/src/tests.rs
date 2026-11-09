@@ -174,3 +174,109 @@ async fn only_an_admin_may_use_it() {
         Action::CreateChannel { .. } | Action::CreateRole { .. }
     )));
 }
+
+fn made(harness: &Harness) -> (usize, usize) {
+    let actions = harness.actions();
+    let count = |pick: fn(&Action) -> bool| actions.iter().filter(|action| pick(action)).count();
+    (
+        count(|a| matches!(a, Action::CreateRole { .. })),
+        count(|a| matches!(a, Action::CreateChannel { .. })),
+    )
+}
+
+#[tokio::test]
+async fn a_restore_that_fails_for_one_channel_keeps_its_record_and_makes_only_that_one_next_time() {
+    let harness = harness();
+    harness.invoke(admin_runs("create")).await.unwrap();
+    gone(&harness);
+    // The calls of the restore, in order: the answer, the roles, the channels, the role, the
+    // category and then `rules`, which is the sixth.
+    harness
+        .api()
+        .fail_nth(6, closure_core::error::DiscordError::Forbidden("no".into()));
+    let replies = harness.invoke(admin_runs("restore")).await.unwrap();
+    assert!(
+        replies
+            .last()
+            .unwrap()
+            .content
+            .contains("Could not create: 1"),
+        "{replies:?}"
+    );
+    assert_eq!(made(&harness), (1, 1), "the role and the category");
+
+    // Nothing of the backup is lost: both channels are still named by it.
+    let info = harness.invoke(admin_runs("info")).await.unwrap();
+    assert!(info.last().unwrap().content.contains("2 channel(s)"));
+
+    // The second restore makes `rules` and nothing else, and puts it in the new category.
+    let replies = harness.invoke(admin_runs("restore")).await.unwrap();
+    assert!(
+        replies
+            .last()
+            .unwrap()
+            .content
+            .contains("Could not create: 0")
+    );
+    assert_eq!(made(&harness), (1, 2));
+    let rules = harness
+        .actions()
+        .iter()
+        .find_map(|action| match action {
+            Action::CreateChannel { spec, .. } if spec.name == "rules" => Some(spec.clone()),
+            _ => None,
+        })
+        .expect("rules is made");
+    assert!(
+        rules
+            .parent_id
+            .is_some_and(|parent| parent.get() != CATEGORY),
+        "it goes into the category made the first time: {rules:?}"
+    );
+    assert_eq!(rules.overwrites.len(), 1);
+
+    // And a third restore finds everything there.
+    harness.invoke(admin_runs("restore")).await.unwrap();
+    assert_eq!(made(&harness), (1, 2));
+}
+
+#[tokio::test]
+async fn a_channel_whose_category_could_not_be_made_waits_and_is_made_inside_it_next_time() {
+    let harness = harness();
+    harness.invoke(admin_runs("create")).await.unwrap();
+    gone(&harness);
+    // The fifth call is the category.
+    harness
+        .api()
+        .fail_nth(5, closure_core::error::DiscordError::Forbidden("no".into()));
+    let replies = harness.invoke(admin_runs("restore")).await.unwrap();
+    assert!(
+        replies
+            .last()
+            .unwrap()
+            .content
+            .contains("Could not create: 2"),
+        "the category and what is in it: {replies:?}"
+    );
+    assert_eq!(
+        made(&harness),
+        (1, 0),
+        "no channel is made at the top and left there"
+    );
+
+    harness.invoke(admin_runs("restore")).await.unwrap();
+    assert_eq!(made(&harness), (1, 2));
+    let rules = harness
+        .actions()
+        .iter()
+        .find_map(|action| match action {
+            Action::CreateChannel { spec, .. } if spec.name == "rules" => Some(spec.clone()),
+            _ => None,
+        })
+        .expect("rules is made");
+    assert!(
+        rules
+            .parent_id
+            .is_some_and(|parent| parent.get() != CATEGORY)
+    );
+}

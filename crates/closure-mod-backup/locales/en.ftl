@@ -1,4 +1,4 @@
-config-backup-daily = Back up the roles and channels once a day. A backup that would lose half of what the last one holds is not taken, so a nuke cannot replace the good backup.
+config-backup-daily = Back up the roles and channels once a day. A backup that would hold less than half of what the last one holds is not taken, so a nuke cannot replace the good backup.
 permission-backup-manage = Create, see and restore the backup of the server
 command-backup = backup
     .description = Keep the roles and channels of the server, and bring back what is gone

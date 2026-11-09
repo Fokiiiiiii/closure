@@ -13,6 +13,8 @@ use crate::builder;
 const VERIFIED: u64 = 100;
 const UNVERIFIED: u64 = 101;
 const ADMIN_ROLE: u64 = 300;
+/// A role made a moderator by the server's own settings; it carries no power of Discord's.
+const CLOSURE_MOD_ROLE: u64 = 301;
 const MEMBER: u64 = 7;
 const PRESS: &str = "verify:press:*:";
 
@@ -44,10 +46,18 @@ fn harness(config: serde_json::Value) -> Harness {
         permissions
             .role_levels
             .insert(Id::new(ADMIN_ROLE), Level::ADMIN);
+        permissions
+            .role_levels
+            .insert(Id::new(CLOSURE_MOD_ROLE), Level::MODERATOR);
     });
     harness.api().set_roles(
         Id::new(1),
-        vec![role(VERIFIED, 0), role(UNVERIFIED, 0), role(ADMIN_ROLE, 0)],
+        vec![
+            role(VERIFIED, 0),
+            role(UNVERIFIED, 0),
+            role(ADMIN_ROLE, 0),
+            role(CLOSURE_MOD_ROLE, 0),
+        ],
     );
     harness.set_config(config);
     harness
@@ -275,4 +285,77 @@ async fn only_an_administrator_posts_the_panel_and_it_is_public_with_one_button(
     let panel = posted.last().unwrap();
     assert!(!panel.ephemeral);
     assert_eq!(panel.custom_ids().len(), 1);
+}
+
+#[tokio::test]
+async fn a_role_the_server_made_a_moderator_is_not_handed_out_as_either_role() {
+    // As the verified role.
+    let mut config = gate();
+    config["role"] = json!(CLOSURE_MOD_ROLE.to_string());
+    let first = harness(config);
+    first.click(Click::new(PRESS).user(MEMBER)).await.unwrap();
+    assert!(
+        !gave(&first, MEMBER, CLOSURE_MOD_ROLE),
+        "no power of Discord's own, but a moderator here"
+    );
+
+    // As the unverified role: it is given at the join to everybody, so it is the more dangerous.
+    let mut config = gate();
+    config["unverified_role"] = json!(CLOSURE_MOD_ROLE.to_string());
+    let second = harness(config);
+    second.emit(joined(MEMBER, false)).await.unwrap();
+    assert!(!gave(&second, MEMBER, CLOSURE_MOD_ROLE));
+
+    // The same role for both is no gate.
+    let mut config = gate();
+    config["unverified_role"] = json!(VERIFIED.to_string());
+    let third = harness(config);
+    third.emit(joined(MEMBER, false)).await.unwrap();
+    assert!(!gave(&third, MEMBER, VERIFIED));
+}
+
+#[tokio::test]
+async fn the_time_is_up_but_a_member_made_a_moderator_since_is_not_kicked() {
+    let mut config = gate();
+    config["kick_after"] = json!("1h");
+    let harness = harness(config);
+    harness.emit(joined(MEMBER, false)).await.unwrap();
+    // Made a moderator in the hour, with no verified role to show for it.
+    harness
+        .api()
+        .set_member(Id::new(1), member(MEMBER, &[UNVERIFIED, CLOSURE_MOD_ROLE]));
+    harness.advance(Duration::from_secs(3_700));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.iter().all(Result::is_ok), "{ended:?}");
+    assert!(!kicked(&harness, MEMBER));
+}
+
+#[tokio::test]
+async fn the_time_is_up_but_a_server_that_dropped_the_time_kicks_nobody() {
+    let mut config = gate();
+    config["kick_after"] = json!("1h");
+    let harness = harness(config);
+    harness.emit(joined(MEMBER, false)).await.unwrap();
+    harness
+        .api()
+        .set_member(Id::new(1), member(MEMBER, &[UNVERIFIED]));
+    // The server turns the time off before it runs out.
+    let mut off = gate();
+    off["kick_after"] = json!(null);
+    harness.set_config(off);
+    harness.advance(Duration::from_secs(3_700));
+    let ended = harness.run_due_jobs().await;
+    assert!(ended.iter().all(Result::is_ok), "{ended:?}");
+    assert!(!kicked(&harness, MEMBER));
+}
+
+#[tokio::test]
+async fn a_member_who_is_verified_but_still_has_the_unverified_role_loses_it_at_the_next_press() {
+    let harness = harness(gate());
+    harness
+        .click(Click::new(PRESS).user(MEMBER).roles([VERIFIED, UNVERIFIED]))
+        .await
+        .unwrap();
+    assert!(took(&harness, MEMBER, UNVERIFIED), "the leftover goes");
+    assert!(!gave(&harness, MEMBER, VERIFIED));
 }
