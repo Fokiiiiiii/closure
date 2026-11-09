@@ -1,4 +1,5 @@
 use closure_core::action::Action;
+use closure_core::event::Event;
 use closure_sdk::testing::{Harness, Invocation, Message};
 use closure_sdk::{CommandOptionValue, Level};
 use serde_json::{Value, json};
@@ -214,4 +215,30 @@ async fn a_moderator_by_closures_own_settings_is_not_punished_either() {
         count(&harness, |a| matches!(a, Action::DeleteMessage { .. })),
         0
     );
+}
+
+#[tokio::test]
+async fn a_punishment_left_half_done_is_looked_at_again_when_the_server_comes_up() {
+    let harness = harness(&config(&json!({})));
+    harness
+        .store()
+        .set(
+            "ban-intent:7",
+            &json!({
+                "target": 7, "moderator": 1, "reason": null,
+                "started_at": 0, "expires_at": null, "case_before": 0
+            }),
+        )
+        .await
+        .unwrap();
+    harness
+        .emit(Event::GuildAvailable {
+            guild_id: Id::new(1),
+            name: "server".into(),
+            preferred_locale: None,
+        })
+        .await
+        .unwrap();
+    assert!(harness.run_due_jobs().await.iter().all(Result::is_ok));
+    assert!(count(&harness, |action| matches!(action, Action::ListBans { .. })) >= 1);
 }

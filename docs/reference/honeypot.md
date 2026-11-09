@@ -8,6 +8,7 @@
 - `send_messages`
 - `manage_messages`
 - `read_guild`
+- `read_bans`
 - `kick_members`
 - `ban_members`
 - `timeout_members`

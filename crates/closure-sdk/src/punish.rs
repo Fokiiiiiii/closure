@@ -2185,10 +2185,17 @@ async fn reconcile_restriction(ctx: &EventContext, key: &str) -> Result<(), User
     let mut before = None;
     let case = loop {
         let cases = ctx.cases().for_target(target, before, 100).await?;
-        if let Some(case) = cases
-            .iter()
-            .find(|case| case.kind.as_str() == intent.kind && case.number > intent.case_before)
-        {
+        // The case this punishment made is the one of this module, by this moderator, with this
+        // reason and this end. Another module's case of the same kind is not it, whatever its
+        // number: adopting it would lift a longer punishment when this one runs out.
+        if let Some(case) = cases.iter().find(|case| {
+            case.module == ctx.module
+                && case.kind.as_str() == intent.kind
+                && case.moderator == moderator
+                && case.reason == intent.reason
+                && case.expires_at == intent.expires_at
+                && case.number > intent.case_before
+        }) {
             break case.clone();
         }
         if cases.len() < 100

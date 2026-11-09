@@ -14,7 +14,7 @@ use closure_core::module::EventContext;
 use closure_core::permission::Actor;
 use closure_core::subscription::Flow;
 use closure_sdk::duration::parse as parse_duration;
-use closure_sdk::punish::{Moderator, Punisher, Settings};
+use closure_sdk::punish::{self, Moderator, Punisher, Settings};
 use closure_sdk::{
     Args, Capability, ChannelId, Command, CommandArgs, CommandCx, CoreError, Intents, Level,
     Locale, ModuleBuilder, ModuleError, PermissionSpec, SdkModule, Subscription, UserError,
@@ -347,13 +347,14 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
         "exempt_users": [],
         "exempt_roles": []
     });
-    Ok(
+    Ok(punish::jobs(
         ModuleBuilder::new("honeypot", "Honeypot", env!("CARGO_PKG_VERSION"))?
             .capability(Capability::Storage)
             .capability(Capability::Schedule)
             .capability(Capability::Cases)
             .capability(Capability::BanMembers)
             .capability(Capability::KickMembers)
+            .capability(Capability::ReadBans)
             .capability(Capability::TimeoutMembers)
             .capability(Capability::ManageMessages)
             .capability(Capability::ManageChannels)
@@ -386,7 +387,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             )
             .catalog(Locale::En, EN)
             .catalog(Locale::Ja, JA),
-    )
+    ))
 }
 
 pub fn module() -> Result<SdkModule, CoreError> {

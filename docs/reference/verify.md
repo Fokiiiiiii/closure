@@ -7,6 +7,7 @@
 
 - `send_messages`
 - `read_guild`
+- `read_bans`
 - `kick_members`
 - `manage_roles`
 - `respond_to_interactions`

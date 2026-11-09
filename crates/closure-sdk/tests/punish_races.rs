@@ -932,7 +932,20 @@ async fn restriction_recovery_handles_absent_duplicate_expired_and_lookup_errors
             .await
             .unwrap();
         run_ban_recovery(&ctx).await;
-        assert!(ctx.cases().get(2).await.unwrap().is_none());
+        // The case of the other moderator is another punishment, not the one this intent made:
+        // the recovery makes the case of its own, and the other one is left standing.
+        let own = ctx
+            .cases()
+            .get(2)
+            .await
+            .unwrap()
+            .expect("the recovery makes its case");
+        assert_eq!(own.moderator, ctx.bot().unwrap());
+        assert_eq!(own.expires_at, Some(expires));
+        assert!(
+            api.present.load(Ordering::SeqCst),
+            "the other punishment still stands"
+        );
         assert_eq!(
             harness.jobs(),
             usize::from(!matches!(mode, RestrictionKind::DiscordTimeout))
@@ -1197,4 +1210,33 @@ async fn a_role_lift_that_stopped_after_the_role_was_off_gives_the_other_roles_b
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn restriction_recovery_does_not_lift_what_another_module_punished_for_longer() {
+    let _guard = TEST_LOCK.lock().await;
+    for mode in RESTRICTIONS {
+        let (_, ctx, api) = restriction_fixture(mode).await;
+        // This module's punishment ran out an hour ago, and its case was never saved.
+        put_restriction_intent(&ctx, mode, ctx.now() - 3600).await;
+        // Another module has since punished the same member for a day, by another moderator.
+        ctx.cases()
+            .create(closure_sdk::NewCase {
+                source: closure_sdk::CaseSource::Command,
+                kind: closure_sdk::CaseKind::new(mode.kind()).unwrap(),
+                target: Id::new(7),
+                moderator: Id::new(8),
+                reason: Some("a day for it".into()),
+                expires_at: Some(ctx.now() + 86_400),
+            })
+            .await
+            .unwrap();
+        api.present.store(true, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(
+            api.present.load(Ordering::SeqCst),
+            "the punishment of a day still stands: the old one running out lifts nothing ({:?})",
+            mode.kind()
+        );
+    }
 }

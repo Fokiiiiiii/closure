@@ -14,7 +14,7 @@ use closure_core::module::EventContext;
 use closure_core::permission::Actor;
 use closure_core::subscription::Flow;
 use closure_sdk::duration::parse as parse_duration;
-use closure_sdk::punish::{Moderator, Punisher, Settings};
+use closure_sdk::punish::{self, Moderator, Punisher, Settings};
 use closure_sdk::ui::{self, CustomId, text_input};
 use closure_sdk::{
     Args, Capability, Command, ComponentCx, CoreError, Cx, Intents, InteractionRef,
@@ -409,7 +409,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             }
         }
     });
-    Ok(
+    Ok(punish::jobs(
         ModuleBuilder::new("verify", "Verify", env!("CARGO_PKG_VERSION"))?
             .capability(Capability::ManageRoles)
             .capability(Capability::ReadGuild)
@@ -419,6 +419,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             // The kick of a member who did not verify is a case like any other.
             .capability(Capability::Cases)
             .capability(Capability::KickMembers)
+            .capability(Capability::ReadBans)
             .capability(Capability::SendMessages)
             .intents(Intents::GUILD_MEMBERS)
             .permission(PermissionSpec::new(
@@ -441,7 +442,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .on(Subscription::new(EventKind::MemberJoined), joined)
             .catalog(Locale::En, EN)
             .catalog(Locale::Ja, JA),
-    )
+    ))
 }
 
 pub fn module() -> Result<SdkModule, CoreError> {
