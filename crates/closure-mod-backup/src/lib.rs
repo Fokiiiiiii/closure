@@ -13,6 +13,7 @@ use closure_core::action::{
 };
 use closure_core::event::{ChannelId, Event, EventKind, RoleId};
 use closure_core::module::EventContext;
+use closure_core::storage::{Expect, StorageError};
 use closure_core::subscription::Flow;
 use closure_sdk::{
     Args, Capability, Command, CommandCx, CoreError, JobCx, Level, Locale, ModuleBuilder,
@@ -29,6 +30,11 @@ const JA: &str = include_str!("../locales/ja.ftl");
 
 const DAILY: &str = "daily";
 const META: &str = "meta";
+/// Held by whoever is saving or restoring, so that two of them never work on the backup at once.
+const LOCK: &str = "lock";
+const LOCK_FOR: Duration = Duration::from_mins(15);
+/// What a restore has made so far, so that one that stopped is carried on, not made again.
+const PROGRESS: &str = "progress";
 /// A backup that would hold less than this share of the last one is not taken by itself.
 const SHRINK_LIMIT_PERCENT: usize = 50;
 
@@ -49,6 +55,16 @@ struct Meta {
     at: i64,
     roles: Vec<u64>,
     channels: Vec<u64>,
+    /// Which save the rows belong to; a save writes a new one and then points here, so a stop in
+    /// the middle leaves the last whole backup as it was. 0 is a backup from before.
+    #[serde(default)]
+    generation: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Progress {
+    roles: HashMap<u64, u64>,
+    channels: HashMap<u64, u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,12 +100,39 @@ fn stored(error: &closure_core::storage::StorageError) -> ModuleError {
     ModuleError::other(error.to_string())
 }
 
-fn role_key(id: u64) -> String {
-    format!("role:{id}")
+fn role_key(generation: u64, id: u64) -> String {
+    if generation == 0 {
+        format!("role:{id}")
+    } else {
+        format!("g{generation}:role:{id}")
+    }
 }
 
-fn channel_key(id: u64) -> String {
-    format!("channel:{id}")
+fn channel_key(generation: u64, id: u64) -> String {
+    if generation == 0 {
+        format!("channel:{id}")
+    } else {
+        format!("g{generation}:channel:{id}")
+    }
+}
+
+/// Takes the right to work on the backup; false when someone else has it.
+async fn lock(ctx: &EventContext) -> Result<bool, ModuleError> {
+    match ctx
+        .store()
+        .replace(LOCK, &ctx.now(), Expect::Missing, Some(LOCK_FOR))
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(StorageError::Conflict) => Ok(false),
+        Err(error) => Err(stored(&error)),
+    }
+}
+
+async fn unlock(ctx: &EventContext) {
+    if let Err(error) = ctx.store().delete(LOCK).await {
+        tracing::warn!(%error, "could not give the backup lock back");
+    }
 }
 
 fn number(count: usize) -> i64 {
@@ -174,9 +217,25 @@ async fn last(ctx: &EventContext) -> Result<Option<Meta>, ModuleError> {
     ctx.store().get(META).await.map_err(|e| stored(&e))
 }
 
-/// Keeps the roles and channels of the server. `None` when `force` is off and the server holds
-/// less than half of what the last backup does, which is left as it is.
-async fn take(ctx: &EventContext, force: bool) -> Result<Option<Meta>, ModuleError> {
+enum Taken {
+    Kept(Meta),
+    /// The server holds less than half of what the last backup does: it is left as it is.
+    Shrank,
+    /// A save or a restore is under way.
+    Busy,
+}
+
+/// Keeps the roles and channels of the server (unless `force` is off and the server shrank).
+async fn take(ctx: &EventContext, force: bool) -> Result<Taken, ModuleError> {
+    if !lock(ctx).await? {
+        return Ok(Taken::Busy);
+    }
+    let taken = save(ctx, force).await;
+    unlock(ctx).await;
+    taken
+}
+
+async fn save(ctx: &EventContext, force: bool) -> Result<Taken, ModuleError> {
     let (roles, channels) = current(ctx).await?;
     // @everyone has the id of the server and always exists; a managed role belongs to a bot.
     let roles: Vec<SavedRole> = roles
@@ -194,19 +253,25 @@ async fn take(ctx: &EventContext, force: bool) -> Result<Option<Meta>, ModuleErr
                 guild = ctx.guild_id.get(),
                 "the server shrank by half: the backup is kept as it was"
             );
-            return Ok(None);
+            return Ok(Taken::Shrank);
         }
     }
     let store = ctx.store();
+    let generation = before.as_ref().map_or(0, |before| before.generation) + 1;
+    // Rows of a save that stopped before it was pointed to are not part of this one.
+    let prefix = format!("g{generation}:");
+    for (key, _) in store.list(&prefix, 1000).await.map_err(|e| stored(&e))? {
+        store.delete(&key).await.map_err(|e| stored(&e))?;
+    }
     for role in &roles {
         store
-            .set(&role_key(role.id), role)
+            .set(&role_key(generation, role.id), role)
             .await
             .map_err(|e| stored(&e))?;
     }
     for channel in &channels {
         store
-            .set(&channel_key(channel.id), channel)
+            .set(&channel_key(generation, channel.id), channel)
             .await
             .map_err(|e| stored(&e))?;
     }
@@ -214,25 +279,25 @@ async fn take(ctx: &EventContext, force: bool) -> Result<Option<Meta>, ModuleErr
         at: ctx.now(),
         roles: roles.iter().map(|role| role.id).collect(),
         channels: channels.iter().map(|channel| channel.id).collect(),
+        generation,
     };
     store.set(META, &meta).await.map_err(|e| stored(&e))?;
-    // What the earlier backup held and this one does not is forgotten.
+    // The save before this one is forgotten, now that nothing points to it.
     if let Some(before) = before {
-        for id in before.roles.iter().filter(|id| !meta.roles.contains(id)) {
-            store.delete(&role_key(*id)).await.map_err(|e| stored(&e))?;
-        }
-        for id in before
-            .channels
-            .iter()
-            .filter(|id| !meta.channels.contains(id))
-        {
+        for id in &before.roles {
             store
-                .delete(&channel_key(*id))
+                .delete(&role_key(before.generation, *id))
+                .await
+                .map_err(|e| stored(&e))?;
+        }
+        for id in &before.channels {
+            store
+                .delete(&channel_key(before.generation, *id))
                 .await
                 .map_err(|e| stored(&e))?;
         }
     }
-    Ok(Some(meta))
+    Ok(Taken::Kept(meta))
 }
 
 #[derive(Debug, Default)]
@@ -258,8 +323,13 @@ async fn restore_roles(
     // The id each role of the backup has now: its own when it exists, else the new one.
     let mut now_role: HashMap<u64, u64> = have_roles.iter().map(|id| (*id, *id)).collect();
     for id in meta.roles.iter().filter(|id| !have_roles.contains(id)) {
+        // Made by a restore that stopped: it is there under its new id.
+        if let Some(now) = done.made_roles.get(id) {
+            now_role.insert(*id, *now);
+            continue;
+        }
         let Some(saved) = store
-            .get::<SavedRole>(&role_key(*id))
+            .get::<SavedRole>(&role_key(meta.generation, *id))
             .await
             .map_err(|e| stored(&e))?
         else {
@@ -284,6 +354,7 @@ async fn restore_roles(
                 now_role.insert(*id, role.id.get());
                 done.made_roles.insert(*id, role.id.get());
                 done.roles += 1;
+                remember(ctx, done).await?;
             }
             Ok(_) => done.failed += 1,
             Err(error) => {
@@ -306,13 +377,18 @@ async fn restore_channels(
     let have_channels: HashSet<u64> = channels.iter().map(|channel| channel.id.get()).collect();
     let store = ctx.store();
     let mut missing = Vec::new();
+    let mut now_channel: HashMap<u64, u64> = have_channels.iter().map(|id| (*id, *id)).collect();
     for id in meta
         .channels
         .iter()
         .filter(|id| !have_channels.contains(id))
     {
+        if let Some(now) = done.made_channels.get(id) {
+            now_channel.insert(*id, *now);
+            continue;
+        }
         if let Some(saved) = store
-            .get::<SavedChannel>(&channel_key(*id))
+            .get::<SavedChannel>(&channel_key(meta.generation, *id))
             .await
             .map_err(|e| stored(&e))?
         {
@@ -321,7 +397,6 @@ async fn restore_channels(
     }
     // Categories first, so that what they hold can be put in them.
     missing.sort_by_key(|channel| channel.kind != ChannelKind::Category);
-    let mut now_channel: HashMap<u64, u64> = have_channels.iter().map(|id| (*id, *id)).collect();
     for saved in missing {
         // A channel whose category is in the backup but could not be made waits for the next
         // restore, so that it is not made at the top and left there.
@@ -372,6 +447,7 @@ async fn restore_channels(
                 now_channel.insert(saved.id, channel.id.get());
                 done.made_channels.insert(saved.id, channel.id.get());
                 done.channels += 1;
+                remember(ctx, done).await?;
             }
             Ok(_) => done.failed += 1,
             Err(error) => {
@@ -393,7 +469,7 @@ async fn rebase(ctx: &EventContext, meta: &Meta, done: &Restored) -> Result<(), 
     let mut stale = Vec::new();
     for id in &meta.roles {
         let Some(mut saved) = store
-            .get::<SavedRole>(&role_key(*id))
+            .get::<SavedRole>(&role_key(meta.generation, *id))
             .await
             .map_err(|e| stored(&e))?
         else {
@@ -403,15 +479,15 @@ async fn rebase(ctx: &EventContext, meta: &Meta, done: &Restored) -> Result<(), 
         if now != *id {
             saved.id = now;
             store
-                .set(&role_key(now), &saved)
+                .set(&role_key(meta.generation, now), &saved)
                 .await
                 .map_err(|e| stored(&e))?;
-            stale.push(role_key(*id));
+            stale.push(role_key(meta.generation, *id));
         }
     }
     for id in &meta.channels {
         let Some(mut saved) = store
-            .get::<SavedChannel>(&channel_key(*id))
+            .get::<SavedChannel>(&channel_key(meta.generation, *id))
             .await
             .map_err(|e| stored(&e))?
         else {
@@ -424,15 +500,16 @@ async fn rebase(ctx: &EventContext, meta: &Meta, done: &Restored) -> Result<(), 
             overwrite.role = swap(overwrite.role, &done.made_roles);
         }
         store
-            .set(&channel_key(now), &saved)
+            .set(&channel_key(meta.generation, now), &saved)
             .await
             .map_err(|e| stored(&e))?;
         if now != *id {
-            stale.push(channel_key(*id));
+            stale.push(channel_key(meta.generation, *id));
         }
     }
     let next = Meta {
         at: meta.at,
+        generation: meta.generation,
         roles: meta
             .roles
             .iter()
@@ -448,12 +525,47 @@ async fn rebase(ctx: &EventContext, meta: &Meta, done: &Restored) -> Result<(), 
     for key in stale {
         store.delete(&key).await.map_err(|e| stored(&e))?;
     }
+    store.delete(PROGRESS).await.map_err(|e| stored(&e))?;
     Ok(())
+}
+
+/// Writes down what the restore has made, so that a stop in the middle does not make it twice.
+async fn remember(ctx: &EventContext, done: &Restored) -> Result<(), ModuleError> {
+    let progress = Progress {
+        roles: done.made_roles.clone(),
+        channels: done.made_channels.clone(),
+    };
+    ctx.store()
+        .set(PROGRESS, &progress)
+        .await
+        .map_err(|e| stored(&e))
 }
 
 async fn restore(ctx: &EventContext, meta: &Meta, reason: &str) -> Result<Restored, ModuleError> {
     let (roles, channels) = current(ctx).await?;
     let mut done = Restored::default();
+    // What an earlier restore made counts when it is still there.
+    if let Some(progress) = ctx
+        .store()
+        .get::<Progress>(PROGRESS)
+        .await
+        .map_err(|e| stored(&e))?
+    {
+        let (have_roles, have_channels): (HashSet<u64>, HashSet<u64>) = (
+            roles.iter().map(|role| role.id.get()).collect(),
+            channels.iter().map(|channel| channel.id.get()).collect(),
+        );
+        done.made_roles = progress
+            .roles
+            .into_iter()
+            .filter(|(_, now)| have_roles.contains(now))
+            .collect();
+        done.made_channels = progress
+            .channels
+            .into_iter()
+            .filter(|(_, now)| have_channels.contains(now))
+            .collect();
+    }
     let now_role = restore_roles(ctx, meta, &roles, reason, &mut done).await?;
     restore_channels(ctx, meta, &channels, &now_role, reason, &mut done).await?;
     Ok(done)
@@ -466,10 +578,14 @@ fn failure(error: &ModuleError) -> UserError {
 
 async fn create(cx: CommandCx, (): ()) -> Result<(), UserError> {
     cx.defer(true).await?;
-    let meta = take(cx.ctx(), true)
+    let meta = match take(cx.ctx(), true)
         .await
         .map_err(|error| failure(&error))?
-        .unwrap_or_default();
+    {
+        Taken::Kept(meta) => meta,
+        Taken::Busy => return cx.reply_private_t("backup-busy", &Args::new()).await,
+        Taken::Shrank => Meta::default(),
+    };
     cx.reply_private_t(
         "backup-created",
         &Args::new()
@@ -498,13 +614,16 @@ async fn restore_command(cx: CommandCx, (): ()) -> Result<(), UserError> {
         return cx.reply_private_t("backup-none", &Args::new()).await;
     };
     cx.defer(true).await?;
+    if !lock(cx.ctx()).await.map_err(|error| failure(&error))? {
+        return cx.reply_private_t("backup-busy", &Args::new()).await;
+    }
     let reason = cx.t("backup-reason", &Args::new());
-    let done = restore(cx.ctx(), &meta, &reason)
-        .await
-        .map_err(|error| failure(&error))?;
-    rebase(cx.ctx(), &meta, &done)
-        .await
-        .map_err(|error| failure(&error))?;
+    let outcome = match restore(cx.ctx(), &meta, &reason).await {
+        Ok(done) => rebase(cx.ctx(), &meta, &done).await.map(|()| done),
+        Err(error) => Err(error),
+    };
+    unlock(cx.ctx()).await;
+    let done = outcome.map_err(|error| failure(&error))?;
     cx.reply_private_t(
         "backup-restored",
         &Args::new()
@@ -515,9 +634,12 @@ async fn restore_command(cx: CommandCx, (): ()) -> Result<(), UserError> {
     .await
 }
 
-/// The server came up: the daily backup is set going, if it is not already.
+/// The server came up, or its settings changed: the daily backup is set going, if it is not already.
 async fn available(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
-    if !matches!(event, Event::GuildAvailable { .. }) {
+    if !matches!(
+        event,
+        Event::GuildAvailable { .. } | Event::ConfigChanged { .. }
+    ) {
         return Ok(Flow::Continue);
     }
     let config: Config = parse_module_config(&ctx)?;
@@ -570,6 +692,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             )?)
             .config(schema, json!({ "daily": true }))
             .on(Subscription::new(EventKind::GuildAvailable), available)
+            .on(Subscription::new(EventKind::ConfigChanged), available)
             .job(DAILY, daily)
             .group(
                 "backup",

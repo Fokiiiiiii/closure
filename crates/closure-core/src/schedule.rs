@@ -70,6 +70,8 @@ pub struct NewJob {
     pub every: Option<Duration>,
     /// A job with the same key (of the same module and guild) is replaced instead of added.
     pub key: Option<String>,
+    /// With `if_absent`: a job of this key that is running is scheduled again, not kept.
+    pub rerun_running: bool,
 }
 
 /// A job that is due, as the module gets it.
@@ -253,6 +255,7 @@ impl Scheduler {
             payload,
             key: None,
             if_absent: false,
+            rerun_running: false,
         })
     }
 
@@ -276,6 +279,7 @@ pub struct JobBuilder<'a> {
     payload: serde_json::Value,
     key: Option<String>,
     if_absent: bool,
+    rerun_running: bool,
 }
 
 impl JobBuilder<'_> {
@@ -285,6 +289,15 @@ impl JobBuilder<'_> {
         self.if_absent = true;
         self
     }
+    /// Keep an existing keyed job that is waiting; one that is running is scheduled again (its run
+    /// does not finish the job), so that what came after it started is not left behind.
+    #[must_use]
+    pub fn unless_waiting(mut self) -> Self {
+        self.if_absent = true;
+        self.rerun_running = true;
+        self
+    }
+
     /// Gives the job a key: scheduling again with the same key replaces it, and
     /// [`Scheduler::cancel`] finds it.
     #[must_use]
@@ -335,6 +348,7 @@ impl JobBuilder<'_> {
                     run_at,
                     every,
                     key: self.key,
+                    rerun_running: self.rerun_running,
                 },
                 self.if_absent,
             )
@@ -483,7 +497,11 @@ impl SchedulerBackend for MemoryScheduler {
             failed: false,
         };
         if let Some(id) = existing {
-            if !if_absent {
+            let running = jobs
+                .by_id
+                .get(&id)
+                .is_some_and(|stored| stored.token != 0 && stored.leased_until > now);
+            if !if_absent || (job.rerun_running && running) {
                 jobs.by_id.insert(id, fresh);
             }
             return Ok(id);
@@ -724,6 +742,32 @@ mod tests {
         f.backend.complete(job.id, job.token).await.unwrap();
         f.advance(30);
         assert_eq!(f.due().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unless_waiting_keeps_a_waiting_job_and_runs_a_running_one_again() {
+        let f = fixture();
+        let scheduler = f.scheduler("warn", 1);
+        let schedule = || async {
+            scheduler
+                .job("x", &())
+                .unwrap()
+                .key("x")
+                .unless_waiting()
+                .after(Duration::from_secs(5))
+                .await
+                .unwrap();
+        };
+        schedule().await;
+        f.advance(3);
+        schedule().await;
+        f.advance(2);
+        let job = f.due().await.remove(0);
+        schedule().await;
+        f.backend.complete(job.id, job.token).await.unwrap();
+        assert!(f.due().await.is_empty(), "the new run waits for its time");
+        f.advance(5);
+        assert_eq!(f.due().await.len(), 1, "what came while it ran is not left");
     }
 
     #[tokio::test]

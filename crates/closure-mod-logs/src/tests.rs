@@ -2431,3 +2431,42 @@ async fn a_calm_server_is_not_delayed() {
     assert_eq!(messages_with_embeds(&harness), vec![1; 6]);
     assert_eq!(harness.jobs(), 0, "nothing is waiting");
 }
+
+#[tokio::test]
+async fn a_batch_a_stopped_flush_was_posting_is_posted_again_and_new_entries_during_a_flush_are_not_lost()
+ {
+    let harness = harness();
+    for user in 0..9 {
+        harness.emit(join(100 + user, false)).await.unwrap();
+    }
+    // A flush that marked the three as being posted and stopped before it knew they were posted.
+    let key = format!("batch:c:{LOG}");
+    let store = harness.store();
+    let entry = store.entry(&key).await.unwrap().unwrap();
+    let mut value = entry.value.clone();
+    value["claimed"] = json!(3);
+    store
+        .replace(
+            &key,
+            &value,
+            closure_core::storage::Expect::Revision(entry.revision),
+            None,
+        )
+        .await
+        .unwrap();
+    // Another entry comes in the meantime.
+    harness.emit(join(200, false)).await.unwrap();
+
+    harness.advance(Duration::from_secs(6));
+    let ran = harness.run_due_jobs().await;
+    assert!(ran.iter().all(Result::is_ok), "{ran:?}");
+    let posted = messages_with_embeds(&harness);
+    assert_eq!(posted.iter().sum::<usize>(), 6 + 3 + 1, "{posted:?}");
+    assert!(
+        store
+            .entry(&key)
+            .await
+            .unwrap()
+            .is_some_and(|entry| entry.value["embeds"].as_array().is_some_and(Vec::is_empty))
+    );
+}

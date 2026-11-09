@@ -14,3 +14,4 @@ backup-info = The backup was taken { $when }. It holds { $roles } role(s) and { 
 backup-restored = Created again { $roles } role(s) and { $channels } channel(s). Could not create: { $failed }. The order of roles and channels, the roles of members and the overwrites of members are not restored.
 backup-failed = The backup could not be made or read. Try again in a moment.
 backup-reason = Restored from the backup
+backup-busy = Another backup or restore is under way. Try again in a moment.

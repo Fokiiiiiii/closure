@@ -1231,3 +1231,33 @@ async fn a_level_that_quarantines_sets_up_its_role_when_it_is_set() {
     }
     assert!(view(&harness).await.contains("is ready"));
 }
+
+#[tokio::test]
+async fn a_role_that_changes_is_looked_at_again_before_it_is_given_to_the_next_joiner() {
+    let harness = raid(json!({
+        "levels": LEVELS,
+        "effects": { "high": { "quarantine": {} } }
+    }));
+    set(&harness, "high").await;
+    join(&harness, MEMBER).await;
+    join(&harness, OTHER_MEMBER).await;
+    let before = role_lists(&harness);
+    harness
+        .emit(Event::RoleUpdated(closure_core::event::RoleInfo {
+            id: Id::new(ROLE),
+            guild_id: Id::new(GUILD),
+            name: "Quarantine".into(),
+            position: 1,
+            permissions: twilight_model::guild::Permissions::ADMINISTRATOR,
+            color: 0,
+            hoist: false,
+            mentionable: false,
+        }))
+        .await
+        .unwrap();
+    join(&harness, 100).await;
+    assert!(
+        role_lists(&harness) > before,
+        "the role is checked again, not taken from the memory"
+    );
+}

@@ -141,10 +141,10 @@ impl SchedulerBackend for Db {
         .execute(&mut *tx)
         .await
         .map_err(backend)?;
-        let existing: Option<(i64, String)> = match &job.key {
+        let existing: Option<(i64, String, bool)> = match &job.key {
             // Locks the row, so a concurrent complete() cannot delete it before the UPDATE.
             Some(key) => sqlx::query_as(
-                "SELECT id, state FROM scheduled_jobs
+                "SELECT id, state, claim_token <> 0 AND leased_until > now() FROM scheduled_jobs
                  WHERE module = $1 AND guild_id = $2 AND dedupe_key = $3 FOR UPDATE",
             )
             .bind(job.module.as_str())
@@ -155,9 +155,9 @@ impl SchedulerBackend for Db {
             .map_err(backend)?,
             None => None,
         };
-        let id = if let Some((id, state)) = existing {
+        let id = if let Some((id, state, running)) = existing {
             // A job that failed for good is no job: asking for one again starts it over.
-            if if_absent && state != "failed" {
+            if if_absent && state != "failed" && !(job.rerun_running && running) {
                 tx.commit().await.map_err(backend)?;
                 return Ok(id);
             }
@@ -464,6 +464,29 @@ mod tests {
         db.complete(job.id, job.token).await.unwrap();
         age(&db, 31).await;
         assert_eq!(db.claim_due(1, LEASE).await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test]
+    async fn unless_waiting_keeps_a_waiting_job_and_runs_a_running_one_again(pool: PgPool) {
+        let db = database(pool).await;
+        let scheduler = scheduler(&db, "warn", 1);
+        let schedule = || async {
+            scheduler
+                .job("x", &())
+                .unwrap()
+                .key("x")
+                .unless_waiting()
+                .after(Duration::ZERO)
+                .await
+                .unwrap();
+        };
+        schedule().await;
+        schedule().await;
+        let job = db.claim_due(10, LEASE).await.unwrap().remove(0);
+        assert!(db.claim_due(10, LEASE).await.unwrap().is_empty());
+        schedule().await;
+        db.complete(job.id, job.token).await.unwrap();
+        assert_eq!(db.claim_due(10, LEASE).await.unwrap().len(), 1);
     }
 
     #[sqlx::test]

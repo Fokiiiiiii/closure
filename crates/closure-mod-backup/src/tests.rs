@@ -280,3 +280,93 @@ async fn a_channel_whose_category_could_not_be_made_waits_and_is_made_inside_it_
             .is_some_and(|parent| parent.get() != CATEGORY)
     );
 }
+
+#[tokio::test]
+async fn the_daily_backup_is_set_going_when_it_is_turned_on_while_the_bot_runs() {
+    let harness = harness();
+    harness.set_config(json!({ "daily": false }));
+    harness
+        .emit(Event::GuildAvailable {
+            guild_id: Id::new(GUILD),
+            name: "server".into(),
+            preferred_locale: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(harness.jobs(), 0);
+    harness.set_config(json!({ "daily": true }));
+    harness
+        .emit(Event::ConfigChanged {
+            guild_id: Id::new(GUILD),
+        })
+        .await
+        .unwrap();
+    assert_eq!(harness.jobs(), 1);
+}
+
+#[tokio::test]
+async fn a_new_backup_replaces_the_old_one_whole_and_leaves_no_row_of_it() {
+    let harness = harness();
+    harness.invoke(admin_runs("create")).await.unwrap();
+    harness.api().set_roles(
+        Id::new(GUILD),
+        vec![role(GUILD, false), role(STAFF, false), role(401, false)],
+    );
+    let replies = harness.invoke(admin_runs("create")).await.unwrap();
+    assert!(replies.last().unwrap().content.contains("2 role(s)"));
+    let store = harness.store();
+    assert!(store.list("g1:", 1000).await.unwrap().is_empty());
+    assert_eq!(store.list("g2:role:", 1000).await.unwrap().len(), 2);
+    gone(&harness);
+    harness.invoke(admin_runs("restore")).await.unwrap();
+    assert_eq!(made(&harness).0, 2, "both roles of the second backup");
+}
+
+#[tokio::test]
+async fn a_save_or_restore_is_refused_while_another_is_under_way() {
+    let harness = harness();
+    harness.invoke(admin_runs("create")).await.unwrap();
+    harness.store().set("lock", &0).await.unwrap();
+    for sub in ["create", "restore"] {
+        let replies = harness.invoke(admin_runs(sub)).await.unwrap();
+        assert!(
+            replies.last().unwrap().content.contains("under way"),
+            "{sub}: {replies:?}"
+        );
+    }
+    assert_eq!(made(&harness), (0, 0));
+}
+
+#[tokio::test]
+async fn a_restore_that_stopped_after_making_things_carries_on_instead_of_making_them_again() {
+    let harness = harness();
+    harness.invoke(admin_runs("create")).await.unwrap();
+    gone(&harness);
+    // The earlier restore made the role as 777 and the category as 778, then stopped.
+    harness
+        .api()
+        .set_roles(Id::new(GUILD), vec![role(GUILD, false), role(777, false)]);
+    harness.api().set_channels(
+        Id::new(GUILD),
+        vec![channel(778, 4, "Info", None, &json!([]))],
+    );
+    harness
+        .store()
+        .set(
+            "progress",
+            &json!({ "roles": { STAFF.to_string(): 777 }, "channels": { CATEGORY.to_string(): 778 } }),
+        )
+        .await
+        .unwrap();
+    harness.invoke(admin_runs("restore")).await.unwrap();
+    assert_eq!(made(&harness), (0, 1), "only `rules` is made");
+    let rules = harness
+        .actions()
+        .iter()
+        .find_map(|action| match action {
+            Action::CreateChannel { spec, .. } => Some(spec.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(rules.parent_id.map(twilight_model::id::Id::get), Some(778));
+}

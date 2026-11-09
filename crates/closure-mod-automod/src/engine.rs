@@ -193,6 +193,9 @@ pub async fn on_event(state: &State, ctx: EventContext, event: Event) -> Result<
             thread_id,
             ..
         } => state.memory.remember_thread(*guild_id, *thread_id, None),
+        // The role a joiner is quarantined with may have been given powers: it is checked again.
+        Event::RoleUpdated(role) => state.memory.forget_quarantine_role(role.guild_id),
+        Event::RoleDeleted { guild_id, .. } => state.memory.forget_quarantine_role(*guild_id),
         _ => {}
     }
     let Some(mut context) = Context::of_event(&event) else {

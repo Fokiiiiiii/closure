@@ -30,12 +30,14 @@ const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
 
 /// The events the rules read: messages, members, roles, cases and threads.
-const EVENTS: [EventKind; 10] = [
+const EVENTS: [EventKind; 12] = [
     EventKind::MessageCreated,
     EventKind::MessageUpdated,
     EventKind::MemberJoined,
     EventKind::MemberLeft,
     EventKind::RolesChanged,
+    EventKind::RoleUpdated,
+    EventKind::RoleDeleted,
     EventKind::CaseCreated,
     EventKind::ThreadCreated,
     EventKind::ThreadArchived,

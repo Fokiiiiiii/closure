@@ -341,6 +341,7 @@ async fn schedule(
         run_at: RunAt::At(at.max(current)),
         every: None,
         key: Some(key.clone()),
+        rerun_running: false,
     };
     state
         .inner

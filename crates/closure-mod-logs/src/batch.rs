@@ -36,6 +36,10 @@ const COUNTER: &str = "log-posts";
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Batch {
     embeds: Vec<Embed>,
+    /// The first this many embeds are being posted: they stay until the post is known to be
+    /// made, so that a stop in between posts them again instead of losing them.
+    #[serde(default)]
+    claimed: usize,
 }
 
 fn key_of(destination: &Destination) -> String {
@@ -109,22 +113,41 @@ async fn gather(ctx: &EventContext, destination: &Destination, incoming: Vec<Emb
             ),
             None => (Batch::default(), Expect::Missing),
         };
+        let claimed = kept.claimed.min(kept.embeds.len());
         let mut all = kept.embeds;
         all.extend(incoming.iter().cloned());
         let size = serde_json::to_vec(&all).map_or(usize::MAX, |bytes| bytes.len());
-        if all.len() >= MAX_EMBEDS || size > MAX_BATCH_BYTES {
-            // The batch is emptied first, so that the same entries are not posted twice.
+        if all.len() - claimed >= MAX_EMBEDS || size > MAX_BATCH_BYTES {
+            // What is posted now leaves the batch first, so that the same entries are not posted
+            // twice; the part that a flush is posting stays for the flush to take off.
+            let posting = all.split_off(claimed);
             match store
-                .replace(&key, &Batch::default(), expect, Some(KEEP))
+                .replace(
+                    &key,
+                    &Batch {
+                        embeds: all,
+                        claimed,
+                    },
+                    expect,
+                    Some(KEEP),
+                )
                 .await
             {
-                Ok(_) => return Gathered::Post(all),
+                Ok(_) => return Gathered::Post(posting),
                 Err(StorageError::Conflict) => continue,
                 Err(_) => break,
             }
         }
         match store
-            .replace(&key, &Batch { embeds: all }, expect, Some(KEEP))
+            .replace(
+                &key,
+                &Batch {
+                    embeds: all,
+                    claimed,
+                },
+                expect,
+                Some(KEEP),
+            )
             .await
         {
             Ok(_) => {
@@ -141,7 +164,7 @@ async fn gather(ctx: &EventContext, destination: &Destination, incoming: Vec<Emb
 /// Books the post of a batch that does not fill up. One job a batch is enough.
 async fn schedule_flush(ctx: &EventContext, destination: &Destination, key: &str) {
     let scheduled = match ctx.scheduler().job(FLUSH_JOB, destination) {
-        Ok(job) => job.key(key).if_absent().after(FLUSH_DELAY).await,
+        Ok(job) => job.key(key).unless_waiting().after(FLUSH_DELAY).await,
         Err(error) => Err(error),
     };
     if let Err(error) = scheduled {
@@ -149,7 +172,8 @@ async fn schedule_flush(ctx: &EventContext, destination: &Destination, key: &str
     }
 }
 
-/// Posts what the batch of a destination holds.
+/// Posts what the batch of a destination holds. The embeds are marked as being posted first and
+/// taken off the batch only after the post, so that a stop in between posts them again.
 pub async fn flush(cx: JobCx) -> Result<(), ModuleError> {
     let destination: Destination = cx.payload()?;
     let (ctx, key) = (cx.ctx(), key_of(&destination));
@@ -158,20 +182,52 @@ pub async fn flush(cx: JobCx) -> Result<(), ModuleError> {
         let Some(entry) = store.entry(&key).await.map_err(|e| stored(&e))? else {
             return Ok(());
         };
-        let batch: Batch = serde_json::from_value(entry.value).unwrap_or_default();
-        if batch.embeds.is_empty() {
+        let mut batch: Batch = serde_json::from_value(entry.value).unwrap_or_default();
+        let claimed = if batch.claimed == 0 || batch.claimed > batch.embeds.len() {
+            batch.embeds.len()
+        } else {
+            batch.claimed
+        };
+        if claimed == 0 {
             return Ok(());
         }
+        batch.claimed = claimed;
+        let posting = batch.embeds[..claimed].to_vec();
         match store
-            .replace(
-                &key,
-                &Batch::default(),
-                Expect::Revision(entry.revision),
-                Some(KEEP),
-            )
+            .replace(&key, &batch, Expect::Revision(entry.revision), Some(KEEP))
             .await
         {
-            Ok(_) => return post_or_retry(ctx, destination, entries_of(batch.embeds)).await,
+            Ok(_) => {}
+            Err(StorageError::Conflict) => continue,
+            Err(error) => return Err(stored(&error)),
+        }
+        // A post that failed is kept by the retry job already, so it leaves the batch either way.
+        let posted = post_or_retry(ctx, destination.clone(), entries_of(posting)).await;
+        let left = acknowledge(ctx, &key).await?;
+        // What came while this was posted goes out in the same run.
+        if posted.is_err() || left == 0 {
+            return posted;
+        }
+    }
+    Err(ModuleError::other("the log batch kept changing"))
+}
+
+/// Takes the embeds that were posted off the batch; what came meanwhile stays.
+async fn acknowledge(ctx: &EventContext, key: &str) -> Result<usize, ModuleError> {
+    let store = ctx.store();
+    for _ in 0..TRIES {
+        let Some(entry) = store.entry(key).await.map_err(|e| stored(&e))? else {
+            return Ok(0);
+        };
+        let mut batch: Batch = serde_json::from_value(entry.value).unwrap_or_default();
+        let done = batch.claimed.min(batch.embeds.len());
+        batch.embeds.drain(..done);
+        batch.claimed = 0;
+        match store
+            .replace(key, &batch, Expect::Revision(entry.revision), Some(KEEP))
+            .await
+        {
+            Ok(_) => return Ok(batch.embeds.len()),
             Err(StorageError::Conflict) => {}
             Err(error) => return Err(stored(&error)),
         }

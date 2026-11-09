@@ -105,8 +105,9 @@ async fn spoke(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> {
         )
         .map_err(|error| ModuleError::other(error.to_string()))?
         .key(&job_key(message.channel_id))
-        // A job that is waiting already will post the text after this message too.
-        .if_absent()
+        // A job that is waiting already will post the text after this message too; one that is
+        // running may have posted it already, and is run again.
+        .unless_waiting()
         .after(config.delay())
         .await
         .map_err(|error| ModuleError::other(error.to_string()))?;
