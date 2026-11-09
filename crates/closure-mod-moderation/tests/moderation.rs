@@ -5912,3 +5912,35 @@ async fn the_cases_button_lists_the_cases_of_the_member() {
         .unwrap();
     assert!(text(&listed).contains("first"), "{listed:?}");
 }
+
+#[tokio::test]
+async fn a_warning_hidden_from_the_lists_is_not_shown_to_the_member_in_mywarnings() {
+    let harness = harness();
+    harness
+        .invoke(warn(MEMBER, Some("quiet words")))
+        .await
+        .unwrap();
+    let own = || Invocation::new("mywarnings").user(MEMBER);
+    let shown = harness.invoke(own()).await.unwrap();
+    assert!(shown[0].content.contains("quiet words"), "{shown:?}");
+
+    harness
+        .invoke(by_admin(
+            case_cmd("hide").option("number", CommandOptionValue::Integer(1)),
+        ))
+        .await
+        .unwrap();
+    let hidden = harness.invoke(own()).await.unwrap();
+    assert!(!hidden[0].content.contains("quiet words"), "{hidden:?}");
+
+    let staff = harness
+        .invoke(by_moderator(
+            Invocation::new("warnings").option("user", user(MEMBER)),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        staff[0].content.contains("quiet words"),
+        "the staff still see it: {staff:?}"
+    );
+}

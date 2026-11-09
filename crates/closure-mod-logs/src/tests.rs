@@ -2470,3 +2470,75 @@ async fn a_batch_a_stopped_flush_was_posting_is_posted_again_and_new_entries_dur
             .is_some_and(|entry| entry.value["embeds"].as_array().is_some_and(Vec::is_empty))
     );
 }
+
+fn thread_in(id: u64, parent: u64) -> twilight_model::channel::Channel {
+    serde_json::from_value(json!({
+        "id": id.to_string(), "type": 11, "guild_id": GUILD.to_string(),
+        "parent_id": parent.to_string(), "name": "thread",
+        "thread_metadata": {
+            "archived": false, "auto_archive_duration": 60,
+            "archive_timestamp": "2024-01-01T00:00:00+00:00", "locked": false
+        }
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_bulk_deletion_leaves_out_the_messages_of_an_ignored_member() {
+    let harness = harness();
+    let mut settings = config(None, true);
+    settings["ignored_users"] = json!(["5"]);
+    harness.set_config(settings);
+    harness
+        .seed_message(saved(22, "secret words", Vec::new()))
+        .await
+        .unwrap();
+    let mut other = saved(23, "shown words", Vec::new());
+    other.author = Id::new(6);
+    harness.seed_message(other).await.unwrap();
+
+    harness
+        .emit(Event::MessagesBulkDeleted {
+            guild_id: Id::new(GUILD),
+            channel_id: Id::new(CHANNEL),
+            message_ids: vec![Id::new(22), Id::new(23)],
+        })
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{:?}", posted.len());
+    assert!(!posted[0].embeds.contains("secret"), "{}", posted[0].embeds);
+    assert!(posted[0].embeds.contains("shown"), "{}", posted[0].embeds);
+}
+
+#[tokio::test]
+async fn a_thread_follows_the_channel_it_is_in_when_that_channel_is_ignored() {
+    let harness = harness();
+    let mut settings = config(None, true);
+    settings["ignored_channels"] = json!([CHANNEL.to_string()]);
+    harness.set_config(settings);
+    harness.api().set_channels(
+        Id::new(GUILD),
+        vec![thread_in(50, CHANNEL), thread_in(51, 999)],
+    );
+    for (thread, id) in [(50, 60), (51, 61)] {
+        let mut message = saved(id, "in a thread", Vec::new());
+        message.channel_id = Id::new(thread);
+        harness.seed_message(message).await.unwrap();
+        harness
+            .emit(Event::MessageDeleted {
+                guild_id: Id::new(GUILD),
+                channel_id: Id::new(thread),
+                message_id: Id::new(id),
+            })
+            .await
+            .unwrap();
+    }
+    let posted = sent(&harness);
+    assert_eq!(
+        posted.len(),
+        1,
+        "only the thread of another channel is logged"
+    );
+}

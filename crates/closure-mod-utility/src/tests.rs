@@ -514,8 +514,12 @@ async fn a_message_is_described_only_in_this_server_and_only_when_its_channel_is
     let open = harness();
     open.api().set_channels(Id::new(1), vec![text_channel(30)]);
     open.api()
-        .set_roles(Id::new(1), vec![everyone_with("1024")]);
+        .set_roles(Id::new(1), vec![everyone_with("66560")]);
     let shown = open.invoke(info_of("message", &link(1))).await.unwrap();
+    assert!(
+        shown[0].ephemeral,
+        "the text of a message is for the one who asked"
+    );
     let card = &shown[0].embeds[0];
     assert!(
         card.title
@@ -537,6 +541,23 @@ async fn a_message_is_described_only_in_this_server_and_only_when_its_channel_is
 
     let bad = open.invoke(info_of("message", "somewhere")).await.unwrap();
     assert!(bad[0].content.contains("not a link"), "{bad:?}");
+
+    // A channel that can be seen but whose history cannot be read gives nothing of it.
+    let no_history = harness();
+    no_history
+        .api()
+        .set_channels(Id::new(1), vec![text_channel(30)]);
+    no_history
+        .api()
+        .set_roles(Id::new(1), vec![everyone_with("1024")]);
+    let refused = no_history
+        .invoke(info_of("message", &link(1)))
+        .await
+        .unwrap();
+    assert!(
+        refused[0].content.contains("could not be found"),
+        "{refused:?}"
+    );
 
     let hidden = harness();
     hidden

@@ -387,7 +387,7 @@ async fn messageinfo(cx: CommandCx, text: &str) -> Result<(), UserError> {
         return Err(UserError::message("utility-unavailable"));
     };
     // Said as if there were no such message: one in a channel the invoker cannot see stays unknown.
-    if !invoker_sees(&cx, &channel).await? {
+    if !invoker_can(&cx, &channel, true).await? {
         return Err(UserError::message("utility-not-found"));
     }
     let message = cx
@@ -443,7 +443,11 @@ async fn messageinfo(cx: CommandCx, text: &str) -> Result<(), UserError> {
             &message.content.chars().take(300).collect::<String>(),
         ));
     }
-    cx.reply_with(reply_of(card)?).await
+    // The text of the message goes to the one who asked, not to everybody who is in the channel
+    // the command was used in.
+    let mut reply = reply_of(card)?;
+    reply.ephemeral = true;
+    cx.reply_with(reply).await
 }
 
 /// The id of an emoji written as `<:name:id>`, `<a:name:id>`, `name:id` or the id alone, with its
@@ -562,6 +566,12 @@ async fn roleinfo(cx: CommandCx, role: RoleId) -> Result<(), UserError> {
 /// Whether the invoker may see `channel`: what the bot knows of a channel it can see is not what
 /// everybody may be told of it.
 async fn invoker_sees(cx: &CommandCx, channel: &Channel) -> Result<bool, UserError> {
+    invoker_can(cx, channel, false).await
+}
+
+/// Whether the invoker may see `channel`, and with `history` also read what was said in it: that
+/// takes the history permission, and a voice channel takes the right to connect to it.
+async fn invoker_can(cx: &CommandCx, channel: &Channel, history: bool) -> Result<bool, UserError> {
     let Outcome::Roles(roles) = cx
         .api()
         .execute(Action::ListRoles {
@@ -609,9 +619,20 @@ async fn invoker_sees(cx: &CommandCx, channel: &Channel) -> Result<bool, UserErr
     } else {
         (channel.kind, channel.permission_overwrites.as_deref())
     };
+    let mut needs = Permissions::VIEW_CHANNEL;
+    if history {
+        needs |= Permissions::READ_MESSAGE_HISTORY;
+        if matches!(
+            kind,
+            twilight_model::channel::ChannelType::GuildVoice
+                | twilight_model::channel::ChannelType::GuildStageVoice
+        ) {
+            needs |= Permissions::CONNECT;
+        }
+    }
     Ok(calculator
         .in_channel(kind, overwrites.unwrap_or(&[]))
-        .contains(Permissions::VIEW_CHANNEL))
+        .contains(needs))
 }
 
 async fn channelinfo(cx: CommandCx, channel: ChannelId) -> Result<(), UserError> {

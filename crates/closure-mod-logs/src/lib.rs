@@ -2,7 +2,10 @@
 //! channel. A deleted message is shown with what the history kept of it: its text, and its files when
 //! the host kept them. The files and their posting are the SDK's (`closure_sdk::files`).
 
-use closure_core::action::FileUpload;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+
+use closure_core::action::{Action, FileUpload, Outcome};
 use closure_core::capability::Capability;
 use closure_core::error::{CoreError, DiscordError, ModuleError};
 use closure_core::event::{
@@ -339,6 +342,7 @@ pub fn builder() -> Result<ModuleBuilder, CoreError> {
             .capability(Capability::ReadMessageHistory)
             .capability(Capability::KeepAttachments)
             .capability(Capability::ReadAuditLog)
+            .capability(Capability::ReadGuild)
             // Reading the invites of the server (to tell which one a member joined with) is the
             // capability that also lets a module make and delete them; this module only reads.
             .capability(Capability::ManageInvites)
@@ -488,8 +492,61 @@ fn route(
     Ok(channel.map(Destination::Channel))
 }
 
-fn id_set(list: &[String]) -> std::collections::HashSet<u64> {
+fn id_set(list: &[String]) -> HashSet<u64> {
     list.iter().filter_map(|id| id.parse().ok()).collect()
+}
+
+/// The channel each thread seen belongs to (`None` for a channel that is not a thread), so that a
+/// thread follows the channel it is in without asking Discord for every message.
+static THREAD_PARENTS: Mutex<Option<HashMap<ChannelId, Option<ChannelId>>>> = Mutex::new(None);
+const MAX_THREADS_REMEMBERED: usize = 50_000;
+
+async fn thread_parent(ctx: &EventContext, channel: ChannelId) -> Option<ChannelId> {
+    let known = THREAD_PARENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|map| map.get(&channel).copied());
+    if let Some(parent) = known {
+        return parent;
+    }
+    let Ok(Outcome::Channel(found)) = ctx
+        .api
+        .execute(Action::GetChannel {
+            channel_id: channel,
+        })
+        .await
+    else {
+        // Not known now: the message is logged, and the next one asks again.
+        return None;
+    };
+    let parent = found.kind.is_thread().then_some(found.parent_id).flatten();
+    let mut remembered = THREAD_PARENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let map = remembered.get_or_insert_with(HashMap::new);
+    if map.len() >= MAX_THREADS_REMEMBERED {
+        map.clear();
+    }
+    map.insert(channel, parent);
+    parent
+}
+
+/// Whether the channel is one the server asked not to log, or a thread of one.
+async fn in_ignored_channel(
+    ctx: &EventContext,
+    ignored: &HashSet<u64>,
+    channel: ChannelId,
+) -> bool {
+    if ignored.is_empty() {
+        return false;
+    }
+    if ignored.contains(&channel.get()) {
+        return true;
+    }
+    thread_parent(ctx, channel)
+        .await
+        .is_some_and(|parent| ignored.contains(&parent.get()))
 }
 
 /// Whether the server asked for nothing to be logged about this event: the channel it happened in,
@@ -507,7 +564,7 @@ async fn is_ignored(ctx: &EventContext, config: &Config, event: &Event) -> bool 
     let role = |id: &RoleId| roles.contains(&id.get());
     match event {
         Event::MessageUpdated(message) => {
-            channel(message.channel_id)
+            in_ignored_channel(ctx, &channels, message.channel_id).await
                 || user(message.author.id)
                 || message.author_roles.iter().any(role)
         }
@@ -516,13 +573,15 @@ async fn is_ignored(ctx: &EventContext, config: &Config, event: &Event) -> bool 
             message_id,
             ..
         } => {
-            channel(*channel_id)
+            in_ignored_channel(ctx, &channels, *channel_id).await
                 || match ctx.history().get(*channel_id, *message_id).await {
                     Ok(Some(saved)) => user(saved.author),
                     _ => false,
                 }
         }
-        Event::MessagesBulkDeleted { channel_id, .. } => channel(*channel_id),
+        Event::MessagesBulkDeleted { channel_id, .. } => {
+            in_ignored_channel(ctx, &channels, *channel_id).await
+        }
         Event::MemberJoined(member) => user(member.user.id) || member.roles.iter().any(role),
         Event::MemberLeft { user: who, .. }
         | Event::BanAdded { user: who, .. }
@@ -597,7 +656,7 @@ async fn on_event(ctx: EventContext, event: Event) -> Result<Flow, ModuleError> 
         } if config.message_deletes => {
             let audit =
                 audit_within_deadline(bulk_audit_of(&ctx, *channel_id, message_ids.len())).await;
-            bulk_deleted(&ctx, *channel_id, message_ids)
+            bulk_deleted(&ctx, &config, *channel_id, message_ids)
                 .await?
                 .into_iter()
                 .map(|entry| add_audit(&ctx, entry, audit.as_ref()))
@@ -919,9 +978,11 @@ async fn deleted(
 /// counts the messages and the ones whose text was not kept.
 async fn bulk_deleted(
     ctx: &EventContext,
+    config: &Config,
     channel: ChannelId,
     messages: &[MessageId],
 ) -> Result<Vec<LogEntry>, ModuleError> {
+    let ignored_users = id_set(&config.ignored_users);
     let mut entries = Vec::new();
     let mut unkept = 0_u64;
     for message in messages {
@@ -932,7 +993,7 @@ async fn bulk_deleted(
             .map_err(|error| ModuleError::other(error.to_string()))?;
         match saved {
             // A message a bot wrote is not logged.
-            Some(saved) if saved.author_bot => {}
+            Some(saved) if saved.author_bot || ignored_users.contains(&saved.author.get()) => {}
             Some(_) => entries.push(deleted(ctx, channel, *message).await?),
             None => unkept += 1,
         }

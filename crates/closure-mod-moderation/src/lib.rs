@@ -693,9 +693,14 @@ async fn note<I: InteractionRef + 'static>(cx: Cx<I>, args: Note) -> Result<(), 
     .await
 }
 
-async fn show_warnings(cx: CommandCx, user: UserId) -> Result<(), UserError> {
+/// The warnings of `user`; with `own` the ones moderators hid from the lists are left out, as
+/// they are from the list of cases.
+async fn show_warnings(cx: CommandCx, user: UserId, own: bool) -> Result<(), UserError> {
     let now = cx.now();
-    let found = active_cases(cx.cases(), user, "warn", now, SHOWN).await?;
+    let mut found = active_cases(cx.cases(), user, "warn", now, SHOWN).await?;
+    if own {
+        found.retain(|case| !case.hidden);
+    }
     if found.is_empty() {
         return cx
             .reply_private_t("warnings-none", &Args::new().with("user", mention(user)))
@@ -729,13 +734,13 @@ async fn show_warnings(cx: CommandCx, user: UserId) -> Result<(), UserError> {
 }
 
 async fn warnings(cx: CommandCx, args: Target) -> Result<(), UserError> {
-    show_warnings(cx, args.user).await
+    show_warnings(cx, args.user, false).await
 }
 
 /// The same list for the member who asks, who needs no power for it.
 async fn mywarnings(cx: CommandCx, (): ()) -> Result<(), UserError> {
     let user = cx.user().id;
-    show_warnings(cx, user).await
+    show_warnings(cx, user, true).await
 }
 
 /// Shows a case the way the log does, or lists the cases of a member.
