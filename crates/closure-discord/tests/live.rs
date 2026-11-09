@@ -101,6 +101,7 @@ async fn gateway_connects_and_closes_cleanly() {
             latency: Arc::default(),
             member_request_limit: 0,
             member_spool: None,
+            allowed_guilds: None,
         },
         new_cache(),
         dispatcher.clone(),

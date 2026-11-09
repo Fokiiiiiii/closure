@@ -1280,6 +1280,8 @@ async fn handle_interaction(
         Verdict::Failed(ModuleError::Discord(error)) => {
             user_message(shared.translator.as_ref(), locale, &error)
         }
+        // A wrong setting is not mended by trying again: the person is told whom to ask.
+        Verdict::Failed(ModuleError::Config(_)) => text(shared, locale, "error-not-set-up"),
         Verdict::Failed(_) | Verdict::Panicked | Verdict::TimedOut | Verdict::Skipped => {
             text(shared, locale, "error-command-failed")
         }

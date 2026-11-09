@@ -415,6 +415,26 @@ fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
     })
 }
 
+/// The guilds the bot may stay in, when the operator named them; any other it leaves.
+fn allowed_guilds(args: &Args, http: &Arc<Client>) -> Option<closure_discord::AllowedGuilds> {
+    if args.allowed_guilds.is_empty() {
+        return None;
+    }
+    let guilds = args
+        .allowed_guilds
+        .iter()
+        .map(|guild| Id::new(guild.get()))
+        .collect();
+    tracing::info!(
+        guilds = args.allowed_guilds.len(),
+        "the bot stays only in the allowed guilds"
+    );
+    Some(closure_discord::AllowedGuilds::leaving_with(
+        guilds,
+        Arc::clone(http),
+    ))
+}
+
 async fn publish_commands(
     args: &Args,
     http: &Client,
@@ -644,6 +664,7 @@ async fn serve(
                 latency,
                 member_request_limit: args.member_request_limit,
                 member_spool: Some(args.hook_spool_dir.clone()),
+                allowed_guilds: allowed_guilds(args, &http),
             },
             Arc::clone(&cache),
             dispatcher,

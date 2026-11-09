@@ -73,6 +73,12 @@ pub struct Args {
     #[arg(long, env = "COMMAND_GUILD")]
     pub command_guild: Option<NonZeroU64>,
 
+    /// The servers the bot may be in (ids, separated by commas). A bot invited to any other server
+    /// leaves it at once, and one that is in such a server at start-up leaves it. Without it every
+    /// server is served.
+    #[arg(long, env = "ALLOWED_GUILDS", value_delimiter = ',')]
+    pub allowed_guilds: Vec<NonZeroU64>,
+
     /// Do not publish slash commands at start-up.
     #[arg(long)]
     pub skip_command_registration: bool,

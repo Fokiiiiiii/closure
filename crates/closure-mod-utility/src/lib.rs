@@ -635,6 +635,23 @@ async fn invoker_can(cx: &CommandCx, channel: &Channel, history: bool) -> Result
         .contains(needs))
 }
 
+/// The key of the name of a kind of channel, so that it is told in the language of the server.
+fn kind_key(kind: twilight_model::channel::ChannelType) -> &'static str {
+    use twilight_model::channel::ChannelType as Kind;
+    match kind {
+        Kind::GuildText => "utility-kind-text",
+        Kind::GuildVoice => "utility-kind-voice",
+        Kind::GuildCategory => "utility-kind-category",
+        Kind::GuildAnnouncement => "utility-kind-announcement",
+        Kind::GuildForum => "utility-kind-forum",
+        Kind::GuildStageVoice => "utility-kind-stage",
+        Kind::AnnouncementThread | Kind::PublicThread | Kind::PrivateThread => {
+            "utility-kind-thread"
+        }
+        _ => "utility-kind-other",
+    }
+}
+
 async fn channelinfo(cx: CommandCx, channel: ChannelId) -> Result<(), UserError> {
     let Outcome::Channel(channel) = cx
         .api()
@@ -652,9 +669,15 @@ async fn channelinfo(cx: CommandCx, channel: ChannelId) -> Result<(), UserError>
     }
     let say = |key: &str| cx.t(key, &Args::new());
     let mut card = EmbedBuilder::new()
-        .title(channel.name.clone().unwrap_or_default())
+        .title(
+            channel
+                .name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| channel.id.get().to_string()),
+        )
         .field(say("utility-id"), channel.id.get().to_string(), true)
-        .field(say("utility-kind"), format!("{:?}", channel.kind), true)
+        .field(say("utility-kind"), say(kind_key(channel.kind)), true)
         .field(
             say("utility-created"),
             moment(created_at(channel.id.get())),
@@ -664,7 +687,7 @@ async fn channelinfo(cx: CommandCx, channel: ChannelId) -> Result<(), UserError>
         card = card.field(say("utility-parent"), format!("<#{parent}>"), true);
     }
     if channel.nsfw == Some(true) {
-        card = card.footer("NSFW");
+        card = card.footer(say("utility-nsfw"));
     }
     if let Some(topic) = channel.topic.as_deref().filter(|t| !t.is_empty()) {
         card = card.description(closure_sdk::embed::escape(topic));

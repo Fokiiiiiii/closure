@@ -28,7 +28,7 @@ pub use commands::{CommandBuildError, CommandScope, build_commands, register_com
 pub use dispatcher::{DispatchError, Dispatcher, DispatcherConfig, JobOutcome};
 pub use fetch::HttpFetcher;
 pub use gateway::{
-    GatewayConfig, GatewayError, GatewayHandle, GatewayHealth, GuildHooks, NoHooks,
-    gateway_intents, new_cache, start_gateway,
+    AllowedGuilds, GatewayConfig, GatewayError, GatewayHandle, GatewayHealth, GuildHooks,
+    GuildLeaver, NoHooks, gateway_intents, new_cache, start_gateway,
 };
 pub use jobs::{run_due, run_jobs};

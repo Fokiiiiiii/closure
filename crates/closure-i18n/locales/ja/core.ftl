@@ -10,8 +10,9 @@ error-rate-limited = Discord のレート制限中です。しばらくしてか
 error-transient = Discord 側で一時的な問題が発生しています。しばらくしてからもう一度お試しください。
 error-fatal = Discord との通信中に問題が発生しました。
 error-internal = 内部でエラーが発生しました。内容は記録されています。
-error-module-disabled = この機能はこのサーバーでは無効になっています。
+error-module-disabled = この機能はこのサーバーでは無効です。サーバー管理者が設定で有効にできます。
 error-command-failed = コマンドの実行中に問題が発生しました。しばらくしてからもう一度お試しください。
+error-not-set-up = このコマンドはこのサーバーで正しく設定されていません。管理者にモジュールの設定を確認してもらってください。
 error-busy = ほかの処理を実行中のため、少し待ってからもう一度お試しください。
 
 # モジュールSDK (closure-sdk) の返信。
@@ -62,7 +63,7 @@ punish-dm-voice-muted-for = サーバーのボイスチャンネルで { $until 
 punish-dm-not-delivered = (ダイレクトメッセージは届きませんでした。)
 punish-reason-none = 理由なし
 punish-timeout-no-timer = タイムアウトは期間が過ぎても解除されません。タイマーを設定できませんでした。
-punish-ban-no-timer = 期間が過ぎても解除されません。タイマーを設定できませんでした。
+punish-ban-no-timer = BAN は期間が過ぎても自動で解除されません。タイマーを設定できませんでした。
 punish-vc-no-timer = ボイスミュートは期間が過ぎても解除されません。タイマーを設定できませんでした。
 punish-timeout-too-long = Discord のタイムアウトは最長 28 日です。
 punish-timeout-role-missing = ロールによるタイムアウトには、設定の timeout_role にロールが必要です。

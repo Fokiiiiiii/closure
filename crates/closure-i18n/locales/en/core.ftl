@@ -10,8 +10,9 @@ error-rate-limited = Discord is rate limiting me. Please try again shortly.
 error-transient = Discord is having trouble right now. Please try again shortly.
 error-fatal = Something went wrong while talking to Discord.
 error-internal = Something went wrong on my side. The incident has been logged.
-error-module-disabled = That feature is turned off on this server.
+error-module-disabled = That feature is off on this server. A server admin can turn it on in the settings.
 error-command-failed = Something went wrong while running that command. Please try again later.
+error-not-set-up = This command is not set up correctly on this server. Ask an admin to check the module settings.
 error-busy = The bot is busy with an earlier request. Please try again in a moment.
 
 # Replies of the module SDK (closure-sdk).

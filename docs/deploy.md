@@ -44,6 +44,7 @@ The bot reads its settings from the environment or from flags (`closure --help`)
 | `API_ADMIN_TOKEN` | Token of the admin API (secret, at least 32 characters). |
 | `BOT_CONFIG` | A bot-wide configuration file (see [configuration](configuration.md)). |
 | `COMMAND_GUILD` | Publish the slash commands to this one server only (development). |
+| `ALLOWED_GUILDS` | The servers the bot may be in (ids, separated by commas). A bot invited to any other server leaves it at once, and one already in such a server leaves it at start-up. Unset, every server is served. Check the ids before setting it: a list that names none of your servers makes the bot leave all of them. |
 | `API_TRUSTED_PROXIES` | The reverse proxies in front of the API (addresses, separated by commas). Failed logins are then counted for the client in `X-Forwarded-For`, not for the proxy. |
 | `MEMBER_REQUEST_LIMIT` | A server with more members than this is not asked for all of them at start-up (default 500000; 0 asks for every server). Its members are known as the gateway reports them and are fetched when a check needs one. |
 | `HOOK_SPOOL_DIR` | Where joins and leaves are kept when the database is too slow to take them (default `spool`, relative to the working directory). They are played back in order, also after a restart. |

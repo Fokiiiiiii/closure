@@ -1,6 +1,6 @@
 //! Running the gateway shards.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::Write as _;
 use std::panic::AssertUnwindSafe;
@@ -99,6 +99,68 @@ pub struct GatewayConfig {
     pub member_request_limit: u64,
     /// Where member events that do not fit a full queue are kept until the hooks catch up; without it they are dropped.
     pub member_spool: Option<PathBuf>,
+    /// The only guilds the bot stays in; without it every guild is served.
+    pub allowed_guilds: Option<AllowedGuilds>,
+}
+
+/// Takes the bot out of one guild.
+pub trait GuildLeaver: Send + Sync {
+    fn leave(&self, guild: GuildId);
+}
+
+/// Leaves a guild through Discord's HTTP API.
+struct HttpLeaver(Arc<Client>);
+
+impl GuildLeaver for HttpLeaver {
+    fn leave(&self, guild: GuildId) {
+        let http = Arc::clone(&self.0);
+        tokio::spawn(async move {
+            match http.leave_guild(guild).await {
+                Ok(_) => {
+                    tracing::warn!(%guild, "left a guild that is not on the list of allowed guilds");
+                }
+                Err(error) => {
+                    tracing::warn!(%guild, %error, "could not leave a guild that is not allowed");
+                }
+            }
+        });
+    }
+}
+
+/// The guilds the bot may serve, and how it gets out of any other.
+#[derive(Clone)]
+pub struct AllowedGuilds {
+    guilds: Arc<HashSet<GuildId>>,
+    leaver: Arc<dyn GuildLeaver>,
+}
+
+impl fmt::Debug for AllowedGuilds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AllowedGuilds")
+            .field("guilds", &self.guilds.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AllowedGuilds {
+    #[must_use]
+    pub fn new(guilds: HashSet<GuildId>, leaver: Arc<dyn GuildLeaver>) -> Self {
+        Self {
+            guilds: Arc::new(guilds),
+            leaver,
+        }
+    }
+
+    /// Leaves through `http`.
+    #[must_use]
+    pub fn leaving_with(guilds: HashSet<GuildId>, http: Arc<Client>) -> Self {
+        Self::new(guilds, Arc::new(HttpLeaver(http)))
+    }
+
+    #[must_use]
+    pub fn permits(&self, guild: GuildId) -> bool {
+        self.guilds.contains(&guild)
+    }
 }
 
 impl fmt::Debug for GatewayConfig {
@@ -217,6 +279,7 @@ struct ShardContext {
     /// Whether the bot asked for members, which a guild's member list needs to be requested.
     members_intent: bool,
     member_request_limit: u64,
+    allowed: Option<AllowedGuilds>,
     shutdown: CancellationToken,
 }
 
@@ -680,6 +743,7 @@ pub async fn start_gateway(
         latency: config.latency,
         members_intent: config.intents.contains(Intents::GUILD_MEMBERS),
         member_request_limit: config.member_request_limit,
+        allowed: config.allowed_guilds,
         shutdown,
     });
     let tracker = TaskTracker::new();
@@ -870,6 +934,17 @@ fn guild_to_request(event: &Event, limit: u64) -> Option<Id<GuildMarker>> {
 }
 
 fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, event: &Event) {
+    // A guild that is not allowed is left at once and never reaches the cache or the modules.
+    if let (Some(allowed), Event::GuildCreate(created)) = (&context.allowed, event) {
+        let guild = match &**created {
+            GuildCreate::Available(guild) => guild.id,
+            GuildCreate::Unavailable(guild) => guild.id,
+        };
+        if !allowed.permits(guild) {
+            allowed.leaver.leave(guild);
+            return;
+        }
+    }
     let before = before(&context.cache, event);
     context.cache.update(event);
     if let Some(ready) = readiness_change(event) {
@@ -884,6 +959,13 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
     }
 
     for converted in crate::convert::events(event, &before) {
+        // What still arrives from a guild that is being left is dropped; its removal is not.
+        if let Some(allowed) = &context.allowed
+            && !matches!(converted, ModuleEvent::GuildRemoved { .. })
+            && !allowed.permits(converted.guild_id())
+        {
+            continue;
+        }
         if matches!(&converted, ModuleEvent::MemberJoined(member) if !member.user.bot)
             || matches!(&converted, ModuleEvent::MemberLeft { user, .. } if !user.bot)
         {
@@ -1220,6 +1302,59 @@ mod tests {
         assert_eq!(seen, ["available:1:a", "available:2:b"]);
     }
 
+    #[derive(Default)]
+    struct Leaves(Mutex<Vec<u64>>);
+
+    impl GuildLeaver for Leaves {
+        fn leave(&self, guild: GuildId) {
+            self.0.lock().unwrap().push(guild.get());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guild_that_is_not_allowed_is_left_and_the_others_are_not() {
+        use closure_core::testing::{MockApi, StaticSettings};
+
+        let dispatcher = Dispatcher::start(
+            Arc::new(ModuleRegistry::new(vec![]).unwrap()),
+            Arc::new(StaticSettings::new([])),
+            Arc::new(MockApi::default()),
+            Arc::new(closure_i18n::TranslatorBuilder::new().unwrap().build()),
+            crate::DispatcherConfig::default(),
+        )
+        .await
+        .unwrap();
+        let leaves = Arc::new(Leaves::default());
+        let queues = Arc::new(HookQueues::new(None));
+        let context = ShardContext {
+            cache: new_cache(),
+            dispatcher,
+            hooks: Arc::clone(&queues),
+            guild_hooks: Arc::new(NoHooks),
+            health: Arc::new(GatewayHealth::new(1)),
+            latency: Arc::default(),
+            members_intent: false,
+            member_request_limit: 0,
+            allowed: Some(AllowedGuilds::new(
+                HashSet::from([Id::new(1)]),
+                Arc::clone(&leaves) as Arc<dyn GuildLeaver>,
+            )),
+            shutdown: CancellationToken::new(),
+        };
+        let unavailable = |id: &str| {
+            let created: GuildCreate =
+                serde_json::from_value(json!({ "id": id, "unavailable": true })).unwrap();
+            Event::GuildCreate(Box::new(created))
+        };
+        let shard = ShardId::new(0, 1);
+        handle_event(&context, shard, None, &unavailable("2"));
+        handle_event(&context, shard, None, &unavailable("1"));
+        handle_event(&context, shard, None, &guild_with(1));
+        assert_eq!(*leaves.0.lock().unwrap(), [2]);
+        let arrivals = queues.lifecycle.take().jobs.len();
+        assert_eq!(arrivals, 1, "the allowed guild is served");
+    }
+
     #[tokio::test]
     async fn the_queue_closes_when_the_last_shard_context_is_dropped() {
         use closure_core::testing::{MockApi, StaticSettings};
@@ -1243,6 +1378,7 @@ mod tests {
             latency: Arc::default(),
             members_intent: false,
             member_request_limit: 0,
+            allowed: None,
             shutdown: CancellationToken::new(),
         });
         let second = Arc::clone(&context);
@@ -1588,6 +1724,7 @@ mod tests {
             latency: Arc::default(),
             member_request_limit: 0,
             member_spool: None,
+            allowed_guilds: None,
         };
         assert!(!format!("{config:?}").contains("super-secret"));
     }

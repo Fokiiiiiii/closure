@@ -37,6 +37,7 @@ const GUILD: u64 = 1;
 enum Behavior {
     Ok,
     Fail,
+    Misconfigured,
     Forbidden,
     Panic,
     Hang,
@@ -335,6 +336,7 @@ impl Module for Probe {
         match behavior {
             Behavior::Ok => Ok(()),
             Behavior::Fail => Err(ModuleError::other("boom")),
+            Behavior::Misconfigured => Err(ModuleError::Config("x is not a channel".into())),
             Behavior::Forbidden => Err(DiscordError::Forbidden("nope".into()).into()),
             Behavior::Panic => panic!("module bug"),
             Behavior::Hang => {
@@ -1269,11 +1271,12 @@ async fn commands_of_a_disabled_module_get_a_private_reply_in_the_invokers_langu
         replies,
         [
             (
-                "That feature is turned off on this server.".to_owned(),
+                "That feature is off on this server. A server admin can turn it on in the settings."
+                    .to_owned(),
                 true
             ),
             (
-                "この機能はこのサーバーでは無効になっています。".to_owned(),
+                "この機能はこのサーバーでは無効です。サーバー管理者が設定で有効にできます。".to_owned(),
                 true
             ),
         ]
@@ -1299,6 +1302,27 @@ async fn a_failing_command_tells_the_user_without_leaking_details() {
     let (text, ephemeral) = reply_text(&actions[0]);
     assert!(text.contains("Something went wrong while running that command"));
     assert!(!text.contains("boom"));
+    assert!(ephemeral);
+}
+
+#[tokio::test]
+async fn a_wrong_setting_tells_the_user_to_ask_an_admin_not_to_try_again() {
+    let module = Probe::with_command("warn", "warn");
+    module.set(Behavior::Misconfigured);
+    let h = harness(
+        &[(&module, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    h.dispatcher.dispatch(command("warn", Some(Locale::En)));
+    h.dispatcher.flush().await;
+
+    let actions = h.api.actions();
+    let (text, ephemeral) = reply_text(&actions[0]);
+    assert!(text.contains("not set up correctly"), "{text}");
+    assert!(!text.contains("not a channel"));
     assert!(ephemeral);
 }
 

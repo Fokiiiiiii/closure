@@ -126,7 +126,7 @@ Punish many members at once, after a preview
 Show what a ban, kick, timeout or unban of many members would do, and wait for Run
 
 - Japanese name: `開始`
-- Japanese description: 多数のメンバーの BAN・Kick・Timeout・BAN 解除の内容を見せ、実行ボタンを待ちます
+- Japanese description: 多数のメンバーの BAN・キック・タイムアウト・BAN 解除の内容を見せ、実行ボタンを待ちます
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
@@ -219,13 +219,13 @@ Record a case by hand, such as a note or something done elsewhere
 Change the reason of a case, or who it names as its moderator
 
 - Japanese name: `更新`
-- Japanese description: ケースの理由や、担当者として示す人を変えます
+- Japanese description: ケースの理由や、実行者として示す人を変えます
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `number` | 番号 | integer | yes | - | Number of the case |
 | `reason` | 理由 | string | no | max_length 512 | The new reason |
-| `moderator` | 担当者 | user | no | - | The moderator to name for the case |
+| `moderator` | 実行者 | user | no | - | The moderator to name for the case |
 
 #### `/case hide`
 
@@ -256,12 +256,12 @@ Delete a case for good
 Find cases by member, moderator, kind, source, state, time or a word of the reason
 
 - Japanese name: `検索`
-- Japanese description: メンバー・担当者・種類・発生元・状態・期間・理由の語でケースを探します
+- Japanese description: メンバー・実行者・種類・発生元・状態・期間・理由の語でケースを探します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | no | - | Cases against this member |
-| `moderator` | 担当者 | user | no | - | Cases made by this moderator |
+| `moderator` | 実行者 | user | no | - | Cases made by this moderator |
 | `kind` | 種類 | string | no | max_length 32 | The kind: warn, note, ban, kick, timeout, softban, ... |
 | `source` | 発生元 | string | no | max_length 16 | Where it came from: command, button, automod, manual, dashboard, script, appeal |
 | `state` | 状態 | string | no | max_length 16 | Where it stands: active, expired or revoked |
@@ -273,10 +273,10 @@ Find cases by member, moderator, kind, source, state, time or a word of the reas
 
 ### `/slowmode`
 
-Set channel slowmode; above 6 hours the bot keeps it by removing messages that come too soon
+Set channel slowmode. Over 6 hours, the bot enforces it by deleting early posts
 
 - Japanese name: `slowmode`
-- Japanese description: チャンネルの低速モードを設定。6 時間を超える場合は、早すぎる投稿を Bot が削除して実現します
+- Japanese description: チャンネルの低速モードを設定。6 時間超は、早すぎる投稿を Bot が削除して実現
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|

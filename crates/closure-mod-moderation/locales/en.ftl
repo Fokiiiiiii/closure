@@ -1,7 +1,7 @@
 
 module-description = Warn members, note about them, and look at and revoke the cases of a server.
 command-slowmode = slowmode
-    .description = Set channel slowmode; above 6 hours the bot keeps it by removing messages that come too soon
+    .description = Set channel slowmode. Over 6 hours, the bot enforces it by deleting early posts
 option-slowmode-seconds = seconds
     .description = Seconds from 0 to 21600
 option-slowmode-channel = channel
