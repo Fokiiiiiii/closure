@@ -1023,6 +1023,47 @@ async fn restriction_recovery_ignores_a_case_from_before_the_intent() {
 }
 
 #[tokio::test]
+async fn restriction_recovery_finds_its_case_behind_a_full_page_of_newer_cases() {
+    let _guard = TEST_LOCK.lock().await;
+    for mode in RESTRICTIONS {
+        let (_, ctx, api) = restriction_fixture(mode).await;
+        let expires = ctx.now() + 3600;
+        ctx.cases()
+            .create(closure_sdk::NewCase {
+                source: closure_sdk::CaseSource::Command,
+                kind: closure_sdk::CaseKind::new(mode.kind()).unwrap(),
+                target: Id::new(7),
+                moderator: ctx.bot().unwrap(),
+                reason: None,
+                expires_at: Some(expires),
+            })
+            .await
+            .unwrap();
+        // More cases than one page holds, all newer than the punishment's own case.
+        for _ in 0..30 {
+            ctx.cases()
+                .create(closure_sdk::NewCase {
+                    source: closure_sdk::CaseSource::Command,
+                    kind: closure_sdk::CaseKind::new("warn").unwrap(),
+                    target: Id::new(7),
+                    moderator: Id::new(8),
+                    reason: Some("newer".into()),
+                    expires_at: None,
+                })
+                .await
+                .unwrap();
+        }
+        put_restriction_intent(&ctx, mode, expires).await;
+        api.present.store(true, Ordering::SeqCst);
+        run_ban_recovery(&ctx).await;
+        assert!(
+            ctx.cases().get(32).await.unwrap().is_none(),
+            "the recovery does not record the punishment a second time"
+        );
+    }
+}
+
+#[tokio::test]
 async fn restriction_recovery_restores_stripped_roles_on_expiry() {
     let _guard = TEST_LOCK.lock().await;
     for mode in [RestrictionKind::RoleTimeout, RestrictionKind::RoleVoice] {

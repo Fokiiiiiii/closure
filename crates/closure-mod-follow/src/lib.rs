@@ -9,15 +9,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use closure_core::error::DiscordError;
+use closure_core::action::{Action, Outcome};
 use closure_core::event::{Event, EventKind, UserId};
 use closure_core::module::EventContext;
-use closure_core::permission::Actor;
+use closure_core::permission::{Actor, PermissionKey};
 use closure_core::subscription::Flow;
 use closure_sdk::{
     Args, Capability, Command, CommandArgs, CommandCx, CoreError, Intents, Level, Locale,
     ModuleBuilder, ModuleError, PermissionSpec, SdkModule, Subscription, UserError,
 };
+use twilight_model::guild::{Permissions, Role};
 
 const EN: &str = include_str!("../locales/en.ftl");
 const JA: &str = include_str!("../locales/ja.ftl");
@@ -27,8 +28,8 @@ const MAX_FOLLOWING: usize = 50;
 const NOTICE_WINDOW: Duration = Duration::from_secs(10);
 const MAX_NOTICE_ENTRIES: usize = 1024;
 
-/// The last time (unix seconds) each member's moderators were told, by member.
-type NoticeTable = Arc<Mutex<HashMap<u64, i64>>>;
+/// The last time (unix seconds) each member's moderators were told, by guild and member.
+type NoticeTable = Arc<Mutex<HashMap<(u64, u64), i64>>>;
 
 #[derive(CommandArgs)]
 struct Target {
@@ -139,14 +140,16 @@ async fn list(cx: CommandCx, (): ()) -> Result<(), UserError> {
         .await
 }
 
-/// Whether a notice about `member` was not sent within the last window; records the time if so.
-fn claim_notice(notices: &NoticeTable, member: u64, now: i64) -> bool {
+/// Whether a notice about `member` was not sent within the last window in this guild; records the
+/// time if so.
+fn claim_notice(notices: &NoticeTable, guild: u64, member: u64, now: i64) -> bool {
     let window = i64::try_from(NOTICE_WINDOW.as_secs()).unwrap_or(i64::MAX);
+    let key = (guild, member);
     let mut last = notices.lock().unwrap_or_else(PoisonError::into_inner);
-    if last.get(&member).is_some_and(|at| now - *at < window) {
+    if last.get(&key).is_some_and(|at| now - *at < window) {
         return false;
     }
-    if !last.contains_key(&member) && last.len() >= MAX_NOTICE_ENTRIES {
+    if !last.contains_key(&key) && last.len() >= MAX_NOTICE_ENTRIES {
         last.retain(|_, at| now - *at < window);
         if last.len() >= MAX_NOTICE_ENTRIES {
             let oldest = last.iter().min_by_key(|(_, at)| **at).map(|(id, _)| *id);
@@ -155,24 +158,36 @@ fn claim_notice(notices: &NoticeTable, member: u64, now: i64) -> bool {
             }
         }
     }
-    last.insert(member, now);
+    last.insert(key, now);
     true
 }
 
-/// Whether the moderator still holds `follow.use`; a moderator we cannot check is not told.
+/// Whether the moderator still may use `follow.use`, decided as the command decides it. `None`
+/// when the member cannot be read: nothing is taken away on a guess.
 async fn holds_follow_permission(
     ctx: &EventContext,
     moderator: UserId,
     owner: Option<UserId>,
-) -> Result<bool, DiscordError> {
-    let member = ctx.api.get_member(ctx.guild_id, moderator).await?;
+    roles: &[Role],
+) -> Option<bool> {
+    let member = ctx.api.get_member(ctx.guild_id, moderator).await.ok()?;
+    // Discord's Administrator permission comes from the member's roles and from @everyone.
+    let everyone = roles
+        .iter()
+        .find(|role| role.id.get() == ctx.guild_id.get());
+    let held = roles
+        .iter()
+        .filter(|role| member.roles.contains(&role.id))
+        .chain(everyone)
+        .fold(Permissions::empty(), |all, role| all | role.permissions);
     let actor = Actor {
         user: moderator,
         roles: member.roles,
-        administrator: false,
+        administrator: held.contains(Permissions::ADMINISTRATOR),
         owner: owner == Some(moderator),
     };
-    Ok(ctx.permissions().level_of(&actor) >= Level::MODERATOR)
+    let key = PermissionKey::new("follow.use").ok()?;
+    Some(ctx.permissions().check(&actor, &key).allowed)
 }
 
 /// Ends a follow of a moderator who lost the permission; the index goes first, as in `remove`.
@@ -210,7 +225,7 @@ async fn on_voice(
         .set_sample(&followers_of(member), MAX_FOLLOWERS)
         .await
         .map_err(|e| ModuleError::other(e.to_string()))?;
-    if moderators.is_empty() || !claim_notice(&notices, member, ctx.now()) {
+    if moderators.is_empty() || !claim_notice(&notices, ctx.guild_id.get(), member, ctx.now()) {
         return Ok(Flow::Continue);
     }
     let owner = match ctx.api.guild_owner().await {
@@ -220,15 +235,26 @@ async fn on_voice(
             return Ok(Flow::Continue);
         }
     };
+    // One read of the roles serves every follower of this event.
+    let Ok(Outcome::Roles(roles)) = ctx
+        .api
+        .execute(Action::ListRoles {
+            guild_id: ctx.guild_id,
+        })
+        .await
+    else {
+        tracing::warn!("could not read the roles; follow notices skipped");
+        return Ok(Flow::Continue);
+    };
     for moderator in moderators.into_iter().filter_map(UserId::new_checked) {
-        match holds_follow_permission(&ctx, moderator, owner).await {
-            Ok(true) => {}
-            Ok(false) => {
+        match holds_follow_permission(&ctx, moderator, owner, &roles).await {
+            Some(true) => {}
+            Some(false) => {
                 revoke(&ctx, member, moderator.get()).await;
                 continue;
             }
-            Err(error) => {
-                tracing::warn!(%error, "could not check a follower's permission; not told");
+            None => {
+                tracing::warn!("could not check a follower's permission; not told");
                 continue;
             }
         }

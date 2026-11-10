@@ -1,6 +1,6 @@
-config-guard-channel_deletes = 1つのアカウントが窓の間に削除できるチャンネルの数。超えると止められます。0: 監視しない。
-config-guard-role_deletes = 1つのアカウントが窓の間に削除できるロールの数。超えると止められます。0: 監視しない。
-config-guard-bans = 1つのアカウントが窓の間に BAN できるメンバーの数。超えると止められます。0: 監視しない。Bot 自身の BAN は数えません。
+config-guard-channel_deletes = 1つのアカウントが窓の間に削除したチャンネルが、設定した件数に達すると止められます。0: 監視しない。
+config-guard-role_deletes = 1つのアカウントが窓の間に削除したロールが、設定した件数に達すると止められます。0: 監視しない。
+config-guard-bans = 1つのアカウントが窓の間に BAN したメンバーが、設定した件数に達すると止められます。0: 監視しない。Bot 自身の BAN は数えません。
 config-guard-window = 変更を数える窓の長さ（例: 30s）。
 config-guard-response = 上限に達したアカウントへの対応。モデレーター権限を剥がしてスタッフに知らせる（Bot はキック）か、知らせるだけにするか。
 config-guard-alert_channel = スタッフに知らせるチャンネル。空にするとサーバーのログチャンネルです。

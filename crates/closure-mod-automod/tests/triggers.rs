@@ -266,6 +266,64 @@ async fn the_server_of_an_invite_is_asked_once_and_only_when_a_rule_needs_it() {
     );
 }
 
+#[tokio::test]
+async fn a_failed_invite_lookup_is_not_a_violation() {
+    let harness = deletes_when(json!({ "type": "invites" }));
+    harness
+        .api()
+        .set_invite("abc123", closure_sdk::GuildId::new(900));
+    harness
+        .api()
+        .fail_nth(1, closure_sdk::DiscordError::Transient("busy".into()));
+    post(&harness, custom(MEMBER, CHANNEL, "discord.gg/abc123")).await;
+    assert_eq!(
+        deletions(&harness),
+        0,
+        "an invite whose server Discord could not say is not a violation"
+    );
+}
+
+#[tokio::test]
+async fn invites_past_the_lookup_limit_are_not_violations() {
+    let own = [
+        ("c1", GUILD),
+        ("c2", GUILD),
+        ("c3", GUILD),
+        ("c4", GUILD),
+        ("c5", GUILD),
+        ("c6", GUILD),
+    ];
+    let content =
+        "discord.gg/c1 discord.gg/c2 discord.gg/c3 discord.gg/c4 discord.gg/c5 discord.gg/c6";
+    let (tripped, lookups) = trips_with_invites(json!({ "type": "invites" }), content, &own).await;
+    assert_eq!(lookups, 5, "only the first five codes are asked about");
+    assert!(
+        !tripped,
+        "a sixth invite that was not asked about is not a violation"
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_invite_trips_even_when_its_lookup_fails() {
+    let harness = deletes_when(json!({ "type": "invites", "block_codes": ["bad"] }));
+    harness
+        .api()
+        .fail_nth(1, closure_sdk::DiscordError::Transient("busy".into()));
+    post(&harness, custom(MEMBER, CHANNEL, "discord.gg/bad")).await;
+    assert_eq!(deletions(&harness), 1);
+}
+
+#[tokio::test]
+async fn without_a_server_rule_an_invite_is_judged_by_its_code_alone() {
+    let trigger = json!({ "type": "invites", "allow_own_server": false, "allow_codes": ["abc"] });
+    let (tripped, lookups) = trips_with_invites(trigger, "discord.gg/xyz", &[]).await;
+    assert!(
+        tripped,
+        "a code that is not allowed trips without any lookup"
+    );
+    assert_eq!(lookups, 0);
+}
+
 fn with_files(files: Vec<closure_sdk::AttachmentInfo>) -> closure_sdk::MessageInfo {
     let mut info = custom(MEMBER, CHANNEL, "");
     info.attachments = files;

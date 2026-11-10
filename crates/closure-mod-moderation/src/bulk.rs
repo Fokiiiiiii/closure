@@ -14,8 +14,8 @@ use closure_sdk::punish::{Moderator, Punisher};
 use closure_sdk::ui::{self, CustomId};
 use closure_sdk::{
     Args, ChannelId, CommandArgs, CommandCx, ComponentCx, Cx, EventContext, InteractionRef,
-    InteractionReply, JobCx, ModuleError, RoleId, TargetProblem, UserError, UserId,
-    check_target_of,
+    InteractionReply, JobCx, ModuleError, RoleId, ScheduleError, Scheduler, TargetProblem,
+    UserError, UserId, check_target_of,
 };
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Component;
@@ -35,6 +35,10 @@ const MAX_PROBLEMS: usize = 30;
 /// How often a change of state is tried again when somebody else changed the operation first.
 const TRANSITION_TRIES: usize = 5;
 const KEEP: Duration = Duration::from_hours(24 * 30);
+/// The operations that may run: a stop can leave one here without a job, and the guild's coming up takes it up.
+const RUNNING: &str = "bulk-running";
+/// How many operations the reconcile reads at a time.
+const WALK: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -472,15 +476,34 @@ fn describe(
     closure_sdk::embed::truncate(&text, crate::MAX_CHARS)
 }
 
-async fn waiting(ctx: &EventContext, id: i64) -> u32 {
-    ctx.store()
-        .set_count(&queue(id))
-        .await
-        .ok()
-        .and_then(|count| u32::try_from(count).ok())
-        .unwrap_or(0)
+/// The members still waiting. A count that cannot be read is an error: taken for zero, it would end
+/// the operation as done while members are still queued.
+fn left_of(count: Result<u64, closure_sdk::StorageError>) -> Result<u32, ModuleError> {
+    let count = count.map_err(|error| stored(&error))?;
+    u32::try_from(count)
+        .map_err(|_| ModuleError::other("the queue of a bulk operation is too large"))
 }
 
+async fn waiting(ctx: &EventContext, id: i64) -> Result<u32, ModuleError> {
+    left_of(ctx.store().set_count(&queue(id)).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::left_of;
+    use closure_sdk::StorageError;
+
+    #[test]
+    fn a_count_that_cannot_be_read_is_not_taken_for_zero_waiting() {
+        assert!(matches!(left_of(Ok(3)), Ok(3)));
+        assert!(left_of(Err(StorageError::Conflict)).is_err());
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flow: read the button, check who may press it, then move the operation"
+)]
 pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
     let data = cx.data();
     let Some((action, id)) = data
@@ -507,13 +530,16 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
             if needs_approval(&cx, &config, &operation).await {
                 return ask_for_approval(&cx, &config, id, &mut operation).await;
             }
+            mark_running(ctx, id).await.map_err(|e| user_error(&e))?;
             if !transition(ctx, id, &[State::Preview], State::Running)
                 .await
                 .map_err(|e| user_error(&e))?
             {
                 return Err(UserError::message("bulk-wrong-state"));
             }
-            schedule(&cx, id, Duration::ZERO).await?;
+            schedule(cx.scheduler(), id, Duration::ZERO, false)
+                .await
+                .map_err(|e| user_error(&e))?;
         }
         ("approve" | "deny", State::Awaiting) => {
             cx.require("moderation.approve").await?;
@@ -532,6 +558,9 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
             } else {
                 State::Cancelled
             };
+            if approved {
+                mark_running(ctx, id).await.map_err(|e| user_error(&e))?;
+            }
             // Only the first of two who decide at once decides.
             if !transition(ctx, id, &[State::Awaiting], to)
                 .await
@@ -541,7 +570,9 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
             }
             if approved {
                 // What it does is checked against the one who asked: their roles, then.
-                schedule(&cx, id, Duration::ZERO).await?;
+                schedule(cx.scheduler(), id, Duration::ZERO, false)
+                    .await
+                    .map_err(|e| user_error(&e))?;
             }
             return cx
                 .reply_private_t(
@@ -574,27 +605,45 @@ pub(crate) async fn press(cx: ComponentCx) -> Result<(), UserError> {
             if again == 0 {
                 return Err(UserError::message("bulk-nothing-to-retry"));
             }
+            mark_running(ctx, id).await.map_err(|e| user_error(&e))?;
             save(ctx, id, &operation)
                 .await
                 .map_err(|e| user_error(&e))?;
-            schedule(&cx, id, Duration::ZERO).await?;
+            schedule(cx.scheduler(), id, Duration::ZERO, false)
+                .await
+                .map_err(|e| user_error(&e))?;
         }
         _ => return Err(UserError::message("bulk-wrong-state")),
     }
-    let left = waiting(ctx, id).await;
+    let left = waiting(ctx, id).await.map_err(|e| user_error(&e))?;
     let say = |key: &str, args: &Args| cx.t(key, args);
     // The preview is private to its moderator; so is what comes of pressing a button on it.
     cx.reply_private(describe(&say, id, &operation, left)).await
 }
 
-async fn schedule(cx: &ComponentCx, id: i64, after: Duration) -> Result<(), UserError> {
-    cx.scheduler()
-        .job(JOB, &serde_json::json!({ "id": id }))
-        .map_err(|e| user_error(&e))?
-        .key(&format!("bulk-{id}"))
-        .after(after)
+/// Takes the job of the next batch of `id`; with `if_absent` a job already waiting for it is kept.
+async fn schedule(
+    scheduler: &Scheduler,
+    id: i64,
+    after: Duration,
+    if_absent: bool,
+) -> Result<(), ScheduleError> {
+    let job = scheduler
+        .job(JOB, &serde_json::json!({ "id": id }))?
+        .key(&format!("bulk-{id}"));
+    let job = if if_absent { job.if_absent() } else { job };
+    job.after(after).await.map(drop)
+}
+
+/// Puts `id` in the running set before it may run, so a stop before its job is taken is found again.
+async fn mark_running(ctx: &EventContext, id: i64) -> Result<(), ModuleError> {
+    let member =
+        u64::try_from(id).map_err(|_| ModuleError::other("the bulk number is not positive"))?;
+    ctx.store()
+        .set_add(RUNNING, member)
         .await
-        .map_err(|e| user_error(&e))
+        .map(drop)
+        .map_err(|e| stored(&e))
 }
 
 async fn retry_failed(
@@ -639,7 +688,9 @@ pub(crate) async fn status(cx: CommandCx, args: OfOperation) -> Result<(), UserE
     let Some(operation) = load(ctx, args.number).await.map_err(|e| user_error(&e))? else {
         return Err(UserError::message("bulk-not-found"));
     };
-    let left = waiting(ctx, args.number).await;
+    let left = waiting(ctx, args.number)
+        .await
+        .map_err(|e| user_error(&e))?;
     let say = |key: &str, args: &Args| cx.t(key, args);
     cx.reply_private(describe(&say, args.number, &operation, left))
         .await
@@ -690,14 +741,13 @@ pub(crate) async fn retry(cx: CommandCx, args: OfOperation) -> Result<(), UserEr
     if again == 0 {
         return Err(UserError::message("bulk-nothing-to-retry"));
     }
+    mark_running(ctx, args.number)
+        .await
+        .map_err(|e| user_error(&e))?;
     save(ctx, args.number, &operation)
         .await
         .map_err(|e| user_error(&e))?;
-    cx.scheduler()
-        .job(JOB, &serde_json::json!({ "id": args.number }))
-        .map_err(|e| user_error(&e))?
-        .key(&format!("bulk-{}", args.number))
-        .after(Duration::ZERO)
+    schedule(cx.scheduler(), args.number, Duration::ZERO, false)
         .await
         .map_err(|e| user_error(&e))?;
     cx.say_private_t(
@@ -708,6 +758,145 @@ pub(crate) async fn retry(cx: CommandCx, args: OfOperation) -> Result<(), UserEr
             .with("count", again as u64),
     )
     .await
+}
+
+/// What a member's punishment came to, written before it is made so that a stop after it is finished
+/// from here and not made again.
+#[derive(Debug, Serialize, Deserialize)]
+struct Attempt {
+    /// When a timed punishment ends (unix seconds), fixed by the first try.
+    ends: Option<i64>,
+    done: bool,
+    /// The case of the punishment, once it is recorded.
+    case: Option<i64>,
+}
+
+fn attempt_key(id: i64, user: u64) -> String {
+    format!("bulk-done:{id}:{user}")
+}
+
+/// Does the action on one member once. A member done before keeps its receipt, and a timed
+/// punishment that ran out during a stop is not made again.
+async fn act_on(
+    ctx: &EventContext,
+    punisher: &Punisher<'_>,
+    actor: &Actor,
+    operation: &Operation,
+    id: i64,
+    user: UserId,
+) -> Result<Result<(), UserError>, ModuleError> {
+    let key = attempt_key(id, user.get());
+    let earlier: Option<Attempt> = ctx.store().get(&key).await.map_err(|e| stored(&e))?;
+    if earlier.as_ref().is_some_and(|attempt| attempt.done) {
+        return Ok(Ok(()));
+    }
+    if operation.what != What::Unban
+        && let Err(error) = check_target_of(ctx, actor, user).await
+    {
+        return Ok(Err(error));
+    }
+    let now = ctx.now();
+    let (ends, resumed) = if let Some(attempt) = earlier {
+        (attempt.ends, true)
+    } else {
+        let ends = operation
+            .seconds
+            .map(|seconds| now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)));
+        let attempt = Attempt {
+            ends,
+            done: false,
+            case: None,
+        };
+        ctx.store()
+            .set_for(&key, &attempt, KEEP)
+            .await
+            .map_err(|e| stored(&e))?;
+        (ends, false)
+    };
+    if resumed && ends.is_some_and(|ends| ends <= now) {
+        let attempt = Attempt {
+            ends,
+            done: true,
+            case: None,
+        };
+        ctx.store()
+            .set_for(&key, &attempt, KEEP)
+            .await
+            .map_err(|e| stored(&e))?;
+        return Ok(Ok(()));
+    }
+    let left =
+        ends.map(|ends| Duration::from_secs(u64::try_from(ends.saturating_sub(now)).unwrap_or(0)));
+    let reason = Some(operation.reason.clone());
+    let made = match operation.what {
+        What::Ban => punisher
+            .ban(
+                user,
+                left,
+                operation.delete_days.saturating_mul(86_400),
+                reason,
+            )
+            .await
+            .map(|done| done.case.number),
+        What::Kick => punisher
+            .kick(user, reason)
+            .await
+            .map(|done| done.case.number),
+        What::Timeout => punisher
+            .timeout(user, left.unwrap_or_default(), reason)
+            .await
+            .map(|done| done.case.number),
+        What::Unban => punisher.unban(user, reason).await.map(|case| case.number),
+    };
+    match made {
+        Ok(number) => {
+            let attempt = Attempt {
+                ends,
+                done: true,
+                case: Some(number),
+            };
+            ctx.store()
+                .set_for(&key, &attempt, KEEP)
+                .await
+                .map_err(|e| stored(&e))?;
+            Ok(Ok(()))
+        }
+        Err(error) => Ok(Err(error)),
+    }
+}
+
+/// Takes up the operations a stop left running: one still running gets its next batch (a job already
+/// waiting for it is kept), one no longer running leaves the set.
+pub(crate) async fn reconcile(ctx: &EventContext) -> Result<(), ModuleError> {
+    let mut after = 0_u64;
+    loop {
+        let page = ctx
+            .store()
+            .set_after(RUNNING, after, WALK)
+            .await
+            .map_err(|e| stored(&e))?;
+        let Some(last) = page.last().copied() else {
+            return Ok(());
+        };
+        after = last;
+        for member in page {
+            let id = i64::try_from(member)
+                .map_err(|_| ModuleError::other("the bulk number is too large"))?;
+            if load(ctx, id)
+                .await?
+                .is_some_and(|operation| operation.state == State::Running)
+            {
+                schedule(ctx.scheduler(), id, Duration::ZERO, true)
+                    .await
+                    .map_err(|e| ModuleError::other(e.to_string()))?;
+            } else {
+                ctx.store()
+                    .set_remove(RUNNING, member)
+                    .await
+                    .map_err(|e| stored(&e))?;
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -740,9 +929,8 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
         name: operation.by_name.clone(),
     };
     let punisher = Punisher::new(ctx, moderator, settings);
-    // A member leaves the queue only once the action on them has an outcome, so a stop in the middle
-    // leaves the rest, and the one being done, to be done again (the punishments finish themselves
-    // from their intents, so doing one twice is safe).
+    // A member leaves the queue only once the action on them has an outcome; the receipt of a member
+    // already done keeps a stop in between from punishing them twice.
     let batch = ctx
         .store()
         .set_sample(&queue(id), BATCH)
@@ -758,36 +946,7 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
             break;
         }
         let user = UserId::new(member);
-        let checked = if operation.what == What::Unban {
-            Ok(())
-        } else {
-            check_target_of(ctx, &actor, user).await
-        };
-        let reason = Some(operation.reason.clone());
-        let result = match checked {
-            Err(error) => Err(error),
-            Ok(()) => match operation.what {
-                What::Ban => punisher
-                    .ban(
-                        user,
-                        operation.seconds.map(Duration::from_secs),
-                        operation.delete_days.saturating_mul(86_400),
-                        reason,
-                    )
-                    .await
-                    .map(drop),
-                What::Kick => punisher.kick(user, reason).await.map(drop),
-                What::Timeout => punisher
-                    .timeout(
-                        user,
-                        Duration::from_secs(operation.seconds.unwrap_or(0)),
-                        reason,
-                    )
-                    .await
-                    .map(drop),
-                What::Unban => punisher.unban(user, reason).await.map(drop),
-            },
-        };
+        let result = act_on(ctx, &punisher, &actor, &operation, id, user).await?;
         match result {
             Ok(()) => {}
             Err(error) => {
@@ -818,7 +977,7 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
             .await
             .map_err(|e| stored(&e))?;
     }
-    let left = waiting(ctx, id).await;
+    let left = waiting(ctx, id).await?;
     // What was done is what is neither waiting, nor failed, nor left out: counted from the queue, so
     // a stop that lost a count of this job does not leave the total and the result disagreeing.
     operation.done = operation
@@ -893,7 +1052,7 @@ async fn ask_for_approval(
     save(cx.ctx(), id, operation)
         .await
         .map_err(|e| user_error(&e))?;
-    let left = waiting(cx.ctx(), id).await;
+    let left = waiting(cx.ctx(), id).await.map_err(|e| user_error(&e))?;
     let say = |key: &str, args: &Args| cx.t(key, args);
     let mut text = describe(&say, id, operation, left);
     text.push('\n');

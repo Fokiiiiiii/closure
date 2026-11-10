@@ -79,6 +79,10 @@ pub struct Args {
     #[arg(long, env = "ALLOWED_GUILDS", value_delimiter = ',')]
     pub allowed_guilds: Vec<NonZeroU64>,
 
+    /// Lets a start go on when `ALLOWED_GUILDS` matches none of the servers the bot is in, which leaves all of them.
+    #[arg(long, env = "ALLOWED_GUILDS_CONFIRM")]
+    pub confirm_leave_all: bool,
+
     /// Do not publish slash commands at start-up.
     #[arg(long)]
     pub skip_command_registration: bool,

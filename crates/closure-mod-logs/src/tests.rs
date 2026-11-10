@@ -2471,6 +2471,98 @@ async fn a_batch_a_stopped_flush_was_posting_is_posted_again_and_new_entries_dur
     );
 }
 
+#[tokio::test]
+async fn a_failed_post_of_long_japanese_deletions_is_kept_for_a_retry() {
+    let harness = harness();
+    harness.set_guild_locale(Locale::Ja);
+    // The first posts go out at once; the ones after them are gathered into one batch.
+    for user in 0..6 {
+        harness.emit(join(100 + user, false)).await.unwrap();
+    }
+    for id in 20..26 {
+        harness
+            .seed_message(saved(id, &"明".repeat(850), Vec::new()))
+            .await
+            .unwrap();
+        harness.emit(deleted(id)).await.unwrap();
+    }
+    harness
+        .api()
+        .fail_with(DiscordError::Transient("offline".into()));
+
+    harness.advance(Duration::from_secs(6));
+    let ran = harness.run_due_jobs().await;
+
+    assert_eq!(ran.len(), 1, "{ran:?}");
+    assert!(ran[0].is_err(), "{ran:?}");
+    // The flush job waits again after its failure; the six embeds do not fit one retry job, so
+    // they are kept by at least two.
+    assert!(harness.jobs() >= 3, "jobs: {}", harness.jobs());
+}
+
+#[test]
+fn a_retry_is_split_into_posts_that_each_fit_a_job_and_keeps_every_entry() {
+    let entries = (0..6)
+        .map(|_| RetryEntry {
+            embed: EmbedBuilder::new()
+                .title("deleted")
+                .field("text", "明".repeat(1000), false)
+                .build()
+                .unwrap(),
+            files: Vec::new(),
+        })
+        .collect();
+    let post = RetryPost {
+        channel: Some(Id::new(LOG)),
+        webhook: None,
+        expires_at: i64::MAX,
+        entries,
+    };
+
+    let posts = fit_retry_posts(post).expect("each entry fits a job of its own");
+
+    assert!(posts.len() >= 2, "six such entries do not fit one job");
+    assert!(posts.iter().all(fits_job));
+    assert_eq!(
+        posts.iter().map(|post| post.entries.len()).sum::<usize>(),
+        6
+    );
+}
+
+#[test]
+fn an_entry_too_big_for_any_job_is_not_planned() {
+    // The embed limit counts characters: six fields of 1000 would be too many, these are not.
+    let embed = [1000, 1000, 1000, 1000, 1000, 900]
+        .into_iter()
+        .enumerate()
+        .fold(EmbedBuilder::new(), |card, (index, chars)| {
+            card.field(format!("part {index}"), "明".repeat(chars), false)
+        })
+        .build()
+        .unwrap();
+    let post = RetryPost {
+        channel: Some(Id::new(LOG)),
+        webhook: None,
+        expires_at: i64::MAX,
+        entries: vec![RetryEntry {
+            embed,
+            files: Vec::new(),
+        }],
+    };
+
+    assert!(fit_retry_posts(post).is_none());
+}
+
+#[test]
+fn only_a_post_that_nothing_keeps_leaves_its_batch_unsettled() {
+    let error = || ModuleError::other("post failed");
+
+    assert!(Delivery::Delivered.is_settled());
+    assert!(Delivery::Refused(error()).is_settled());
+    assert!(Delivery::RetryPersisted(error()).is_settled());
+    assert!(!Delivery::NotPersisted(error()).is_settled());
+}
+
 fn thread_in(id: u64, parent: u64) -> twilight_model::channel::Channel {
     serde_json::from_value(json!({
         "id": id.to_string(), "type": 11, "guild_id": GUILD.to_string(),

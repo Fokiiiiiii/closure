@@ -72,56 +72,135 @@ async fn schedule_retry(scheduler: &Scheduler, post: &RetryPost) -> Result<(), S
     scheduler.job("retry_log", post)?.after(RETRY_DELAY).await
 }
 
+/// What became of a post of log entries. A batch may leave its store only once it is settled.
+enum Delivery {
+    /// Discord took the entries.
+    Delivered,
+    /// Discord refused them, which a retry does not change; the error goes to the caller.
+    Refused(ModuleError),
+    /// The post failed, and a retry job holds the entries.
+    RetryPersisted(ModuleError),
+    /// The post failed, and no retry job could hold the entries; they must stay where they are.
+    NotPersisted(ModuleError),
+}
+
+impl Delivery {
+    fn is_settled(&self) -> bool {
+        !matches!(self, Self::NotPersisted(_))
+    }
+
+    fn into_result(self) -> Result<(), ModuleError> {
+        match self {
+            Self::Delivered => Ok(()),
+            Self::Refused(error) | Self::RetryPersisted(error) | Self::NotPersisted(error) => {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Splits a retry into posts that each fit a job. The files go first, as they are the big part;
+/// None when one entry does not fit even without them.
+fn fit_retry_posts(post: RetryPost) -> Option<Vec<RetryPost>> {
+    let mut fitted = Vec::new();
+    let mut pending = vec![post];
+    while let Some(post) = pending.pop() {
+        if fits_job(&post) {
+            fitted.push(post);
+            continue;
+        }
+        let lean = without_files(&post);
+        if fits_job(&lean) {
+            fitted.push(lean);
+            continue;
+        }
+        if post.entries.len() < 2 {
+            return None;
+        }
+        let RetryPost {
+            channel,
+            webhook,
+            expires_at,
+            mut entries,
+        } = post;
+        let tail = entries.split_off(entries.len() / 2);
+        pending.push(RetryPost {
+            channel,
+            webhook: webhook.clone(),
+            expires_at,
+            entries: tail,
+        });
+        pending.push(RetryPost {
+            channel,
+            webhook,
+            expires_at,
+            entries,
+        });
+    }
+    Some(fitted)
+}
+
+fn fits_job(post: &RetryPost) -> bool {
+    serde_json::to_vec(post)
+        .is_ok_and(|bytes| bytes.len() <= closure_core::schedule::MAX_PAYLOAD_BYTES)
+}
+
+fn without_files(post: &RetryPost) -> RetryPost {
+    RetryPost {
+        channel: post.channel,
+        webhook: post.webhook.clone(),
+        expires_at: post.expires_at,
+        entries: post
+            .entries
+            .iter()
+            .map(|entry| RetryEntry {
+                embed: entry.embed.clone(),
+                files: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
 async fn post_or_retry(
     ctx: &EventContext,
     destination: Destination,
     entries: Vec<LogEntry>,
-) -> Result<(), ModuleError> {
+) -> Delivery {
     let (channel, webhook) = match &destination {
         Destination::Channel(channel) => (Some(*channel), None),
         Destination::Webhook { name, fallback } => (*fallback, Some(name.clone())),
     };
-    let retry = RetryPost {
+    let retry_entries: Vec<RetryEntry> = entries
+        .iter()
+        .map(|entry| RetryEntry {
+            embed: entry.embed.clone(),
+            files: entry.files.clone(),
+        })
+        .collect();
+    let error = match files::post(ctx, &destination, entries).await {
+        Ok(()) => return Delivery::Delivered,
+        Err(error) => error,
+    };
+    if !retryable(&error) {
+        return Delivery::Refused(error);
+    }
+    let post = RetryPost {
         channel,
         webhook,
         expires_at: ctx.now().saturating_add(RETRY_LIFETIME),
-        entries: entries
-            .iter()
-            .map(|entry| RetryEntry {
-                embed: entry.embed.clone(),
-                files: entry.files.clone(),
-            })
-            .collect(),
+        entries: retry_entries,
     };
-    if let Err(error) = files::post(ctx, &destination, entries).await {
-        if retryable(&error) {
-            // The files of an entry can be too big for the job that keeps it: the entry is kept
-            // without them, and is delivered later, instead of not at all.
-            let mut scheduled = schedule_retry(ctx.scheduler(), &retry).await;
-            if matches!(
-                scheduled,
-                Err(ScheduleError::TooLarge { .. } | ScheduleError::Payload(_))
-            ) {
-                let lean = RetryPost {
-                    entries: retry
-                        .entries
-                        .iter()
-                        .map(|entry| RetryEntry {
-                            embed: entry.embed.clone(),
-                            files: Vec::new(),
-                        })
-                        .collect(),
-                    ..retry
-                };
-                scheduled = schedule_retry(ctx.scheduler(), &lean).await;
-            }
-            if let Err(error) = scheduled {
-                tracing::warn!(?error, "could not schedule log retry");
-            }
+    let Some(posts) = fit_retry_posts(post) else {
+        tracing::warn!("a log entry is too large to be kept for a retry");
+        return Delivery::NotPersisted(error);
+    };
+    for post in &posts {
+        if let Err(schedule_error) = schedule_retry(ctx.scheduler(), post).await {
+            tracing::warn!(?schedule_error, "could not schedule log retry");
+            return Delivery::NotPersisted(error);
         }
-        return Err(error);
     }
-    Ok(())
+    Delivery::RetryPersisted(error)
 }
 
 async fn retry_post(cx: JobCx) -> Result<(), ModuleError> {

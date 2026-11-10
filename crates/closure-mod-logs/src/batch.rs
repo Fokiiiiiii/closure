@@ -84,12 +84,14 @@ pub async fn submit(
 ) -> Result<(), ModuleError> {
     if entries.is_empty() || entries.iter().any(|entry| !entry.files.is_empty()) || !busy(ctx).await
     {
-        return post_or_retry(ctx, destination, entries).await;
+        return post_or_retry(ctx, destination, entries).await.into_result();
     }
     let embeds: Vec<Embed> = entries.into_iter().map(|entry| entry.embed).collect();
     match gather(ctx, &destination, embeds).await {
         Gathered::Kept => Ok(()),
-        Gathered::Post(embeds) => post_or_retry(ctx, destination, entries_of(embeds)).await,
+        Gathered::Post(embeds) => post_or_retry(ctx, destination, entries_of(embeds))
+            .await
+            .into_result(),
     }
 }
 
@@ -201,8 +203,12 @@ pub async fn flush(cx: JobCx) -> Result<(), ModuleError> {
             Err(StorageError::Conflict) => continue,
             Err(error) => return Err(stored(&error)),
         }
-        // A post that failed is kept by the retry job already, so it leaves the batch either way.
-        let posted = post_or_retry(ctx, destination.clone(), entries_of(posting)).await;
+        let delivery = post_or_retry(ctx, destination.clone(), entries_of(posting)).await;
+        // Entries that nothing keeps stay claimed, so that the next run posts them again.
+        if !delivery.is_settled() {
+            return delivery.into_result();
+        }
+        let posted = delivery.into_result();
         let left = acknowledge(ctx, &key).await?;
         // What came while this was posted goes out in the same run.
         if posted.is_err() || left == 0 {

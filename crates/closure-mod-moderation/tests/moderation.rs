@@ -5944,3 +5944,84 @@ async fn a_warning_hidden_from_the_lists_is_not_shown_to_the_member_in_mywarning
         "the staff still see it: {staff:?}"
     );
 }
+
+#[tokio::test]
+async fn a_run_whose_job_was_lost_is_taken_up_again_when_the_guild_comes_back() {
+    let harness = harness();
+    harness.api().add_channel(Id::new(5), Some(Id::new(GUILD)));
+    harness
+        .api()
+        .set_not_a_member(Id::new(GUILD), Id::new(2400));
+    harness.invoke(bulk_start("ban", "2400")).await.unwrap();
+    let press = Click::new("moderation:bulk:*:run:1")
+        .user(MODERATOR)
+        .roles([ADMIN_ROLE]);
+    harness.click(press).await.unwrap();
+    // A stop after the operation became running and before its job was taken.
+    assert!(harness.scheduler().cancel("bulk-1").await.unwrap());
+    harness.config_changed().await.unwrap();
+    harness.run_due_jobs().await;
+    assert_eq!(bans_of(&harness), vec![2400], "the run is resumed");
+}
+
+#[tokio::test]
+async fn a_member_punished_before_a_stop_is_not_punished_again_when_the_batch_comes_back() {
+    let harness = harness();
+    harness.api().add_channel(Id::new(5), Some(Id::new(GUILD)));
+    harness
+        .api()
+        .set_not_a_member(Id::new(GUILD), Id::new(2500));
+    harness.invoke(bulk_start("ban", "2500")).await.unwrap();
+    let press = Click::new("moderation:bulk:*:run:1")
+        .user(MODERATOR)
+        .roles([ADMIN_ROLE]);
+    harness.click(press).await.unwrap();
+    harness.run_due_jobs().await;
+    assert_eq!(bans_of(&harness), vec![2500]);
+    // The stop: the punishment and its case are done, but the member is still in the queue.
+    harness.store().set_add("bulk-1", 2500_u64).await.unwrap();
+    let mut operation: serde_json::Value = harness.store().get("bulk:1").await.unwrap().unwrap();
+    operation["state"] = json!("running");
+    harness
+        .store()
+        .set_for("bulk:1", &operation, Duration::from_secs(30 * DAY))
+        .await
+        .unwrap();
+    harness
+        .scheduler()
+        .job("bulk", &json!({ "id": 1 }))
+        .unwrap()
+        .key("bulk-1")
+        .after(Duration::ZERO)
+        .await
+        .unwrap();
+    harness.run_due_jobs().await;
+    assert_eq!(bans_of(&harness), vec![2500], "no second ban");
+    assert!(!harness.store().set_has("bulk-1", 2500_u64).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_hidden_newest_warning_does_not_hide_an_older_one_from_mywarnings() {
+    let harness = harness();
+    harness.set_config(json!({ "escalation_enabled": false }));
+    harness
+        .invoke(warn(MEMBER, Some("first words")))
+        .await
+        .unwrap();
+    for number in 2..=11_i64 {
+        harness.advance(Duration::from_secs(3));
+        let reason = format!("hidden {number}");
+        harness.invoke(warn(MEMBER, Some(&reason))).await.unwrap();
+        harness
+            .invoke(by_admin(
+                case_cmd("hide").option("number", CommandOptionValue::Integer(number)),
+            ))
+            .await
+            .unwrap();
+    }
+    let own = harness
+        .invoke(Invocation::new("mywarnings").user(MEMBER))
+        .await
+        .unwrap();
+    assert!(text(&own).contains("first words"), "{own:?}");
+}

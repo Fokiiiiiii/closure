@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use closure_core::action::Action;
 use closure_core::event::{ChannelId, CommandOptionValue, Event, GuildId, UserId, UserInfo};
+use closure_core::permission::PermissionKey;
 use closure_sdk::Level;
 use closure_sdk::testing::{Harness, Invocation};
 use twilight_model::id::Id;
@@ -281,7 +282,86 @@ async fn the_list_shows_who_a_moderator_follows() {
 fn the_notice_table_is_bounded() {
     let notices = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     for member in 0..(MAX_NOTICE_ENTRIES as u64 + 500) {
-        assert!(claim_notice(&notices, member, 1_000));
+        assert!(claim_notice(&notices, 1, member, 1_000));
     }
     assert!(notices.lock().unwrap().len() <= MAX_NOTICE_ENTRIES);
+}
+
+#[test]
+fn a_member_told_about_in_one_guild_is_still_told_about_in_another() {
+    let notices = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    assert!(claim_notice(&notices, 1, MEMBER, 1_000));
+    assert!(claim_notice(&notices, 2, MEMBER, 1_000));
+    assert!(!claim_notice(&notices, 1, MEMBER, 1_000));
+}
+
+fn admin_role(id: u64) -> twilight_model::guild::Role {
+    serde_json::from_value(serde_json::json!({
+        "id": id.to_string(), "name": "admins", "color": 0, "colors": {
+            "primary_color": 0, "secondary_color": null, "tertiary_color": null },
+        "hoist": false, "managed": false, "mentionable": false, "permissions": "8",
+        "position": 3, "flags": 0,
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_moderator_allowed_by_name_below_the_level_keeps_the_follow() {
+    const ALLOWED: u64 = 30;
+    let harness = harness();
+    harness.permissions(|permissions| {
+        permissions
+            .keys
+            .entry(PermissionKey::new("follow.use").unwrap())
+            .or_default()
+            .allow_users
+            .push(Id::new(ALLOWED));
+    });
+    declare(&harness, ALLOWED, &[]);
+    harness.invoke(adds(ALLOWED, MEMBER)).await.unwrap();
+    harness
+        .emit(voice(MEMBER, false, None, Some(LOBBY)))
+        .await
+        .unwrap();
+    let messages = told(&harness);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].0, ALLOWED);
+    assert!(
+        harness
+            .store()
+            .set_has(&format!("follow:{MEMBER}"), ALLOWED)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn an_administrator_keeps_the_follow_they_made() {
+    const ADMIN: u64 = 31;
+    const ADMIN_ROLE: u64 = 310;
+    let harness = harness();
+    harness
+        .api()
+        .set_roles(GuildId::new(1), vec![admin_role(ADMIN_ROLE)]);
+    declare(&harness, ADMIN, &[ADMIN_ROLE]);
+    let made = Invocation::new("follow")
+        .subcommand("add")
+        .user(ADMIN)
+        .administrator()
+        .option("user", CommandOptionValue::User(Id::new(MEMBER)));
+    harness.invoke(made).await.unwrap();
+    harness
+        .emit(voice(MEMBER, false, None, Some(LOBBY)))
+        .await
+        .unwrap();
+    let messages = told(&harness);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].0, ADMIN);
+    assert!(
+        harness
+            .store()
+            .set_has(&format!("follow:{MEMBER}"), ADMIN)
+            .await
+            .unwrap()
+    );
 }

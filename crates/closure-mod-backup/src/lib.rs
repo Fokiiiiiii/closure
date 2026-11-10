@@ -333,6 +333,8 @@ async fn restore_roles(
             .await
             .map_err(|e| stored(&e))?
         else {
+            // The backup names this role but its row is gone: counted, not skipped.
+            done.failed += 1;
             continue;
         };
         let created = ctx
@@ -387,13 +389,15 @@ async fn restore_channels(
             now_channel.insert(*id, *now);
             continue;
         }
-        if let Some(saved) = store
+        let Some(saved) = store
             .get::<SavedChannel>(&channel_key(meta.generation, *id))
             .await
             .map_err(|e| stored(&e))?
-        {
-            missing.push(saved);
-        }
+        else {
+            done.failed += 1;
+            continue;
+        };
+        missing.push(saved);
     }
     // Categories first, so that what they hold can be put in them.
     missing.sort_by_key(|channel| channel.kind != ChannelKind::Category);
@@ -402,6 +406,13 @@ async fn restore_channels(
         // restore, so that it is not made at the top and left there.
         if saved.parent.is_some_and(|parent| {
             meta.channels.contains(&parent) && !now_channel.contains_key(&parent)
+        }) {
+            done.failed += 1;
+            continue;
+        }
+        // Made without its overwrite, the channel would keep it missing, so it waits.
+        if saved.overwrites.iter().any(|overwrite| {
+            meta.roles.contains(&overwrite.role) && !now_role.contains_key(&overwrite.role)
         }) {
             done.failed += 1;
             continue;
@@ -463,7 +474,12 @@ async fn restore_channels(
 /// not be made keeps its record under its old id, to be made at the next restore. The new records
 /// are written first and the old ones go last, so that a stop at any point leaves a backup that
 /// is whole.
-async fn rebase(ctx: &EventContext, meta: &Meta, done: &Restored) -> Result<(), ModuleError> {
+async fn rebase(
+    ctx: &EventContext,
+    meta: &Meta,
+    revision: i64,
+    done: &Restored,
+) -> Result<(), ModuleError> {
     let store = ctx.store();
     let swap = |id: u64, made: &HashMap<u64, u64>| made.get(&id).copied().unwrap_or(id);
     let mut stale = Vec::new();
@@ -521,7 +537,10 @@ async fn rebase(ctx: &EventContext, meta: &Meta, done: &Restored) -> Result<(), 
             .map(|id| swap(*id, &done.made_channels))
             .collect(),
     };
-    store.set(META, &next).await.map_err(|e| stored(&e))?;
+    store
+        .replace(META, &next, Expect::Revision(revision), None)
+        .await
+        .map_err(|e| stored(&e))?;
     for key in stale {
         store.delete(&key).await.map_err(|e| stored(&e))?;
     }
@@ -610,20 +629,16 @@ async fn info(cx: CommandCx, (): ()) -> Result<(), UserError> {
 }
 
 async fn restore_command(cx: CommandCx, (): ()) -> Result<(), UserError> {
-    let Some(meta) = last(cx.ctx()).await.map_err(|error| failure(&error))? else {
-        return cx.reply_private_t("backup-none", &Args::new()).await;
-    };
     cx.defer(true).await?;
     if !lock(cx.ctx()).await.map_err(|error| failure(&error))? {
         return cx.reply_private_t("backup-busy", &Args::new()).await;
     }
     let reason = cx.t("backup-reason", &Args::new());
-    let outcome = match restore(cx.ctx(), &meta, &reason).await {
-        Ok(done) => rebase(cx.ctx(), &meta, &done).await.map(|()| done),
-        Err(error) => Err(error),
-    };
+    let outcome = restore_under_lock(cx.ctx(), &reason).await;
     unlock(cx.ctx()).await;
-    let done = outcome.map_err(|error| failure(&error))?;
+    let Some(done) = outcome.map_err(|error| failure(&error))? else {
+        return cx.reply_private_t("backup-none", &Args::new()).await;
+    };
     cx.reply_private_t(
         "backup-restored",
         &Args::new()
@@ -632,6 +647,23 @@ async fn restore_command(cx: CommandCx, (): ()) -> Result<(), UserError> {
             .with("failed", number(done.failed)),
     )
     .await
+}
+
+/// The lock is held, so no save can replace the backup between the read and the rebase.
+async fn restore_under_lock(
+    ctx: &EventContext,
+    reason: &str,
+) -> Result<Option<Restored>, ModuleError> {
+    let Some(entry) = ctx.store().entry(META).await.map_err(|e| stored(&e))? else {
+        return Ok(None);
+    };
+    let meta: Meta = serde_json::from_value(entry.value)
+        .map_err(|error| ModuleError::other(error.to_string()))?;
+    #[cfg(test)]
+    race::pause().await;
+    let done = restore(ctx, &meta, reason).await?;
+    rebase(ctx, &meta, entry.revision, &done).await?;
+    Ok(Some(done))
 }
 
 /// The server came up, or its settings changed: the daily backup is set going, if it is not already.
@@ -719,3 +751,24 @@ pub fn module() -> Result<SdkModule, CoreError> {
 
 #[cfg(test)]
 mod tests;
+
+/// Lets a test run a save after the restore has read the backup; thread-local, one test per thread.
+#[cfg(test)]
+mod race {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    use tokio::sync::Notify;
+
+    thread_local! {
+        pub(crate) static PAUSE: RefCell<Option<(Arc<Notify>, Arc<Notify>)>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) async fn pause() {
+        let hook = PAUSE.with(|pause| pause.borrow_mut().take());
+        if let Some((reached, go)) = hook {
+            reached.notify_one();
+            go.notified().await;
+        }
+    }
+}

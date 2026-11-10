@@ -5,10 +5,16 @@ FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --no-create-home closure
+    && useradd --system --uid 10001 --no-create-home closure \
+    && mkdir /data && chown closure:closure /data
 
 ARG TARGETARCH
 COPY context/${TARGETARCH}/closure /usr/local/bin/closure
+
+# The spool outlives the container, so it lives on a volume.
+WORKDIR /data
+ENV HOOK_SPOOL_DIR=/data/spool
+VOLUME /data
 
 USER closure
 # The admin API listens on 127.0.0.1 unless API_BIND says otherwise.

@@ -497,11 +497,12 @@ impl SchedulerBackend for MemoryScheduler {
             failed: false,
         };
         if let Some(id) = existing {
-            let running = jobs
-                .by_id
-                .get(&id)
-                .is_some_and(|stored| stored.token != 0 && stored.leased_until > now);
-            if !if_absent || (job.rerun_running && running) {
+            // A job that failed for good is no job: asking for one again starts it over.
+            let keep = jobs.by_id.get(&id).is_some_and(|stored| {
+                let running = stored.token != 0 && stored.leased_until > now;
+                if_absent && !stored.failed && !(job.rerun_running && running)
+            });
+            if !keep {
                 jobs.by_id.insert(id, fresh);
             }
             return Ok(id);
@@ -550,7 +551,9 @@ impl SchedulerBackend for MemoryScheduler {
         // while it runs) is given up on too.
         for stored in jobs.by_id.values_mut() {
             if stored.attempts >= MAX_ATTEMPTS && stored.leased_until <= now {
+                // The old hand-out is void: its reports must not change a job given up on.
                 stored.failed = true;
+                stored.token = 0;
             }
         }
         let mut due: Vec<(i64, i64)> = jobs
@@ -646,6 +649,20 @@ impl SchedulerBackend for MemoryScheduler {
             stored.token = 0;
         }
         Ok(())
+    }
+
+    async fn renew(&self, id: i64, token: i64, lease: Duration) -> Result<bool, ScheduleError> {
+        let now = (self.clock)();
+        let mut jobs = self.lock();
+        let Some(stored) = jobs
+            .by_id
+            .get_mut(&id)
+            .filter(|stored| stored.token == token && !stored.failed)
+        else {
+            return Ok(false);
+        };
+        stored.leased_until = now.saturating_add(seconds(lease));
+        Ok(true)
     }
 
     async fn discard(&self, id: i64, token: i64) -> Result<(), ScheduleError> {
@@ -1121,5 +1138,92 @@ mod tests {
             warn.job("x", &"a\\u0000b").is_ok(),
             "backslash and text only"
         );
+    }
+
+    /// Takes the job again and again without a report until it is given up on; returns the last hand-out.
+    async fn give_up_on_job(f: &Fixture) -> ScheduledJob {
+        let mut last = None;
+        for _ in 0..MAX_ATTEMPTS {
+            last = f.due().await.pop();
+            f.advance(61);
+        }
+        assert!(f.due().await.is_empty());
+        last.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_job_given_up_on_ignores_the_reports_of_its_last_hand_out() {
+        let f = fixture();
+        let warn = f.scheduler("warn", 1);
+        warn.job("x", &1)
+            .unwrap()
+            .key("x")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        let last = give_up_on_job(&f).await;
+        f.backend.complete(last.id, last.token).await.unwrap();
+        assert!(
+            !f.backend
+                .renew(last.id, last.token, Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+        assert_eq!((f.backend.failed().len(), f.backend.len()), (1, 1));
+        warn.job("x", &2)
+            .unwrap()
+            .key("x")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        let job = f.due().await.remove(0);
+        assert_eq!((job.payload, job.attempt), (json!(2), 1));
+    }
+
+    #[tokio::test]
+    async fn a_failed_job_is_taken_back_by_if_absent_and_unless_waiting() {
+        let f = fixture();
+        let warn = f.scheduler("warn", 1);
+        warn.job("x", &1)
+            .unwrap()
+            .key("x")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        give_up_on_job(&f).await;
+        warn.job("x", &2)
+            .unwrap()
+            .key("x")
+            .if_absent()
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(f.backend.failed().is_empty());
+        give_up_on_job(&f).await;
+        warn.job("x", &3)
+            .unwrap()
+            .key("x")
+            .unless_waiting()
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(f.backend.failed().is_empty());
+        assert_eq!(f.backend.len(), 1);
+        let job = f.due().await.remove(0);
+        assert_eq!((job.payload.clone(), job.attempt), (json!(3), 1));
+        assert!(
+            !f.backend
+                .renew(job.id, job.token + 1, Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+        assert!(
+            f.backend
+                .renew(job.id, job.token, Duration::from_secs(600))
+                .await
+                .unwrap()
+        );
+        f.advance(120);
+        assert!(f.due().await.is_empty(), "the holder renewed its lease");
     }
 }

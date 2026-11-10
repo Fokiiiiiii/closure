@@ -9,6 +9,8 @@ use closure_core::error::DiscordError;
 use closure_core::event::{Event, EventKind, RoleId, UserId};
 use closure_core::module::EventContext;
 use closure_core::permission::{Actor, PermissionKey};
+use closure_core::schedule::Scheduler;
+use closure_core::storage::Store;
 use closure_core::subscription::Flow;
 use closure_sdk::{
     Args, Command, CommandArgs, CommandCx, ComponentCx, CoreError, Intents, Level, Locale,
@@ -260,6 +262,32 @@ async fn toggle(cx: ComponentCx) -> Result<(), UserError> {
     .await
 }
 
+/// Moves the end of a role's ping to a minute from `now`, and keeps the job that closes it.
+async fn extend_ping(
+    store: &Store,
+    scheduler: &Scheduler,
+    role: RoleId,
+    now: i64,
+) -> Result<(), UserError> {
+    let until = now.saturating_add(i64::try_from(PING_WINDOW.as_secs()).unwrap_or(0));
+    // The job goes first: when it cannot be kept, the end the waiting job expects must not move.
+    scheduler
+        .job(UNPING, &Unping { role: role.get() })
+        .map_err(|e| UserError::from(ModuleError::other(e.to_string())))?
+        .key(&unping_key(role))
+        .at(until)
+        .await
+        .map_err(|e| UserError::from(ModuleError::other(e.to_string())))?;
+    store
+        .score_put(PING_UNTIL, role.get(), until)
+        .await
+        .map_err(|e| UserError::from(ModuleError::other(e.to_string())))
+}
+
+fn unping_key(role: RoleId) -> String {
+    format!("unping:{}", role.get())
+}
+
 /// Lets a listed role be pinged for a minute: it is mentionable until the job takes that back.
 async fn ping_role(cx: CommandCx, args: OneRole) -> Result<(), UserError> {
     let config: Config = cx.config()?;
@@ -270,33 +298,7 @@ async fn ping_role(cx: CommandCx, args: OneRole) -> Result<(), UserError> {
     {
         return Err(UserError::message("roles-not-pingable"));
     }
-    // The job that takes the permission back is kept first: a role that can be pinged must always
-    // have one waiting to make it quiet again.
-    let schedule = |e: closure_core::schedule::ScheduleError| {
-        UserError::from(ModuleError::other(e.to_string()))
-    };
-    cx.ctx()
-        .store()
-        .score_put(
-            PING_UNTIL,
-            args.role.get(),
-            cx.now()
-                .saturating_add(i64::try_from(PING_WINDOW.as_secs()).unwrap_or(0)),
-        )
-        .await
-        .map_err(|e| UserError::from(ModuleError::other(e.to_string())))?;
-    cx.scheduler()
-        .job(
-            UNPING,
-            &Unping {
-                role: args.role.get(),
-            },
-        )
-        .map_err(schedule)?
-        .key(&format!("unping:{}", args.role))
-        .after(PING_WINDOW)
-        .await
-        .map_err(schedule)?;
+    extend_ping(cx.ctx().store(), cx.scheduler(), args.role, cx.now()).await?;
     let reason = Reason::new(cx.t("roles-reason-ping", &Args::new())).map_err(|e| problem(&e))?;
     cx.api()
         .execute(Action::EditRole {
@@ -321,15 +323,21 @@ async fn unping(cx: closure_sdk::JobCx) -> Result<(), ModuleError> {
     let job: Unping = cx.payload()?;
     let role = RoleId::new_checked(job.role)
         .ok_or_else(|| ModuleError::other("an unping job names no role"))?;
-    // A later ping of the same role moved the end: that one's job makes it quiet, not this one,
-    // which may have been taken before the ping was made again.
     let until = cx
         .ctx()
         .store()
         .score(PING_UNTIL, role.get())
         .await
         .map_err(|e| ModuleError::other(e.to_string()))?;
+    // A later ping moved the end: this job waits for that end, so the role is never left mentionable.
     if until > cx.ctx().now() {
+        cx.scheduler()
+            .job(UNPING, &job)
+            .map_err(|e| ModuleError::other(e.to_string()))?
+            .key(&unping_key(role))
+            .at(until)
+            .await
+            .map_err(|e| ModuleError::other(e.to_string()))?;
         return Ok(());
     }
     let reason = Reason::new(cx.t("roles-reason-ping-end", &Args::new()))?;

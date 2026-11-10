@@ -777,28 +777,43 @@ async fn strip_now(
         .await
         .map_err(|error| store_error(&error))?;
 
-    let mut failed = Vec::new();
+    let mut settled = Vec::new();
     for role in chosen {
-        // A role that cannot be taken off, for any reason, is counted and noted, and the others
-        // still go. Whatever is saved and not removed is harmless: giving it back is idempotent.
-        if ctx
+        // A role that cannot be taken off is counted, and the others still go. Only a failure that
+        // leaves the role as it was is forgotten: any other may have taken it off, and giving it
+        // back is idempotent.
+        if let Err(error) = ctx
             .api
             .remove_role(ctx.guild_id, target, role, audit(ctx, which, "stripped"))
             .await
-            .is_err()
         {
             skipped += 1;
-            failed.push(role.get());
+            if left_as_it_was(&error) {
+                settled.push(role.get());
+            }
         }
     }
-    if !failed.is_empty() {
-        plan.retain(|id| !failed.contains(id));
+    if !settled.is_empty() {
+        plan.retain(|id| !settled.contains(id));
         ctx.restrictions()
             .set(&stripped_key(target), &plan)
             .await
             .map_err(|error| store_error(&error))?;
     }
     Ok(skipped)
+}
+
+/// Whether a failed removal certainly left the role as it was: Discord refused it, or the member
+/// does not hold it. Any other failure may still have taken the role off.
+fn left_as_it_was(error: &DiscordError) -> bool {
+    matches!(
+        error,
+        DiscordError::Forbidden(_)
+            | DiscordError::HierarchyViolation(_)
+            | DiscordError::NotFound
+            | DiscordError::Invalid(_)
+            | DiscordError::CapabilityDenied(_)
+    )
 }
 
 /// Gives back the roles that [`strip`] took off `target` and that `selection` names. Those that

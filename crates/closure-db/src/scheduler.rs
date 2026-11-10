@@ -252,11 +252,11 @@ impl SchedulerBackend for Db {
         limit: usize,
         lease: Duration,
     ) -> Result<Vec<ScheduledJob>, ScheduleError> {
-        // A job taken over and over without ever being reported is given up on.
+        // A job taken over and over without ever being reported is given up on; its old hand-out is void.
         sqlx::query(
             "UPDATE scheduled_jobs
              SET state = 'failed', last_error = 'taken too many times without an answer',
-                 updated_at = now()
+                 updated_at = now(), claim_token = 0
              WHERE state = 'pending' AND attempts >= $1 AND leased_until <= now()",
         )
         .bind(i32::try_from(MAX_ATTEMPTS).unwrap_or(i32::MAX))
@@ -366,7 +366,7 @@ impl SchedulerBackend for Db {
     async fn renew(&self, id: i64, token: i64, lease: Duration) -> Result<bool, ScheduleError> {
         let renewed = sqlx::query(
             "UPDATE scheduled_jobs SET leased_until = now() + $3 * interval '1 second'
-             WHERE id = $1 AND claim_token = $2",
+             WHERE id = $1 AND claim_token = $2 AND state = 'pending'",
         )
         .bind(id)
         .bind(token)
@@ -1021,5 +1021,94 @@ mod tests {
         assert_eq!(count(&db).await, 1);
         let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
         assert_eq!(job.payload, json!(2));
+    }
+
+    /// Takes the job again and again without a report until it is given up on; returns the last hand-out.
+    async fn give_up_on_job(db: &Db) -> ScheduledJob {
+        let mut last = None;
+        for _ in 0..MAX_ATTEMPTS {
+            last = db.claim_due(1, LEASE).await.unwrap().pop();
+            age(db, 61).await;
+        }
+        assert!(db.claim_due(1, LEASE).await.unwrap().is_empty());
+        last.unwrap()
+    }
+
+    #[sqlx::test]
+    async fn a_job_given_up_on_ignores_the_reports_of_its_last_hand_out(pool: PgPool) {
+        let db = database(pool).await;
+        let warn = scheduler(&db, "warn", 1);
+        warn.job("x", &1)
+            .unwrap()
+            .key("x")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        let last = give_up_on_job(&db).await;
+        db.complete(last.id, last.token).await.unwrap();
+        assert!(!db.renew(last.id, last.token, LEASE).await.unwrap());
+        let state: String = sqlx::query_scalar("SELECT state FROM scheduled_jobs")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!((state.as_str(), count(&db).await), ("failed", 1));
+        warn.job("x", &2)
+            .unwrap()
+            .key("x")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
+        assert_eq!((job.payload, job.attempt), (json!(2), 1));
+    }
+
+    #[sqlx::test]
+    async fn a_failed_job_is_taken_back_by_if_absent_and_unless_waiting(pool: PgPool) {
+        let db = database(pool).await;
+        let warn = scheduler(&db, "warn", 1);
+        warn.job("x", &1)
+            .unwrap()
+            .key("x")
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        give_up_on_job(&db).await;
+        let state = || async {
+            sqlx::query_scalar::<_, String>("SELECT state FROM scheduled_jobs")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap()
+        };
+        warn.job("x", &2)
+            .unwrap()
+            .key("x")
+            .if_absent()
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(state().await, "pending");
+        give_up_on_job(&db).await;
+        warn.job("x", &3)
+            .unwrap()
+            .key("x")
+            .unless_waiting()
+            .after(Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(state().await, "pending");
+        assert_eq!(count(&db).await, 1);
+        let job = db.claim_due(1, LEASE).await.unwrap().remove(0);
+        assert_eq!((job.payload, job.attempt), (json!(3), 1));
+        assert!(!db.renew(job.id, job.token + 1, LEASE).await.unwrap());
+        assert!(
+            db.renew(job.id, job.token, Duration::from_secs(600))
+                .await
+                .unwrap()
+        );
+        age(&db, 120).await;
+        assert!(
+            db.claim_due(1, LEASE).await.unwrap().is_empty(),
+            "the holder renewed its lease"
+        );
     }
 }

@@ -398,6 +398,42 @@ async fn host_output_limit_cannot_be_swallowed_and_opens_breaker() {
 }
 
 #[tokio::test]
+async fn one_guilds_failures_do_not_disable_the_script_for_other_guilds() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let runtime = Arc::new(FakeRuntime::new(move |_, _, _| {
+        if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 5 {
+            Err("trap".into())
+        } else {
+            Ok(json!([]))
+        }
+    }));
+    let (module, ctx, api) = setup(runtime, vec![], Limits::default());
+    for _ in 0..5 {
+        assert!(module.on_event(&ctx, &event()).await.is_err());
+    }
+    assert!(
+        module
+            .on_event(&ctx, &event())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("disabled")
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+
+    let other = GuildId::new(2);
+    let mut other_ctx = ctx.clone();
+    other_ctx.guild_id = other;
+    other_ctx.api = ApiClient::new(api, CapabilitySet::all(), ctx.module.clone()).scoped_to(other);
+    module
+        .on_event(&other_ctx, &Event::ConfigChanged { guild_id: other })
+        .await
+        .unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
+}
+
+#[tokio::test]
 async fn storage_without_owner_grant_is_denied() {
     let runtime = Arc::new(FakeRuntime::new(|_, host, _| {
         assert!(host.set("key", json!(1)).unwrap_err().contains("storage"));

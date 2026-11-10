@@ -112,15 +112,15 @@ Find the voice channel a member is in
 
 ### `/vcmove`
 
-Move a member, or everyone in a voice channel, to another voice channel, or disconnect a member
+Move a member or a whole voice channel; omit the channel only to disconnect one member
 
 - Japanese name: `vcmove`
-- Japanese description: メンバー、またはチャンネルにいる全員を別のボイスチャンネルへ移動します（移動先を省くと切断）
+- Japanese description: メンバー、またはチャンネルの全員を移動します。移動先を省略できるのは1人を指定した時だけで、その場合は切断
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | user | user | no | - | The member, who has to be in voice |
-| `channel` | channel | channel | no | - | The voice channel to move them to; left out, they are disconnected |
+| `channel` | channel | channel | no | - | The voice channel to move them to; omit it only for one member, who is then disconnected |
 | `from` | from | channel | no | - | Instead of one member: the voice channel to empty |
 
 ## Configuration

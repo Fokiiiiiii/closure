@@ -306,7 +306,8 @@ fn links_hit(ctx: &EventContext, links: &Links, message: &MessageInfo) -> Option
 }
 
 /// Whether an invite trips: its code or its server is blocked, or neither is allowed. The server
-/// of an invite is `None` when Discord did not say (the invite is gone, or the lookup failed).
+/// of an invite is `None` when the invite is gone. A code that was not asked about is absent, and is
+/// not a violation unless it is blocked.
 fn invites_hit(
     ctx: &EventContext,
     invites: &Invites,
@@ -316,17 +317,24 @@ fn invites_hit(
     text::invites(&message.content)
         .into_iter()
         .find(|code| {
-            let server = servers.get(code).copied().flatten();
+            let asked = servers.get(code).copied();
+            let server = asked.flatten();
             if invites.block_codes.contains(code)
                 || server.is_some_and(|server| invites.block_guilds.contains(&server))
             {
                 return true;
             }
-            let allowed = invites.allow_codes.contains(code)
-                || server.is_some_and(|server| {
-                    invites.allow_guilds.contains(&server)
-                        || (invites.allow_own_server && server == ctx.guild_id)
-                });
+            if invites.allow_codes.contains(code) {
+                return false;
+            }
+            // Without an answer from Discord the server is unknown, which is not a reason to act.
+            if invites.reads_servers() && asked.is_none() {
+                return false;
+            }
+            let allowed = server.is_some_and(|server| {
+                invites.allow_guilds.contains(&server)
+                    || (invites.allow_own_server && server == ctx.guild_id)
+            });
             !allowed
         })
         .map(|code| {

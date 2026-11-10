@@ -1,11 +1,13 @@
 use closure_core::action::{Action, Emoji};
 use closure_core::event::{ChannelId, Event, GuildId, MessageId, ReactionInfo, RoleId, UserId};
+use closure_core::module::ModuleId;
+use closure_core::schedule::Scheduler;
 use closure_sdk::testing::{Click, Harness, Invocation};
 use closure_sdk::{CommandOptionValue, Level};
 use twilight_model::guild::Role;
 use twilight_model::id::Id;
 
-use crate::builder;
+use crate::{PING_UNTIL, builder};
 
 const MODERATOR: u64 = 200;
 const SELF_ROLE: u64 = 100;
@@ -339,4 +341,54 @@ async fn the_role_of_a_punishment_is_not_handed_out_or_taken_by_hand_or_picked()
     harness.invoke(own).await.unwrap();
     assert!(!gave(&harness, 9, SELF_ROLE) && !took(&harness, 9, SELF_ROLE));
     assert!(!gave(&harness, 51, SELF_ROLE));
+}
+
+fn pings(role: u64) -> Invocation {
+    Invocation::new("pingrole")
+        .option("role", role_option(role))
+        .roles([MODERATOR])
+        .user(50)
+}
+
+/// Whether the role was made mentionable (`true`) or closed again (`false`).
+fn made_mentionable(harness: &Harness, mentionable: bool) -> bool {
+    harness.actions().iter().any(|a| {
+        matches!(a, Action::EditRole { role_id, patch, .. }
+            if role_id.get() == SELF_ROLE && patch.mentionable == Some(mentionable))
+    })
+}
+
+#[tokio::test]
+async fn a_ping_whose_job_cannot_be_reserved_leaves_the_end_of_the_window_alone() {
+    let harness = harness();
+    harness.set_config(serde_json::json!({"pingable_roles": [SELF_ROLE.to_string()]}));
+    harness.invoke(pings(SELF_ROLE)).await.unwrap();
+    let store = harness.store();
+    let end = store.score(PING_UNTIL, SELF_ROLE).await.unwrap();
+    let unavailable = Scheduler::unavailable(ModuleId::new("roles").unwrap(), GuildId::new(1));
+    // Fifty seconds into the first minute: the extension would move the end to `end + 50`.
+    let extended = crate::extend_ping(&store, &unavailable, Id::new(SELF_ROLE), end - 10).await;
+    assert!(extended.is_err());
+    assert_eq!(store.score(PING_UNTIL, SELF_ROLE).await.unwrap(), end);
+}
+
+#[tokio::test]
+async fn an_unping_job_that_finds_a_later_end_waits_for_it() {
+    let harness = harness();
+    harness.set_config(serde_json::json!({"pingable_roles": [SELF_ROLE.to_string()]}));
+    harness.invoke(pings(SELF_ROLE)).await.unwrap();
+    let store = harness.store();
+    let first_end = store.score(PING_UNTIL, SELF_ROLE).await.unwrap();
+    // The end moved fifty seconds on, but the job of the first ping still waits for the old one.
+    store
+        .score_put(PING_UNTIL, SELF_ROLE, first_end + 50)
+        .await
+        .unwrap();
+    harness.advance(std::time::Duration::from_secs(61));
+    harness.run_due_jobs().await;
+    assert!(!made_mentionable(&harness, false), "closed before its end");
+    assert_eq!(harness.jobs(), 1, "the job was not kept for the later end");
+    harness.advance(std::time::Duration::from_secs(50));
+    harness.run_due_jobs().await;
+    assert!(made_mentionable(&harness, false));
 }

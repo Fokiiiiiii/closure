@@ -359,6 +359,35 @@ async fn active_cases(
         .await
 }
 
+/// The warnings of `target` that stand and are not hidden, newest first. Older pages are read until
+/// `wanted` are found, so hidden warnings do not hide the ones before them.
+async fn visible_warnings(
+    cases: &Cases,
+    target: UserId,
+    now: i64,
+    wanted: usize,
+) -> Result<Vec<Case>, CaseError> {
+    let mut found = Vec::new();
+    let mut before = None;
+    loop {
+        let page = cases.for_target(target, before, PAGE).await?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        before = Some(last.number);
+        let full = page.len() == PAGE;
+        found.extend(
+            page.into_iter()
+                .filter(|case| !case.hidden && stands(case, "warn", now)),
+        );
+        if found.len() >= wanted || !full {
+            break;
+        }
+    }
+    found.truncate(wanted);
+    Ok(found)
+}
+
 fn mention(user: UserId) -> String {
     format!("<@{}>", user.get())
 }
@@ -478,6 +507,7 @@ async fn config_changed(ctx: EventContext, _event: Event) -> Result<Flow, Module
         .await
         .map_err(|error| ModuleError::other(error.to_string()))?;
     }
+    bulk::reconcile(&ctx).await?;
     Ok(Flow::Continue)
 }
 
@@ -697,10 +727,11 @@ async fn note<I: InteractionRef + 'static>(cx: Cx<I>, args: Note) -> Result<(), 
 /// they are from the list of cases.
 async fn show_warnings(cx: CommandCx, user: UserId, own: bool) -> Result<(), UserError> {
     let now = cx.now();
-    let mut found = active_cases(cx.cases(), user, "warn", now, SHOWN).await?;
-    if own {
-        found.retain(|case| !case.hidden);
-    }
+    let found = if own {
+        visible_warnings(cx.cases(), user, now, SHOWN).await?
+    } else {
+        active_cases(cx.cases(), user, "warn", now, SHOWN).await?
+    };
     if found.is_empty() {
         return cx
             .reply_private_t("warnings-none", &Args::new().with("user", mention(user)))

@@ -108,6 +108,35 @@ pub trait GuildLeaver: Send + Sync {
     fn leave(&self, guild: GuildId);
 }
 
+/// Waits between the attempts to leave a guild: a failed leave is tried again after each of these.
+const LEAVE_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+    Duration::from_mins(5),
+];
+
+/// Runs `attempt` again after each of `delays` while it fails; the last error is returned.
+async fn retry_on_error<F, Fut, E>(delays: &[Duration], mut attempt: F) -> Result<(), E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+    E: fmt::Display,
+{
+    let mut waits = delays.iter();
+    loop {
+        match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let Some(delay) = waits.next() else {
+                    return Err(error);
+                };
+                tracing::warn!(%error, ?delay, "could not leave a guild that is not allowed; trying again");
+                tokio::time::sleep(*delay).await;
+            }
+        }
+    }
+}
+
 /// Leaves a guild through Discord's HTTP API.
 struct HttpLeaver(Arc<Client>);
 
@@ -115,12 +144,18 @@ impl GuildLeaver for HttpLeaver {
     fn leave(&self, guild: GuildId) {
         let http = Arc::clone(&self.0);
         tokio::spawn(async move {
-            match http.leave_guild(guild).await {
-                Ok(_) => {
+            let left = retry_on_error(&LEAVE_RETRY_DELAYS, || {
+                let http = Arc::clone(&http);
+                async move { http.leave_guild(guild).await.map(|_| ()) }
+            })
+            .await;
+            match left {
+                Ok(()) => {
                     tracing::warn!(%guild, "left a guild that is not on the list of allowed guilds");
                 }
                 Err(error) => {
-                    tracing::warn!(%guild, %error, "could not leave a guild that is not allowed");
+                    metrics::counter!("closure_guild_leave_failures_total").increment(1);
+                    tracing::error!(%guild, %error, "could not leave a guild that is not allowed, even after retries");
                 }
             }
         });
@@ -525,8 +560,10 @@ struct Spill {
 
 impl Spill {
     fn new(path: PathBuf) -> Self {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        if let Some(dir) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(dir)
+        {
+            tracing::warn!(path = %dir.display(), %error, "could not create the spool directory; member events may not be kept");
         }
         let replay = path.with_extension("replay");
         Self {
@@ -1747,5 +1784,47 @@ mod guild_ready_tests {
         health.set(ShardId::new(1, 2), true);
         assert!(health.guild_ready(on_shard_1));
         assert!(!GatewayHealth::new(0).guild_ready(on_shard_0));
+    }
+}
+
+#[cfg(test)]
+mod leave_retry_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+
+    use super::{LEAVE_RETRY_DELAYS, retry_on_error};
+
+    #[tokio::test(start_paused = true)]
+    async fn a_leave_that_keeps_failing_is_tried_four_times_over_five_minutes() {
+        let attempts = AtomicUsize::new(0);
+        let started = Instant::now();
+
+        let result: Result<(), &str> = retry_on_error(&LEAVE_RETRY_DELAYS, || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err("unreachable") }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(started.elapsed(), Duration::from_secs(5 + 30 + 300));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_leave_that_succeeds_on_a_retry_is_not_tried_again() {
+        let attempts = AtomicUsize::new(0);
+        let started = Instant::now();
+
+        let result: Result<(), &str> = retry_on_error(&LEAVE_RETRY_DELAYS, || {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            async move { if attempt < 3 { Err("down") } else { Ok(()) } }
+        })
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(started.elapsed(), Duration::from_secs(5 + 30));
     }
 }

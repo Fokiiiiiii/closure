@@ -379,7 +379,7 @@ fn unit_part(cursor: &mut Cursor, unit: &str) -> Option<i64> {
     if cursor.leading_digits() == 0 {
         return Some(0);
     }
-    let value = exact(cursor, 2)?;
+    let value = number(cursor)?;
     cursor.eat(unit).then_some(value)
 }
 
@@ -715,6 +715,19 @@ mod tests {
     fn a_length_from_a_duration_resolves_to_itself() {
         let span = Span::from_duration(Duration::from_mins(90));
         assert_eq!(span.resolve_at(NOW, 0), Ok(Duration::from_mins(90)));
+    }
+
+    #[test]
+    fn japanese_minutes_and_seconds_take_one_or_two_digits() {
+        assert_eq!(secs("18時5分", JST), 75_900);
+        assert_eq!(secs("18時30分5秒", JST), 77_405);
+        assert_eq!(Span::parse("18時60分"), Err(SpanError::NotUnderstood));
+        assert_eq!(Span::parse("25時"), Err(SpanError::NotUnderstood));
+        assert_eq!(
+            secs("18:05", JST),
+            75_900,
+            "the colon form keeps its two digits"
+        );
     }
 
     /// Every string of up to eight bytes made of multi-byte and combining pieces.

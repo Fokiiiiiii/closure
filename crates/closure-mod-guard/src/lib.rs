@@ -43,6 +43,8 @@ const RECHECK_AFTER: [Duration; 3] = [
 const QUIET: i64 = 600;
 /// The most accounts followed at once; past that the counts start over.
 const MAX_FOLLOWED: usize = 10_000;
+/// The most changes kept per account and kind: a limit is at most 1000, so more is never needed.
+const MAX_HITS: usize = 1_000;
 
 /// The powers that make a role one to take away from an account that nukes.
 const POWERS: Permissions = Permissions::ADMINISTRATOR
@@ -141,7 +143,7 @@ fn ids<T>(list: &[String], make: impl Fn(u64) -> Option<T>) -> Vec<T> {
         .collect()
 }
 
-type Followed = HashMap<(GuildId, UserId, Change), Vec<i64>>;
+type Followed = HashMap<(GuildId, UserId, Change), Vec<(i64, u64)>>;
 type Quiet = HashMap<(GuildId, UserId), i64>;
 
 /// How often the staff are told about an account that could not be stopped.
@@ -170,8 +172,10 @@ fn first_to_alert(guild: GuildId, user: UserId, now: i64) -> bool {
 static COUNTS: Mutex<Option<Followed>> = Mutex::new(None);
 static ACTED: Mutex<Option<Quiet>> = Mutex::new(None);
 
-/// Counts one more change by `user` and says how many there are in the window now.
-fn count(guild: GuildId, user: UserId, change: Change, now: i64, window: i64) -> usize {
+/// Counts the change `id` that happened at `at`, and says how many changes of its kind by `user` fall
+/// in one window of `window` seconds that contains it. Changes are counted by when they happened, so
+/// the order they are read in does not matter; a change that is read twice is counted once.
+fn count(guild: GuildId, user: UserId, change: Change, id: u64, at: i64, window: i64) -> usize {
     let mut counts = COUNTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -179,10 +183,35 @@ fn count(guild: GuildId, user: UserId, change: Change, now: i64, window: i64) ->
     if map.len() >= MAX_FOLLOWED {
         map.clear();
     }
-    let times = map.entry((guild, user, change)).or_default();
-    times.retain(|at| now - *at < window);
-    times.push(now);
-    times.len()
+    let hits = map.entry((guild, user, change)).or_default();
+    if !hits.iter().any(|(_, seen)| *seen == id) {
+        let place = hits.partition_point(|(time, _)| *time <= at);
+        hits.insert(place, (at, id));
+    }
+    if hits.len() > MAX_HITS {
+        hits.drain(..hits.len() - MAX_HITS);
+    }
+    let most = most_in_a_window_with(hits, at, window);
+    let newest = hits.last().map_or(at, |(time, _)| *time);
+    hits.retain(|(time, _)| *time >= newest - window);
+    most
+}
+
+/// The most changes in one window that contains `at`; `hits` is sorted by time.
+fn most_in_a_window_with(hits: &[(i64, u64)], at: i64, window: i64) -> usize {
+    let mut most = 0;
+    let mut end = 0;
+    for (start, &(first, _)) in hits.iter().enumerate() {
+        if first > at || first <= at - window {
+            continue;
+        }
+        end = end.max(start);
+        while end < hits.len() && hits[end].0 < first + window {
+            end += 1;
+        }
+        most = most.max(end - start);
+    }
+    most
 }
 
 /// Forgets the counts of `user`, whose powers were just dealt with.
@@ -235,7 +264,7 @@ fn change_of(event: &Event) -> Option<(Change, u64)> {
 
 /// Who made the change, and when it happened: the time of the audit log entry, which is the time
 /// to count by, since the bot may read the events long after they happened.
-async fn actor_of(ctx: &EventContext, change: Change, target: u64) -> Option<(UserId, i64)> {
+async fn actor_of(ctx: &EventContext, change: Change, target: u64) -> Option<(UserId, i64, u64)> {
     let outcome = ctx
         .api
         .execute(Action::GetAuditLog {
@@ -262,7 +291,7 @@ async fn actor_of(ctx: &EventContext, change: Change, target: u64) -> Option<(Us
         .and_then(|entry| {
             entry
                 .user_id
-                .map(|user| (user, snowflake_time(entry.id.get())))
+                .map(|user| (user, snowflake_time(entry.id.get()), entry.id.get()))
         })
 }
 
@@ -439,10 +468,10 @@ async fn recheck(cx: JobCx) -> Result<(), ModuleError> {
     look(cx.ctx(), payload.change, payload.target, payload.attempt).await
 }
 
-async fn act(ctx: &EventContext, config: &Config, change: Change, found: (UserId, i64)) {
-    let (user, happened) = found;
+async fn act(ctx: &EventContext, config: &Config, change: Change, found: (UserId, i64, u64)) {
+    let (user, happened, entry) = found;
     let limit = config.limit(change);
-    let seen = count(ctx.guild_id, user, change, happened, config.window());
+    let seen = count(ctx.guild_id, user, change, entry, happened, config.window());
     if seen < usize::try_from(limit).unwrap_or(usize::MAX) {
         return;
     }

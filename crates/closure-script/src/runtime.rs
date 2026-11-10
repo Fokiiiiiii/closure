@@ -89,14 +89,17 @@ type Job = Box<dyn FnOnce() + Send>;
 #[derive(Debug)]
 pub enum CallError {
     Busy,
+    /// The script failed; only the guild that ran it is affected.
     Failed(String),
+    /// The pool failed (a lost worker, a missed deadline); every script on it is affected.
+    Runtime(String),
 }
 
 impl fmt::Display for CallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Busy => f.write_str("script queue is full"),
-            Self::Failed(error) => f.write_str(error),
+            Self::Failed(error) | Self::Runtime(error) => f.write_str(error),
         }
     }
 }
@@ -269,10 +272,10 @@ impl Pool {
         limits: Limits,
     ) -> Result<Value, CallError> {
         if self.status().disabled {
-            return Err(CallError::Failed("script is disabled".into()));
+            return Err(CallError::Runtime("script is disabled".into()));
         }
         let result = self.call_inner(runtime, host, input, limits).await;
-        if matches!(result, Err(CallError::Failed(_))) {
+        if matches!(result, Err(CallError::Runtime(_))) {
             self.record_failure();
         }
         result
@@ -292,33 +295,35 @@ impl Pool {
             output_bytes: limits.output_bytes,
             deadline: Instant::now() + limits.wall_time(),
         };
-        let (send, receive) = oneshot::channel();
+        let (send, receive) = oneshot::channel::<Result<Value, CallError>>();
         self.queue
             .try_send(Box::new(move || {
-                let result = catch_unwind(AssertUnwindSafe(|| {
+                let result = catch_unwind(AssertUnwindSafe(|| -> Result<Value, CallError> {
                     if Instant::now() >= budget.deadline {
-                        return Err("script deadline exceeded".into());
+                        return Err(CallError::Runtime("script deadline exceeded".into()));
                     }
-                    let result = runtime.call(input, Arc::clone(&host), budget);
+                    let result = runtime
+                        .call(input, Arc::clone(&host), budget)
+                        .map_err(CallError::Failed);
                     match host.limit_failure() {
-                        Some(error) => Err(error),
+                        Some(error) => Err(CallError::Failed(error)),
                         None => result,
                     }
                 }))
-                .unwrap_or_else(|_| Err("script panicked".into()));
+                .unwrap_or_else(|_| Err(CallError::Failed("script panicked".into())));
                 let _ = send.send(result);
             }))
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => CallError::Busy,
                 mpsc::TrySendError::Disconnected(_) => {
-                    CallError::Failed("script queue is closed".into())
+                    CallError::Runtime("script queue is closed".into())
                 }
             })?;
         let result =
             tokio::time::timeout_at(tokio::time::Instant::from_std(budget.deadline), receive)
                 .await
-                .map_err(|_| "script deadline exceeded".to_owned())?
-                .map_err(|_| "script worker stopped".to_owned())??;
+                .map_err(|_| CallError::Runtime("script deadline exceeded".into()))?
+                .map_err(|_| CallError::Runtime("script worker stopped".into()))??;
         let actions = result
             .as_array()
             .ok_or_else(|| "script output is not an array".to_owned())?;
@@ -449,20 +454,23 @@ mod tests {
         let pool = Pool::new(1, 1).unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = Arc::clone(&calls);
-        let runtime: Arc<dyn ScriptRuntime> = Arc::new(FakeRuntime::new(move |_, _, _| {
+        let runtime: Arc<dyn ScriptRuntime> = Arc::new(FakeRuntime::new(move |_, _, budget| {
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err("trap".into())
+            while Instant::now() < budget.deadline {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            Err("interrupted".into())
         }));
+        let limits = Limits {
+            wall_ms: 10,
+            ..Limits::default()
+        };
         for _ in 0..6 {
             assert!(
-                pool.call(
-                    Arc::clone(&runtime),
-                    Arc::new(Host),
-                    Value::Null,
-                    Limits::default()
-                )
-                .await
-                .is_err()
+                pool.call(Arc::clone(&runtime), Arc::new(Host), Value::Null, limits)
+                    .await
+                    .is_err()
             );
         }
         assert!(pool.status().disabled);

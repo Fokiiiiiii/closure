@@ -74,7 +74,8 @@ impl State {
     }
 
     /// The server each invite code of the message leads to, when a rule in scope asks for it.
-    /// A code Discord does not know, or cannot be asked about now, maps to `None`.
+    /// A code Discord does not know maps to `None`. A code that could not be asked about (the lookup
+    /// failed, or it is past `MAX_INVITES_ASKED`) is left out, which the triggers read as unresolved.
     async fn invite_servers(
         &self,
         ctx: &EventContext,
@@ -117,11 +118,8 @@ impl State {
                     }
                     // An invite that is gone leads nowhere, and that does not change.
                     Err(closure_sdk::DiscordError::NotFound) => None,
-                    // Anything else is not remembered: the next message asks again.
-                    _ => {
-                        found.insert(code, None);
-                        continue;
-                    }
+                    // Anything else is not remembered and not answered: the next message asks again.
+                    _ => continue,
                 };
                 let mut memory = self.invites.lock().unwrap_or_else(PoisonError::into_inner);
                 if memory.len() >= MAX_INVITES_REMEMBERED {

@@ -142,6 +142,15 @@ fn app_built(
     available: bool,
     sink: Option<Arc<dyn MessageSink>>,
 ) -> App {
+    app_with_source(pool, gateway, Arc::new(FakeAccess(available)), sink)
+}
+
+fn app_with_source(
+    pool: PgPool,
+    gateway: GatewayStatus,
+    access: Arc<dyn MemberAccess>,
+    sink: Option<Arc<dyn MessageSink>>,
+) -> App {
     let mut dashboard =
         ModuleManifest::new(ModuleId::new("dashboard").unwrap(), "dashboard", "0.1.0");
     dashboard = dashboard.permission(
@@ -168,7 +177,7 @@ fn app_built(
         db.clone(),
         Arc::new(FixedReadiness(gateway)),
         Arc::new(FakeDirectory),
-        Arc::new(FakeAccess(available)),
+        access,
         || "closure_up 1\n".to_owned(),
         &SecretString::from(TOKEN),
     )
@@ -204,6 +213,28 @@ impl MessageSink for FakeSink {
             .push((channel.get(), post.content, post.embeds.len()));
         let answer = self.0.clone();
         Box::pin(async move { answer })
+    }
+}
+
+/// Never answers, so a request that reaches it keeps its concurrency slot for the whole test.
+struct StalledAccess(std::sync::atomic::AtomicUsize);
+
+impl MemberAccess for StalledAccess {
+    fn member(
+        &self,
+        _guild: closure_core::event::GuildId,
+        _user: closure_core::event::UserId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<closure_core::permission::Actor>, ()>>
+                + Send
+                + '_,
+        >,
+    > {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(std::future::pending::<
+            Result<Option<closure_core::permission::Actor>, ()>,
+        >())
     }
 }
 
@@ -847,6 +878,47 @@ async fn an_address_that_keeps_failing_to_log_in_is_turned_away_even_with_the_ri
         app.router.clone().oneshot(probe).await.unwrap().status(),
         StatusCode::OK
     );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn liveness_probe_answers_while_every_business_slot_is_taken(pool: PgPool) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let stalled = Arc::new(StalledAccess(AtomicUsize::new(0)));
+    let app = app_with_source(
+        pool,
+        GatewayStatus { ready: 1, total: 1 },
+        Arc::clone(&stalled) as Arc<dyn MemberAccess>,
+        None,
+    );
+    app.db.register_guild(Id::new(GUILD)).await.unwrap();
+    let mut requests = Vec::new();
+    for _ in 0..MAX_CONCURRENT_REQUESTS {
+        let router = app.router.clone();
+        let uri = format!("/v1/guilds/{GUILD}/access/1");
+        requests.push(tokio::spawn(async move {
+            send(&router, call(Method::GET, &uri)).await
+        }));
+    }
+    for _ in 0..500 {
+        if stalled.0.load(Ordering::SeqCst) == MAX_CONCURRENT_REQUESTS {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(stalled.0.load(Ordering::SeqCst), MAX_CONCURRENT_REQUESTS);
+
+    let probe = tokio::time::timeout(
+        Duration::from_secs(2),
+        send(&app.router, call(Method::GET, "/healthz").token(None)),
+    )
+    .await
+    .expect("the liveness probe waited for a business slot");
+    assert_eq!(probe.status, StatusCode::OK);
+    for request in requests {
+        request.abort();
+    }
 }
 
 #[sqlx::test(migrations = "../closure-db/migrations")]

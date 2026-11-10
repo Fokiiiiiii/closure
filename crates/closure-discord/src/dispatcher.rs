@@ -8,7 +8,7 @@
 //! - Every module call runs in its own task with a timeout; a panic or a hang costs only that
 //!   call, and a module that keeps failing in a guild is skipped for a while (circuit breaker).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -81,6 +81,8 @@ pub struct DispatcherConfig {
     pub bot_id: Option<UserId>,
     /// The gateway's heartbeat round trips, given to every module call; the gateway writes into the same value.
     pub gateway_latency: Arc<GatewayLatency>,
+    /// The guilds whose scheduled jobs may run; `None` runs them for every guild. Set when `ALLOWED_GUILDS` is in use.
+    pub allowed_guilds: Option<Arc<HashSet<GuildId>>>,
 }
 
 impl Default for DispatcherConfig {
@@ -92,6 +94,7 @@ impl Default for DispatcherConfig {
             interaction_limits: InteractionLimits::default(),
             bot_id: None,
             gateway_latency: Arc::default(),
+            allowed_guilds: None,
         }
     }
 }
@@ -1046,6 +1049,16 @@ async fn handle_job(
     event: &Arc<Event>,
     job: &ScheduledJob,
 ) -> JobOutcome {
+    // Not run here: the job stays queued, so it runs if the guild is allowed again.
+    if shared
+        .config
+        .allowed_guilds
+        .as_ref()
+        .is_some_and(|allowed| !allowed.contains(&guild))
+    {
+        tracing::warn!(module = %job.module, job = %job.name, %guild, "a scheduled job is for a guild that is not allowed; it waits");
+        return JobOutcome::Postponed;
+    }
     let Some(module) = shared.registry.get(&job.module) else {
         return JobOutcome::Gone;
     };

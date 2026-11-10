@@ -44,7 +44,10 @@ pub const MIN_TOKEN_CHARS: usize = 24;
 
 /// Configuration documents are small; the limit sits just above the parser's to reject oversized bodies early.
 const MAX_BODY_BYTES: usize = 70 * 1024;
+/// Covers the wait for a concurrency slot as well as the handling.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// A readiness answer that takes longer than this is no answer.
+const READY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONCURRENT_REQUESTS: usize = 64;
 
 /// How many gateway shards hold a session.
@@ -204,16 +207,25 @@ pub fn router(state: ApiState) -> Router {
             auth::require_token,
         ));
 
-    Router::new()
-        .route("/healthz", get(ops::healthz))
-        .route("/readyz", get(ops::readyz))
-        .merge(protected)
+    // Outside the business concurrency limit: a saturated API must not stall the liveness probe,
+    // or an orchestrator restarts a healthy process.
+    let probes = Router::new().route("/healthz", get(ops::healthz)).route(
+        "/readyz",
+        get(ops::readyz).layer(TimeoutLayer::with_status_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            READY_TIMEOUT,
+        )),
+    );
+    let business = protected
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
-        ))
-        .layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
+        ));
+    Router::new()
+        .merge(probes)
+        .merge(business)
         .layer(
             // A 503 from /readyz while starting up is expected, not an error.
             TraceLayer::new_for_http()

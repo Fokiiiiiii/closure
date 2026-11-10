@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -416,23 +417,90 @@ fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
 }
 
 /// The guilds the bot may stay in, when the operator named them; any other it leaves.
-fn allowed_guilds(args: &Args, http: &Arc<Client>) -> Option<closure_discord::AllowedGuilds> {
+fn allowed_guild_ids(args: &Args) -> Option<HashSet<GuildId>> {
     if args.allowed_guilds.is_empty() {
         return None;
     }
-    let guilds = args
-        .allowed_guilds
-        .iter()
-        .map(|guild| Id::new(guild.get()))
-        .collect();
     tracing::info!(
         guilds = args.allowed_guilds.len(),
         "the bot stays only in the allowed guilds"
     );
-    Some(closure_discord::AllowedGuilds::leaving_with(
-        guilds,
-        Arc::clone(http),
-    ))
+    Some(
+        args.allowed_guilds
+            .iter()
+            .map(|guild| Id::new(guild.get()))
+            .collect(),
+    )
+}
+
+/// What the allowed list would make the bot leave of the servers it is in at start-up.
+#[derive(Debug, PartialEq, Eq)]
+enum LeaveRisk {
+    None,
+    Majority,
+    All,
+}
+
+/// Compares the allowed list with the servers the bot is in, before anything is left.
+fn leave_risk(allowed: &HashSet<GuildId>, joined: &[GuildId]) -> LeaveRisk {
+    if allowed.is_empty() || joined.is_empty() {
+        return LeaveRisk::None;
+    }
+    let leaving = joined
+        .iter()
+        .filter(|guild| !allowed.contains(guild))
+        .count();
+    if leaving == joined.len() {
+        LeaveRisk::All
+    } else if leaving * 2 > joined.len() {
+        LeaveRisk::Majority
+    } else {
+        LeaveRisk::None
+    }
+}
+
+/// Refuses a start that would leave every server the bot is in, unless that is confirmed; warns when most of them would be left.
+fn check_leave_risk(args: &Args, allowed: &HashSet<GuildId>, joined: &[GuildId]) -> Result<()> {
+    match leave_risk(allowed, joined) {
+        LeaveRisk::None => {}
+        LeaveRisk::Majority => tracing::warn!(
+            joined = joined.len(),
+            "ALLOWED_GUILDS would leave most of the servers the bot is in"
+        ),
+        LeaveRisk::All if !args.confirm_leave_all => bail!(
+            "ALLOWED_GUILDS matches none of the {} servers the bot is in, so the bot would leave all of them; set ALLOWED_GUILDS_CONFIRM=1 if that is intended",
+            joined.len()
+        ),
+        LeaveRisk::All => tracing::warn!(
+            joined = joined.len(),
+            "ALLOWED_GUILDS matches none of the servers the bot is in; leaving all of them as confirmed"
+        ),
+    }
+    Ok(())
+}
+
+/// Checks `ALLOWED_GUILDS` against the servers the bot is in, then brings the database in line with them.
+async fn reconcile_joined_guilds(
+    args: &Args,
+    http: &Client,
+    db: &Db,
+    allowed: Option<&HashSet<GuildId>>,
+) -> Result<()> {
+    let guilds = match joined_guilds(http).await {
+        Ok(guilds) => guilds,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the guild list from Discord");
+            return Ok(());
+        }
+    };
+    if let Some(allowed) = allowed {
+        check_leave_risk(args, allowed, &guilds)?;
+    }
+    match reconcile_guilds(db, &guilds).await {
+        Ok(left) => tracing::info!(guilds = guilds.len(), left, "reconciled the guild list"),
+        Err(error) => tracing::warn!(%error, "could not reconcile the guild list"),
+    }
+    Ok(())
 }
 
 async fn publish_commands(
@@ -595,6 +663,7 @@ async fn serve(
 ) -> Result<bool> {
     let application_id = Id::new(args.application_id.get());
     let http = Arc::new(Client::new(args.discord_token.clone()));
+    let allowed = allowed_guild_ids(args);
     let cache = new_cache();
     // Shared by the Gateway task, which writes it, and the dispatcher, which hands it to modules.
     let latency = Arc::new(GatewayLatency::default());
@@ -615,6 +684,7 @@ async fn serve(
                 DispatcherConfig {
                     bot_id: Some(Id::new(args.application_id.get())),
                     gateway_latency: Arc::clone(&latency),
+                    allowed_guilds: allowed.clone().map(Arc::new),
                     ..DispatcherConfig::default()
                 },
                 Arc::new(db.clone()) as Arc<dyn StorageBackend>,
@@ -640,13 +710,7 @@ async fn serve(
 
     publish_commands(args, &http, application_id, core).await?;
 
-    match joined_guilds(&http).await {
-        Ok(guilds) => match reconcile_guilds(db, &guilds).await {
-            Ok(left) => tracing::info!(guilds = guilds.len(), left, "reconciled the guild list"),
-            Err(error) => tracing::warn!(%error, "could not reconcile the guild list"),
-        },
-        Err(error) => tracing::warn!(%error, "could not read the guild list from Discord"),
-    }
+    reconcile_joined_guilds(args, &http, db, allowed.as_ref()).await?;
 
     let hooks = Arc::new(AppHooks::new(
         db.clone(),
@@ -664,7 +728,9 @@ async fn serve(
                 latency,
                 member_request_limit: args.member_request_limit,
                 member_spool: Some(args.hook_spool_dir.clone()),
-                allowed_guilds: allowed_guilds(args, &http),
+                allowed_guilds: allowed.map(|guilds| {
+                    closure_discord::AllowedGuilds::leaving_with(guilds, Arc::clone(&http))
+                }),
             },
             Arc::clone(&cache),
             dispatcher,
@@ -1200,5 +1266,63 @@ mod tests {
                 command.name
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod allowed_guilds_tests {
+    use std::collections::HashSet;
+
+    use closure_core::event::GuildId;
+
+    use super::{LeaveRisk, leave_risk};
+
+    fn guild(id: u64) -> GuildId {
+        GuildId::new(id)
+    }
+
+    #[test]
+    fn nothing_is_left_when_no_list_is_given() {
+        assert_eq!(
+            leave_risk(&HashSet::new(), &[guild(1), guild(2)]),
+            LeaveRisk::None
+        );
+    }
+
+    #[test]
+    fn nothing_is_left_when_the_bot_is_in_no_server() {
+        assert_eq!(leave_risk(&HashSet::from([guild(9)]), &[]), LeaveRisk::None);
+    }
+
+    #[test]
+    fn a_list_matching_none_of_the_servers_would_leave_all_of_them() {
+        assert_eq!(
+            leave_risk(&HashSet::from([guild(9)]), &[guild(1), guild(2)]),
+            LeaveRisk::All
+        );
+    }
+
+    #[test]
+    fn more_than_half_of_the_servers_left_is_a_majority() {
+        assert_eq!(
+            leave_risk(&HashSet::from([guild(1)]), &[guild(1), guild(2), guild(3)]),
+            LeaveRisk::Majority
+        );
+    }
+
+    #[test]
+    fn exactly_half_left_is_not_a_majority() {
+        assert_eq!(
+            leave_risk(&HashSet::from([guild(1)]), &[guild(1), guild(2)]),
+            LeaveRisk::None
+        );
+    }
+
+    #[test]
+    fn allowed_servers_the_bot_is_not_in_do_not_count() {
+        assert_eq!(
+            leave_risk(&HashSet::from([guild(1), guild(9)]), &[guild(1), guild(2)]),
+            LeaveRisk::None
+        );
     }
 }

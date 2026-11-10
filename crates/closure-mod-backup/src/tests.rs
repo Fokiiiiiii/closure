@@ -370,3 +370,107 @@ async fn a_restore_that_stopped_after_making_things_carries_on_instead_of_making
         .unwrap();
     assert_eq!(rules.parent_id.map(twilight_model::id::Id::get), Some(778));
 }
+
+#[tokio::test]
+async fn a_save_that_lands_during_a_restore_leaves_the_backup_whole() {
+    let harness = harness();
+    harness.invoke(admin_runs("create")).await.unwrap();
+    // One channel stays, so that the save is not refused as a shrink of the server.
+    gone(&harness);
+    harness.api().set_channels(
+        Id::new(GUILD),
+        vec![channel(CATEGORY, 4, "Info", None, &json!([]))],
+    );
+    let reached = std::sync::Arc::new(tokio::sync::Notify::new());
+    let go = std::sync::Arc::new(tokio::sync::Notify::new());
+    crate::race::PAUSE.with(|pause| *pause.borrow_mut() = Some((reached.clone(), go.clone())));
+    let save_during = async {
+        reached.notified().await;
+        let replies = harness.invoke(admin_runs("create")).await.unwrap();
+        go.notify_one();
+        replies
+    };
+    let (restored, _saved) = tokio::join!(harness.invoke(admin_runs("restore")), save_during);
+    restored.unwrap();
+
+    let store = harness.store();
+    let meta: crate::Meta = store
+        .get(crate::META)
+        .await
+        .unwrap()
+        .expect("a backup is kept");
+    for id in &meta.roles {
+        assert!(
+            store
+                .get::<crate::SavedRole>(&crate::role_key(meta.generation, *id))
+                .await
+                .unwrap()
+                .is_some(),
+            "the role {id} of the backup it points to is kept"
+        );
+    }
+    for id in &meta.channels {
+        assert!(
+            store
+                .get::<crate::SavedChannel>(&crate::channel_key(meta.generation, *id))
+                .await
+                .unwrap()
+                .is_some(),
+            "the channel {id} of the backup it points to is kept"
+        );
+    }
+    assert_eq!(made(&harness), (1, 1), "the backup the restore began with");
+}
+
+#[tokio::test]
+async fn a_channel_whose_overwrite_is_for_a_role_not_yet_made_waits_for_that_role() {
+    let harness = harness();
+    harness.invoke(admin_runs("create")).await.unwrap();
+    gone(&harness);
+    // The calls of the restore, in order: the answer, the roles, the channels, then the role
+    // STAFF, which `rules` gives an overwrite to.
+    harness
+        .api()
+        .fail_nth(4, closure_core::error::DiscordError::Forbidden("no".into()));
+    harness.invoke(admin_runs("restore")).await.unwrap();
+    assert_eq!(
+        made(&harness),
+        (0, 1),
+        "the category only: rules waits for its role"
+    );
+    assert!(
+        !harness.actions().iter().any(|action| matches!(
+            action,
+            Action::CreateChannel { spec, .. } if spec.name == "rules"
+        )),
+        "rules is not made without its overwrite"
+    );
+
+    harness.invoke(admin_runs("restore")).await.unwrap();
+    assert_eq!(made(&harness), (1, 2));
+    let role = harness
+        .api()
+        .roles(Id::new(GUILD))
+        .into_iter()
+        .map(|role| role.id.get())
+        .find(|id| *id != GUILD)
+        .expect("STAFF is made");
+    let rules = harness
+        .actions()
+        .iter()
+        .find_map(|action| match action {
+            Action::CreateChannel { spec, .. } if spec.name == "rules" => Some(spec.clone()),
+            _ => None,
+        })
+        .expect("rules is made");
+    assert!(
+        matches!(
+            rules.overwrites.as_slice(),
+            [overwrite] if matches!(
+                overwrite.target,
+                closure_core::action::OverwriteTarget::Role(id) if id.get() == role
+            )
+        ),
+        "the overwrite is for the role made now: {rules:?}"
+    );
+}

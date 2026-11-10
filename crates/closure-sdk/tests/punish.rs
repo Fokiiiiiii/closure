@@ -821,6 +821,36 @@ async fn a_lift_that_leaves_a_role_out_does_not_let_a_later_lift_give_it_back() 
 }
 
 #[tokio::test]
+async fn a_role_whose_removal_got_no_answer_is_given_back_by_the_lift() {
+    let harness = harness();
+    harness
+        .api()
+        .set_roles(Id::new(1), vec![guild_role(700, 1)]);
+    harness
+        .api()
+        .set_member(Id::new(1), member_with_roles(MEMBER, &[700]));
+    harness.set_config(json!({
+        "timeout": "role", "timeout_role": "30", "strip_remove": true, "strip_restore": true
+    }));
+    // Discord may have taken the role off before the answer was lost, so it stays remembered.
+    harness.api().fail_role(
+        Id::new(700),
+        DiscordError::Transient("connection reset".into()),
+    );
+    harness
+        .invoke(with_duration(target("timeout", MEMBER), "1h"))
+        .await
+        .unwrap();
+    assert!(role_changed(&harness, 700, false), "the removal was tried");
+    harness.api().recover_roles();
+    harness.invoke(target("untimeout", MEMBER)).await.unwrap();
+    assert!(
+        role_changed(&harness, 700, true),
+        "the lift gives back the role whose removal got no answer"
+    );
+}
+
+#[tokio::test]
 async fn a_role_taken_off_while_a_lift_gives_roles_back_is_given_back_later() {
     // Its own member: the turns of a member are shared by every test of this binary.
     const RACE_MEMBER: u64 = 8_100;

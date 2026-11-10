@@ -2919,6 +2919,24 @@ async fn how_a_job_went_is_told_to_whoever_keeps_it() {
 }
 
 #[tokio::test]
+async fn a_job_for_a_guild_that_is_not_allowed_waits_and_does_not_run() {
+    let module = Probe::new("warn", &[], &[]);
+    let config = DispatcherConfig {
+        allowed_guilds: Some(Arc::new(std::collections::HashSet::from([Id::new(
+            GUILD + 1,
+        )]))),
+        ..DispatcherConfig::default()
+    };
+    let h = harness(&[(&module, true)], limits(64, 4), config).await;
+
+    assert_eq!(
+        h.dispatcher.run_job(due_job("warn")).await,
+        JobOutcome::Postponed
+    );
+    assert_eq!(module.log(), ["load"]);
+}
+
+#[tokio::test]
 async fn a_job_is_postponed_when_the_guild_is_full_or_the_bot_is_stopping() {
     let warn = Probe::new("warn", &[], &[]);
     let h = harness(&[(&warn, true)], limits(0, 1), DispatcherConfig::default()).await;

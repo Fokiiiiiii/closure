@@ -801,6 +801,15 @@ impl Harness {
             .unwrap_or_default();
         let mut ended = Vec::new();
         for job in due {
+            if job.module != self.module.manifest().id {
+                // Another module of the bot runs its own jobs: hand this one back at once.
+                drop(
+                    self.scheduler
+                        .postpone(job.id, job.token, Duration::ZERO)
+                        .await,
+                );
+                continue;
+            }
             let (id, token, attempt) = (job.id, job.token, job.attempt);
             let ctx = self.context(job.guild_id);
             let result = self

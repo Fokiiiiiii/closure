@@ -2,6 +2,7 @@ use closure_core::action::Action;
 use closure_core::event::{ChannelInfo, Event, UserInfo};
 use closure_sdk::testing::Harness;
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use twilight_model::guild::Role;
 use twilight_model::guild::audit_log::{AuditLogEntry, AuditLogEventType};
@@ -71,6 +72,13 @@ fn config(changes: &Value) -> Value {
     config
 }
 
+static NEXT_ENTRY: AtomicU64 = AtomicU64::new(1);
+
+/// Discord gives every audit log entry its own id, even those made within the same millisecond.
+fn unique_low_bits() -> u64 {
+    NEXT_ENTRY.fetch_add(1, Ordering::Relaxed) & ((1 << 22) - 1)
+}
+
 fn audit(kind: AuditLogEventType, target: u64, by: u64) -> AuditLogEntry {
     let now_ms = u64::try_from(
         SystemTime::now()
@@ -83,7 +91,7 @@ fn audit(kind: AuditLogEventType, target: u64, by: u64) -> AuditLogEntry {
         action_type: kind,
         changes: Vec::new(),
         guild_id: None,
-        id: Id::new((now_ms - DISCORD_EPOCH_MS) << 22),
+        id: Id::new(((now_ms - DISCORD_EPOCH_MS) << 22) | unique_low_bits()),
         options: None,
         reason: None,
         target_id: Some(Id::new(target)),
@@ -404,4 +412,45 @@ async fn a_change_nobody_is_ever_named_for_is_looked_at_a_few_times_and_then_lef
         assert!(harness.run_due_jobs().await.iter().all(Result::is_ok));
     }
     assert_eq!(harness.jobs(), 0);
+}
+
+#[test]
+fn changes_read_out_of_order_are_counted_by_when_they_happened() {
+    // 0, 20 and 40 seconds: no window of 30 seconds holds all three, whatever order they are read in.
+    let guild = Id::new(900_001);
+    let user = Id::new(900_001);
+    let mut seen = 0;
+    for (id, at) in [(2, 1_020), (3, 1_040), (1, 1_000)] {
+        seen = crate::count(guild, user, crate::Change::Ban, id, at, 30);
+    }
+    assert!(seen < 3, "read 20, 40, 0: counted {seen}");
+}
+
+#[test]
+fn a_burst_is_counted_in_full_whatever_order_it_is_read_in() {
+    let guild = Id::new(900_002);
+    let user = Id::new(900_002);
+    let mut seen = 0;
+    for (id, at) in [(2, 1_020), (1, 1_000), (3, 1_010)] {
+        seen = crate::count(guild, user, crate::Change::Ban, id, at, 30);
+    }
+    assert_eq!(seen, 3, "0, 10 and 20 seconds fit in one window");
+}
+
+#[test]
+fn a_change_read_twice_is_counted_once() {
+    let guild = Id::new(900_003);
+    let user = Id::new(900_003);
+    assert_eq!(
+        crate::count(guild, user, crate::Change::Ban, 7, 1_000, 30),
+        1
+    );
+    assert_eq!(
+        crate::count(guild, user, crate::Change::Ban, 7, 1_000, 30),
+        1
+    );
+    assert_eq!(
+        crate::count(guild, user, crate::Change::Ban, 8, 1_010, 30),
+        2
+    );
 }

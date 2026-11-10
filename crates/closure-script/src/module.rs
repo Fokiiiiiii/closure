@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -6,7 +7,7 @@ use async_trait::async_trait;
 use closure_core::action::Action;
 use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::error::{DiscordError, ModuleError};
-use closure_core::event::Event;
+use closure_core::event::{Event, GuildId};
 use closure_core::module::{EventContext, Module, ModuleManifest};
 use closure_core::subscription::Flow;
 use serde_json::Value;
@@ -20,6 +21,7 @@ pub struct ScriptModule {
     manifest: ModuleManifest,
     runtime: Arc<dyn ScriptRuntime>,
     pool: Pool,
+    guild_breakers: Mutex<GuildBreakers>,
     limits: Limits,
 }
 
@@ -32,6 +34,19 @@ impl std::fmt::Debug for ScriptModule {
 }
 
 impl ScriptModule {
+    fn guild_breaker(&self, guild: GuildId) -> Arc<Breaker> {
+        self.guild_breakers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(guild, Instant::now())
+    }
+
+    fn fail_guild(&self, breaker: &Breaker, guild: GuildId) {
+        if breaker.record_failure() {
+            tracing::error!(module = %self.manifest.id, guild = %guild, "script disabled for a guild after repeated failures");
+        }
+    }
+
     pub fn new(
         mut manifest: ModuleManifest,
         grants: &Grants,
@@ -53,8 +68,57 @@ impl ScriptModule {
             manifest,
             runtime,
             pool: Pool::new(limits.workers, limits.workers)?,
+            guild_breakers: Mutex::new(GuildBreakers::default()),
             limits,
         })
+    }
+}
+
+/// Upper bound on guilds that have a breaker of their own.
+const GUILD_BREAKER_LIMIT: usize = 1024;
+
+/// Script failures are counted per guild, so one guild's broken settings do not stop the script
+/// for the others; the worker pool and its runtime-level breaker stay shared.
+#[derive(Default)]
+struct GuildBreakers {
+    entries: HashMap<GuildId, GuildBreaker>,
+}
+
+struct GuildBreaker {
+    breaker: Arc<Breaker>,
+    last_used: Instant,
+}
+
+impl GuildBreakers {
+    fn get(&mut self, guild: GuildId, now: Instant) -> Arc<Breaker> {
+        if !self.entries.contains_key(&guild) && self.entries.len() >= GUILD_BREAKER_LIMIT {
+            self.make_room();
+        }
+        let entry = self.entries.entry(guild).or_insert_with(|| GuildBreaker {
+            breaker: Arc::new(Breaker::default()),
+            last_used: now,
+        });
+        entry.last_used = now;
+        Arc::clone(&entry.breaker)
+    }
+
+    /// Forgets breakers that hold no state, since they are the same as new ones, and then the
+    /// least recently used one if the map is still full.
+    fn make_room(&mut self) {
+        self.entries.retain(|_, entry| {
+            let status = entry.breaker.status();
+            status.disabled || status.recent_failures > 0
+        });
+        if self.entries.len() >= GUILD_BREAKER_LIMIT {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(guild, _)| *guild);
+            if let Some(guild) = oldest {
+                self.entries.remove(&guild);
+            }
+        }
     }
 }
 
@@ -67,6 +131,7 @@ struct Host {
     action_limit: usize,
     state: Mutex<HostState>,
     breaker: Arc<Breaker>,
+    pool_breaker: Arc<Breaker>,
     cancelled: tokio::sync::watch::Receiver<()>,
 }
 
@@ -95,7 +160,10 @@ impl Host {
     }
 
     fn check(&self) -> Result<(), String> {
-        if self.cancelled.has_changed().is_err() || self.breaker.status().disabled {
+        if self.cancelled.has_changed().is_err()
+            || self.breaker.status().disabled
+            || self.pool_breaker.status().disabled
+        {
             return Err("script invocation is no longer active".into());
         }
         if let Some(error) = self.limit_failure() {
@@ -253,6 +321,10 @@ impl Module for ScriptModule {
         }
         let input =
             serde_json::to_value(event).map_err(|error| ModuleError::other(error.to_string()))?;
+        let guild_breaker = self.guild_breaker(ctx.guild_id);
+        if guild_breaker.status().disabled {
+            return Err(ModuleError::other("script is disabled for this guild"));
+        }
         let (active, cancelled) = tokio::sync::watch::channel(());
         let mut scoped_ctx = ctx.clone();
         scoped_ctx.api = scoped_ctx.api.scoped_to(ctx.guild_id);
@@ -264,7 +336,8 @@ impl Module for ScriptModule {
             output_limit: self.limits.output_bytes,
             action_limit: self.limits.actions,
             state: Mutex::new(HostState::default()),
-            breaker: self.pool.breaker(),
+            breaker: Arc::clone(&guild_breaker),
+            pool_breaker: self.pool.breaker(),
             cancelled,
         });
         let result = self
@@ -275,10 +348,14 @@ impl Module for ScriptModule {
                 CallError::Busy => {
                     ModuleError::Discord(DiscordError::Transient("script queue is full".into()))
                 }
-                CallError::Failed(error) => ModuleError::other(error),
+                CallError::Failed(error) => {
+                    self.fail_guild(&guild_breaker, ctx.guild_id);
+                    ModuleError::other(error)
+                }
+                CallError::Runtime(error) => ModuleError::other(error),
             })?;
         if let Err(error) = host.output(result.clone()) {
-            self.pool.record_failure();
+            self.fail_guild(&guild_breaker, ctx.guild_id);
             return Err(ModuleError::other(error));
         }
         // A scheduled job whose action failed for a reason that passes is tried again, so the
@@ -316,7 +393,7 @@ impl Module for ScriptModule {
             return Err(error.into());
         }
         if let Some(error) = host.limit_failure() {
-            self.pool.record_failure();
+            self.fail_guild(&guild_breaker, ctx.guild_id);
             return Err(ModuleError::other(error));
         }
         drop(active);

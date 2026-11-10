@@ -6,6 +6,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use closure_core::action::{Action, Outcome};
+use closure_core::cases::MAX_PAGE;
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Embed;
 
@@ -1786,6 +1787,31 @@ async fn reconcile_batch(
     Ok(count)
 }
 
+/// The newest case of `target` above `after` that `matches`, found by paging through its cases. A
+/// page that is not full is the last one, and so is a page that reaches `after`: the cases beyond
+/// it were there before the punishment.
+async fn case_after(
+    ctx: &EventContext,
+    target: UserId,
+    after: i64,
+    matches: impl Fn(&Case) -> bool,
+) -> Result<Option<Case>, UserError> {
+    let mut before = None;
+    loop {
+        let cases = ctx.cases().for_target(target, before, MAX_PAGE).await?;
+        if let Some(case) = cases
+            .iter()
+            .find(|case| case.number > after && matches(case))
+        {
+            return Ok(Some(case.clone()));
+        }
+        if cases.len() < MAX_PAGE || cases.last().is_some_and(|case| case.number <= after) {
+            return Ok(None);
+        }
+        before = cases.last().map(|case| case.number);
+    }
+}
+
 async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
     let Some(intent) = ctx.store().get::<BanIntent>(key).await? else {
         return Ok(());
@@ -1812,22 +1838,18 @@ async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
     let case_before = intent
         .case_before
         .ok_or_else(|| ModuleError::other("ban intent has no case boundary"))?;
-    let mut before = None;
-    let case = loop {
-        let cases = ctx.cases().for_target(target, before, 100).await?;
-        if let Some(case) = cases.iter().find(|case| {
-            case.module == ctx.module
-                && case.kind.as_str() == "ban"
-                && case.moderator == moderator
-                && case.reason == intent.reason
-                && case.expires_at == intent.expires_at
-                && case.number > case_before
-        }) {
-            break case.clone();
-        }
-        if cases.len() < 100 || cases.last().is_some_and(|case| case.number <= case_before) {
-            break ctx
-                .cases()
+    let case = match case_after(ctx, target, case_before, |case| {
+        case.module == ctx.module
+            && case.kind.as_str() == "ban"
+            && case.moderator == moderator
+            && case.reason == intent.reason
+            && case.expires_at == intent.expires_at
+    })
+    .await?
+    {
+        Some(case) => case,
+        None => {
+            ctx.cases()
                 .create(NewCase {
                     source: crate::CaseSource::Command,
                     kind: CaseKind::new("ban")?,
@@ -1836,9 +1858,8 @@ async fn reconcile_ban(ctx: &EventContext, key: &str) -> Result<(), UserError> {
                     reason: intent.reason.clone(),
                     expires_at: intent.expires_at,
                 })
-                .await?;
+                .await?
         }
-        before = cases.last().map(|case| case.number);
     };
     // A ban for good has no timer; a timed one gets its timer, or is lifted if its time is up.
     if let Some(at) = intent.expires_at.filter(|at| *at > ctx.now()) {
@@ -2054,24 +2075,16 @@ async fn reconcile_action(ctx: &EventContext, key: &str) -> Result<(), UserError
         return Ok(());
     }
     finish_role_lift(ctx, &intent, target).await?;
-    let mut before = None;
-    let case = loop {
-        let cases = ctx.cases().for_target(target, before, 100).await?;
-        if let Some(case) = cases.iter().find(|case| {
-            case.module == ctx.module
-                && case.kind.as_str() == intent.kind
-                && case.moderator == moderator
-                && case.number > intent.case_before
-        }) {
-            break case.clone();
-        }
-        if cases.len() < 100
-            || cases
-                .last()
-                .is_some_and(|case| case.number <= intent.case_before)
-        {
-            break ctx
-                .cases()
+    let case = match case_after(ctx, target, intent.case_before, |case| {
+        case.module == ctx.module
+            && case.kind.as_str() == intent.kind
+            && case.moderator == moderator
+    })
+    .await?
+    {
+        Some(case) => case,
+        None => {
+            ctx.cases()
                 .create(NewCase {
                     source: crate::CaseSource::Command,
                     kind: CaseKind::new(&intent.kind)?,
@@ -2080,9 +2093,8 @@ async fn reconcile_action(ctx: &EventContext, key: &str) -> Result<(), UserError
                     reason: intent.reason.clone(),
                     expires_at: None,
                 })
-                .await?;
+                .await?
         }
-        before = cases.last().map(|case| case.number);
     };
     if let Some(lifted) = match intent.kind.as_str() {
         "unban" => Some("ban"),
@@ -2182,29 +2194,21 @@ async fn reconcile_restriction(ctx: &EventContext, key: &str) -> Result<(), User
         ctx.store().delete(key).await?;
         return Ok(());
     }
-    let mut before = None;
-    let case = loop {
-        let cases = ctx.cases().for_target(target, before, 100).await?;
-        // The case this punishment made is the one of this module, by this moderator, with this
-        // reason and this end. Another module's case of the same kind is not it, whatever its
-        // number: adopting it would lift a longer punishment when this one runs out.
-        if let Some(case) = cases.iter().find(|case| {
-            case.module == ctx.module
-                && case.kind.as_str() == intent.kind
-                && case.moderator == moderator
-                && case.reason == intent.reason
-                && case.expires_at == intent.expires_at
-                && case.number > intent.case_before
-        }) {
-            break case.clone();
-        }
-        if cases.len() < 100
-            || cases
-                .last()
-                .is_some_and(|case| case.number <= intent.case_before)
-        {
-            break ctx
-                .cases()
+    // The case this punishment made is the one of this module, by this moderator, with this
+    // reason and this end. Another module's case of the same kind is not it, whatever its
+    // number: adopting it would lift a longer punishment when this one runs out.
+    let case = match case_after(ctx, target, intent.case_before, |case| {
+        case.module == ctx.module
+            && case.kind.as_str() == intent.kind
+            && case.moderator == moderator
+            && case.reason == intent.reason
+            && case.expires_at == intent.expires_at
+    })
+    .await?
+    {
+        Some(case) => case,
+        None => {
+            ctx.cases()
                 .create(NewCase {
                     source: crate::CaseSource::Command,
                     kind: CaseKind::new(&intent.kind)?,
@@ -2213,9 +2217,8 @@ async fn reconcile_restriction(ctx: &EventContext, key: &str) -> Result<(), User
                     reason: intent.reason.clone(),
                     expires_at: intent.expires_at,
                 })
-                .await?;
+                .await?
         }
-        before = cases.last().map(|case| case.number);
     };
     finish_restriction(ctx, key, &mut intent, target, role, &case).await?;
     ctx.store().delete(key).await?;
