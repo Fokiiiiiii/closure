@@ -412,6 +412,16 @@ const WIDGETS: [&str; 10] = [
     "message",
 ];
 
+/// The kinds of channel a channel field may be limited to.
+const CHANNEL_KINDS: [&str; 6] = [
+    "text",
+    "voice",
+    "category",
+    "announcement",
+    "forum",
+    "stage",
+];
+
 /// Hints for the dashboard's forms. They are annotations the bot does not act on, so only their
 /// shape is checked, and every other `x-` keyword is passed through as it is.
 fn check_ui_hints(hints: &Value) -> Result<(), String> {
@@ -437,6 +447,15 @@ fn check_ui_hints(hints: &Value) -> Result<(), String> {
                     && names
                         .iter()
                         .all(|n| n.as_str().is_some_and(|n| n.len() <= 20))
+            }),
+            // The kinds of channel a channel field offers; without it only text channels are listed.
+            "channel_kinds" => value.as_array().is_some_and(|kinds| {
+                !kinds.is_empty()
+                    && kinds.len() <= CHANNEL_KINDS.len()
+                    && kinds.iter().all(|kind| {
+                        kind.as_str()
+                            .is_some_and(|kind| CHANNEL_KINDS.contains(&kind))
+                    })
             }),
             // Which view a setting belongs to; see the `view` module.
             "level" => value
@@ -846,6 +865,20 @@ mod tests {
                 "the published schema rejects what the compiler accepts: {config}"
             );
         }
+    }
+
+    #[test]
+    fn a_channel_field_may_name_the_kinds_of_channel_it_offers() {
+        let ok =
+            |kinds: Value| check_ui_hints(&json!({ "widget": "channel", "channel_kinds": kinds }));
+        assert!(ok(json!(["category"])).is_ok());
+        assert!(ok(json!(["text", "forum"])).is_ok());
+        assert!(
+            ok(json!([])).is_err(),
+            "a field with no kind could offer nothing"
+        );
+        assert!(ok(json!(["thread"])).is_err());
+        assert!(ok(json!("category")).is_err());
     }
 
     #[test]
