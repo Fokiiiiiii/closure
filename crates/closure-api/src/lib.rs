@@ -2,6 +2,7 @@
 //!
 //! - `GET /healthz`, `GET /readyz`: liveness and readiness, no authentication.
 //! - `GET /metrics`, `GET /v1/schema`: operations and tooling, bearer token.
+//! - `/v1/guilds/{id}/tickets`: read paged open tickets and closed history for dashboard staff.
 //! - `/v1/guilds/{id}/config`: read and write a guild's configuration as YAML or JSON. Writes
 //!   are guarded by `If-Match` with the revision being edited, so two editors cannot silently
 //!   overwrite each other.
@@ -18,6 +19,7 @@ mod messages;
 mod ops;
 mod server;
 mod stats;
+mod tickets;
 
 pub use access::MemberAccess;
 pub use directory::{Channel, Directory, Guild, GuildDirectory, Role};
@@ -193,6 +195,11 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/guilds/{guild_id}/cases/{number}",
             get(cases::get).patch(cases::change),
+        )
+        .route("/v1/guilds/{guild_id}/tickets", get(tickets::list))
+        .route(
+            "/v1/guilds/{guild_id}/tickets/{channel_id}",
+            get(tickets::get),
         )
         .route(
             "/v1/guilds/{guild_id}/scheduled-posts",
