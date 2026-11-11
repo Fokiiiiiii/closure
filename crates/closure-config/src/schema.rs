@@ -399,12 +399,13 @@ fn check_levels(schema: &Value, inherited: bool, path: &str) -> Result<(), Strin
 }
 
 /// The widgets a dashboard can draw for a setting.
-const WIDGETS: [&str; 11] = [
+const WIDGETS: [&str; 12] = [
     "role",
     "roles",
     "channel",
     "duration",
     "textarea",
+    "text-list",
     "user",
     "entries",
     "entries-json",
@@ -1407,6 +1408,7 @@ mod tests {
             }
         });
         check_supported(&schema).unwrap();
+        check_supported(&json!({ "x-ui": { "widget": "text-list" } })).unwrap();
         for widget in WIDGETS {
             check_supported(&json!({ "x-ui": { "widget": widget } })).unwrap();
         }
