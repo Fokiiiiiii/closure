@@ -231,6 +231,7 @@ fn error_label(error: &DiscordError) -> &'static str {
         DiscordError::WebhookNotRegistered => "webhook_not_registered",
         DiscordError::WebhookGone => "webhook_gone",
         DiscordError::DirectMessagesClosed => "direct_messages_closed",
+        DiscordError::DirectMessageComponentsNotRoutable => "dm_components_not_routable",
         DiscordError::NotInVoice => "not_in_voice",
         DiscordError::RateLimited { .. } => "rate_limited",
         DiscordError::Transient(_) => "transient",
@@ -713,9 +714,18 @@ impl TwilightApi {
                 user_id,
                 content,
                 embeds,
+                components,
+                files,
             } => {
-                self.send_direct_message(*guild_id, *user_id, content.as_deref(), embeds)
-                    .await
+                self.send_direct_message(
+                    *guild_id,
+                    *user_id,
+                    content.as_deref(),
+                    embeds,
+                    components,
+                    files,
+                )
+                .await
             }
             Action::EditMessage {
                 channel_id,

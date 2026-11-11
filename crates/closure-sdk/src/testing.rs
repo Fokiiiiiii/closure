@@ -4,19 +4,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use closure_core::action::{Action, InteractionReply, InteractionResponse};
+use closure_core::action::{Action, InteractionReply, InteractionResponse, ModalComponent};
 use closure_core::cases::{Case, CaseBackend, Cases, MemoryCases};
 use closure_core::client::ApiClient;
 use closure_core::error::ModuleError;
 use closure_core::event::{
-    AttachmentInfo, AutocompleteInvocation, CommandInvocation, CommandOption, CommandOptionValue,
-    ComponentInvocation, ContextInvocation, ContextTarget, Event, GuildId, InteractionToken,
-    MessageInfo, ModalSubmission, RolesChange, ThreadInfo, UserId, UserInfo,
+    AttachmentInfo, AutocompleteInvocation, ChannelId, CommandInvocation, CommandOption,
+    CommandOptionValue, ComponentInvocation, ContextInvocation, ContextTarget, Event, GuildId,
+    InteractionToken, MessageId, MessageInfo, ModalSubmission, ModalValue, ModalValueField,
+    RolesChange, ThreadInfo, UserId, UserInfo,
 };
 use closure_core::history::{
     HistoryBackend, HistoryError, MemoryHistory, MessageHistory, SavedMessage,
 };
-use closure_core::interaction::InteractionGuilds;
+use closure_core::interaction::{DirectMessageComponentRoutes, InteractionGuilds};
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::{Locale, Translator};
 use closure_core::module::{EventContext, Module};
@@ -234,6 +235,7 @@ impl Click {
 pub struct Submit {
     custom_id: String,
     fields: Vec<(String, String)>,
+    values: Vec<ModalValueField>,
     user: u64,
     roles: Vec<u64>,
     administrator: bool,
@@ -245,16 +247,33 @@ impl Submit {
         Self {
             custom_id: custom_id.into(),
             fields: Vec::new(),
+            values: Vec::new(),
             user: 100,
             roles: Vec::new(),
             administrator: false,
         }
     }
 
-    /// The text written in the input `custom_id`.
+    /// The text written in the input custom_id.
     #[must_use]
     pub fn field(mut self, custom_id: &str, value: &str) -> Self {
-        self.fields.push((custom_id.to_owned(), value.to_owned()));
+        let custom_id = custom_id.to_owned();
+        let value = value.to_owned();
+        self.fields.push((custom_id.clone(), value.clone()));
+        self.values.push(ModalValueField {
+            custom_id,
+            value: ModalValue::Text(value),
+        });
+        self
+    }
+
+    /// The typed answer for a select or choice-group input.
+    #[must_use]
+    pub fn value(mut self, custom_id: impl Into<String>, value: ModalValue) -> Self {
+        self.values.push(ModalValueField {
+            custom_id: custom_id.into(),
+            value,
+        });
         self
     }
 
@@ -887,6 +906,9 @@ impl Harness {
             manifest.id.clone(),
         )
         .with_interactions(Arc::clone(&self.interactions))
+        .with_direct_message_component_routes(Arc::new(DirectMessageComponentRoutes::new(
+            Arc::clone(&self.storage) as Arc<dyn StorageBackend>,
+        )))
         .scoped_to(guild);
         let permissions = self
             .permissions
@@ -1006,6 +1028,48 @@ impl Harness {
         self.deliver(guild, Event::Component(event)).await
     }
 
+    /// Delivers a DM click only when it matches the saved send record for this module.
+    pub async fn click_direct_message(
+        &self,
+        message_id: MessageId,
+        channel_id: ChannelId,
+        click: Click,
+    ) -> Result<Vec<Reply>, ModuleError> {
+        let routes =
+            DirectMessageComponentRoutes::new(Arc::clone(&self.storage) as Arc<dyn StorageBackend>);
+        let route = routes
+            .get(message_id)
+            .await
+            .map_err(|error| ModuleError::other(error.to_string()))?
+            .filter(|route| {
+                route.message_id == message_id
+                    && route.channel_id == channel_id
+                    && route.user_id == Id::new(click.user)
+                    && route.module_id == self.module.manifest().id
+                    && route.custom_ids.contains(&click.custom_id)
+            })
+            .ok_or_else(|| {
+                ModuleError::other("direct-message button has no matching send record")
+            })?;
+        let (number, token) = self.new_interaction(route.guild_id, Id::new(click.user), false);
+        let event = ComponentInvocation {
+            interaction_id: Id::new(number),
+            application_id: Id::new(1),
+            token,
+            guild_id: route.guild_id,
+            channel_id,
+            message_id,
+            user: tester(click.user),
+            roles: Vec::new(),
+            invoker_permissions: Permissions::empty(),
+            locale: None,
+            custom_id: click.custom_id,
+            values: click.values,
+        };
+        self.deliver(route.guild_id, Event::DirectMessageComponent(event))
+            .await
+    }
+
     /// Delivers a submitted form and returns what the module answered.
     pub async fn submit(&self, submit: Submit) -> Result<Vec<Reply>, ModuleError> {
         let guild: GuildId = Id::new(GUILD);
@@ -1022,6 +1086,7 @@ impl Harness {
             locale: None,
             custom_id: submit.custom_id,
             fields: submit.fields,
+            values: submit.values,
         };
         self.deliver(guild, Event::Modal(event)).await
     }
@@ -1306,6 +1371,26 @@ fn administrator_if(administrator: bool) -> Permissions {
     }
 }
 
+fn reply_component(component: &ModalComponent) -> Option<Component> {
+    match component {
+        ModalComponent::Component(component) => Some(component.clone()),
+        ModalComponent::Label {
+            id,
+            label,
+            description,
+            component,
+        } => Some(Component::Label(
+            twilight_model::channel::message::component::Label {
+                id: *id,
+                label: label.clone(),
+                description: description.clone(),
+                component: Box::new(reply_component(component)?),
+            },
+        )),
+        ModalComponent::RadioGroup { .. } | ModalComponent::CheckboxGroup { .. } => None,
+    }
+}
+
 fn reply_of(action: &Action) -> Option<Reply> {
     let (kind, reply) = match action {
         Action::Respond {
@@ -1348,7 +1433,7 @@ fn reply_of(action: &Action) -> Option<Reply> {
                 kind: ReplyKind::Modal,
                 content: spec.title.clone(),
                 ephemeral: false,
-                components: spec.components.clone(),
+                components: spec.components.iter().filter_map(reply_component).collect(),
                 embeds: Vec::new(),
             });
         }

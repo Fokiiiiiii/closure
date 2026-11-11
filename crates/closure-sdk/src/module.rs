@@ -287,9 +287,10 @@ pub struct ModuleBuilder {
     routes: HashMap<(String, Option<String>), Route>,
     handlers: HashMap<EventKind, Arc<EventRun>>,
     components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
+    dm_components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
     modals: HashMap<String, Arc<UiRun<ModalSubmission>>>,
     jobs: HashMap<String, Arc<JobRun>>,
-    /// By command, subcommand (`group sub`, if any) and option.
+    /// By command, subcommand (group sub, if any) and option.
     autocompletes: HashMap<(String, Option<String>, String), Arc<AutoRun>>,
     contexts: HashMap<(ContextKind, String), ContextRoute>,
     problem: Option<CoreError>,
@@ -320,6 +321,7 @@ impl ModuleBuilder {
             routes: HashMap::new(),
             handlers: HashMap::new(),
             components: HashMap::new(),
+            dm_components: HashMap::new(),
             modals: HashMap::new(),
             jobs: HashMap::new(),
             autocompletes: HashMap::new(),
@@ -445,6 +447,26 @@ impl ModuleBuilder {
         if self.components.insert(route.to_owned(), run).is_some() {
             self.problem
                 .get_or_insert(self.invalid(route, "has two component handlers".to_owned()));
+        }
+        self
+    }
+
+    /// Handles a button or select menu only when it was sent in a direct message.
+    /// This route is separate from the guild component route and the handler must check its stored target.
+    /// Host route records expire after one year.
+    #[must_use]
+    pub fn direct_message_component<F, Fut>(mut self, route: &str, handler: F) -> Self
+    where
+        F: Fn(ComponentCx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), UserError>> + Send + 'static,
+    {
+        self.check_route(route);
+        let run: Arc<UiRun<ComponentInvocation>> = Arc::new(move |cx| handler(cx).boxed());
+        if self.dm_components.insert(route.to_owned(), run).is_some() {
+            self.problem.get_or_insert(self.invalid(
+                route,
+                "has two direct-message component handlers".to_owned(),
+            ));
         }
         self
     }
@@ -892,6 +914,7 @@ impl ModuleBuilder {
             routes: self.routes,
             handlers: self.handlers,
             components: self.components,
+            dm_components: self.dm_components,
             modals: self.modals,
             jobs: self.jobs,
             autocompletes: self.autocompletes,
@@ -941,12 +964,13 @@ fn mark_autocomplete(
     Ok(())
 }
 
-/// A module made with [`ModuleBuilder`]: answers commands, checks permission and cooldown, and tells refused users why in their language.
+/// A module made with ModuleBuilder.
 pub struct SdkModule {
     manifest: ModuleManifest,
     routes: HashMap<(String, Option<String>), Route>,
     handlers: HashMap<EventKind, Arc<EventRun>>,
     components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
+    dm_components: HashMap<String, Arc<UiRun<ComponentInvocation>>>,
     modals: HashMap<String, Arc<UiRun<ModalSubmission>>>,
     jobs: HashMap<String, Arc<JobRun>>,
     autocompletes: HashMap<(String, Option<String>, String), Arc<AutoRun>>,
@@ -976,12 +1000,11 @@ impl SdkModule {
         (route.run)(cx.clone()).await
     }
 
-    /// A click or a choice: finds the handler named in the `custom_id`, checks that the user is
-    /// the one the component was made for, and runs it.
     async fn on_component(
         &self,
         ctx: &EventContext,
         click: &ComponentInvocation,
+        direct_message: bool,
     ) -> Result<Flow, ModuleError> {
         let cx = ComponentCx::new(ctx, click);
         let Some((_, id)) = self.own_custom_id(&click.custom_id) else {
@@ -990,7 +1013,12 @@ impl SdkModule {
         if id.expires_at.is_some_and(|at| cx.now() >= at) {
             return Self::refuse(&cx, "sdk-expired").await;
         }
-        let Some(run) = self.components.get(&id.route) else {
+        let routes = if direct_message {
+            &self.dm_components
+        } else {
+            &self.components
+        };
+        let Some(run) = routes.get(&id.route) else {
             return Self::refuse(&cx, "sdk-gone").await;
         };
         if id.owner.is_some_and(|owner| owner != click.user.id) {
@@ -999,7 +1027,6 @@ impl SdkModule {
         match run(cx.clone()).await {
             Ok(()) => {
                 if !cx.has_replied() {
-                    // A click nobody answers would show as failed in Discord.
                     cx.defer_update().await.map_err(module_error)?;
                 }
             }
@@ -1238,7 +1265,10 @@ impl Module for SdkModule {
     async fn on_event_flow(&self, ctx: &EventContext, event: &Event) -> Result<Flow, ModuleError> {
         let invocation = match event {
             Event::Command(invocation) => invocation,
-            Event::Component(click) => return self.on_component(ctx, click).await,
+            Event::Component(click) => return self.on_component(ctx, click, false).await,
+            Event::DirectMessageComponent(click) => {
+                return self.on_component(ctx, click, true).await;
+            }
             Event::Modal(submission) => return self.on_modal(ctx, submission).await,
             Event::Scheduled(job) => return self.on_job(ctx, job).await,
             Event::Autocomplete(query) => return self.on_autocomplete(ctx, query).await,
@@ -1262,7 +1292,6 @@ impl Module for SdkModule {
         match self.run(&cx, route, &name).await {
             Ok(()) => {
                 if !cx.has_replied() {
-                    // A command that said nothing would show as failed in Discord.
                     let done = cx.core_message("sdk-done", &Args::new());
                     cx.reply_private(done).await.map_err(module_error)?;
                 }

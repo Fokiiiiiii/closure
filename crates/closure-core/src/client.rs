@@ -23,7 +23,9 @@ use crate::action::{
 use crate::capability::CapabilitySet;
 use crate::error::DiscordError;
 use crate::event::{ChannelId, GuildId, InteractionRef, MessageId, RoleId, UserId};
-use crate::interaction::InteractionGuilds;
+use crate::interaction::{
+    DirectMessageComponentRoute, DirectMessageComponentRoutes, InteractionGuilds,
+};
 use crate::module::{ModuleId, OptionChoice};
 
 /// The single door to Discord. Implemented by the Twilight-backed client in production and by
@@ -59,6 +61,7 @@ pub struct ApiClient {
     module: ModuleId,
     guild: Option<GuildId>,
     interactions: Option<Arc<InteractionGuilds>>,
+    dm_component_routes: Option<Arc<DirectMessageComponentRoutes>>,
 }
 
 impl fmt::Debug for ApiClient {
@@ -91,6 +94,7 @@ impl ApiClient {
             module,
             guild: None,
             interactions: None,
+            dm_component_routes: None,
         }
     }
 
@@ -102,6 +106,20 @@ impl ApiClient {
             tracing::warn!(module = %self.module, "the interaction record of a bound client cannot be replaced");
         } else {
             self.interactions = Some(interactions);
+        }
+        self
+    }
+
+    /// Records the host-owned target map required before DM components can be delivered.
+    #[must_use]
+    pub fn with_direct_message_component_routes(
+        mut self,
+        routes: Arc<DirectMessageComponentRoutes>,
+    ) -> Self {
+        if self.dm_component_routes.is_some() {
+            tracing::warn!(module = %self.module, "the DM component route record of a bound client cannot be replaced");
+        } else {
+            self.dm_component_routes = Some(routes);
         }
         self
     }
@@ -146,10 +164,13 @@ impl ApiClient {
         let own_prefix = format!("{}:", self.module);
         // The posts of the dashboard carry the role buttons of the `roles` module (see
         // `MessageSpec`): that one route, and only for the module that posts them.
-        let shared = (self.module.as_str() == "post").then_some("roles:toggle:");
-        if let Some(id) = action
-            .custom_ids()
-            .into_iter()
+        let shared = (self.module.as_str() == "post"
+            && !matches!(&action, Action::SendDirectMessage { .. }))
+        .then_some("roles:toggle:");
+        let custom_ids = action.custom_ids();
+        if let Some(id) = custom_ids
+            .iter()
+            .copied()
             .find(|id| !id.starts_with(&own_prefix) && !shared.is_some_and(|s| id.starts_with(s)))
         {
             tracing::warn!(module = %self.module, action = name, custom_id = id, "custom_id outside the module's own");
@@ -157,12 +178,124 @@ impl ApiClient {
                 "a custom_id has to start with `{own_prefix}`"
             )));
         }
+        let dm_component_route = match &action {
+            Action::SendDirectMessage {
+                guild_id, user_id, ..
+            } if !custom_ids.is_empty() => {
+                if self.guild != Some(*guild_id) {
+                    return Err(DiscordError::Forbidden(
+                        "DM components need a client bound to their source guild".into(),
+                    ));
+                }
+                let routes = self.dm_component_routes.as_ref().ok_or_else(|| {
+                    DiscordError::Invalid("DM component routing is not configured".into())
+                })?;
+                Some((
+                    Arc::clone(routes),
+                    *guild_id,
+                    *user_id,
+                    self.module.clone(),
+                    custom_ids
+                        .iter()
+                        .map(|id| (*id).to_owned())
+                        .collect::<Vec<_>>(),
+                ))
+            }
+            _ => None,
+        };
         if let Some(scope) = self.guild {
             self.check_scope(scope, &action).await?;
         }
 
         let started = Instant::now();
-        let result = self.api.execute(action).await;
+        let result = match (dm_component_route, self.api.execute(action).await) {
+            (
+                Some((routes, guild_id, user_id, module_id, custom_ids)),
+                Ok(Outcome::Message(message)),
+            ) => {
+                let route = DirectMessageComponentRoute {
+                    message_id: message.id,
+                    channel_id: message.channel_id,
+                    guild_id,
+                    module_id,
+                    user_id,
+                    custom_ids,
+                };
+                match routes.record(&route).await {
+                    Ok(()) => Ok(Outcome::Message(message)),
+                    Err(error) => {
+                        tracing::error!(
+                            guild = %guild_id,
+                            module = %route.module_id,
+                            user = %user_id,
+                            message = %route.message_id,
+                            channel = %route.channel_id,
+                            %error,
+                            "direct message sent but component route could not be saved"
+                        );
+                        // This host-only compensation targets only the DM message returned above.
+                        // It does not grant the module DeleteMessages or accept a channel from it.
+                        let cleanup = match crate::action::Reason::new(
+                            "DM component route registration failed",
+                        ) {
+                            Ok(reason) => {
+                                self.api
+                                    .execute(Action::DeleteMessage {
+                                        channel_id: route.channel_id,
+                                        message_id: route.message_id,
+                                        reason,
+                                    })
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        };
+                        match cleanup {
+                            Ok(_) => tracing::warn!(
+                                guild = %guild_id,
+                                module = %route.module_id,
+                                user = %user_id,
+                                message = %route.message_id,
+                                channel = %route.channel_id,
+                                "unroutable DM cleanup request completed"
+                            ),
+                            Err(cleanup_error) => tracing::error!(
+                                guild = %guild_id,
+                                module = %route.module_id,
+                                user = %user_id,
+                                message = %route.message_id,
+                                channel = %route.channel_id,
+                                %cleanup_error,
+                                "DM route save and message cleanup failed; the button remains unroutable"
+                            ),
+                        }
+                        Err(DiscordError::DirectMessageComponentsNotRoutable)
+                    }
+                }
+            }
+            (
+                Some((_, guild_id, user_id, module_id, _)),
+                Err(error @ DiscordError::Transient(_)),
+            ) => {
+                tracing::error!(
+                    guild = %guild_id,
+                    module = %module_id,
+                    user = %user_id,
+                    %error,
+                    "direct message component delivery is uncertain; refusing a retryable error"
+                );
+                Err(DiscordError::DirectMessageComponentsNotRoutable)
+            }
+            (Some((_, guild_id, user_id, module_id, _)), Ok(_)) => {
+                tracing::error!(
+                    guild = %guild_id,
+                    module = %module_id,
+                    user = %user_id,
+                    "direct message components returned no message for route registration"
+                );
+                Err(DiscordError::DirectMessageComponentsNotRoutable)
+            }
+            (_, result) => result,
+        };
         tracing::debug!(
             module = %self.module,
             action = name,
@@ -259,6 +392,8 @@ impl ApiClient {
             user_id,
             content: Some(content.into()),
             embeds,
+            components: Vec::new(),
+            files: Vec::new(),
         };
         match self.execute(action).await? {
             Outcome::Message(message) => Ok(*message),
@@ -1212,7 +1347,11 @@ mod tests {
     };
     use crate::capability::Capability;
     use crate::event::InteractionToken;
+    use crate::interaction::DirectMessageComponentRoutes;
+    use crate::storage::{MemoryStorage, NoStorage};
     use crate::testing::MockApi;
+    use twilight_model::channel::message::Component;
+    use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
     use twilight_model::guild::Permissions;
     use twilight_model::id::Id;
 
@@ -1489,6 +1628,7 @@ mod tests {
                 channel_id,
                 patch: ChannelPatch {
                     name: Some("renamed".into()),
+                    parent_id: Some(None),
                     ..ChannelPatch::default()
                 },
                 reason: reason(),
@@ -1644,6 +1784,14 @@ mod tests {
 
         for action in [
             new_channel(Some(200)),
+            Action::EditChannel {
+                channel_id: Id::new(100),
+                patch: ChannelPatch {
+                    parent_id: Some(Some(Id::new(200))),
+                    ..ChannelPatch::default()
+                },
+                reason: reason(),
+            },
             new_rule(Some(200), None),
             new_rule(None, Some(200)),
             new_rule(Some(100), Some(200)),
@@ -1959,6 +2107,8 @@ mod tests {
                 user_id: Id::new(9),
                 content: Some("hi".into()),
                 embeds: Vec::new(),
+                components: Vec::new(),
+                files: Vec::new(),
             }]
         );
     }
@@ -1972,6 +2122,8 @@ mod tests {
             user_id: Id::new(9),
             content: Some("hi".into()),
             embeds: Vec::new(),
+            components: Vec::new(),
+            files: Vec::new(),
         };
         assert!(matches!(
             scoped.execute(elsewhere).await,
@@ -1987,6 +2139,134 @@ mod tests {
             "{result:?}"
         );
         assert_eq!(api.actions(), []);
+    }
+
+    fn dm_button() -> Vec<Component> {
+        vec![Component::ActionRow(ActionRow {
+            id: None,
+            components: vec![Component::Button(Button {
+                custom_id: Some("test:rate:9:data".into()),
+                disabled: false,
+                emoji: None,
+                id: None,
+                label: Some("Rate".into()),
+                style: ButtonStyle::Primary,
+                url: None,
+                sku_id: None,
+            })],
+        })]
+    }
+
+    #[tokio::test]
+    async fn dm_components_need_a_bound_client_and_a_saved_route() {
+        let api = Arc::new(MockApi::default());
+        let action = Action::SendDirectMessage {
+            guild_id: Id::new(1),
+            user_id: Id::new(9),
+            content: Some("Rate".into()),
+            embeds: Vec::new(),
+            components: dm_button(),
+            files: Vec::new(),
+        };
+        let unbound = client(&api, &[Capability::SendDirectMessages]);
+        assert!(matches!(
+            unbound.execute(action.clone()).await,
+            Err(DiscordError::Forbidden(_))
+        ));
+        assert_eq!(api.actions(), []);
+
+        let routes = Arc::new(DirectMessageComponentRoutes::new(Arc::new(
+            MemoryStorage::default(),
+        )));
+        let bound = client(&api, &[Capability::SendDirectMessages])
+            .scoped_to(Id::new(1))
+            .with_direct_message_component_routes(Arc::clone(&routes));
+        let Outcome::Message(message) = bound.execute(action).await.unwrap() else {
+            panic!("a DM should return its message");
+        };
+        let route = routes.get(message.id).await.unwrap().unwrap();
+        assert_eq!(route.guild_id, Id::new(1));
+        assert_eq!(route.user_id, Id::new(9));
+        assert_eq!(route.channel_id, message.channel_id);
+        assert_eq!(route.module_id, ModuleId::new("test").unwrap());
+        assert_eq!(route.custom_ids, ["test:rate:9:data"]);
+    }
+
+    #[tokio::test]
+    async fn a_dm_cannot_claim_the_dashboard_shared_component_route() {
+        let api = Arc::new(MockApi::default());
+        let routes = Arc::new(DirectMessageComponentRoutes::new(Arc::new(
+            MemoryStorage::default(),
+        )));
+        let client = ApiClient::new(
+            Arc::clone(&api) as Arc<dyn DiscordApi>,
+            [Capability::SendDirectMessages].into_iter().collect(),
+            ModuleId::new("post").unwrap(),
+        )
+        .with_direct_message_component_routes(routes)
+        .scoped_to(Id::new(1));
+        let action = Action::SendDirectMessage {
+            guild_id: Id::new(1),
+            user_id: Id::new(9),
+            content: Some("Rate".into()),
+            embeds: Vec::new(),
+            components: vec![Component::ActionRow(ActionRow {
+                id: None,
+                components: vec![Component::Button(Button {
+                    custom_id: Some("roles:toggle:9:role".into()),
+                    disabled: false,
+                    emoji: None,
+                    id: None,
+                    label: Some("Toggle".into()),
+                    style: ButtonStyle::Primary,
+                    url: None,
+                    sku_id: None,
+                })],
+            })],
+            files: Vec::new(),
+        };
+
+        assert!(matches!(
+            client.execute(action).await,
+            Err(DiscordError::Invalid(_))
+        ));
+        assert_eq!(api.actions(), []);
+    }
+
+    #[tokio::test]
+    async fn a_sent_dm_with_unrecorded_components_is_reported_as_non_retryable() {
+        let api = Arc::new(MockApi::default());
+        let routes = Arc::new(DirectMessageComponentRoutes::new(Arc::new(NoStorage)));
+        let bound = client(&api, &[Capability::SendDirectMessages])
+            .scoped_to(Id::new(1))
+            .with_direct_message_component_routes(routes);
+        let action = Action::SendDirectMessage {
+            guild_id: Id::new(1),
+            user_id: Id::new(9),
+            content: Some("Rate".into()),
+            embeds: Vec::new(),
+            components: dm_button(),
+            files: Vec::new(),
+        };
+
+        let error = bound.execute(action).await.unwrap_err();
+
+        assert_eq!(error, DiscordError::DirectMessageComponentsNotRoutable);
+        assert!(!error.is_retryable());
+        let actions = api.actions();
+        assert_eq!(
+            actions.len(),
+            2,
+            "the host attempts to remove the unroutable DM"
+        );
+        assert!(matches!(
+            actions.get(1),
+            Some(Action::DeleteMessage {
+                channel_id,
+                message_id,
+                ..
+            }) if *channel_id == Id::new(1) && *message_id == Id::new(1)
+        ));
     }
 
     #[tokio::test]

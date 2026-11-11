@@ -3,11 +3,11 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use closure_core::event::GuildId;
+use closure_core::event::{GuildId, MessageId};
 use closure_core::module::ModuleId;
 use closure_core::storage::{
-    Entry, Expect, MAX_COUNTERS, MAX_ENTRIES, MAX_WINDOW, StorageBackend, StorageError,
-    window_minutes,
+    Entry, Expect, MAX_COUNTERS, MAX_ENTRIES, MAX_VALUE_BYTES, MAX_WINDOW, StorageBackend,
+    StorageError, window_minutes,
 };
 use sqlx::{Postgres, Transaction};
 
@@ -74,8 +74,84 @@ async fn lock_key(
     Ok(())
 }
 
+async fn lock_direct_message_component_route(
+    tx: &mut Transaction<'_, Postgres>,
+    message_id: i64,
+) -> Result<(), StorageError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('dm-component:' || $1::text, 2))")
+        .bind(message_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(backend)?;
+    Ok(())
+}
+
 #[async_trait]
 impl StorageBackend for Db {
+    async fn get_direct_message_component_route(
+        &self,
+        message_id: MessageId,
+    ) -> Result<Option<Entry>, StorageError> {
+        let row: Option<(serde_json::Value, i64)> = sqlx::query_as(
+            "SELECT value, revision FROM dm_component_routes
+             WHERE message_id = $1 AND expires_at > now()",
+        )
+        .bind(to_db(message_id).map_err(backend)?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(row.map(|(value, revision)| Entry { value, revision }))
+    }
+
+    async fn insert_direct_message_component_route(
+        &self,
+        message_id: MessageId,
+        value: serde_json::Value,
+        ttl: Duration,
+    ) -> Result<(), StorageError> {
+        if message_id.get() == 0 {
+            return Err(StorageError::Value("message id must be positive".into()));
+        }
+        let size = serde_json::to_vec(&value).map_or(usize::MAX, |bytes| bytes.len());
+        if size > MAX_VALUE_BYTES {
+            return Err(StorageError::TooLarge {
+                size,
+                limit: MAX_VALUE_BYTES,
+            });
+        }
+        let message_id = to_db(message_id).map_err(backend)?;
+        let seconds = ttl.as_secs_f64().max(1.0);
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        lock_direct_message_component_route(&mut tx, message_id).await?;
+        sqlx::query(
+            "DELETE FROM dm_component_routes WHERE message_id = $1 AND expires_at <= now()",
+        )
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        let exists: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM dm_component_routes WHERE message_id = $1")
+                .bind(message_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend)?;
+        if exists.is_some() {
+            return Err(StorageError::Conflict);
+        }
+        sqlx::query(
+            "INSERT INTO dm_component_routes (message_id, value, revision, expires_at)
+             VALUES ($1, $2, 1, now() + make_interval(secs => $3::float8))",
+        )
+        .bind(message_id)
+        .bind(value)
+        .bind(seconds)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)
+    }
+
     async fn get(
         &self,
         module: &ModuleId,
@@ -785,15 +861,17 @@ impl StorageBackend for Db {
 }
 
 impl Db {
-    /// Deletes entries that have expired and the per-minute history older than the widest window
-    /// a module may ask for. Returns how many of each were deleted. Run it now and then.
     pub async fn purge_module_storage(&self) -> Result<(u64, u64), DbError> {
         let entries = sqlx::query("DELETE FROM module_kv WHERE expires_at <= now()")
             .execute(&self.pool)
             .await?
             .rows_affected();
+        let routes = sqlx::query("DELETE FROM dm_component_routes WHERE expires_at <= now()")
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
         let minutes = self.purge_counter_minutes().await?;
-        Ok((entries, minutes))
+        Ok((entries + routes, minutes))
     }
 
     /// Deletes the per-minute history past the widest window in batches, for a bounded time: a backlog of
@@ -1200,12 +1278,13 @@ mod tests {
         assert_eq!(store.counter_total("warns", 7_u64).await.unwrap(), 5);
         assert_eq!(
             store
-                .counter_recent("warns", 7_u64, Duration::from_secs(60))
+                .counter_recent("warns", 7_u64, Duration::from_mins(3))
                 .await
                 .unwrap(),
             5
         );
-        sqlx::query("UPDATE module_counters SET bucket = bucket - 60 WHERE bucket > 0")
+        // Keep samples away from the minute-window boundary.
+        sqlx::query("UPDATE module_counters SET bucket = bucket - 58 WHERE bucket > 0")
             .execute(&db.pool)
             .await
             .unwrap();
@@ -1218,7 +1297,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .counter_recent("warns", 7_u64, Duration::from_mins(61))
+                .counter_recent("warns", 7_u64, Duration::from_mins(62))
                 .await
                 .unwrap(),
             5
@@ -1335,7 +1414,7 @@ mod tests {
             assert_eq!(store.counter_add("c", 5_u64, -1).await.unwrap(), 3);
             assert_eq!(
                 store
-                    .counter_recent("c", 5_u64, Duration::from_secs(60))
+                    .counter_recent("c", 5_u64, Duration::from_mins(3))
                     .await
                     .unwrap(),
                 3
@@ -1421,5 +1500,63 @@ mod tests {
         let elsewhere = store(&db, "leveling", 2);
         assert_eq!(elsewhere.score_count("xp").await.unwrap(), 0);
         assert_eq!(elsewhere.set_count("giveaway").await.unwrap(), 0);
+    }
+
+    #[sqlx::test]
+    async fn a_dm_component_route_is_stored_by_message_id_and_expires(pool: PgPool) {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        let message_id = Id::new(44);
+        let value = json!({
+            "message_id": "44",
+            "channel_id": "77",
+            "guild_id": "1",
+            "module_id": "tickets",
+            "user_id": "7",
+            "custom_ids": ["tickets:rate:7:ticket-1"]
+        });
+        let lifetime = Duration::from_secs(365 * 24 * 60 * 60);
+
+        StorageBackend::insert_direct_message_component_route(
+            &db,
+            message_id,
+            value.clone(),
+            lifetime,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            StorageBackend::get_direct_message_component_route(&db, message_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            value
+        );
+        assert_eq!(
+            StorageBackend::insert_direct_message_component_route(
+                &db,
+                message_id,
+                json!({"custom_ids": ["forged"]}),
+                lifetime,
+            )
+            .await,
+            Err(StorageError::Conflict)
+        );
+
+        sqlx::query(
+            "UPDATE dm_component_routes SET expires_at = now() - interval '1 second' WHERE message_id = $1",
+        )
+        .bind(44_i64)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            StorageBackend::get_direct_message_component_route(&db, message_id)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(db.purge_module_storage().await.unwrap().0, 1);
     }
 }

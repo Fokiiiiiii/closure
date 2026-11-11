@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::Channel;
 use twilight_model::channel::message::component::{
@@ -160,13 +161,45 @@ pub struct NewChannel {
     pub overwrites: Vec<OverwriteSpec>,
 }
 
-/// Fields left as `None` are not changed.
+/// Fields left as None are not changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChannelPatch {
     pub name: Option<String>,
     pub topic: Option<String>,
     pub nsfw: Option<bool>,
     pub slowmode_seconds: Option<u16>,
+    /// None keeps the current parent; Some(None) removes it.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "optional_channel_parent"
+    )]
+    pub parent_id: Option<Option<ChannelId>>,
+}
+
+mod optional_channel_parent {
+    use super::ChannelId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(
+        parent: &Option<Option<ChannelId>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match parent {
+            Some(parent) => parent.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Option<ChannelId>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<ChannelId>::deserialize(deserializer).map(Some)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,13 +384,230 @@ pub struct InteractionReply {
     pub components: Vec<Component>,
 }
 
-/// A form to show to the user: a title and rows of one text input each.
+/// An option for a radio group or checkbox group in a modal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModalOption {
+    pub value: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<bool>,
+}
+
+/// A typed modal component. Radio and checkbox groups are not represented by Twilight's
+/// message-component model, so this type serializes their documented modal payloads explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModalComponent {
+    /// A component supported by Twilight's existing modal/message component model.
+    Component(Component),
+    Label {
+        id: Option<i32>,
+        label: String,
+        description: Option<String>,
+        component: Box<ModalComponent>,
+    },
+    RadioGroup {
+        custom_id: String,
+        required: Option<bool>,
+        options: Vec<ModalOption>,
+    },
+    CheckboxGroup {
+        custom_id: String,
+        required: Option<bool>,
+        min_values: Option<u8>,
+        max_values: Option<u8>,
+        options: Vec<ModalOption>,
+    },
+}
+
+impl From<Component> for ModalComponent {
+    fn from(component: Component) -> Self {
+        match component {
+            Component::Label(label) => Self::Label {
+                id: label.id,
+                label: label.label,
+                description: label.description,
+                component: Box::new(Self::Component(*label.component)),
+            },
+            component => Self::Component(component),
+        }
+    }
+}
+
+impl Serialize for ModalComponent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Component(component) => component.serialize(serializer),
+            Self::Label {
+                id,
+                label,
+                description,
+                component,
+            } => {
+                let field_count =
+                    3 + usize::from(id.is_some()) + usize::from(description.is_some());
+                let mut state = serializer.serialize_struct("ModalComponent", field_count)?;
+                state.serialize_field("type", &18_u8)?;
+                if let Some(id) = id {
+                    state.serialize_field("id", id)?;
+                }
+                state.serialize_field("label", label)?;
+                if let Some(description) = description {
+                    state.serialize_field("description", description)?;
+                }
+                state.serialize_field("component", component)?;
+                state.end()
+            }
+            Self::RadioGroup {
+                custom_id,
+                required,
+                options,
+            } => {
+                let field_count = 3 + usize::from(required.is_some());
+                let mut state = serializer.serialize_struct("ModalComponent", field_count)?;
+                state.serialize_field("type", &21_u8)?;
+                state.serialize_field("custom_id", custom_id)?;
+                state.serialize_field("options", options)?;
+                if let Some(required) = required {
+                    state.serialize_field("required", required)?;
+                }
+                state.end()
+            }
+            Self::CheckboxGroup {
+                custom_id,
+                required,
+                min_values,
+                max_values,
+                options,
+            } => {
+                let field_count = 3
+                    + usize::from(required.is_some())
+                    + usize::from(min_values.is_some())
+                    + usize::from(max_values.is_some());
+                let mut state = serializer.serialize_struct("ModalComponent", field_count)?;
+                state.serialize_field("type", &22_u8)?;
+                state.serialize_field("custom_id", custom_id)?;
+                state.serialize_field("options", options)?;
+                if let Some(required) = required {
+                    state.serialize_field("required", required)?;
+                }
+                if let Some(min_values) = min_values {
+                    state.serialize_field("min_values", min_values)?;
+                }
+                if let Some(max_values) = max_values {
+                    state.serialize_field("max_values", max_values)?;
+                }
+                state.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ModalComponent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let component_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| serde::de::Error::custom("modal component type is missing"))?;
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LabelValue {
+            #[serde(rename = "type")]
+            kind: u8,
+            id: Option<i32>,
+            label: String,
+            description: Option<String>,
+            component: Box<ModalComponent>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RadioGroupValue {
+            #[serde(rename = "type")]
+            kind: u8,
+            custom_id: String,
+            required: Option<bool>,
+            options: Vec<ModalOption>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CheckboxGroupValue {
+            #[serde(rename = "type")]
+            kind: u8,
+            custom_id: String,
+            required: Option<bool>,
+            min_values: Option<u8>,
+            max_values: Option<u8>,
+            options: Vec<ModalOption>,
+        }
+
+        match component_type {
+            18 => {
+                let label: LabelValue =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                if label.kind != 18 {
+                    return Err(serde::de::Error::custom("invalid modal Label type"));
+                }
+                Ok(Self::Label {
+                    id: label.id,
+                    label: label.label,
+                    description: label.description,
+                    component: label.component,
+                })
+            }
+            21 => {
+                let radio: RadioGroupValue =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                if radio.kind != 21 {
+                    return Err(serde::de::Error::custom("invalid modal Radio Group type"));
+                }
+                Ok(Self::RadioGroup {
+                    custom_id: radio.custom_id,
+                    required: radio.required,
+                    options: radio.options,
+                })
+            }
+            22 => {
+                let checkbox: CheckboxGroupValue =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                if checkbox.kind != 22 {
+                    return Err(serde::de::Error::custom(
+                        "invalid modal Checkbox Group type",
+                    ));
+                }
+                Ok(Self::CheckboxGroup {
+                    custom_id: checkbox.custom_id,
+                    required: checkbox.required,
+                    min_values: checkbox.min_values,
+                    max_values: checkbox.max_values,
+                    options: checkbox.options,
+                })
+            }
+            _ => serde_json::from_value(value)
+                .map(Self::Component)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+/// A form to show to the user, with up to five typed modal components.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModalSpec {
-    /// Starts with the id of the module (`module:..`); the submission comes back under it.
+    /// Starts with the id of the module; the submission comes back under it.
     pub custom_id: String,
     pub title: String,
-    pub components: Vec<Component>,
+    pub components: Vec<ModalComponent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -406,6 +656,7 @@ pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_FILENAME_CHARS: usize = 255;
 /// The most files Discord takes in one message.
 pub const MAX_FILES: usize = 10;
+pub const MAX_MODAL_COMPONENTS: usize = 5;
 
 /// Every Discord operation available to modules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -455,12 +706,17 @@ pub enum Action {
         channel_id: ChannelId,
         message_id: MessageId,
     },
-    /// Privately to a member of `guild_id`: the host checks the membership before sending.
+    /// Privately to a member of guild_id: the host checks membership before sending. Buttons
+    /// are routed only from their saved message record to a direct-message handler.
     SendDirectMessage {
         guild_id: GuildId,
         user_id: UserId,
         content: Option<String>,
         embeds: Vec<Embed>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        components: Vec<Component>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<FileUpload>,
     },
     EditMessage {
         channel_id: ChannelId,
@@ -958,6 +1214,22 @@ fn check_new_message(content: Option<&str>, embeds: &[Embed]) -> Result<(), Disc
     )
 }
 
+fn check_files(files: &[FileUpload]) -> Result<(), DiscordError> {
+    ensure(files.len() <= MAX_FILES, || {
+        format!("a message has at most {MAX_FILES} files")
+    })?;
+    for file in files {
+        ensure(
+            !file.filename.is_empty() && file.filename.chars().count() <= MAX_FILENAME_CHARS,
+            || format!("a file name is 1 to {MAX_FILENAME_CHARS} characters"),
+        )?;
+    }
+    ensure(
+        files.iter().map(|file| file.data.len()).sum::<usize>() <= MAX_UPLOAD_BYTES,
+        || format!("the files of a message are at most {MAX_UPLOAD_BYTES} bytes"),
+    )
+}
+
 /// Discord takes at most 25 choices; names and string values are 1-100 characters.
 fn check_choices(choices: &[OptionChoice]) -> Result<(), DiscordError> {
     ensure(choices.len() <= 25, || {
@@ -1076,41 +1348,203 @@ fn check_select(menu: &SelectMenu) -> Result<(), DiscordError> {
     )
 }
 
-/// A modal has a title, an id, and 1-5 rows of one text input each.
 fn check_modal(spec: &ModalSpec) -> Result<(), DiscordError> {
     check_len("modal custom_id", &spec.custom_id, 1, 100)?;
     check_len("modal title", &spec.title, 1, 45)?;
-    ensure((1..=5).contains(&spec.components.len()), || {
-        "a modal has 1-5 inputs".into()
-    })?;
-    for row in &spec.components {
-        let [Component::ActionRow(row)] = std::slice::from_ref(row) else {
-            return Err(DiscordError::Invalid(
-                "modal inputs belong in action rows".into(),
-            ));
-        };
-        let [Component::TextInput(input)] = row.components.as_slice() else {
-            return Err(DiscordError::Invalid(
-                "a modal row holds one text input".into(),
-            ));
-        };
-        check_len("input custom_id", &input.custom_id, 1, 100)?;
-        #[allow(deprecated)]
-        if let Some(label) = &input.label {
-            check_len("input label", label, 1, 45)?;
+    ensure(
+        (1..=MAX_MODAL_COMPONENTS).contains(&spec.components.len()),
+        || format!("a modal has 1-{MAX_MODAL_COMPONENTS} components"),
+    )?;
+    let mut custom_ids = BTreeSet::new();
+    let mut input_count = 0;
+    for component in &spec.components {
+        check_modal_component(component, &mut custom_ids, &mut input_count)?;
+    }
+    ensure(input_count > 0, || {
+        "a modal needs at least one input".into()
+    })
+}
+
+fn check_modal_component(
+    component: &ModalComponent,
+    custom_ids: &mut BTreeSet<String>,
+    input_count: &mut usize,
+) -> Result<(), DiscordError> {
+    match component {
+        ModalComponent::Label {
+            label,
+            description,
+            component,
+            ..
+        } => check_modal_label(
+            label,
+            description.as_deref(),
+            component,
+            custom_ids,
+            input_count,
+        ),
+        ModalComponent::Component(Component::Label(label)) => {
+            let child = ModalComponent::from((*label.component).clone());
+            check_modal_label(
+                &label.label,
+                label.description.as_deref(),
+                &child,
+                custom_ids,
+                input_count,
+            )
         }
-        if let Some(max) = input.max_length {
-            ensure((1..=4000).contains(&max), || {
-                "an input holds 1-4000 characters".into()
+        ModalComponent::Component(Component::ActionRow(row)) => {
+            let [Component::TextInput(input)] = row.components.as_slice() else {
+                return Err(DiscordError::Invalid(
+                    "a legacy modal row holds one text input".into(),
+                ));
+            };
+            check_modal_text_input(input, custom_ids, input_count)
+        }
+        ModalComponent::Component(Component::TextDisplay(display)) => {
+            check_len("modal text display", &display.content, 1, 4000)
+        }
+        _ => Err(DiscordError::Invalid(
+            "modal inputs must be Labels or legacy text input rows".into(),
+        )),
+    }
+}
+
+fn check_modal_label(
+    label: &str,
+    description: Option<&str>,
+    component: &ModalComponent,
+    custom_ids: &mut BTreeSet<String>,
+    input_count: &mut usize,
+) -> Result<(), DiscordError> {
+    check_len("modal label", label, 1, 45)?;
+    if let Some(description) = description {
+        check_len("modal label description", description, 0, 100)?;
+    }
+    check_modal_input(component, custom_ids, input_count)
+}
+
+fn check_modal_input(
+    component: &ModalComponent,
+    custom_ids: &mut BTreeSet<String>,
+    input_count: &mut usize,
+) -> Result<(), DiscordError> {
+    match component {
+        ModalComponent::Component(Component::TextInput(input)) => {
+            check_modal_text_input(input, custom_ids, input_count)
+        }
+        ModalComponent::Component(Component::SelectMenu(menu)) => {
+            check_modal_custom_id(&menu.custom_id, custom_ids)?;
+            check_select(menu)?;
+            *input_count += 1;
+            Ok(())
+        }
+        ModalComponent::RadioGroup {
+            custom_id, options, ..
+        } => {
+            check_modal_custom_id(custom_id, custom_ids)?;
+            check_modal_options(options, 2, 10)?;
+            let defaults = options
+                .iter()
+                .filter(|option| option.default == Some(true))
+                .count();
+            ensure(defaults <= 1, || {
+                "a radio group has at most one default option".into()
             })?;
+            *input_count += 1;
+            Ok(())
         }
+        ModalComponent::CheckboxGroup {
+            custom_id,
+            required,
+            min_values,
+            max_values,
+            options,
+        } => {
+            check_modal_custom_id(custom_id, custom_ids)?;
+            check_modal_options(options, 1, 10)?;
+            let option_count = u8::try_from(options.len()).unwrap_or(u8::MAX);
+            let min = min_values.unwrap_or(if *required == Some(false) { 0 } else { 1 });
+            let max = max_values.unwrap_or(option_count);
+            ensure(max >= 1 && max <= option_count && min <= max, || {
+                "checkbox group selection limits must fit its options".into()
+            })?;
+            ensure(*required == Some(false) || min >= 1, || {
+                "a required checkbox group must require one selection".into()
+            })?;
+            *input_count += 1;
+            Ok(())
+        }
+        _ => Err(DiscordError::Invalid(
+            "a modal Label must contain a supported input".into(),
+        )),
+    }
+}
+
+fn check_modal_text_input(
+    input: &twilight_model::channel::message::component::TextInput,
+    custom_ids: &mut BTreeSet<String>,
+    input_count: &mut usize,
+) -> Result<(), DiscordError> {
+    check_modal_custom_id(&input.custom_id, custom_ids)?;
+    if let Some(label) = &input.label {
+        check_len("input label", label, 1, 45)?;
+    }
+    if let Some(min) = input.min_length {
+        ensure(min <= 4000, || {
+            "an input holds at most 4000 characters".into()
+        })?;
+    }
+    if let Some(max) = input.max_length {
+        ensure((1..=4000).contains(&max), || {
+            "an input holds 1-4000 characters".into()
+        })?;
+    }
+    if let (Some(min), Some(max)) = (input.min_length, input.max_length) {
+        ensure(min <= max, || {
+            "an input minimum cannot exceed its maximum".into()
+        })?;
+    }
+    if let Some(value) = &input.value {
+        check_len("input value", value, 0, 4000)?;
+    }
+    *input_count += 1;
+    Ok(())
+}
+
+fn check_modal_custom_id(
+    custom_id: &str,
+    custom_ids: &mut BTreeSet<String>,
+) -> Result<(), DiscordError> {
+    check_len("input custom_id", custom_id, 1, 100)?;
+    ensure(custom_ids.insert(custom_id.to_owned()), || {
+        "modal input custom_ids must be unique".into()
+    })
+}
+
+fn check_modal_options(
+    options: &[ModalOption],
+    minimum: usize,
+    maximum: usize,
+) -> Result<(), DiscordError> {
+    ensure((minimum..=maximum).contains(&options.len()), || {
+        format!("a modal choice group has {minimum}-{maximum} options")
+    })?;
+    let mut values = BTreeSet::new();
+    for option in options {
+        check_len("modal option value", &option.value, 1, 100)?;
+        check_len("modal option label", &option.label, 1, 100)?;
+        if let Some(description) = &option.description {
+            check_len("modal option description", description, 0, 100)?;
+        }
+        ensure(values.insert(option.value.as_str()), || {
+            "modal option values must be unique".into()
+        })?;
     }
     Ok(())
 }
 
 impl Action {
-    /// The `custom_id`s of the components and modal this action sends.
-    #[must_use]
     pub fn custom_ids(&self) -> Vec<&str> {
         fn of(components: &[Component]) -> Vec<&str> {
             let mut found = Vec::new();
@@ -1120,11 +1554,34 @@ impl Action {
                     Component::Button(button) => found.extend(button.custom_id.as_deref()),
                     Component::SelectMenu(menu) => found.push(menu.custom_id.as_str()),
                     Component::TextInput(input) => found.push(input.custom_id.as_str()),
+                    Component::Label(label) => {
+                        found.extend(of(std::slice::from_ref(&*label.component)));
+                    }
                     _ => {}
                 }
             }
             found
         }
+
+        fn of_modal(components: &[ModalComponent]) -> Vec<&str> {
+            let mut found = Vec::new();
+            for component in components {
+                match component {
+                    ModalComponent::Component(component) => {
+                        found.extend(of(std::slice::from_ref(component)));
+                    }
+                    ModalComponent::Label { component, .. } => {
+                        found.extend(of_modal(std::slice::from_ref(component)));
+                    }
+                    ModalComponent::RadioGroup { custom_id, .. }
+                    | ModalComponent::CheckboxGroup { custom_id, .. } => {
+                        found.push(custom_id.as_str());
+                    }
+                }
+            }
+            found
+        }
+
         match self {
             Self::Respond { response, .. } => match response {
                 InteractionResponse::Message { reply } | InteractionResponse::Update { reply } => {
@@ -1132,7 +1589,7 @@ impl Action {
                 }
                 InteractionResponse::Modal(spec) => {
                     let mut ids = vec![spec.custom_id.as_str()];
-                    ids.extend(of(&spec.components));
+                    ids.extend(of_modal(&spec.components));
                     ids
                 }
                 InteractionResponse::Defer { .. }
@@ -1142,9 +1599,9 @@ impl Action {
             Self::Followup { reply, .. } | Self::EditResponse { reply, .. } => {
                 of(&reply.components)
             }
-            // A message posted to a channel carries components too: a module must not be able
-            // to post a button that another module answers.
-            Self::PostMessage { components, .. } => of(components),
+            Self::PostMessage { components, .. } | Self::SendDirectMessage { components, .. } => {
+                of(components)
+            }
             _ => Vec::new(),
         }
     }
@@ -1609,10 +2066,14 @@ impl Action {
             | Self::BulkDeleteMessages { channel_id, .. }
             | Self::AddReaction { channel_id, .. }
             | Self::GetChannel { channel_id }
-            | Self::EditChannel { channel_id, .. }
             | Self::DeleteChannel { channel_id, .. }
             | Self::SetPermissionOverwrite { channel_id, .. }
             | Self::DeletePermissionOverwrite { channel_id, .. } => vec![*channel_id],
+            Self::EditChannel {
+                channel_id, patch, ..
+            } => std::iter::once(*channel_id)
+                .chain(patch.parent_id.flatten())
+                .collect(),
             Self::CreateChannel { spec, .. } => spec.parent_id.into_iter().collect(),
             Self::CreateAutoModRule { spec, .. } => spec
                 .actions
@@ -1938,27 +2399,26 @@ impl Action {
                     check_message_body(content.as_deref(), embeds)?;
                 }
                 check_components(components)?;
-                ensure(files.len() <= MAX_FILES, || {
-                    format!("a message has at most {MAX_FILES} files")
-                })?;
-                for file in files {
-                    ensure(
-                        !file.filename.is_empty()
-                            && file.filename.chars().count() <= MAX_FILENAME_CHARS,
-                        || format!("a file name is 1 to {MAX_FILENAME_CHARS} characters"),
-                    )?;
-                }
-                ensure(
-                    files.iter().map(|f| f.data.len()).sum::<usize>() <= MAX_UPLOAD_BYTES,
-                    || format!("the files of a message are at most {MAX_UPLOAD_BYTES} bytes"),
-                )
+                check_files(files)
             }
             Self::SendMessage {
                 content, embeds, ..
-            }
-            | Self::SendDirectMessage {
-                content, embeds, ..
             } => check_new_message(content.as_deref(), embeds),
+            Self::SendDirectMessage {
+                content,
+                embeds,
+                components,
+                files,
+                ..
+            } => {
+                if files.is_empty() {
+                    check_new_message(content.as_deref(), embeds)?;
+                } else {
+                    check_message_body(content.as_deref(), embeds)?;
+                }
+                check_components(components)?;
+                check_files(files)
+            }
             Self::EditMessage {
                 content, embeds, ..
             } => check_message_body(content.as_deref(), embeds.as_deref().unwrap_or_default()),
@@ -1998,7 +2458,15 @@ impl Action {
                     format!("slowmode is at most {MAX_SLOWMODE_SECONDS} seconds")
                 })
             }
-            Self::EditChannel { patch, .. } => {
+            Self::EditChannel {
+                channel_id, patch, ..
+            } => {
+                ensure(
+                    patch
+                        .parent_id
+                        .is_none_or(|parent| parent.is_none_or(|parent| parent != *channel_id)),
+                    || "a channel cannot be its own parent".into(),
+                )?;
                 if let Some(name) = &patch.name {
                     check_len("channel name", name, 1, 100)?;
                 }
@@ -2112,6 +2580,154 @@ mod tests {
             files: Vec::new(),
         };
         assert_eq!(action.custom_ids(), ["other:delete:1"]);
+    }
+
+    #[test]
+    fn direct_message_components_are_validated_and_tracked_by_the_action() {
+        let action = Action::SendDirectMessage {
+            guild_id: id::<1, _>(),
+            user_id: id::<2, _>(),
+            content: Some("Rate this ticket".into()),
+            embeds: Vec::new(),
+            components: vec![row_of(vec![button_with("tickets:rate:13:12:44:1:5", "5")])],
+            files: Vec::new(),
+        };
+        assert_eq!(action.custom_ids(), ["tickets:rate:13:12:44:1:5"]);
+        assert!(action.validate().is_ok());
+
+        let invalid = Action::SendDirectMessage {
+            guild_id: id::<1, _>(),
+            user_id: id::<2, _>(),
+            content: Some("Rate this ticket".into()),
+            embeds: Vec::new(),
+            components: vec![button_with("tickets:rate:13:12:44:1:5", "5")],
+            files: Vec::new(),
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn direct_message_files_follow_message_size_and_filename_limits() {
+        let file = |filename: String, bytes: usize| FileUpload {
+            filename,
+            data: vec![0; bytes],
+        };
+        let send = |files: Vec<FileUpload>| Action::SendDirectMessage {
+            guild_id: id::<1, _>(),
+            user_id: id::<2, _>(),
+            content: None,
+            embeds: Vec::new(),
+            components: Vec::new(),
+            files,
+        };
+
+        assert!(
+            send(vec![]).validate().is_err(),
+            "an empty DM is not a message"
+        );
+        assert!(
+            send(vec![file("export.zip".into(), 1)]).validate().is_ok(),
+            "a file may be the whole DM"
+        );
+        assert!(
+            send(vec![file("export.zip".into(), MAX_UPLOAD_BYTES + 1)])
+                .validate()
+                .is_err(),
+            "the upload size limit applies"
+        );
+        assert!(
+            send(vec![
+                file("first.zip".into(), MAX_UPLOAD_BYTES),
+                file("second.zip".into(), 1),
+            ])
+            .validate()
+            .is_err(),
+            "the aggregate upload limit applies"
+        );
+        assert!(
+            send(
+                (0..=MAX_FILES)
+                    .map(|_| file("export.zip".into(), 1))
+                    .collect()
+            )
+            .validate()
+            .is_err(),
+            "the attachment count limit applies"
+        );
+        assert!(
+            send(vec![file(String::new(), 1)]).validate().is_err(),
+            "file names are required"
+        );
+        assert!(
+            send(vec![file("x".repeat(MAX_FILENAME_CHARS + 1), 1)])
+                .validate()
+                .is_err(),
+            "the filename length limit applies"
+        );
+    }
+
+    #[test]
+    fn channel_parent_patch_preserves_keep_clear_and_move() {
+        let keep = ChannelPatch::default();
+        let keep_json = serde_json::to_string(&keep).unwrap();
+        assert!(!keep_json.contains("parent_id"));
+        assert_eq!(
+            serde_json::from_str::<ChannelPatch>("{}")
+                .unwrap()
+                .parent_id,
+            None
+        );
+
+        let clear: ChannelPatch = serde_json::from_str(r#"{"parent_id":null}"#).unwrap();
+        assert_eq!(clear.parent_id, Some(None));
+
+        let move_to = ChannelPatch {
+            parent_id: Some(Some(Id::new(42))),
+            ..ChannelPatch::default()
+        };
+        let move_json = serde_json::to_string(&move_to).unwrap();
+        assert!(move_json.contains(r#""parent_id":"42""#));
+        assert_eq!(
+            serde_json::from_str::<ChannelPatch>(&move_json).unwrap(),
+            move_to
+        );
+    }
+
+    #[test]
+    fn a_channel_cannot_be_its_own_parent() {
+        let channel_id = id::<1, _>();
+        let action = Action::EditChannel {
+            channel_id,
+            patch: ChannelPatch {
+                parent_id: Some(Some(channel_id)),
+                ..ChannelPatch::default()
+            },
+            reason: reason(),
+        };
+        assert!(action.validate().is_err());
+    }
+
+    #[test]
+    fn old_direct_message_actions_deserialize_without_components() {
+        let action = Action::SendDirectMessage {
+            guild_id: id::<1, _>(),
+            user_id: id::<2, _>(),
+            content: Some("Rate this ticket".into()),
+            embeds: Vec::new(),
+            components: vec![row_of(vec![button_with("tickets:rate:13:12:44:1:5", "5")])],
+            files: Vec::new(),
+        };
+        let mut value = serde_json::to_value(action).unwrap();
+        value.as_object_mut().unwrap().remove("components");
+        value.as_object_mut().unwrap().remove("files");
+        assert!(matches!(
+            serde_json::from_value::<Action>(value).unwrap(),
+            Action::SendDirectMessage {
+                components,
+                files,
+                ..
+            } if components.is_empty() && files.is_empty()
+        ));
     }
 
     #[test]
@@ -2462,7 +3078,7 @@ mod tests {
         let modal = |title: &str, inputs: Vec<Component>| ModalSpec {
             custom_id: "m:form".into(),
             title: title.into(),
-            components: inputs,
+            components: inputs.into_iter().map(ModalComponent::from).collect(),
         };
         assert!(check_modal(&modal("Report", vec![input("m:why", "Why")])).is_ok());
         assert!(check_modal(&modal("", vec![input("m:why", "Why")])).is_err());
@@ -2592,6 +3208,8 @@ mod tests {
             user_id: id::<2, _>(),
             content: Some("hi".into()),
             embeds: vec![],
+            components: Vec::new(),
+            files: Vec::new(),
         };
         assert_eq!(action.capability(), Capability::SendDirectMessages);
         assert_eq!(action.guild_id(), Some(id::<7, _>()));
@@ -3366,6 +3984,8 @@ mod tests {
             user_id: id::<2, _>(),
             content,
             embeds: vec![],
+            components: Vec::new(),
+            files: Vec::new(),
         };
         assert!(make(None).validate().is_err());
         assert!(make(Some(String::new())).validate().is_err());

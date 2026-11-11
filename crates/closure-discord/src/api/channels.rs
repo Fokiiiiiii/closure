@@ -112,6 +112,9 @@ impl TwilightApi {
         if let Some(seconds) = patch.slowmode_seconds {
             request = request.rate_limit_per_user(seconds);
         }
+        if let Some(parent_id) = patch.parent_id {
+            request = request.parent_id(parent_id);
+        }
         read(request)
             .await
             .map(|channel| Outcome::Channel(Box::new(channel)))

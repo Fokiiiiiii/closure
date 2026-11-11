@@ -448,6 +448,8 @@ mod tests {
             user_id: UserId::new(42),
             content: Some("hi there".to_owned()),
             embeds: vec![],
+            components: vec![],
+            files: vec![],
         };
 
         let plan = plan_of(&[dm]);
@@ -465,6 +467,8 @@ mod tests {
             user_id: UserId::new(user),
             content: None,
             embeds: vec![described(text)],
+            components: vec![],
+            files: vec![],
         };
 
         let plan = plan_of(&[

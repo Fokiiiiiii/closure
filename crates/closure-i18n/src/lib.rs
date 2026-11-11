@@ -207,6 +207,7 @@ pub fn error_key(error: &DiscordError) -> &'static str {
             "error-not-found"
         }
         DiscordError::DirectMessagesClosed => "error-dm-closed",
+        DiscordError::DirectMessageComponentsNotRoutable => "error-dm-components-not-routable",
         DiscordError::NotInVoice => "error-not-in-voice",
         DiscordError::RateLimited { .. } => "error-rate-limited",
         DiscordError::Transient(_) => "error-transient",

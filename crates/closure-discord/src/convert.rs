@@ -1,17 +1,19 @@
 //! Turns gateway payloads into the stable [`Event`] model.
 //!
-//! Anything that is not about a guild (direct messages, interactions outside a guild) is dropped
-//! here, so the rest of the pipeline can rely on every event belonging to one.
+//! Direct messages are dropped except component clicks, which remain unscoped until the host
+//! matches them to a saved send record.
 
 use closure_core::action::Emoji;
 use closure_core::event::{
     AttachmentInfo, AutocompleteInvocation, ChannelId, ChannelInfo, CommandInvocation,
     CommandOption, CommandOptionValue, ComponentInvocation, ContextInvocation, ContextTarget,
     EmojiInfo, Event, GuildId, InteractionToken, MemberInfo, Mentionable, MessageInfo,
-    ModalSubmission, OverwriteInfo, OverwriteTarget, ReactionInfo, RoleId, RoleInfo, RolesChange,
-    StageInfo, StickerInfo, ThreadInfo, UserInfo,
+    ModalSubmission, ModalValue, ModalValueField, OverwriteInfo, OverwriteTarget, ReactionInfo,
+    RoleId, RoleInfo, RolesChange, StageInfo, StickerInfo, ThreadInfo, UserInfo,
 };
 use closure_core::locale::Locale;
+use serde_json::Value;
+use std::collections::BTreeSet;
 use twilight_cache_inmemory::model::{CachedEmoji, CachedSticker};
 use twilight_gateway::Event as Gateway;
 use twilight_model::application::command::CommandType;
@@ -24,7 +26,7 @@ use twilight_model::application::interaction::{Interaction, InteractionData, Int
 use twilight_model::channel::message::sticker::Sticker;
 use twilight_model::channel::message::{EmojiReactionType, Message, MessageType};
 use twilight_model::channel::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType};
-use twilight_model::channel::{Attachment, Channel, StageInstance};
+use twilight_model::channel::{Attachment, Channel, ChannelType, StageInstance};
 use twilight_model::gateway::payload::incoming::{
     GuildCreate, GuildEmojisUpdate, GuildStickersUpdate, MemberUpdate, ThreadCreate, ThreadDelete,
 };
@@ -295,6 +297,13 @@ fn origin(interaction: &Interaction) -> Option<Origin> {
 }
 
 fn interaction_event(interaction: &Interaction) -> Option<Event> {
+    interaction_event_with_modal_components(interaction, None)
+}
+
+fn interaction_event_with_modal_components(
+    interaction: &Interaction,
+    raw_modal_components: Option<&Value>,
+) -> Option<Event> {
     match interaction.kind {
         InteractionType::ApplicationCommand => match &interaction.data {
             Some(InteractionData::ApplicationCommand(data))
@@ -307,56 +316,288 @@ fn interaction_event(interaction: &Interaction) -> Option<Event> {
         InteractionType::ApplicationCommandAutocomplete => {
             autocomplete(interaction).map(Event::Autocomplete)
         }
-        InteractionType::MessageComponent => component(interaction).map(Event::Component),
-        InteractionType::ModalSubmit => modal(interaction).map(Event::Modal),
+        InteractionType::MessageComponent => component(interaction),
+        InteractionType::ModalSubmit => modal(interaction, raw_modal_components).map(Event::Modal),
         _ => None,
     }
 }
 
-fn component(interaction: &Interaction) -> Option<ComponentInvocation> {
+fn component(interaction: &Interaction) -> Option<Event> {
     let Some(InteractionData::MessageComponent(data)) = &interaction.data else {
         return None;
     };
+    let channel = interaction.channel.as_ref()?;
+    let message_id = interaction.message.as_ref()?.id;
+    if channel.kind == ChannelType::Private {
+        return Some(Event::DirectMessageComponent(ComponentInvocation {
+            interaction_id: interaction.id,
+            application_id: interaction.application_id,
+            token: InteractionToken::new(interaction.token.clone()),
+            guild_id: Id::new(0),
+            channel_id: channel.id,
+            message_id,
+            user: user(interaction.author()?),
+            roles: Vec::new(),
+            invoker_permissions: twilight_model::guild::Permissions::empty(),
+            locale: interaction
+                .locale
+                .as_deref()
+                .and_then(Locale::from_discord_tag),
+            custom_id: data.custom_id.clone(),
+            values: data.values.clone(),
+        }));
+    }
     let origin = origin(interaction)?;
-    Some(ComponentInvocation {
+    Some(Event::Component(ComponentInvocation {
         interaction_id: origin.interaction_id,
         application_id: origin.application_id,
         token: origin.token,
         guild_id: origin.guild_id,
         channel_id: origin.channel_id,
-        message_id: interaction.message.as_ref()?.id,
+        message_id,
         user: origin.user,
         roles: origin.roles,
         invoker_permissions: origin.invoker_permissions,
         locale: origin.locale,
         custom_id: data.custom_id.clone(),
         values: data.values.clone(),
-    })
+    }))
 }
 
-/// The text inputs of a submitted modal, in the order of the modal, wherever they are nested.
-fn modal_fields(components: &[ModalInteractionComponent], fields: &mut Vec<(String, String)>) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModalPlacement {
+    TopLevel,
+    LabelChild,
+    LegacyRowChild,
+}
+
+struct ModalAnswers {
+    fields: Vec<(String, String)>,
+    values: Vec<ModalValueField>,
+    custom_ids: BTreeSet<String>,
+}
+
+fn check_modal_string(value: &str, minimum: usize, maximum: usize) -> Result<(), &'static str> {
+    let length = value.chars().count();
+    if !(minimum..=maximum).contains(&length) {
+        return Err("a modal field has an invalid length");
+    }
+    Ok(())
+}
+
+fn modal_custom_id(component: &Value, answers: &mut ModalAnswers) -> Result<String, &'static str> {
+    let custom_id = component
+        .get("custom_id")
+        .and_then(Value::as_str)
+        .ok_or("a modal input has no custom_id")?;
+    check_modal_string(custom_id, 1, 100)?;
+    if !answers.custom_ids.insert(custom_id.to_owned()) {
+        return Err("modal input custom_ids are duplicated");
+    }
+    Ok(custom_id.to_owned())
+}
+
+fn modal_values(components: &Value) -> Result<ModalAnswers, &'static str> {
+    let components = components
+        .as_array()
+        .ok_or("modal components are not an array")?;
+    if components.is_empty() || components.len() > 5 {
+        return Err("a modal must contain 1-5 top-level components");
+    }
+    let mut answers = ModalAnswers {
+        fields: Vec::new(),
+        values: Vec::new(),
+        custom_ids: BTreeSet::new(),
+    };
     for component in components {
-        match component {
-            ModalInteractionComponent::ActionRow(row) => modal_fields(&row.components, fields),
-            ModalInteractionComponent::Label(label) => {
-                modal_fields(std::slice::from_ref(&*label.component), fields);
+        modal_component(component, ModalPlacement::TopLevel, &mut answers)?;
+    }
+    if answers.values.is_empty() {
+        return Err("a modal submission has no supported input values");
+    }
+    Ok(answers)
+}
+
+fn modal_component(
+    component: &Value,
+    placement: ModalPlacement,
+    answers: &mut ModalAnswers,
+) -> Result<(), &'static str> {
+    let kind = component
+        .get("type")
+        .and_then(Value::as_u64)
+        .ok_or("a modal component has no numeric type")?;
+    match kind {
+        1 if placement == ModalPlacement::TopLevel => {
+            let children = component
+                .get("components")
+                .and_then(Value::as_array)
+                .ok_or("a modal action row has no components")?;
+            if children.len() != 1 || children[0].get("type").and_then(Value::as_u64) != Some(4) {
+                return Err("a legacy modal row must contain one text input");
             }
-            ModalInteractionComponent::TextInput(input) => {
-                fields.push((input.custom_id.clone(), input.value.clone()));
-            }
-            _ => {}
+            modal_component(&children[0], ModalPlacement::LegacyRowChild, answers)
         }
+        18 if placement == ModalPlacement::TopLevel => {
+            let label = component
+                .get("label")
+                .and_then(Value::as_str)
+                .ok_or("a modal Label has no label")?;
+            check_modal_string(label, 1, 45)?;
+            if let Some(description) = component.get("description") {
+                check_modal_string(
+                    description
+                        .as_str()
+                        .ok_or("a modal Label description is not text")?,
+                    0,
+                    100,
+                )?;
+            }
+            let child = component
+                .get("component")
+                .ok_or("a modal Label has no input")?;
+            modal_component(child, ModalPlacement::LabelChild, answers)
+        }
+        10 if placement == ModalPlacement::TopLevel => {
+            let content = component
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or("a modal TextDisplay has no content")?;
+            check_modal_string(content, 1, 4000)
+        }
+        4 if matches!(
+            placement,
+            ModalPlacement::LabelChild | ModalPlacement::LegacyRowChild
+        ) =>
+        {
+            let custom_id = modal_custom_id(component, answers)?;
+            let value = component
+                .get("value")
+                .and_then(Value::as_str)
+                .ok_or("a text input answer is not text")?;
+            check_modal_string(value, 0, 4000)?;
+            if answers.values.len() == 5 {
+                return Err("a modal has more than five input values");
+            }
+            answers.fields.push((custom_id.clone(), value.to_owned()));
+            answers.values.push(ModalValueField {
+                custom_id,
+                value: ModalValue::Text(value.to_owned()),
+            });
+            Ok(())
+        }
+        kind @ (3 | 5 | 6 | 7 | 8) if placement == ModalPlacement::LabelChild => {
+            let custom_id = modal_custom_id(component, answers)?;
+            let selected = component
+                .get("values")
+                .and_then(Value::as_array)
+                .ok_or("a select answer has no values array")?;
+            if selected.len() > 25 {
+                return Err("a select answer has more than 25 values");
+            }
+            let values = selected
+                .iter()
+                .map(|value| {
+                    let value = value
+                        .as_str()
+                        .ok_or("a select answer contains a non-string value")?;
+                    check_modal_string(value, 1, if kind == 3 { 100 } else { 20 })?;
+                    if kind != 3 && !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err("an entity select answer is not a snowflake");
+                    }
+                    Ok(value.to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if values.iter().collect::<BTreeSet<_>>().len() != values.len() {
+                return Err("a select answer contains duplicate values");
+            }
+            if answers.values.len() == 5 {
+                return Err("a modal has more than five input values");
+            }
+            let value = match kind {
+                3 => ModalValue::StringSelect(values),
+                5 => ModalValue::UserSelect(values),
+                6 => ModalValue::RoleSelect(values),
+                7 => ModalValue::MentionableSelect(values),
+                _ => ModalValue::ChannelSelect(values),
+            };
+            answers.values.push(ModalValueField { custom_id, value });
+            Ok(())
+        }
+        21 if placement == ModalPlacement::LabelChild => {
+            let custom_id = modal_custom_id(component, answers)?;
+            let value = component
+                .get("value")
+                .ok_or("a radio group answer has no value")?;
+            let value = if value.is_null() {
+                None
+            } else {
+                let value = value
+                    .as_str()
+                    .ok_or("a radio group answer is neither text nor null")?;
+                check_modal_string(value, 1, 100)?;
+                Some(value.to_owned())
+            };
+            if answers.values.len() == 5 {
+                return Err("a modal has more than five input values");
+            }
+            answers.values.push(ModalValueField {
+                custom_id,
+                value: ModalValue::RadioGroup(value),
+            });
+            Ok(())
+        }
+        22 if placement == ModalPlacement::LabelChild => {
+            let custom_id = modal_custom_id(component, answers)?;
+            let values = component
+                .get("values")
+                .and_then(Value::as_array)
+                .ok_or("a checkbox group answer has no values array")?;
+            if values.len() > 10 {
+                return Err("a checkbox group answer has more than ten values");
+            }
+            let values = values
+                .iter()
+                .map(|value| {
+                    let value = value
+                        .as_str()
+                        .ok_or("a checkbox group answer contains a non-string value")?;
+                    check_modal_string(value, 1, 100)?;
+                    Ok(value.to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if values.iter().collect::<BTreeSet<_>>().len() != values.len() {
+                return Err("a checkbox group answer contains duplicate values");
+            }
+            if answers.values.len() == 5 {
+                return Err("a modal has more than five input values");
+            }
+            answers.values.push(ModalValueField {
+                custom_id,
+                value: ModalValue::CheckboxGroup(values),
+            });
+            Ok(())
+        }
+        _ => Err("a modal submission contains an unsupported component or nesting"),
     }
 }
 
-fn modal(interaction: &Interaction) -> Option<ModalSubmission> {
+fn modal(interaction: &Interaction, raw_components: Option<&Value>) -> Option<ModalSubmission> {
     let Some(InteractionData::ModalSubmit(data)) = &interaction.data else {
         return None;
     };
     let origin = origin(interaction)?;
-    let mut fields = Vec::new();
-    modal_fields(&data.components, &mut fields);
+    let components = match raw_components {
+        Some(components) => components.clone(),
+        None => serde_json::to_value(&data.components).ok()?,
+    };
+    let answers = match modal_values(&components) {
+        Ok(answers) => answers,
+        Err(reason) => {
+            tracing::warn!(reason, "discarding malformed modal submission");
+            return None;
+        }
+    };
     Some(ModalSubmission {
         interaction_id: origin.interaction_id,
         application_id: origin.application_id,
@@ -368,7 +609,8 @@ fn modal(interaction: &Interaction) -> Option<ModalSubmission> {
         invoker_permissions: origin.invoker_permissions,
         locale: origin.locale,
         custom_id: data.custom_id.clone(),
-        fields,
+        fields: answers.fields,
+        values: answers.values,
     })
 }
 
@@ -559,9 +801,22 @@ pub(crate) struct Before {
     pub(crate) stage: Option<StageInfo>,
 }
 
-/// Every event a payload gives: the one it converts to, then the one comparing it with `before` (a role change follows its member update).
 pub(crate) fn events(gateway: &Gateway, before: &Before) -> Vec<Event> {
-    event(gateway)
+    events_with_modal_components(gateway, before, None)
+}
+
+pub(crate) fn events_with_modal_components(
+    gateway: &Gateway,
+    before: &Before,
+    raw_modal_components: Option<&Value>,
+) -> Vec<Event> {
+    let converted = match (gateway, raw_modal_components) {
+        (Gateway::InteractionCreate(interaction), Some(components)) => {
+            interaction_event_with_modal_components(&interaction.0, Some(components))
+        }
+        _ => event(gateway),
+    };
+    converted
         .into_iter()
         .chain(state_change(gateway, before))
         .collect()
@@ -1572,6 +1827,36 @@ mod tests {
         );
         assert_eq!(click.token.expose(), "tok2");
         assert_eq!(click.locale, Some(Locale::En));
+    }
+
+    #[test]
+    fn a_dm_component_is_left_unscoped_until_the_host_validates_its_route() {
+        let message = json!({
+            "id": "900", "channel_id": "77", "author": user_json("99", true), "content": "rate",
+            "timestamp": "2026-10-24T00:00:00.000000+00:00", "edited_timestamp": null,
+            "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+            "attachments": [], "embeds": [], "pinned": false, "type": 0
+        });
+        let gateway = user_interaction(
+            3,
+            &json!({ "custom_id": "tickets:rate:100:1:5", "component_type": 2 }),
+            &json!({
+                "guild_id": "999",
+                "member": null,
+                "user": user_json("7", false),
+                "channel": { "id": "77", "type": 1 },
+                "message": message
+            }),
+        );
+        let Some(Event::DirectMessageComponent(click)) = event(&gateway) else {
+            panic!("expected a direct-message click");
+        };
+        assert_eq!(click.guild_id.get(), 0);
+        assert_eq!(click.channel_id.get(), 77);
+        assert_eq!(click.message_id.get(), 900);
+        assert_eq!(click.user.id.get(), 7);
+        assert!(click.roles.is_empty());
+        assert!(click.invoker_permissions.is_empty());
     }
 
     #[test]

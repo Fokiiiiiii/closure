@@ -21,11 +21,13 @@ use closure_core::cases::{Case, CaseBackend, CaseError, Cases, MemoryCases, NewC
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
 use closure_core::event::{
-    AutocompleteInvocation, CommandInvocation, ContextTarget, Event, GuildId, InteractionRef,
-    InteractionToken, MessageInfo, UserId,
+    AutocompleteInvocation, CommandInvocation, ComponentInvocation, ContextTarget, Event, GuildId,
+    InteractionRef, InteractionToken, MessageInfo, UserId,
 };
 use closure_core::history::{HistoryBackend, MemoryHistory, MessageHistory};
-use closure_core::interaction::{InteractionGuilds, InteractionLimits, Recorded};
+use closure_core::interaction::{
+    DirectMessageComponentRoutes, InteractionGuilds, InteractionLimits, Recorded,
+};
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{CommandSpec, ContextKind, EventContext, Module, ModuleId};
@@ -241,6 +243,7 @@ struct Shared {
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
     /// The guild of every live interaction, so a module cannot answer another guild's.
     interactions: Arc<InteractionGuilds>,
+    dm_component_routes: Arc<DirectMessageComponentRoutes>,
     /// Per module, how many of its calls overran the timeout and still run, since they block a thread and cannot be aborted; a module with any gets no new calls.
     wedged: DashMap<ModuleId, Arc<AtomicUsize>>,
     pending_total: AtomicUsize,
@@ -411,7 +414,7 @@ fn ordering_key(event: &Event) -> u64 {
         Event::Command(invocation) => invocation.user.id.get(),
         Event::Autocomplete(query) => query.user.id.get(),
         Event::ContextCommand(invocation) => invocation.user.id.get(),
-        Event::Component(click) => click.user.id.get(),
+        Event::Component(click) | Event::DirectMessageComponent(click) => click.user.id.get(),
         Event::Modal(submission) => submission.user.id.get(),
         Event::Scheduled(job) => u64::try_from(job.id).unwrap_or(0),
         Event::GuildAvailable { .. } | Event::GuildRemoved { .. } | Event::ConfigChanged { .. } => {
@@ -469,9 +472,6 @@ impl Dispatcher {
         .await
     }
 
-    /// [`Self::start_with_storage`] with the place scheduled jobs, moderation cases and the message history are kept as well; whoever keeps the jobs runs them with [`Self::run_job`].
-    // Each service is its own argument: one struct for them would change every caller.
-    #[allow(clippy::too_many_arguments)]
     pub async fn start_with_services(
         registry: Arc<ModuleRegistry>,
         settings: Arc<dyn SettingsProvider>,
@@ -494,6 +494,7 @@ impl Dispatcher {
         }
 
         let interactions = Arc::new(InteractionGuilds::with_limits(config.interaction_limits));
+        let dm_component_routes = Arc::new(DirectMessageComponentRoutes::new(Arc::clone(&storage)));
         let api: Arc<dyn DiscordApi> = Arc::new(TextCommandApi::new(
             api,
             Arc::clone(&interactions),
@@ -516,6 +517,7 @@ impl Dispatcher {
             config,
             guilds: DashMap::new(),
             interactions,
+            dm_component_routes,
             wedged: DashMap::new(),
             pending_total: AtomicUsize::new(0),
             usage_replies: Arc::new(Semaphore::new(MAX_USAGE_REPLIES)),
@@ -643,9 +645,13 @@ impl Dispatcher {
         receiver.await.unwrap_or(JobOutcome::Postponed)
     }
 
-    /// Whether the event was accepted.
     fn enqueue(&self, event: Event, outcome: Option<oneshot::Sender<JobOutcome>>) -> bool {
-        self.enqueue_recorded(event, outcome, None)
+        match event {
+            Event::DirectMessageComponent(click) => {
+                self.enqueue_direct_message_component(click, outcome)
+            }
+            event => self.enqueue_recorded(event, outcome, None),
+        }
     }
 
     fn enqueue_recorded(
@@ -653,6 +659,30 @@ impl Dispatcher {
         event: Event,
         outcome: Option<oneshot::Sender<JobOutcome>>,
         recorded: Option<oneshot::Receiver<Event>>,
+    ) -> bool {
+        match event {
+            Event::DirectMessageComponent(click) => {
+                self.enqueue_direct_message_component(click, outcome)
+            }
+            event => self.enqueue_recorded_at(
+                event,
+                outcome,
+                recorded,
+                Instant::now(),
+                Arc::new(AtomicBool::new(false)),
+                true,
+            ),
+        }
+    }
+
+    fn enqueue_recorded_at(
+        &self,
+        event: Event,
+        outcome: Option<oneshot::Sender<JobOutcome>>,
+        recorded: Option<oneshot::Receiver<Event>>,
+        enqueued: Instant,
+        claim: Arc<AtomicBool>,
+        start_busy_timer: bool,
     ) -> bool {
         let kind = event.kind().as_str();
         if self.shared.closing.load(Ordering::Acquire) {
@@ -668,8 +698,10 @@ impl Dispatcher {
             return false;
         };
 
-        // The budget is the guild's, not a lane's, so one busy channel may use all of it; commands, clicks and forms are answered to a waiting person within three seconds, so they get lanes and a budget of their own.
         let command = event.interaction_token().is_some();
+        if command && claim.load(Ordering::Acquire) {
+            return false;
+        }
         let budget = lanes.state.budget(command);
         if budget.fetch_add(1, Ordering::AcqRel) >= limits.queue_capacity {
             budget.fetch_sub(1, Ordering::AcqRel);
@@ -680,14 +712,12 @@ impl Dispatcher {
             return false;
         }
 
-        // Once accepted and before any module can see it, the record decides whose interaction a module may answer; events dropped above never use up a record.
         if let Some(token) = event.interaction_token() {
-            let recorded = self.shared.interactions.register(token, guild);
-            if !recorded.is_recorded() {
-                // No module could answer it, so none is given it. Undo what was reserved above.
+            let recorded_interaction = self.shared.interactions.register(token, guild);
+            if !recorded_interaction.is_recorded() {
                 budget.fetch_sub(1, Ordering::AcqRel);
                 lanes.state.pending.fetch_sub(1, Ordering::AcqRel);
-                let reason = match recorded {
+                let reason = match recorded_interaction {
                     Recorded::GuildFull => "interaction_records_guild_full",
                     Recorded::TableFull | Recorded::New | Recorded::Known => {
                         "interaction_records_table_full"
@@ -699,10 +729,8 @@ impl Dispatcher {
         }
 
         let sender = lanes.sender_for(&event).clone();
-        let enqueued = Instant::now();
         let event = Arc::new(event);
-        let claim = Arc::new(AtomicBool::new(false));
-        if command {
+        if command && start_busy_timer {
             self.shared.tracker.spawn(answer_when_busy(
                 Arc::clone(&self.shared),
                 guild,
@@ -728,6 +756,132 @@ impl Dispatcher {
             return false;
         }
         true
+    }
+
+    fn enqueue_direct_message_component(
+        &self,
+        click: ComponentInvocation,
+        outcome: Option<oneshot::Sender<JobOutcome>>,
+    ) -> bool {
+        let pending = self.shared.pending_total.fetch_add(1, Ordering::AcqRel);
+        if pending >= self.shared.config.interaction_limits.total {
+            self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
+            metrics::counter!("closure_events_dropped_total", "reason" => "dm_component_queue_full")
+                .increment(1);
+            return false;
+        }
+        if self.shared.closing.load(Ordering::Acquire) {
+            self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
+            return false;
+        }
+
+        let enqueued = Instant::now();
+        let claim = Arc::new(AtomicBool::new(false));
+        let raw_event = Arc::new(Event::DirectMessageComponent(click.clone()));
+        self.shared.tracker.spawn(answer_when_busy(
+            Arc::clone(&self.shared),
+            GuildId::new(0),
+            raw_event,
+            Arc::clone(&claim),
+            enqueued + INTERACTION_DEADLINE,
+        ));
+        let dispatcher = self.clone();
+        self.shared.tracker.spawn(async move {
+            dispatcher
+                .resolve_direct_message_component(click, outcome, enqueued, claim)
+                .await;
+        });
+        true
+    }
+
+    async fn resolve_direct_message_component(
+        &self,
+        mut click: ComponentInvocation,
+        outcome: Option<oneshot::Sender<JobOutcome>>,
+        enqueued: Instant,
+        claim: Arc<AtomicBool>,
+    ) {
+        let route = tokio::select! {
+            () = self.shared.cancel.cancelled() => {
+                self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
+                return;
+            }
+            route = self.shared.dm_component_routes.get(click.message_id) => route,
+        };
+        match route {
+            Ok(Some(route)) => {
+                let owner_matches = self
+                    .shared
+                    .registry
+                    .interaction_owner(&click.custom_id)
+                    .is_some_and(|module| module.manifest().id == route.module_id);
+                let allowed = self
+                    .shared
+                    .config
+                    .allowed_guilds
+                    .as_ref()
+                    .is_none_or(|guilds| guilds.contains(&route.guild_id));
+                let enabled = self
+                    .shared
+                    .settings
+                    .module(route.guild_id, &route.module_id)
+                    .is_some_and(|settings| settings.enabled);
+                let matches_record = route.message_id == click.message_id
+                    && route.channel_id == click.channel_id
+                    && route.user_id == click.user.id
+                    && route.custom_ids.contains(&click.custom_id)
+                    && !click.user.bot;
+                if owner_matches && allowed && enabled && matches_record {
+                    click.guild_id = route.guild_id;
+                    if !self.enqueue_recorded_at(
+                        Event::DirectMessageComponent(click.clone()),
+                        outcome,
+                        None,
+                        enqueued,
+                        Arc::clone(&claim),
+                        false,
+                    ) {
+                        self.refuse_direct_message_component(&click, &claim, "error-busy")
+                            .await;
+                    }
+                } else {
+                    self.refuse_direct_message_component(
+                        &click,
+                        &claim,
+                        "error-dm-component-invalid",
+                    )
+                    .await;
+                }
+            }
+            Ok(None) => {
+                self.refuse_direct_message_component(&click, &claim, "error-dm-component-invalid")
+                    .await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    message = %click.message_id,
+                    channel = %click.channel_id,
+                    %error,
+                    "could not look up a direct-message component route"
+                );
+                self.refuse_direct_message_component(&click, &claim, "error-internal")
+                    .await;
+            }
+        }
+        self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    async fn refuse_direct_message_component(
+        &self,
+        click: &ComponentInvocation,
+        claim: &Arc<AtomicBool>,
+        key: &str,
+    ) {
+        if claim.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let locale = click.locale.clone().unwrap_or(Locale::DEFAULT);
+        reply(&self.shared, click, text(&self.shared, locale, key)).await;
     }
 
     /// Lanes of `guild`, created on first use and rebuilt when the configured lane count changed while nothing was pending. The pending count is raised under the map lock so the reaper cannot release lanes about to receive an event; returns `None` once shutdown has begun.
@@ -1003,7 +1157,7 @@ async fn handle_event(
             handle_autocomplete(shared, guild, state, event, owner, query).await;
             return None;
         }
-        Event::Component(click) => {
+        Event::Component(click) | Event::DirectMessageComponent(click) => {
             let owner = shared.registry.interaction_owner(&click.custom_id);
             handle_interaction(shared, guild, state, event, owner, click).await;
             return None;
@@ -1169,6 +1323,7 @@ fn context_for(
         id.clone(),
     )
     .with_interactions(Arc::clone(&shared.interactions))
+    .with_direct_message_component_routes(Arc::clone(&shared.dm_component_routes))
     .scoped_to(guild);
     let context = EventContext::new(
         id.clone(),
@@ -1376,7 +1531,7 @@ async fn answer_busy(shared: &Shared, guild: GuildId, event: &Event) {
     let invocation: &dyn InteractionRef = match event {
         Event::Command(invocation) => invocation,
         Event::ContextCommand(invocation) => invocation,
-        Event::Component(click) => click,
+        Event::Component(click) | Event::DirectMessageComponent(click) => click,
         Event::Modal(submission) => submission,
         Event::Autocomplete(query) => return answer_without_choices(shared, query).await,
         _ => return,

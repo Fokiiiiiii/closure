@@ -41,23 +41,36 @@ pub enum Sent {
     Closed,
 }
 
-/// Sends `message` privately to `user`, who has to be a member of the guild of `ctx`. The module
-/// needs the capability `SendDirectMessages`.
+/// Sends message privately to user, who has to be a member of the guild of ctx. The module
+/// needs the capability SendDirectMessages.
 pub async fn send(
     ctx: &EventContext,
     user: UserId,
     message: DirectMessage,
+) -> Result<Sent, UserError> {
+    send_with_components(ctx, user, message, Vec::new()).await
+}
+
+/// Sends message with buttons or menus privately to a member of the guild of ctx.
+/// The module needs the capability SendDirectMessages and a registered DM component route.
+pub async fn send_with_components(
+    ctx: &EventContext,
+    user: UserId,
+    message: DirectMessage,
+    components: Vec<twilight_model::channel::message::Component>,
 ) -> Result<Sent, UserError> {
     let action = Action::SendDirectMessage {
         guild_id: ctx.guild_id,
         user_id: user,
         content: message.content,
         embeds: message.embeds,
+        components,
+        files: Vec::new(),
     };
     match ctx.api.execute(action).await {
         Ok(Outcome::Message(sent)) => Ok(Sent::Delivered(sent.id)),
         Ok(_) => {
-            Err(DiscordError::Fatal("unexpected outcome for `send_direct_message`".into()).into())
+            Err(DiscordError::Fatal("unexpected outcome for send_direct_message".into()).into())
         }
         Err(DiscordError::DirectMessagesClosed) => Ok(Sent::Closed),
         Err(error) => Err(error.into()),

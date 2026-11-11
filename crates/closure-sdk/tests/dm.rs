@@ -3,11 +3,12 @@
 
 use closure_core::action::Action;
 use closure_core::event::CommandOptionValue;
-use closure_sdk::testing::{Harness, Invocation, Reply};
+use closure_sdk::testing::{Click, Harness, Invocation, Reply};
 use closure_sdk::{
-    BoundCommand, Capability, Command, CommandArgs, DirectMessage, DiscordError, EmbedBuilder,
-    ModuleBuilder, Sent, UserError, UserId,
+    BoundCommand, Capability, Command, CommandArgs, CustomId, DirectMessage, DiscordError,
+    EmbedBuilder, ModuleBuilder, ModuleId, Sent, UserError, UserId, ui,
 };
+use twilight_model::channel::message::component::ButtonStyle;
 use twilight_model::id::Id;
 
 #[derive(CommandArgs)]
@@ -42,6 +43,39 @@ fn embed_command() -> BoundCommand {
             .await;
         cx.reply(describe(&sent)).await
     })
+}
+
+fn rate_custom_id(user: UserId) -> String {
+    CustomId::new("rate")
+        .only_for(user)
+        .data("ticket-1")
+        .encode(&ModuleId::new("dm").unwrap())
+}
+
+fn button_module() -> ModuleBuilder {
+    let handler = || {
+        Command::<Notify>::new("notify").handler(|cx, args| async move {
+            let components = vec![ui::row([ui::button(
+                ButtonStyle::Primary,
+                "Rate",
+                rate_custom_id(args.user),
+            )])];
+            let sent = cx
+                .direct_message_with_components(
+                    args.user,
+                    DirectMessage::text("Rate this ticket"),
+                    components,
+                )
+                .await;
+            cx.reply(describe(&sent)).await
+        })
+    };
+    ModuleBuilder::new("dm", "Direct messages", "0.1.0")
+        .unwrap()
+        .capability(Capability::SendDirectMessages)
+        .command(handler())
+        .component("rate", |cx| async move { cx.reply("guild route").await })
+        .direct_message_component("rate", |cx| async move { cx.reply("DM route").await })
 }
 
 fn module() -> ModuleBuilder {
@@ -89,6 +123,8 @@ async fn a_member_gets_the_message_in_the_guild_of_the_command() {
             user_id: Id::new(7),
             content: Some("hi".into()),
             embeds: vec![],
+            components: vec![],
+            files: vec![],
         }]
     );
 }
@@ -111,6 +147,27 @@ async fn an_embed_is_sent_without_text() {
     assert_eq!(content, &None);
     assert_eq!(embeds.len(), 1);
     assert_eq!(embeds[0].title.as_deref(), Some("Notice"));
+}
+
+#[tokio::test]
+async fn direct_message_components_use_only_the_dm_route() {
+    let harness = Harness::new(button_module()).unwrap();
+    let replies = harness.invoke(notify("notify")).await.unwrap();
+    assert_eq!(texts(&replies), ["delivered"]);
+
+    let custom_id = rate_custom_id(Id::new(7));
+    let dm_replies = harness
+        .click_direct_message(
+            Id::new(1),
+            Id::new(1),
+            Click::new(custom_id.clone()).user(7),
+        )
+        .await
+        .unwrap();
+    assert_eq!(texts(&dm_replies), ["DM route"]);
+
+    let guild_replies = harness.click(Click::new(custom_id).user(7)).await.unwrap();
+    assert_eq!(texts(&guild_replies), ["guild route"]);
 }
 
 #[tokio::test]

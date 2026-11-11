@@ -170,14 +170,29 @@ impl TwilightApi {
         user: UserId,
         content: Option<&str>,
         embeds: &[Embed],
+        components: &[Component],
+        files: &[closure_core::action::FileUpload],
     ) -> Result<Outcome, DiscordError> {
         self.ensure_member(guild, user).await?;
         let channel = read(self.http.create_private_channel(user)).await?;
         let allowed = AllowedMentions::default();
+        let attachments: Vec<twilight_model::http::attachment::Attachment> = files
+            .iter()
+            .zip(0_u64..)
+            .map(|(file, id)| {
+                twilight_model::http::attachment::Attachment::from_bytes(
+                    file.filename.clone(),
+                    file.data.clone(),
+                    id,
+                )
+            })
+            .collect();
         let mut request = self
             .http
             .create_message(channel.id)
-            .allowed_mentions(Some(&allowed));
+            .allowed_mentions(Some(&allowed))
+            .components(components)
+            .attachments(&attachments);
         if let Some(content) = content {
             request = request.content(content);
         }

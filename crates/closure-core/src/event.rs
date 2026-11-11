@@ -330,8 +330,28 @@ pub struct ComponentInvocation {
     pub values: Vec<String>,
 }
 
+/// A submitted value from a supported modal component.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ModalValue {
+    Text(String),
+    StringSelect(Vec<String>),
+    UserSelect(Vec<String>),
+    RoleSelect(Vec<String>),
+    MentionableSelect(Vec<String>),
+    ChannelSelect(Vec<String>),
+    RadioGroup(Option<String>),
+    CheckboxGroup(Vec<String>),
+}
+
+/// A modal value paired with the custom id used to request it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModalValueField {
+    pub custom_id: String,
+    pub value: ModalValue,
+}
+
 /// A modal that the user filled in and sent.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModalSubmission {
     pub interaction_id: InteractionId,
     pub application_id: ApplicationId,
@@ -342,10 +362,24 @@ pub struct ModalSubmission {
     pub roles: Vec<RoleId>,
     pub invoker_permissions: Permissions,
     pub locale: Option<Locale>,
-    /// The id the module gave the modal; it starts with the id of the module (`module:..`).
+    /// The id the module gave the modal; it starts with the id of the module.
     pub custom_id: String,
-    /// The text of each input, by the input's id, in the order of the modal.
+    /// The text of each TextInput, by the input's id, in the order of the modal.
     pub fields: Vec<(String, String)>,
+    /// Typed values of the supported interactive modal components.
+    #[serde(default)]
+    pub values: Vec<ModalValueField>,
+}
+
+impl ModalSubmission {
+    /// Finds a submitted value by the component's custom id.
+    #[must_use]
+    pub fn value(&self, custom_id: &str) -> Option<&ModalValue> {
+        self.values
+            .iter()
+            .find(|field| field.custom_id == custom_id)
+            .map(|field| &field.value)
+    }
 }
 
 impl ModalSubmission {
@@ -604,8 +638,11 @@ pub enum Event {
     /// recorded it gets it too.
     CaseCreated(Case),
     Command(CommandInvocation),
-    /// A click or a choice on a component of one of the module's messages.
+    /// A click or a choice on a component of one of the module's guild messages.
     Component(ComponentInvocation),
+    /// A DM click awaiting host validation against the saved send record. The dispatcher replaces
+    /// its placeholder guild id before any module sees it.
+    DirectMessageComponent(ComponentInvocation),
     /// A modal of the module that the user sent.
     Modal(ModalSubmission),
     /// The user is typing in an option of a command of the module; answer with the choices.
@@ -826,7 +863,7 @@ impl Event {
             Self::ThreadDeleted { .. } => EventKind::ThreadDeleted,
             Self::CaseCreated(_) => EventKind::CaseCreated,
             Self::Command(_) => EventKind::Command,
-            Self::Component(_) => EventKind::Component,
+            Self::Component(_) | Self::DirectMessageComponent(_) => EventKind::Component,
             Self::Modal(_) => EventKind::Modal,
             Self::Autocomplete(_) => EventKind::Autocomplete,
             Self::ContextCommand(_) => EventKind::ContextCommand,
@@ -851,7 +888,7 @@ impl Event {
             | Self::ChannelUpdated(channel)
             | Self::ChannelDeleted(channel) => Some(channel.id),
             Self::Command(invocation) => Some(invocation.channel_id),
-            Self::Component(click) => Some(click.channel_id),
+            Self::Component(click) | Self::DirectMessageComponent(click) => Some(click.channel_id),
             Self::Modal(submission) => Some(submission.channel_id),
             Self::Autocomplete(query) => Some(query.channel_id),
             Self::ContextCommand(invocation) => Some(invocation.channel_id),
@@ -875,7 +912,7 @@ impl Event {
             | Self::BanAdded { user, .. }
             | Self::BanRemoved { user, .. } => user.bot,
             Self::Command(invocation) => invocation.user.bot,
-            Self::Component(click) => click.user.bot,
+            Self::Component(click) | Self::DirectMessageComponent(click) => click.user.bot,
             Self::Modal(submission) => submission.user.bot,
             Self::Autocomplete(query) => query.user.bot,
             Self::ContextCommand(invocation) => invocation.user.bot,
@@ -891,7 +928,7 @@ impl Event {
             Self::MessageCreated(message) | Self::MessageUpdated(message) => &message.author_roles,
             Self::MemberJoined(member) | Self::MemberUpdated(member) => &member.roles,
             Self::Command(invocation) => &invocation.roles,
-            Self::Component(click) => &click.roles,
+            Self::Component(click) | Self::DirectMessageComponent(click) => &click.roles,
             Self::Modal(submission) => &submission.roles,
             Self::Autocomplete(query) => &query.roles,
             Self::ContextCommand(invocation) => &invocation.roles,
@@ -899,8 +936,7 @@ impl Event {
         }
     }
 
-    /// Every event is scoped to one guild; events outside a guild (DMs) are dropped when the
-    /// gateway payload is converted, so dispatch can always key on this value.
+    /// Events are scoped to a guild after the DM component router replaces its untrusted placeholder.
     #[must_use]
     pub fn guild_id(&self) -> GuildId {
         match self {
@@ -938,7 +974,7 @@ impl Event {
             Self::StageCreated(info) | Self::StageDeleted(info) => info.guild_id,
             Self::StageUpdated { after, .. } => after.guild_id,
             Self::Command(invocation) => invocation.guild_id,
-            Self::Component(click) => click.guild_id,
+            Self::Component(click) | Self::DirectMessageComponent(click) => click.guild_id,
             Self::Modal(submission) => submission.guild_id,
             Self::Autocomplete(query) => query.guild_id,
             Self::ContextCommand(invocation) => invocation.guild_id,
@@ -952,7 +988,7 @@ impl Event {
     pub fn interaction_token(&self) -> Option<&InteractionToken> {
         match self {
             Self::Command(invocation) => Some(&invocation.token),
-            Self::Component(click) => Some(&click.token),
+            Self::Component(click) | Self::DirectMessageComponent(click) => Some(&click.token),
             Self::Modal(submission) => Some(&submission.token),
             Self::Autocomplete(query) => Some(&query.token),
             Self::ContextCommand(invocation) => Some(&invocation.token),

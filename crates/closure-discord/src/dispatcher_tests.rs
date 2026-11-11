@@ -8,11 +8,13 @@ use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::{DiscordError, ModuleError};
 use closure_core::event::{
-    ChannelId, CommandInvocation, CommandOption, CommandOptionValue, Event, EventKind,
-    InteractionToken, MessageInfo, UserInfo,
+    ChannelId, CommandInvocation, CommandOption, CommandOptionValue, ComponentInvocation, Event,
+    EventKind, InteractionToken, MessageInfo, UserInfo,
 };
 use closure_core::history::{HistoryBackend, MemoryHistory, SavedMessage};
-use closure_core::interaction::InteractionGuilds;
+use closure_core::interaction::{
+    DirectMessageComponentRoute, DirectMessageComponentRoutes, InteractionGuilds,
+};
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Locale;
 use closure_core::module::{
@@ -209,7 +211,7 @@ impl Probe {
 
     /// Answers the click it got, then tries a token it was never given.
     async fn respond_to_click(&self, ctx: &EventContext, event: &Event) -> Result<(), ModuleError> {
-        let Event::Component(click) = event else {
+        let (Event::Component(click) | Event::DirectMessageComponent(click)) = event else {
             return Ok(());
         };
         let reply = || InteractionReply {
@@ -302,6 +304,7 @@ impl Probe {
 fn label(event: &Event) -> String {
     match event {
         Event::MessageCreated(message) => format!("msg:{}", message.id),
+        Event::DirectMessageComponent(click) => format!("dm_component:{}", click.guild_id),
         other => other.kind().as_str().to_owned(),
     }
 }
@@ -426,7 +429,7 @@ impl Module for Probe {
                 let spec = closure_core::action::ModalSpec {
                     custom_id: "warn:form".into(),
                     title: "Warn".into(),
-                    components: vec![input],
+                    components: vec![closure_core::action::ModalComponent::from(input)],
                 };
                 Ok(ctx.api.modal(invocation, spec).await?)
             }
@@ -599,6 +602,7 @@ fn limits(queue_capacity: usize, concurrency: usize) -> RuntimeLimits {
 struct Harness {
     dispatcher: Dispatcher,
     api: Arc<MockApi>,
+    storage: Arc<MemoryStorage>,
 }
 
 async fn harness(
@@ -627,20 +631,25 @@ async fn harness(
     }));
     settings.limits = limits;
     let api = Arc::new(MockApi::default());
+    let storage = Arc::new(MemoryStorage::default());
     let translator = Arc::new(TranslatorBuilder::new().unwrap().build());
-    let dispatcher = Dispatcher::start(
+    let dispatcher = Dispatcher::start_with_storage(
         registry,
         Arc::new(settings),
         Arc::clone(&api) as Arc<dyn DiscordApi>,
         translator,
         config,
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
     )
     .await
     .unwrap();
-    Harness { dispatcher, api }
+    Harness {
+        dispatcher,
+        api,
+        storage,
+    }
 }
 
-/// [`harness`] with the message history the modules read given.
 async fn harness_with_history(
     probes: &[(&Arc<Probe>, bool)],
     limits: RuntimeLimits,
@@ -668,6 +677,7 @@ async fn harness_with_history(
     }));
     settings.limits = limits;
     let api = Arc::new(MockApi::default());
+    let storage = Arc::new(MemoryStorage::default());
     let translator = Arc::new(TranslatorBuilder::new().unwrap().build());
     let dispatcher = Dispatcher::start_with_services(
         registry,
@@ -675,14 +685,18 @@ async fn harness_with_history(
         Arc::clone(&api) as Arc<dyn DiscordApi>,
         translator,
         config,
-        Arc::new(MemoryStorage::default()),
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
         Arc::new(MemoryScheduler::default()),
         Arc::new(MemoryCases::default()),
         history,
     )
     .await
     .unwrap();
-    Harness { dispatcher, api }
+    Harness {
+        dispatcher,
+        api,
+        storage,
+    }
 }
 
 fn messages_only(id: &str) -> Arc<Probe> {
@@ -2284,7 +2298,6 @@ async fn text_harness(
     text_harness_with(probes, policy, locale).await
 }
 
-/// [`text_harness`] with the whole guild policy, for the settings that go beyond the prefix.
 async fn text_harness_with(
     probes: &[(&Arc<Probe>, bool)],
     policy: GuildPolicy,
@@ -2318,16 +2331,22 @@ async fn text_harness_with(
         bot_id: Some(Id::new(9)),
         ..DispatcherConfig::default()
     };
-    let dispatcher = Dispatcher::start(
+    let storage = Arc::new(MemoryStorage::default());
+    let dispatcher = Dispatcher::start_with_storage(
         registry,
         Arc::new(settings),
         Arc::clone(&api) as Arc<dyn DiscordApi>,
         Arc::new(TranslatorBuilder::new().unwrap().build()),
         config,
+        Arc::clone(&storage) as Arc<dyn StorageBackend>,
     )
     .await
     .unwrap();
-    Harness { dispatcher, api }
+    Harness {
+        dispatcher,
+        api,
+        storage,
+    }
 }
 
 /// The log entries of the commands a module got.
@@ -3456,5 +3475,149 @@ async fn a_standing_search_is_answered_by_the_backend_itself() {
         backend.listed.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "the search is not paged through the listings"
+    );
+}
+
+#[tokio::test]
+async fn a_dm_component_uses_the_saved_message_route_not_its_placeholder_guild() {
+    let module = Probe::new(
+        "tools",
+        &[EventKind::Component],
+        &[Capability::RespondToInteractions],
+    );
+    module.set(Behavior::RespondToClick);
+    let h = harness(
+        &[(&module, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+    let custom_id = "tools:rate:7:ticket-1";
+    DirectMessageComponentRoutes::new(Arc::clone(&h.storage) as Arc<dyn StorageBackend>)
+        .record(&DirectMessageComponentRoute {
+            message_id: Id::new(900),
+            channel_id: Id::new(300),
+            guild_id: Id::new(1),
+            module_id: ModuleId::new("tools").unwrap(),
+            user_id: Id::new(7),
+            custom_ids: vec![custom_id.into()],
+        })
+        .await
+        .unwrap();
+
+    let make_click = |custom_id: &str, guild: u64, token: &str, user_id: u64| {
+        Event::DirectMessageComponent(ComponentInvocation {
+            interaction_id: Id::new(51),
+            application_id: Id::new(60),
+            token: InteractionToken::new(token),
+            guild_id: Id::new(guild),
+            channel_id: Id::new(300),
+            message_id: Id::new(900),
+            user: user(user_id),
+            roles: Vec::new(),
+            invoker_permissions: Permissions::empty(),
+            locale: Some(Locale::Ja),
+            custom_id: custom_id.into(),
+            values: Vec::new(),
+        })
+    };
+
+    assert!(
+        h.dispatcher
+            .try_dispatch(make_click(custom_id, 999, "dm-token", 7))
+    );
+    h.dispatcher.flush().await;
+    assert_eq!(
+        module.log(),
+        ["dm_component:1", "answered:true forged:true"]
+    );
+    assert_eq!(
+        h.api.actions().len(),
+        1,
+        "only the module's own answer was sent"
+    );
+
+    assert!(
+        h.dispatcher
+            .try_dispatch(make_click("tools:rate:7:forged", 2, "forged-token", 7))
+    );
+    h.dispatcher.flush().await;
+    assert_eq!(
+        module.log(),
+        ["dm_component:1", "answered:true forged:true"]
+    );
+    assert_eq!(
+        h.api.actions().len(),
+        2,
+        "the forged click only gets a host refusal"
+    );
+
+    assert!(
+        h.dispatcher
+            .try_dispatch(make_click(custom_id, 2, "wrong-user", 8))
+    );
+    h.dispatcher.flush().await;
+    assert_eq!(
+        module.log(),
+        ["dm_component:1", "answered:true forged:true"]
+    );
+    assert_eq!(
+        h.api.actions().len(),
+        3,
+        "another recipient gets only a host refusal"
+    );
+}
+
+#[tokio::test]
+async fn a_dm_component_does_not_bypass_the_configured_guild_allowlist() {
+    let module = Probe::new(
+        "tools",
+        &[EventKind::Component],
+        &[Capability::RespondToInteractions],
+    );
+    let h = harness(
+        &[(&module, true)],
+        limits(64, 4),
+        DispatcherConfig {
+            allowed_guilds: Some(Arc::new(HashSet::from([Id::new(2)]))),
+            ..DispatcherConfig::default()
+        },
+    )
+    .await;
+    let custom_id = "tools:rate:7:ticket-1";
+    DirectMessageComponentRoutes::new(Arc::clone(&h.storage) as Arc<dyn StorageBackend>)
+        .record(&DirectMessageComponentRoute {
+            message_id: Id::new(900),
+            channel_id: Id::new(300),
+            guild_id: Id::new(1),
+            module_id: ModuleId::new("tools").unwrap(),
+            user_id: Id::new(7),
+            custom_ids: vec![custom_id.into()],
+        })
+        .await
+        .unwrap();
+
+    h.dispatcher
+        .dispatch(Event::DirectMessageComponent(ComponentInvocation {
+            interaction_id: Id::new(52),
+            application_id: Id::new(60),
+            token: InteractionToken::new("not-allowlisted"),
+            guild_id: Id::new(0),
+            channel_id: Id::new(300),
+            message_id: Id::new(900),
+            user: user(7),
+            roles: Vec::new(),
+            invoker_permissions: Permissions::empty(),
+            locale: Some(Locale::Ja),
+            custom_id: custom_id.into(),
+            values: Vec::new(),
+        }));
+    h.dispatcher.flush().await;
+
+    assert!(module.log().is_empty());
+    assert_eq!(
+        h.api.actions().len(),
+        1,
+        "the host refuses before module dispatch"
     );
 }

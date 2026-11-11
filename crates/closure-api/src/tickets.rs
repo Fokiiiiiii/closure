@@ -49,6 +49,8 @@ struct OpenTicket {
     #[serde(default)]
     closing: Option<i64>,
     #[serde(default)]
+    closed: bool,
+    #[serde(default)]
     staff_roles: Option<Vec<u64>>,
     #[serde(default)]
     panel: Option<Value>,
@@ -73,6 +75,8 @@ struct TicketHistory {
     #[serde(default)]
     staff_roles: Vec<u64>,
     status: String,
+    #[serde(default)]
+    privacy_generation: u64,
     #[serde(default)]
     transcript_attempt: Option<i64>,
     #[serde(default)]
@@ -136,6 +140,7 @@ pub(crate) async fn get(
         .get::<OpenTicket>(&open_key)
         .await
         .map_err(storage_error)?
+        .filter(|entry| !entry.closed)
     {
         let staff_roles = open_staff_roles(&entry, &viewer.default_staff_roles);
         if !can_view(&viewer, &staff_roles) {
@@ -151,23 +156,23 @@ pub(crate) async fn get(
         } else {
             "open"
         };
-        return Ok(Json(ticket_json(
+        return Ok(Json(ticket_json(TicketView {
             channel,
-            entry.number,
-            entry.opener,
-            entry.claimed_by,
-            entry.created,
+            number: entry.number,
+            opener: entry.opener,
+            claimed_by: entry.claimed_by,
+            created: entry.created,
             state,
-            None,
-            None,
-            None,
-            panel_id(entry.panel.as_ref()),
-            Some(json!({
+            closed_at: None,
+            closer_id: None,
+            reason: None,
+            panel_id: panel_id(entry.panel.as_ref()),
+            transcript: Some(json!({
                 "pages": [],
                 "next_page": null,
                 "truncated": false,
             })),
-        )));
+        })));
     }
 
     let pointer_key = format!("{HISTORY_ID_PREFIX}{channel}");
@@ -191,7 +196,7 @@ pub(crate) async fn get(
     if history.channel_id != channel || history.status != "closed" {
         return Err(no_ticket());
     }
-    if history.number <= 0 || history.number >= i64::MAX {
+    if history.number <= 0 || history.number == i64::MAX {
         return Err(ApiError::Internal("invalid ticket history number".into()));
     }
     let expected_key = format!(
@@ -203,23 +208,31 @@ pub(crate) async fn get(
             "ticket history key does not match its record".into(),
         ));
     }
+    if !history_privacy_generation_current(&store, &history_key, history.privacy_generation).await?
+    {
+        return Err(no_ticket());
+    }
     if !can_view(&viewer, &history.staff_roles) {
         return Err(no_ticket());
     }
     let transcript = transcript(&store, channel, &history, start, limit).await?;
-    Ok(Json(ticket_json(
+    if !history_privacy_generation_current(&store, &history_key, history.privacy_generation).await?
+    {
+        return Err(no_ticket());
+    }
+    Ok(Json(ticket_json(TicketView {
         channel,
-        history.number,
-        history.opener,
-        history.claimed_by,
-        history.created,
-        "closed",
-        history.closed,
-        history.closer,
-        history.reason.as_deref(),
-        panel_id(history.panel.as_ref()),
-        Some(transcript),
-    )))
+        number: history.number,
+        opener: history.opener,
+        claimed_by: history.claimed_by,
+        created: history.created,
+        state: "closed",
+        closed_at: history.closed,
+        closer_id: history.closer,
+        reason: history.reason.as_deref(),
+        panel_id: panel_id(history.panel.as_ref()),
+        transcript: Some(transcript),
+    })))
 }
 
 async fn viewer(
@@ -270,6 +283,21 @@ fn ticket_store(state: &ApiState, guild: GuildId) -> Result<Store, ApiError> {
     let granted: CapabilitySet = [Capability::Storage].into_iter().collect();
     let backend: Arc<dyn StorageBackend> = Arc::new(state.inner.db.clone());
     Ok(Store::new(backend, &granted, module, guild))
+}
+
+async fn history_privacy_generation_current(
+    store: &Store,
+    key: &str,
+    generation: u64,
+) -> Result<bool, ApiError> {
+    let Some(history) = store
+        .get::<TicketHistory>(key)
+        .await
+        .map_err(storage_error)?
+    else {
+        return Ok(false);
+    };
+    Ok(history.status == "closed" && history.privacy_generation == generation)
 }
 
 fn can_view(viewer: &Viewer, staff_roles: &[u64]) -> bool {
@@ -338,29 +366,32 @@ async fn list_open(
             last_scanned = Some(channel);
             scanned += 1;
             let ticket = decode::<OpenTicket>(entry)?;
+            if ticket.closed {
+                continue;
+            }
             let staff_roles = open_staff_roles(&ticket, &viewer.default_staff_roles);
             if can_view(viewer, &staff_roles) {
                 if tickets.len() == limit {
                     more_visible = true;
                     break;
                 }
-                tickets.push(ticket_json(
+                tickets.push(ticket_json(TicketView {
                     channel,
-                    ticket.number,
-                    ticket.opener,
-                    ticket.claimed_by,
-                    ticket.created,
-                    if ticket.closing.is_some() {
+                    number: ticket.number,
+                    opener: ticket.opener,
+                    claimed_by: ticket.claimed_by,
+                    created: ticket.created,
+                    state: if ticket.closing.is_some() {
                         "closing"
                     } else {
                         "open"
                     },
-                    None,
-                    None,
-                    None,
-                    panel_id(ticket.panel.as_ref()),
-                    None,
-                ));
+                    closed_at: None,
+                    closer_id: None,
+                    reason: None,
+                    panel_id: panel_id(ticket.panel.as_ref()),
+                    transcript: None,
+                }));
                 last_returned = Some(channel);
             }
             if scanned == MAX_SCAN {
@@ -406,6 +437,7 @@ async fn list_closed(
     let mut tickets = Vec::with_capacity(limit);
     let mut last_returned = None;
     let mut last_scanned_number = None;
+    let mut privacy_checks = Vec::with_capacity(limit);
     let mut scanned = 0;
     let mut more_visible = false;
     let mut more_entries = false;
@@ -429,7 +461,7 @@ async fn list_closed(
         let full_batch = found.len() == batch;
         for (key, entry) in found {
             let history = decode::<TicketHistory>(entry)?;
-            if history.number <= 0 || history.number >= i64::MAX {
+            if history.number <= 0 || history.number == i64::MAX {
                 return Err(ApiError::Internal("invalid ticket history number".into()));
             }
             let expected_prefix = format!("{HISTORY_PREFIX}{:019}:", i64::MAX - history.number);
@@ -443,27 +475,28 @@ async fn list_closed(
                     "ticket history key does not match its record".into(),
                 ));
             }
-            after = Some(key);
+            after = Some(key.clone());
             last_scanned_number = Some(history.number);
             scanned += 1;
             if history.status == "closed" && can_view(viewer, &history.staff_roles) {
+                privacy_checks.push((key.clone(), history.privacy_generation));
                 if tickets.len() == limit {
                     more_visible = true;
                     break;
                 }
-                tickets.push(ticket_json(
-                    history.channel_id,
-                    history.number,
-                    history.opener,
-                    history.claimed_by,
-                    history.created,
-                    "closed",
-                    history.closed,
-                    history.closer,
-                    history.reason.as_deref(),
-                    panel_id(history.panel.as_ref()),
-                    None,
-                ));
+                tickets.push(ticket_json(TicketView {
+                    channel: history.channel_id,
+                    number: history.number,
+                    opener: history.opener,
+                    claimed_by: history.claimed_by,
+                    created: history.created,
+                    state: "closed",
+                    closed_at: history.closed,
+                    closer_id: history.closer,
+                    reason: history.reason.as_deref(),
+                    panel_id: panel_id(history.panel.as_ref()),
+                    transcript: None,
+                }));
                 last_returned = Some(history.number);
             }
             if scanned == MAX_SCAN {
@@ -488,6 +521,11 @@ async fn list_closed(
         }
     }
 
+    for (key, generation) in privacy_checks {
+        if !history_privacy_generation_current(store, &key, generation).await? {
+            return Err(no_ticket());
+        }
+    }
     let next_before = if more_visible {
         last_returned
     } else if more_entries {
@@ -538,7 +576,7 @@ async fn transcript(
 }
 
 fn history_after_number(number: i64) -> Result<String, ApiError> {
-    if number <= 0 || number >= i64::MAX {
+    if number <= 0 || number == i64::MAX {
         return Err(ApiError::BadRequest(
             "before must be a positive ticket number".into(),
         ));
@@ -576,41 +614,42 @@ fn decode<T: serde::de::DeserializeOwned>(entry: Entry) -> Result<T, ApiError> {
         .map_err(|error| ApiError::Internal(format!("invalid ticket record: {error}")))
 }
 
-fn panel_id(panel: Option<&Value>) -> Option<String> {
+fn panel_id(panel: Option<&Value>) -> Option<&str> {
     panel.and_then(|panel| {
         panel
             .as_str()
             .or_else(|| panel.get("id").and_then(Value::as_str))
-            .map(str::to_owned)
     })
 }
 
-fn ticket_json(
+struct TicketView<'a> {
     channel: u64,
     number: i64,
     opener: u64,
     claimed_by: Option<u64>,
     created: i64,
-    state: &str,
-    closed: Option<i64>,
-    closer: Option<u64>,
-    reason: Option<&str>,
-    panel: Option<String>,
+    state: &'a str,
+    closed_at: Option<i64>,
+    closer_id: Option<u64>,
+    reason: Option<&'a str>,
+    panel_id: Option<&'a str>,
     transcript: Option<Value>,
-) -> Value {
+}
+
+fn ticket_json(view: TicketView<'_>) -> Value {
     let mut ticket = json!({
-        "channel_id": channel.to_string(),
-        "number": number,
-        "opener": opener.to_string(),
-        "claimed_by": claimed_by.map(|id| id.to_string()),
-        "created": created,
-        "state": state,
-        "closed": closed,
-        "closer": closer.map(|id| id.to_string()),
-        "reason": reason,
-        "panel": panel,
+        "channel_id": view.channel.to_string(),
+        "number": view.number,
+        "opener": view.opener.to_string(),
+        "claimed_by": view.claimed_by.map(|id| id.to_string()),
+        "created": view.created,
+        "state": view.state,
+        "closed": view.closed_at,
+        "closer": view.closer_id.map(|id| id.to_string()),
+        "reason": view.reason,
+        "panel": view.panel_id,
     });
-    if let Some(transcript) = transcript {
+    if let Some(transcript) = view.transcript {
         ticket["transcript"] = transcript;
     }
     ticket

@@ -9,7 +9,9 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::event::{GuildId, InteractionToken};
+use crate::event::{ChannelId, GuildId, InteractionToken, MessageId, UserId};
+use crate::module::ModuleId;
+use crate::storage::{MAX_VALUE_BYTES, StorageBackend, StorageError, contains_nul};
 use crate::throttle::LogGate;
 
 /// How long Discord honours an interaction token (15 minutes), plus a little slack.
@@ -235,9 +237,93 @@ impl Locked<'_> {
     }
 }
 
+/// The message, guild and module that issued a DM component, and its only permitted recipient.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirectMessageComponentRoute {
+    pub message_id: MessageId,
+    pub channel_id: ChannelId,
+    pub guild_id: GuildId,
+    pub module_id: ModuleId,
+    pub user_id: UserId,
+    pub custom_ids: Vec<String>,
+}
+
+/// Host-owned, durable provenance for direct-message component clicks.
+#[derive(Clone)]
+pub struct DirectMessageComponentRoutes {
+    backend: Arc<dyn StorageBackend>,
+}
+
+impl fmt::Debug for DirectMessageComponentRoutes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectMessageComponentRoutes")
+            .finish_non_exhaustive()
+    }
+}
+
+const DM_COMPONENT_ROUTE_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+impl DirectMessageComponentRoutes {
+    #[must_use]
+    pub fn new(backend: Arc<dyn StorageBackend>) -> Self {
+        Self { backend }
+    }
+
+    /// Records a message only once; a retry of the same record is idempotent, a conflicting
+    /// message id is refused. Only the host writes this record; modules cannot choose its guild.
+    pub async fn record(&self, route: &DirectMessageComponentRoute) -> Result<(), StorageError> {
+        if route.message_id.get() == 0 {
+            return Err(StorageError::Value("message id must be positive".into()));
+        }
+        let value =
+            serde_json::to_value(route).map_err(|error| StorageError::Value(error.to_string()))?;
+        let size = serde_json::to_vec(&value).map_or(usize::MAX, |bytes| bytes.len());
+        if size > MAX_VALUE_BYTES {
+            return Err(StorageError::TooLarge {
+                size,
+                limit: MAX_VALUE_BYTES,
+            });
+        }
+        if contains_nul(&value) {
+            return Err(StorageError::Value("text must not contain NUL".into()));
+        }
+        match self
+            .backend
+            .insert_direct_message_component_route(route.message_id, value, DM_COMPONENT_ROUTE_TTL)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(StorageError::Conflict) => {
+                if self.get(route.message_id).await?.as_ref() == Some(route) {
+                    Ok(())
+                } else {
+                    Err(StorageError::Conflict)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Finds the record by Discord message id; callers still compare channel, user and custom id.
+    pub async fn get(
+        &self,
+        message_id: MessageId,
+    ) -> Result<Option<DirectMessageComponentRoute>, StorageError> {
+        self.backend
+            .get_direct_message_component_route(message_id)
+            .await?
+            .map(|entry| {
+                serde_json::from_value(entry.value)
+                    .map_err(|error| StorageError::Value(error.to_string()))
+            })
+            .transpose()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
     use std::sync::mpsc;
 
     use twilight_model::id::Id;
@@ -257,6 +343,54 @@ mod tests {
         fn at(&self, token: &str, now: Instant) -> Option<GuildId> {
             self.lock().lookup(token, now)
         }
+    }
+
+    #[tokio::test]
+    async fn dm_component_routes_are_persistent_and_bound_to_one_message_and_recipient() {
+        let routes =
+            DirectMessageComponentRoutes::new(Arc::new(crate::storage::MemoryStorage::default()));
+        let route = DirectMessageComponentRoute {
+            message_id: Id::new(10),
+            channel_id: Id::new(11),
+            guild_id: Id::new(12),
+            module_id: ModuleId::new("tickets").unwrap(),
+            user_id: Id::new(13),
+            custom_ids: vec!["tickets:rate:13:12:44:1:5".into()],
+        };
+
+        routes.record(&route).await.unwrap();
+        assert_eq!(
+            routes.get(route.message_id).await.unwrap(),
+            Some(route.clone())
+        );
+        assert_eq!(routes.get(Id::new(14)).await.unwrap(), None);
+        routes.record(&route).await.unwrap();
+
+        let mut forged = route.clone();
+        forged.user_id = Id::new(15);
+        assert_eq!(routes.record(&forged).await, Err(StorageError::Conflict));
+    }
+
+    #[tokio::test]
+    async fn dm_component_routes_expire_after_one_year() {
+        let now = Arc::new(AtomicI64::new(1_700_000_000));
+        let clock = Arc::clone(&now);
+        let routes = DirectMessageComponentRoutes::new(Arc::new(
+            crate::storage::MemoryStorage::with_clock(move || clock.load(Ordering::SeqCst)),
+        ));
+        let route = DirectMessageComponentRoute {
+            message_id: Id::new(20),
+            channel_id: Id::new(21),
+            guild_id: Id::new(22),
+            module_id: ModuleId::new("tickets").unwrap(),
+            user_id: Id::new(23),
+            custom_ids: vec!["tickets:rate:23:22:44:1:5".into()],
+        };
+        routes.record(&route).await.unwrap();
+        assert!(routes.get(route.message_id).await.unwrap().is_some());
+
+        now.fetch_add(365 * 24 * 60 * 60, Ordering::SeqCst);
+        assert_eq!(routes.get(route.message_id).await.unwrap(), None);
     }
 
     #[test]

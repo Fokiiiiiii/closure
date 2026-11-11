@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use closure_core::action::ModalSpec;
+use closure_core::action::{ModalComponent, ModalSpec};
 use closure_core::event::UserId;
 use closure_core::module::ModuleId;
 use twilight_model::channel::message::Component;
@@ -235,18 +235,49 @@ pub fn text_input(
     row([Component::TextInput(input)])
 }
 
-/// A form: its `custom_id` brings the submission back to the module's `modal` handler. Every
-/// input is a row made with [`text_input`].
+/// Wraps one modal input in Discord's current Label component. A legacy one-input row returned
+/// by `text_input` is unwrapped for use as the Label's child.
 #[must_use]
-pub fn modal(
-    custom_id: String,
-    title: impl Into<String>,
-    inputs: impl IntoIterator<Item = Component>,
-) -> ModalSpec {
+pub fn label(
+    label: impl Into<String>,
+    description: Option<String>,
+    component: impl Into<ModalComponent>,
+) -> ModalComponent {
+    let component = match component.into() {
+        ModalComponent::Component(Component::ActionRow(row)) => {
+            if let [Component::TextInput(input)] = row.components.as_slice() {
+                let mut input = input.clone();
+                input.label = None;
+                ModalComponent::from(Component::TextInput(input))
+            } else if let [child] = row.components.as_slice() {
+                ModalComponent::from(child.clone())
+            } else {
+                ModalComponent::Component(Component::ActionRow(row))
+            }
+        }
+        component => component,
+    };
+
+    ModalComponent::Label {
+        id: None,
+        label: label.into(),
+        description,
+        component: Box::new(component),
+    }
+}
+
+/// A form: its `custom_id` brings the submission back to the module's `modal` handler. Each item
+/// is either a Label input or a legacy text input row.
+#[must_use]
+pub fn modal<I, C>(custom_id: String, title: impl Into<String>, inputs: I) -> ModalSpec
+where
+    I: IntoIterator<Item = C>,
+    C: Into<ModalComponent>,
+{
     ModalSpec {
         custom_id,
         title: title.into(),
-        components: inputs.into_iter().collect(),
+        components: inputs.into_iter().map(Into::into).collect(),
     }
 }
 

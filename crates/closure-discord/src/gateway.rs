@@ -14,18 +14,20 @@ use closure_core::event::{Event as ModuleEvent, GuildId};
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Locale;
 use closure_core::registry::ModuleRegistry;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt as FuturesStreamExt};
+use serde_json::Value;
 use tokio::sync::Notify;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use twilight_cache_inmemory::{InMemoryCache, ResourceType};
-use twilight_gateway::error::ReceiveMessageErrorType;
+use twilight_gateway::error::{ReceiveMessageError, ReceiveMessageErrorType};
 use twilight_gateway::{
-    CloseFrame, Config, Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _,
-    create_recommended,
+    CloseFrame, Config, Event, EventTypeFlags, Intents, Message, Shard, ShardId, StreamExt as _,
+    create_recommended, parse,
 };
 use twilight_http::Client;
+use twilight_model::application::interaction::InteractionType;
 use twilight_model::gateway::payload::incoming::GuildCreate;
 use twilight_model::gateway::payload::outgoing::RequestGuildMembers;
 use twilight_model::id::Id;
@@ -792,6 +794,85 @@ pub async fn start_gateway(
     Ok(GatewayHandle { tracker, health })
 }
 
+const MAX_MODAL_RAW_PAYLOAD_BYTES: usize = 64 * 1024;
+
+async fn next_event_with_modal_raw(
+    shard: &mut Shard,
+) -> Option<Result<(Event, Option<Value>), ReceiveMessageError>> {
+    loop {
+        match shard.next().await? {
+            Err(error) => return Some(Err(error)),
+            Ok(Message::Close(frame)) => {
+                return Some(Ok((Event::GatewayClose(frame), None)));
+            }
+            Ok(Message::Text(raw)) => {
+                let interaction_text = raw.contains("INTERACTION_CREATE");
+                let raw_size = raw.len();
+                let oversized = interaction_text && raw_size > MAX_MODAL_RAW_PAYLOAD_BYTES;
+                let retained_raw = (interaction_text && !oversized).then(|| raw.clone());
+                match parse(raw, EventTypeFlags::all()) {
+                    Ok(Some(event)) => {
+                        let event = Event::from(event);
+                        let components = match &event {
+                            Event::InteractionCreate(interaction)
+                                if interaction.0.kind == InteractionType::ModalSubmit =>
+                            {
+                                if oversized {
+                                    tracing::warn!(
+                                        size = raw_size,
+                                        "discarding oversized modal submission payload"
+                                    );
+                                    Some(Value::Null)
+                                } else if let Some(raw) = retained_raw.as_deref() {
+                                    raw_modal_components(&event, raw)
+                                } else {
+                                    tracing::warn!("modal submission had no bounded raw payload");
+                                    Some(Value::Null)
+                                }
+                            }
+                            _ => None,
+                        };
+                        return Some(Ok((event, components)));
+                    }
+                    Ok(None) => continue,
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+            Ok(_) => continue,
+        }
+    }
+}
+
+fn raw_modal_components(event: &Event, raw: &str) -> Option<Value> {
+    let Event::InteractionCreate(interaction) = event else {
+        return None;
+    };
+    if interaction.0.kind != InteractionType::ModalSubmit {
+        return None;
+    }
+    if raw.len() > MAX_MODAL_RAW_PAYLOAD_BYTES {
+        tracing::warn!(
+            size = raw.len(),
+            "discarding oversized modal submission payload"
+        );
+        return Some(Value::Null);
+    }
+    let envelope: Value = match serde_json::from_str(raw) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            tracing::warn!("discarding malformed modal submission payload");
+            return Some(Value::Null);
+        }
+    };
+    let components = envelope
+        .get("d")
+        .and_then(|dispatch| dispatch.get("data"))
+        .and_then(|data| data.get("components"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    Some(components)
+}
+
 async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
     let id = shard.id();
     let mut closing = false;
@@ -811,17 +892,23 @@ async fn run_shard(mut shard: Shard, context: Arc<ShardContext>) {
                 }
                 continue;
             }
-            item = shard.next_event(EventTypeFlags::all()) => item,
+            item = next_event_with_modal_raw(&mut shard) => item,
         };
         // The stream ends once the connection is closed for good.
         let Some(item) = item else { break };
         match item {
-            Ok(event) => {
+            Ok((event, raw_modal_components)) => {
                 // Once shutdown was requested, the close handshake finishing is the end; the stream itself would otherwise reconnect, as it does after any close.
                 let finished = closing && matches!(event, Event::GatewayClose(_));
                 // `Shard` is not `Sync`, so only plain values cross the await points below.
                 let latency = shard.latency().recent().first().copied();
-                handle_event(&context, id, latency, &event);
+                handle_event_with_modal_components(
+                    &context,
+                    id,
+                    latency,
+                    &event,
+                    raw_modal_components.as_ref(),
+                );
                 if context.members_intent
                     && let Some(guild) = guild_to_request(&event, context.member_request_limit)
                 {
@@ -971,7 +1058,16 @@ fn guild_to_request(event: &Event, limit: u64) -> Option<Id<GuildMarker>> {
 }
 
 fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, event: &Event) {
-    // A guild that is not allowed is left at once and never reaches the cache or the modules.
+    handle_event_with_modal_components(context, id, latency, event, None);
+}
+
+fn handle_event_with_modal_components(
+    context: &ShardContext,
+    id: ShardId,
+    latency: Option<Duration>,
+    event: &Event,
+    raw_modal_components: Option<&Value>,
+) {
     if let (Some(allowed), Event::GuildCreate(created)) = (&context.allowed, event) {
         let guild = match &**created {
             GuildCreate::Available(guild) => guild.id,
@@ -995,8 +1091,13 @@ fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, 
         context.latency.record(u64::from(id.number()), latency);
     }
 
-    for converted in crate::convert::events(event, &before) {
-        // What still arrives from a guild that is being left is dropped; its removal is not.
+    for converted in
+        crate::convert::events_with_modal_components(event, &before, raw_modal_components)
+    {
+        if matches!(&converted, ModuleEvent::DirectMessageComponent(_)) {
+            context.dispatcher.dispatch(converted);
+            continue;
+        }
         if let Some(allowed) = &context.allowed
             && !matches!(converted, ModuleEvent::GuildRemoved { .. })
             && !allowed.permits(converted.guild_id())

@@ -252,6 +252,14 @@ impl ModalCx {
         self.interaction
             .field(&format!("{}:{name}", self.ctx.module))
     }
+
+    /// The typed answer for `name`, including select and choice-group inputs. The module prefix
+    /// is added here just as it is for [`Self::field`].
+    #[must_use]
+    pub fn value(&self, name: &str) -> Option<&closure_core::event::ModalValue> {
+        self.interaction
+            .value(&format!("{}:{name}", self.ctx.module))
+    }
 }
 
 impl<I: InteractionRef + 'static> Cx<I> {
@@ -379,6 +387,16 @@ impl<I: InteractionRef + 'static> Cx<I> {
         message: DirectMessage,
     ) -> Result<Sent, UserError> {
         crate::dm::send(self.ctx(), user, message).await
+    }
+
+    /// Sends a direct message with buttons or menus. The handler must be registered with direct_message_component.
+    pub async fn direct_message_with_components(
+        &self,
+        user: UserId,
+        message: DirectMessage,
+        components: Vec<twilight_model::channel::message::Component>,
+    ) -> Result<Sent, UserError> {
+        crate::dm::send_with_components(self.ctx(), user, message, components).await
     }
 
     /// A message of the module's catalog in the language of the answer.
@@ -774,6 +792,16 @@ impl JobCx {
         message: DirectMessage,
     ) -> Result<Sent, UserError> {
         crate::dm::send(&self.ctx, user, message).await
+    }
+
+    /// Sends a direct message with buttons or menus. The handler must be registered with direct_message_component.
+    pub async fn direct_message_with_components(
+        &self,
+        user: UserId,
+        message: DirectMessage,
+        components: Vec<twilight_model::channel::message::Component>,
+    ) -> Result<Sent, UserError> {
+        crate::dm::send_with_components(&self.ctx, user, message, components).await
     }
 
     /// The module's configuration in this guild, as its own type.

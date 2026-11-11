@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::capability::{Capability, CapabilitySet};
-use crate::event::GuildId;
+use crate::event::{GuildId, MessageId};
 use crate::module::ModuleId;
 
 /// The longest key, in characters.
@@ -97,6 +97,24 @@ pub trait StorageBackend: Send + Sync {
         guild: GuildId,
         key: &str,
     ) -> Result<bool, StorageError>;
+
+    /// Host-only global provenance for a direct-message component, keyed by its Discord message id.
+    async fn get_direct_message_component_route(
+        &self,
+        _message_id: MessageId,
+    ) -> Result<Option<Entry>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// Inserts one host-owned DM route with an expiry; conflicting message ids are refused.
+    async fn insert_direct_message_component_route(
+        &self,
+        _message_id: MessageId,
+        _value: serde_json::Value,
+        _ttl: Duration,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Unavailable)
+    }
 
     /// Entries whose key starts with `prefix`, in key order.
     async fn list(
@@ -328,7 +346,7 @@ fn check_counter(name: &str) -> Result<(), StorageError> {
 }
 
 /// PostgreSQL cannot keep U+0000 in JSON text, so no backend takes it.
-fn contains_nul(value: &serde_json::Value) -> bool {
+pub(crate) fn contains_nul(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::String(text) => text.contains('\0'),
         serde_json::Value::Array(items) => items.iter().any(contains_nul),
@@ -364,7 +382,7 @@ impl std::fmt::Debug for Store {
 }
 
 /// The backend of a [`Store`] that has none.
-struct NoStorage;
+pub(crate) struct NoStorage;
 
 #[async_trait]
 impl StorageBackend for NoStorage {
@@ -826,6 +844,7 @@ struct Inner {
     /// The revision of the latest write; every write takes the next one.
     revisions: i64,
     entries: HashMap<RowKey, Row>,
+    dm_component_routes: HashMap<MessageId, Row>,
     counters: HashMap<CounterKey, CounterRow>,
     scores: HashMap<(ModuleId, GuildId, String, u64), i64>,
     sets: HashMap<(ModuleId, GuildId, String), BTreeSet<u64>>,
@@ -890,6 +909,69 @@ impl MemoryStorage {
 
 #[async_trait]
 impl StorageBackend for MemoryStorage {
+    async fn get_direct_message_component_route(
+        &self,
+        message_id: MessageId,
+    ) -> Result<Option<Entry>, StorageError> {
+        let now = (self.clock)();
+        Ok(self
+            .lock()
+            .dm_component_routes
+            .get(&message_id)
+            .filter(|row| Self::live(row, now))
+            .map(|row| row.entry.clone()))
+    }
+
+    async fn insert_direct_message_component_route(
+        &self,
+        message_id: MessageId,
+        value: serde_json::Value,
+        ttl: Duration,
+    ) -> Result<(), StorageError> {
+        if message_id.get() == 0 {
+            return Err(StorageError::Value("message id must be positive".into()));
+        }
+        let size = serde_json::to_vec(&value).map_or(usize::MAX, |bytes| bytes.len());
+        if size > MAX_VALUE_BYTES {
+            return Err(StorageError::TooLarge {
+                size,
+                limit: MAX_VALUE_BYTES,
+            });
+        }
+        if contains_nul(&value) {
+            return Err(StorageError::Value("text must not contain NUL".into()));
+        }
+        let now = (self.clock)();
+        let mut inner = self.lock();
+        let existing = inner
+            .dm_component_routes
+            .get(&message_id)
+            .is_some_and(|row| Self::live(row, now));
+        if existing {
+            return Err(StorageError::Conflict);
+        }
+        let kept = inner
+            .dm_component_routes
+            .values()
+            .filter(|row| Self::live(row, now))
+            .count();
+        if kept >= self.quota {
+            return Err(StorageError::QuotaExceeded { limit: self.quota });
+        }
+        inner.revisions += 1;
+        let revision = inner.revisions;
+        let expires =
+            Some(now.saturating_add(i64::try_from(ttl.as_secs().max(1)).unwrap_or(i64::MAX)));
+        inner.dm_component_routes.insert(
+            message_id,
+            Row {
+                entry: Entry { value, revision },
+                expires,
+            },
+        );
+        Ok(())
+    }
+
     async fn get(
         &self,
         module: &ModuleId,

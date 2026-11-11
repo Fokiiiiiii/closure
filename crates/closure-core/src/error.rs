@@ -102,6 +102,9 @@ pub enum DiscordError {
     /// cannot change that, and it is no fault of the module.
     #[error("the user does not accept direct messages from this bot")]
     DirectMessagesClosed,
+    /// Delivery or route storage is uncertain; retrying may send a duplicate message.
+    #[error("the direct message may have been sent, but its component route could not be saved")]
+    DirectMessageComponentsNotRoutable,
     /// The member is not connected to a voice channel, so Discord cannot mute it there (error
     /// 40032). Retrying cannot change that until the member joins voice.
     #[error("the member is not connected to voice")]
@@ -131,6 +134,11 @@ mod tests {
     #[test]
     fn a_closed_direct_message_is_not_worth_repeating() {
         assert!(!DiscordError::DirectMessagesClosed.is_retryable());
+    }
+
+    #[test]
+    fn a_dm_with_uncertain_component_storage_is_not_worth_repeating() {
+        assert!(!DiscordError::DirectMessageComponentsNotRoutable.is_retryable());
     }
 
     #[test]

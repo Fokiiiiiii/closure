@@ -2,11 +2,14 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use closure_core::action::{InteractionReply, InteractionResponse, Outcome};
+use closure_core::action::{InteractionReply, InteractionResponse, ModalSpec, Outcome};
 use closure_core::error::DiscordError;
 use closure_core::event::{ChannelId, InteractionId, InteractionToken};
 use closure_core::module::{ChoiceValue, OptionChoice};
+use serde_json::{Value, json};
+use twilight_http::request::Request;
 use twilight_http::request::channel::reaction::RequestReactionType;
+use twilight_http::routing::Route;
 use twilight_model::application::command::{CommandOptionChoice, CommandOptionChoiceValue};
 use twilight_model::channel::Message;
 use twilight_model::channel::message::{AllowedMentions, MessageFlags};
@@ -16,7 +19,7 @@ use twilight_model::http::interaction::{
 use twilight_model::id::Id;
 use twilight_model::id::marker::MessageMarker;
 
-use super::{TwilightApi, read, run};
+use super::{TwilightApi, map_http_error, read, run};
 
 fn flags(ephemeral: bool) -> Option<MessageFlags> {
     ephemeral.then_some(MessageFlags::EPHEMERAL)
@@ -55,8 +58,8 @@ fn update_data(reply: &InteractionReply) -> InteractionResponseData {
     }
 }
 
-fn twilight_response(response: &InteractionResponse) -> TwilightResponse {
-    match response {
+fn twilight_response(response: &InteractionResponse) -> Option<TwilightResponse> {
+    Some(match response {
         InteractionResponse::Defer { ephemeral } => TwilightResponse {
             kind: InteractionResponseType::DeferredChannelMessageWithSource,
             data: flags(*ephemeral).map(|flags| InteractionResponseData {
@@ -83,16 +86,22 @@ fn twilight_response(response: &InteractionResponse) -> TwilightResponse {
                 ..InteractionResponseData::default()
             }),
         },
-        InteractionResponse::Modal(spec) => TwilightResponse {
-            kind: InteractionResponseType::Modal,
-            data: Some(InteractionResponseData {
-                custom_id: Some(spec.custom_id.clone()),
-                title: Some(spec.title.clone()),
-                components: Some(spec.components.clone()),
-                ..InteractionResponseData::default()
-            }),
+        InteractionResponse::Modal(_) => return None,
+    })
+}
+
+fn modal_payload(spec: &ModalSpec) -> Result<Value, DiscordError> {
+    let components = serde_json::to_value(&spec.components).map_err(|error| {
+        DiscordError::Invalid(format!("could not serialize modal components: {error}"))
+    })?;
+    Ok(json!({
+        "type": InteractionResponseType::Modal as u8,
+        "data": {
+            "custom_id": spec.custom_id,
+            "title": spec.title,
+            "components": components,
         },
-    }
+    }))
 }
 
 impl TwilightApi {
@@ -107,8 +116,23 @@ impl TwilightApi {
                 .respond_to_text_command(channel, message, token, response)
                 .await;
         }
+        if let InteractionResponse::Modal(spec) = response {
+            let payload = modal_payload(spec)?;
+            let request = Request::builder(&Route::InteractionCallback {
+                interaction_id: interaction_id.get(),
+                interaction_token: token.expose(),
+                with_response: false,
+            })
+            .use_authorization_token(false)
+            .json(&payload)
+            .build()
+            .map_err(|error| map_http_error(&error))?;
+            return run(self.http.request::<()>(request)).await;
+        }
         let interaction = self.http.interaction(self.application_id);
-        let response = twilight_response(response);
+        let response = twilight_response(response).ok_or_else(|| {
+            DiscordError::Invalid("a modal response requires its typed request path".into())
+        })?;
         run(interaction.create_response(interaction_id, token.expose(), &response)).await
     }
 
@@ -373,7 +397,8 @@ mod tests {
                     value: ChoiceValue::Integer(3),
                 },
             ],
-        });
+        })
+        .expect("autocomplete responses use Twilight's typed response");
         assert_eq!(
             answer.kind,
             InteractionResponseType::ApplicationCommandAutocompleteResult
@@ -407,28 +432,47 @@ mod tests {
                 content: Some("changed".into()),
                 ..InteractionReply::default()
             },
-        });
+        })
+        .expect("message updates use Twilight's typed response");
         assert_eq!(update.kind, InteractionResponseType::UpdateMessage);
         assert_eq!(
             update.data.and_then(|d| d.content).as_deref(),
             Some("changed")
         );
 
-        let ack = twilight_response(&InteractionResponse::DeferUpdate);
+        let ack = twilight_response(&InteractionResponse::DeferUpdate)
+            .expect("acknowledgements use Twilight's typed response");
         assert_eq!(ack.kind, InteractionResponseType::DeferredUpdateMessage);
         assert!(ack.data.is_none());
 
-        let form = twilight_response(&InteractionResponse::Modal(
-            closure_core::action::ModalSpec {
-                custom_id: "m:form".into(),
-                title: "Report".into(),
-                components: vec![],
-            },
-        ));
-        assert_eq!(form.kind, InteractionResponseType::Modal);
-        let data = form.data.unwrap();
-        assert_eq!(data.custom_id.as_deref(), Some("m:form"));
-        assert_eq!(data.title.as_deref(), Some("Report"));
+        let form = modal_payload(&ModalSpec {
+            custom_id: "m:form".into(),
+            title: "Report".into(),
+            components: vec![closure_core::action::ModalComponent::RadioGroup {
+                custom_id: "m:choice".into(),
+                required: Some(true),
+                options: vec![
+                    closure_core::action::ModalOption {
+                        value: "one".into(),
+                        label: "One".into(),
+                        description: None,
+                        default: None,
+                    },
+                    closure_core::action::ModalOption {
+                        value: "two".into(),
+                        label: "Two".into(),
+                        description: None,
+                        default: None,
+                    },
+                ],
+            }],
+        })
+        .expect("typed modal components serialize to Discord's payload");
+        assert_eq!(form["type"], InteractionResponseType::Modal as u8);
+        assert_eq!(form["data"]["custom_id"], "m:form");
+        assert_eq!(form["data"]["title"], "Report");
+        assert_eq!(form["data"]["components"][0]["type"], 21);
+        assert_eq!(form["data"]["components"][0]["custom_id"], "m:choice");
     }
 
     #[test]
@@ -453,14 +497,16 @@ mod tests {
 
     #[test]
     fn deferring_is_public_unless_asked_otherwise() {
-        let public = twilight_response(&InteractionResponse::Defer { ephemeral: false });
+        let public = twilight_response(&InteractionResponse::Defer { ephemeral: false })
+            .expect("defer responses use Twilight's typed response");
         assert_eq!(
             public.kind,
             InteractionResponseType::DeferredChannelMessageWithSource
         );
         assert!(public.data.is_none());
 
-        let private = twilight_response(&InteractionResponse::Defer { ephemeral: true });
+        let private = twilight_response(&InteractionResponse::Defer { ephemeral: true })
+            .expect("defer responses use Twilight's typed response");
         assert_eq!(
             private.data.and_then(|d| d.flags),
             Some(MessageFlags::EPHEMERAL)

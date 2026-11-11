@@ -855,6 +855,34 @@ mod direct_messages {
             user_id: Id::new(20),
             content: Some("hi".into()),
             embeds: vec![],
+            components: vec![],
+            files: vec![],
+        }
+    }
+
+    fn direct_message_with_button() -> Action {
+        use twilight_model::channel::message::Component;
+        use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
+
+        Action::SendDirectMessage {
+            guild_id: Id::new(10),
+            user_id: Id::new(20),
+            content: Some("Rate this ticket".into()),
+            embeds: vec![],
+            components: vec![Component::ActionRow(ActionRow {
+                id: None,
+                components: vec![Component::Button(Button {
+                    custom_id: Some("tickets:rate:20:44:1:5".into()),
+                    disabled: false,
+                    emoji: None,
+                    id: None,
+                    label: Some("5".into()),
+                    style: ButtonStyle::Primary,
+                    url: None,
+                    sku_id: None,
+                })],
+            })],
+            files: vec![],
         }
     }
 
@@ -895,6 +923,52 @@ mod direct_messages {
         let message: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
         assert_eq!(message["content"], "hi");
         assert_eq!(message["allowed_mentions"]["parse"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_direct_message_sends_its_button_without_mentions() {
+        let discord =
+            FakeDiscord::start(vec![(200, MEMBER), (200, DM_CHANNEL), (200, DM_MESSAGE)]).await;
+
+        let outcome = discord.api().execute(direct_message_with_button()).await;
+
+        assert!(matches!(outcome, Ok(Outcome::Message(_))), "{outcome:?}");
+        let requests = discord.requests();
+        let message: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+        assert_eq!(
+            message["components"][0]["components"][0]["custom_id"],
+            "tickets:rate:20:44:1:5"
+        );
+        assert_eq!(message["allowed_mentions"]["parse"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_direct_message_sends_a_file_as_multipart_after_member_check() {
+        let discord =
+            FakeDiscord::start(vec![(200, MEMBER), (200, DM_CHANNEL), (200, DM_MESSAGE)]).await;
+        let outcome = discord
+            .api()
+            .execute(Action::SendDirectMessage {
+                guild_id: Id::new(10),
+                user_id: Id::new(20),
+                content: None,
+                embeds: Vec::new(),
+                components: Vec::new(),
+                files: vec![closure_core::action::FileUpload {
+                    filename: "export.json".into(),
+                    data: b"export payload".to_vec(),
+                }],
+            })
+            .await;
+
+        assert!(matches!(outcome, Ok(Outcome::Message(_))), "{outcome:?}");
+        let requests = discord.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].path.ends_with("/channels/300/messages"));
+        assert!(requests[2].body.contains("filename="));
+        assert!(requests[2].body.contains("export.json"));
+        assert!(requests[2].body.contains("export payload"));
+        assert!(requests[2].body.contains("allowed_mentions"));
     }
 
     #[tokio::test]
