@@ -399,8 +399,9 @@ fn check_levels(schema: &Value, inherited: bool, path: &str) -> Result<(), Strin
 }
 
 /// The widgets a dashboard can draw for a setting.
-const WIDGETS: [&str; 10] = [
+const WIDGETS: [&str; 11] = [
     "role",
+    "roles",
     "channel",
     "duration",
     "textarea",
@@ -1396,7 +1397,8 @@ mod tests {
 
     #[test]
     fn ui_hints_are_accepted_and_kept_in_the_published_schema() {
-        let hint = json!({ "widget": "role", "group": "Roles", "order": 3, "help": "Who may act" });
+        let hint =
+            json!({ "widget": "roles", "group": "Roles", "order": 3, "help": "Who may act" });
         let schema = json!({
             "type": "object",
             "properties": {
