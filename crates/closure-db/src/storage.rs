@@ -263,6 +263,77 @@ impl StorageBackend for Db {
             .collect())
     }
 
+    async fn list_after(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        let rows: Vec<(String, serde_json::Value, i64)> = sqlx::query_as(
+            "SELECT key, value, revision FROM module_kv
+             WHERE module = $1 AND guild_id = $2 AND starts_with(key, $3) AND key > $4
+               AND (expires_at IS NULL OR expires_at > now())
+             ORDER BY key LIMIT $5",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(prefix)
+        .bind(after)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(rows
+            .into_iter()
+            .map(|(key, value, revision)| (key, Entry { value, revision }))
+            .collect())
+    }
+
+    async fn list_numeric_suffix_before(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        prefix: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        let before = before
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| StorageError::InvalidKey("numeric cursor exceeds 63 bits".into()))?;
+        let rows: Vec<(String, serde_json::Value, i64)> = sqlx::query_as(
+            "SELECT key, value, revision FROM module_kv
+             WHERE module = $1 AND guild_id = $2 AND starts_with(key, $3)
+               AND CASE
+                     WHEN substring(key from length($3) + 1) ~ '^[0-9]+$'
+                     THEN $4::bigint IS NULL
+                       OR substring(key from length($3) + 1)::numeric < $4
+                     ELSE FALSE
+                   END
+               AND (expires_at IS NULL OR expires_at > now())
+             ORDER BY CASE
+                        WHEN substring(key from length($3) + 1) ~ '^[0-9]+$'
+                        THEN substring(key from length($3) + 1)::numeric
+                      END DESC,
+                      key DESC
+             LIMIT $5",
+        )
+        .bind(module.as_str())
+        .bind(guild_id(guild)?)
+        .bind(prefix)
+        .bind(before)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(rows
+            .into_iter()
+            .map(|(key, value, revision)| (key, Entry { value, revision }))
+            .collect())
+    }
+
     async fn counter_add(
         &self,
         module: &ModuleId,

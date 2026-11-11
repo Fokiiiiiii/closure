@@ -107,6 +107,30 @@ pub trait StorageBackend: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(String, Entry)>, StorageError>;
 
+    /// Entries whose key starts with `prefix` and is greater than `after`, in key order.
+    async fn list_after(
+        &self,
+        _: &ModuleId,
+        _: GuildId,
+        _: &str,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    /// Entries whose key is `prefix` plus a decimal u64, newest suffix first.
+    async fn list_numeric_suffix_before(
+        &self,
+        _: &ModuleId,
+        _: GuildId,
+        _: &str,
+        _: Option<u64>,
+        _: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
     /// Adds `delta` to a counter, in its total and in the current minute; returns the total.
     async fn counter_add(
         &self,
@@ -550,6 +574,41 @@ impl Store {
             .await
     }
 
+    /// Up to `limit` entries after a full key cursor, in key order.
+    pub async fn list_after(
+        &self,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        self.allowed()?;
+        check_key(prefix)?;
+        check_key(after)?;
+        if !after.starts_with(prefix) {
+            return Err(StorageError::InvalidKey(after.to_owned()));
+        }
+        self.backend
+            .list_after(&self.module, self.guild, prefix, after, limit.min(1000))
+            .await
+    }
+
+    /// Up to `limit` entries keyed by `prefix` plus a decimal snowflake, newest first.
+    pub async fn list_numeric_suffix_before(
+        &self,
+        prefix: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        self.allowed()?;
+        check_key(prefix)?;
+        if let Some(before) = before.filter(|id| i64::try_from(*id).is_err()) {
+            return Err(StorageError::InvalidKey(before.to_string()));
+        }
+        self.backend
+            .list_numeric_suffix_before(&self.module, self.guild, prefix, before, limit.min(1000))
+            .await
+    }
+
     /// Adds `delta` (it may be negative) to the counter `name` of `subject` (a user, a role,
     /// anything with a number) and returns the new total.
     pub async fn counter_add(
@@ -927,6 +986,63 @@ impl StorageBackend for MemoryStorage {
         found.sort_by(|a, b| a.0.cmp(&b.0));
         found.truncate(limit);
         Ok(found)
+    }
+
+    async fn list_after(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        let now = (self.clock)();
+        let mut found: Vec<(String, Entry)> = self
+            .lock()
+            .entries
+            .iter()
+            .filter(|((m, g, key), row)| {
+                m == module
+                    && *g == guild
+                    && key.starts_with(prefix)
+                    && key.as_str() > after
+                    && Self::live(row, now)
+            })
+            .map(|((_, _, key), row)| (key.clone(), row.entry.clone()))
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found.truncate(limit);
+        Ok(found)
+    }
+
+    async fn list_numeric_suffix_before(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        prefix: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        let now = (self.clock)();
+        let mut found: Vec<(u64, String, Entry)> = self
+            .lock()
+            .entries
+            .iter()
+            .filter_map(|((m, g, key), row)| {
+                let id = key.strip_prefix(prefix)?.parse::<u64>().ok()?;
+                (m == module
+                    && *g == guild
+                    && before.is_none_or(|before| id < before)
+                    && Self::live(row, now))
+                    .then(|| (id, key.clone(), row.entry.clone()))
+            })
+            .collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.truncate(limit);
+        Ok(found
+            .into_iter()
+            .map(|(_, key, entry)| (key, entry))
+            .collect())
     }
 
     async fn counter_add(

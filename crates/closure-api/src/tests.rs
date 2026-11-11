@@ -4,9 +4,11 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use closure_config::{ConfigCompiler, SettingsStore};
+use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::module::{Module, ModuleId, ModuleManifest};
 use closure_core::registry::ModuleRegistry;
 use closure_core::settings::SettingsProvider;
+use closure_core::storage::Store;
 use closure_core::testing::StubModule;
 use closure_db::Db;
 use http_body_util::BodyExt;
@@ -161,12 +163,25 @@ fn app_with_source(
         )
         .unwrap(),
     );
+    let mut tickets =
+        ModuleManifest::new(ModuleId::new("tickets").unwrap(), "tickets", "0.1.0");
+    tickets.config_schema = json!({ "type": "object" });
+    tickets.default_config = json!({ "staff_roles": ["5"] });
+    tickets = tickets.permission(
+        closure_core::permission::PermissionSpec::new(
+            "tickets.manage",
+            closure_core::permission::Level::MODERATOR,
+            "manage",
+        )
+        .unwrap(),
+    );
     let registry = Arc::new(
         ModuleRegistry::new(vec![
             warn_module(),
             layered_module(),
             automod_module(),
             Arc::new(StubModule(dashboard)),
+            Arc::new(StubModule(tickets)),
         ])
         .unwrap(),
     );
@@ -1932,4 +1947,326 @@ async fn a_person_needs_to_be_a_moderator_to_read_and_the_dashboard_right_to_cha
         StatusCode::BAD_REQUEST,
         "a change says what changes"
     );
+}
+
+fn ticket_store(app: &App, guild: u64) -> Store {
+    let granted: CapabilitySet = [Capability::Storage].into_iter().collect();
+    let backend: Arc<dyn closure_core::storage::StorageBackend> = Arc::new(app.db.clone());
+    Store::new(
+        backend,
+        &granted,
+        ModuleId::new("tickets").unwrap(),
+        Id::new(guild),
+    )
+}
+
+async fn put_ticket_record(app: &App, guild: u64, key: &str, value: Value) {
+    ticket_store(app, guild).set(key, &value).await.unwrap();
+}
+
+fn history_key(number: i64, channel: u64) -> String {
+    format!("ticket-history:{:019}:{channel}", i64::MAX - number)
+}
+
+async fn put_history(
+    app: &App,
+    guild: u64,
+    number: i64,
+    channel: u64,
+    staff_roles: Vec<u64>,
+    transcript_pages: usize,
+) {
+    let key = history_key(number, channel);
+    put_ticket_record(
+        app,
+        guild,
+        &key,
+        json!({
+            "channel_id": channel,
+            "number": number,
+            "opener": 10,
+            "claimed_by": 2,
+            "created": number * 10,
+            "closed": number * 10 + 5,
+            "closer": 2,
+            "reason": "resolved",
+            "panel": { "id": "support-a", "staff_roles": staff_roles },
+            "staff_roles": staff_roles,
+            "status": "closed",
+            "attempt": 500,
+            "transcript_attempt": 700,
+            "transcript_pages": transcript_pages,
+            "transcript_truncated": true
+        }),
+    )
+    .await;
+    put_ticket_record(
+        app,
+        guild,
+        &format!("ticket-history-id:{channel}"),
+        json!(key),
+    )
+    .await;
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn ticket_api_pages_open_tickets_and_scopes_access_to_guild_and_panel(pool: PgPool) {
+    let app = app(pool).await;
+    app.db.register_guild(Id::new(43)).await.unwrap();
+    for (channel, roles) in [
+        (101, vec![5]),
+        (102, vec![5]),
+        (103, vec![5]),
+        (104, vec![6]),
+    ] {
+        put_ticket_record(
+            &app,
+            42,
+            &format!("ticket:{channel}"),
+            json!({
+                "number": channel - 100,
+                "opener": 10,
+                "claimed_by": null,
+                "created": channel as i64,
+                "closing": if channel == 103 { Some(channel as i64) } else { None },
+                "staff_roles": roles,
+                "panel": { "id": "support-a" }
+            }),
+        )
+        .await;
+    }
+    put_ticket_record(
+        &app,
+        43,
+        "ticket:105",
+        json!({
+            "number": 5,
+            "opener": 10,
+            "created": 105,
+            "staff_roles": [5]
+        }),
+    )
+    .await;
+
+    let staff = |request: Call| request.header("x-closure-actor", "2");
+    let base = "/v1/guilds/42/tickets?state=open&limit=2";
+    let first = send(&app.router, staff(call(Method::GET, base))).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text);
+    assert_eq!(first.json()["tickets"][0]["channel_id"], "103");
+    assert_eq!(first.json()["tickets"][1]["channel_id"], "102");
+    assert_eq!(first.json()["tickets"][0]["panel"], "support-a");
+    assert_eq!(first.json()["tickets"][0]["state"], "closing");
+    assert_eq!(first.json()["next_before"], "102");
+
+    let next = send(
+        &app.router,
+        staff(call(
+            Method::GET,
+            "/v1/guilds/42/tickets?state=open&limit=2&before=102",
+        )),
+    )
+    .await;
+    assert_eq!(next.json()["tickets"][0]["channel_id"], "101");
+    assert!(next.json()["next_before"].is_null());
+
+    put_ticket_record(
+        &app,
+        42,
+        "ticket:109",
+        json!({
+            "number": 9,
+            "opener": 10,
+            "created": 109,
+            "panel": { "id": "legacy-panel", "staff_roles": ["5"] }
+        }),
+    )
+    .await;
+    put_ticket_record(
+        &app,
+        42,
+        "ticket:110",
+        json!({
+            "number": 10,
+            "opener": 10,
+            "created": 110,
+            "panel": null
+        }),
+    )
+    .await;
+    put_ticket_record(
+        &app,
+        42,
+        "ticket:108",
+        json!({
+            "number": 8,
+            "opener": 10,
+            "created": 108,
+            "staff_roles": [],
+            "panel": { "id": "legacy-panel", "staff_roles": ["5"] }
+        }),
+    )
+    .await;
+
+    let legacy_panel_ticket = send(
+        &app.router,
+        staff(call(Method::GET, "/v1/guilds/42/tickets/109")),
+    )
+    .await;
+    assert_eq!(legacy_panel_ticket.status, StatusCode::OK);
+    assert_eq!(legacy_panel_ticket.json()["panel"], "legacy-panel");
+    let legacy_default_ticket = send(
+        &app.router,
+        staff(call(Method::GET, "/v1/guilds/42/tickets/110")),
+    )
+    .await;
+    assert_eq!(legacy_default_ticket.status, StatusCode::OK);
+    let explicit_empty_roles = send(
+        &app.router,
+        staff(call(Method::GET, "/v1/guilds/42/tickets/108")),
+    )
+    .await;
+    assert_eq!(explicit_empty_roles.status, StatusCode::NOT_FOUND);
+
+    let hidden_panel = send(
+        &app.router,
+        staff(call(Method::GET, "/v1/guilds/42/tickets/104")),
+    )
+    .await;
+    assert_eq!(hidden_panel.status, StatusCode::NOT_FOUND);
+    let foreign_guild = send(
+        &app.router,
+        staff(call(Method::GET, "/v1/guilds/42/tickets/105")),
+    )
+    .await;
+    assert_eq!(foreign_guild.status, StatusCode::NOT_FOUND);
+
+    let member_without_ticket_access = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/tickets?state=open")
+            .header("x-closure-actor", "3"),
+    )
+    .await;
+    assert_eq!(member_without_ticket_access.status, StatusCode::OK);
+    assert!(member_without_ticket_access.json()["tickets"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let forged_actor_without_admin_token = send(
+        &app.router,
+        call(Method::GET, "/v1/guilds/42/tickets?state=open")
+            .token(None)
+            .header("x-closure-actor", "123"),
+    )
+    .await;
+    assert_eq!(forged_actor_without_admin_token.status, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
+async fn ticket_history_is_paged_and_each_detail_page_checks_panel_access(pool: PgPool) {
+    let app = app(pool).await;
+    for (number, channel, roles, pages) in [
+        (18, 180, vec![5], 1),
+        (19, 190, vec![5], 0),
+        (20, 200, vec![5], 6),
+        (21, 210, vec![6], 0),
+    ] {
+        put_history(&app, 42, number, channel, roles, pages).await;
+    }
+    let store = ticket_store(&app, 42);
+    for page in 0..6 {
+        store
+            .set(
+                &format!("ticket-history-content:200:700:{page:04}"),
+                &format!("transcript chunk {page}"),
+            )
+            .await
+            .unwrap();
+    }
+    put_history(&app, 42, 17, 170, vec![5], 1).await;
+
+    let staff = |request: Call| request.header("x-closure-actor", "2");
+    let first = send(
+        &app.router,
+        staff(call(
+            Method::GET,
+            "/v1/guilds/42/tickets?state=closed&limit=2",
+        )),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text);
+    assert_eq!(first.json()["tickets"][0]["number"], 20);
+    assert_eq!(first.json()["tickets"][1]["number"], 19);
+    assert!(first.json()["tickets"][0].get("transcript").is_none());
+    assert_eq!(first.json()["next_before"], "19");
+
+    let next = send(
+        &app.router,
+        staff(call(
+            Method::GET,
+            "/v1/guilds/42/tickets?state=closed&limit=1&before=19",
+        )),
+    )
+    .await;
+    assert_eq!(next.json()["tickets"][0]["number"], 18);
+    assert_eq!(next.json()["next_before"], "18");
+
+    let detail = send(
+        &app.router,
+        staff(call(Method::GET, "/v1/guilds/42/tickets/200")),
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.text);
+    assert_eq!(detail.json()["panel"], "support-a");
+    assert_eq!(detail.json()["opener"], "10");
+    assert_eq!(detail.json()["transcript"]["pages"].as_array().unwrap().len(), 4);
+    assert_eq!(detail.json()["transcript"]["pages"][0]["text"], "transcript chunk 0");
+    assert_eq!(detail.json()["transcript"]["next_page"], 4);
+    assert_eq!(detail.json()["transcript"]["truncated"], true);
+
+    let rest = send(
+        &app.router,
+        staff(call(
+            Method::GET,
+            "/v1/guilds/42/tickets/200?start=4&limit=4",
+        )),
+    )
+    .await;
+    assert_eq!(rest.json()["transcript"]["pages"].as_array().unwrap().len(), 2);
+    assert!(rest.json()["transcript"]["next_page"].is_null());
+
+    let other_panel = send(
+        &app.router,
+        staff(call(Method::GET, "/v1/guilds/42/tickets/210")),
+    )
+    .await;
+    assert_eq!(other_panel.status, StatusCode::NOT_FOUND);
+
+    let missing_chunk = send(
+        &app.router,
+        staff(call(Method::GET, "/v1/guilds/42/tickets/170")),
+    )
+    .await;
+    assert_eq!(missing_chunk.status, StatusCode::NOT_FOUND);
+
+    let denied_transcript_page = send(
+        &app.router,
+        call(
+            Method::GET,
+            "/v1/guilds/42/tickets/200?start=4&limit=4",
+        )
+        .header("x-closure-actor", "3"),
+    )
+    .await;
+    assert_eq!(denied_transcript_page.status, StatusCode::NOT_FOUND);
+
+    let out_of_range = send(
+        &app.router,
+        staff(call(
+            Method::GET,
+            "/v1/guilds/42/tickets/200?start=7&limit=4",
+        )),
+    )
+    .await;
+    assert_eq!(out_of_range.status, StatusCode::BAD_REQUEST);
 }
