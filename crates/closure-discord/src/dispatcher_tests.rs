@@ -3602,7 +3602,7 @@ async fn a_dm_component_does_not_bypass_the_configured_guild_allowlist() {
             interaction_id: Id::new(52),
             application_id: Id::new(60),
             token: InteractionToken::new("not-allowlisted"),
-            guild_id: Id::new(0),
+            guild_id: Id::new(2),
             channel_id: Id::new(300),
             message_id: Id::new(900),
             user: user(7),

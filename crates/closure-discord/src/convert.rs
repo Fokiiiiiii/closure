@@ -332,7 +332,8 @@ fn component(interaction: &Interaction) -> Option<Event> {
             interaction_id: interaction.id,
             application_id: interaction.application_id,
             token: InteractionToken::new(interaction.token.clone()),
-            guild_id: Id::new(0),
+            // The dispatcher replaces this nonzero placeholder before module dispatch.
+            guild_id: Id::new(1),
             channel_id: channel.id,
             message_id,
             user: user(interaction.author()?),
@@ -1852,7 +1853,7 @@ mod tests {
         let Some(Event::DirectMessageComponent(click)) = event(&gateway) else {
             panic!("expected a direct-message click");
         };
-        assert_eq!(click.guild_id.get(), 0);
+        assert_eq!(click.guild_id.get(), 1);
         assert_eq!(click.channel_id.get(), 77);
         assert_eq!(click.message_id.get(), 900);
         assert_eq!(click.user.id.get(), 7);
@@ -1862,19 +1863,20 @@ mod tests {
 
     #[test]
     fn a_submitted_modal_gives_the_text_of_every_input_wherever_it_is() {
+        let raw_components = json!([
+            { "type": 1, "id": 1, "components": [
+                { "type": 4, "id": 2, "custom_id": "why", "value": "spam" } ] },
+            { "type": 18, "id": 3, "label": "Note", "component": {
+                "type": 4, "id": 4, "custom_id": "note", "value": "twice" } }
+        ]);
         let gateway = user_interaction(
             5,
-            &json!({
-                "custom_id": "warn:reason",
-                "components": [
-                    { "type": 1, "id": 1, "components": [
-                        { "type": 4, "id": 2, "custom_id": "why", "value": "spam" } ] },
-                    { "type": 18, "id": 3, "component": { "type": 4, "id": 4, "custom_id": "note", "value": "twice" } }
-                ]
-            }),
+            &json!({"custom_id": "warn:reason", "components": raw_components.clone()}),
             &json!({}),
         );
-        let Some(Event::Modal(form)) = event(&gateway) else {
+        let events =
+            events_with_modal_components(&gateway, &Before::default(), Some(&raw_components));
+        let [Event::Modal(form)] = events.as_slice() else {
             panic!("expected a modal");
         };
         assert_eq!(form.custom_id, "warn:reason");

@@ -954,7 +954,7 @@ impl Dispatcher {
         if command && start_busy_timer {
             self.shared.tracker.spawn(answer_when_busy(
                 Arc::clone(&self.shared),
-                guild,
+                Some(guild),
                 Arc::clone(&event),
                 Arc::clone(&claim),
                 enqueued + INTERACTION_DEADLINE,
@@ -1001,7 +1001,7 @@ impl Dispatcher {
         let raw_event = Arc::new(Event::DirectMessageComponent(click.clone()));
         self.shared.tracker.spawn(answer_when_busy(
             Arc::clone(&self.shared),
-            GuildId::new(0),
+            None,
             raw_event,
             Arc::clone(&claim),
             enqueued + INTERACTION_DEADLINE,
@@ -1778,10 +1778,9 @@ async fn answer_without_choices(shared: &Shared, query: &AutocompleteInvocation)
     }
 }
 
-/// Answers an interaction still waiting in its lane at the deadline, and keeps it from running. Discord gives an interaction three seconds for its first answer, so this cannot wait for the lane; a command run late would act after the user was told it had not been done.
 async fn answer_when_busy(
     shared: Arc<Shared>,
-    guild: GuildId,
+    guild: Option<GuildId>,
     event: Arc<Event>,
     claim: Arc<AtomicBool>,
     deadline: Instant,
@@ -1795,12 +1794,12 @@ async fn answer_when_busy(
         return;
     }
     metrics::counter!("closure_interactions_busy_total").increment(1);
-    tracing::warn!(%guild, kind = event.kind().as_str(), "an interaction waited too long in its lane; it is answered as busy");
+    tracing::warn!(guild = ?guild, kind = event.kind().as_str(), "an interaction waited too long in its lane; it is answered as busy");
     answer_busy(&shared, guild, &event).await;
 }
 
 /// Says the bot is busy, in the invoker's language; an autocomplete gets no choices, which is all Discord takes there.
-async fn answer_busy(shared: &Shared, guild: GuildId, event: &Event) {
+async fn answer_busy(shared: &Shared, guild: Option<GuildId>, event: &Event) {
     let invocation: &dyn InteractionRef = match event {
         Event::Command(invocation) => invocation,
         Event::ContextCommand(invocation) => invocation,
@@ -1811,7 +1810,8 @@ async fn answer_busy(shared: &Shared, guild: GuildId, event: &Event) {
     };
     let locale = invocation
         .locale()
-        .unwrap_or_else(|| shared.settings.locale(guild));
+        .or_else(|| guild.map(|guild| shared.settings.locale(guild)))
+        .unwrap_or(Locale::DEFAULT);
     reply_in(
         shared,
         invocation,
