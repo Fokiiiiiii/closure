@@ -834,7 +834,7 @@ async fn next_event_with_modal_raw(
                         };
                         return Some(Ok((event, components)));
                     }
-                    Ok(None) => continue,
+                    Ok(None) => {}
                     Err(error) => return Some(Err(error)),
                 }
             }
@@ -856,12 +856,9 @@ fn raw_modal_components(event: &Event, raw: &str) -> Option<Value> {
         );
         return Some(Value::Null);
     }
-    let envelope: Value = match serde_json::from_str(raw) {
-        Ok(envelope) => envelope,
-        Err(_) => {
-            tracing::warn!("discarding malformed modal submission payload");
-            return Some(Value::Null);
-        }
+    let Ok(envelope) = serde_json::from_str::<Value>(raw) else {
+        tracing::warn!("discarding malformed modal submission payload");
+        return Some(Value::Null);
     };
     let components = envelope
         .get("d")
@@ -1054,10 +1051,6 @@ fn guild_to_request(event: &Event, limit: u64) -> Option<Id<GuildMarker>> {
         }
         GuildCreate::Available(_) | GuildCreate::Unavailable(_) => None,
     }
-}
-
-fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, event: &Event) {
-    handle_event_with_modal_components(context, id, latency, event, None);
 }
 
 fn handle_event_with_modal_components(

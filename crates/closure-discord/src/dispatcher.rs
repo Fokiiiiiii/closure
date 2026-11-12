@@ -490,6 +490,7 @@ impl Dispatcher {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_with_services(
         registry: Arc<ModuleRegistry>,
         settings: Arc<dyn SettingsProvider>,
@@ -1100,7 +1101,7 @@ impl Dispatcher {
         if claim.swap(true, Ordering::AcqRel) {
             return;
         }
-        let locale = click.locale.clone().unwrap_or(Locale::DEFAULT);
+        let locale = click.locale.unwrap_or(Locale::DEFAULT);
         reply(&self.shared, click, text(&self.shared, locale, key)).await;
     }
 

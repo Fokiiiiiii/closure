@@ -4,13 +4,13 @@ use std::pin::Pin;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, HeaderValue, Response, header},
-    response::IntoResponse,
+    http::{HeaderMap, HeaderValue, header},
+    response::{IntoResponse, Response},
 };
 use closure_core::event::{GuildId, UserId};
 use closure_core::permission::{Actor, GuildPermissions, Level, PermissionKey, Reason};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::{ApiState, config::guild_id, error::ApiError};
 

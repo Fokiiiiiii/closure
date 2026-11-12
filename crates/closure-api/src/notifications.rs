@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
@@ -22,10 +21,9 @@ use lettre::{
     transport::smtp::authentication::Credentials,
 };
 use ring::rand::{SecureRandom, SystemRandom};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use subtle::ConstantTimeEq;
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
@@ -197,6 +195,7 @@ fn locale_tag(locale: MessageLocale) -> &'static str {
     match locale {
         MessageLocale::En => "en",
         MessageLocale::Ja => "ja",
+        _ => "en",
     }
 }
 

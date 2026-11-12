@@ -18,7 +18,6 @@ mod directory;
 mod error;
 mod messages;
 pub mod notifications;
-pub mod notifications;
 mod ops;
 mod server;
 mod stats;

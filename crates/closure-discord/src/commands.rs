@@ -409,9 +409,7 @@ pub fn build_guild_commands(
         .commands()
         .map(|(_, spec)| spec.name.clone())
         .collect();
-    let mut count = names.len();
-
-    for (module, alias) in aliases {
+    for (count, (module, alias)) in (names.len()..).zip(aliases) {
         if !names.insert(alias.name.clone()) {
             return Err(CommandBuildError {
                 module: module.clone(),
@@ -427,7 +425,6 @@ pub fn build_guild_commands(
             });
         }
         commands.push(dynamic_command(module, alias, translator)?);
-        count += 1;
     }
     Ok(commands)
 }

@@ -417,6 +417,7 @@ fn modal_values(components: &Value) -> Result<ModalAnswers, &'static str> {
     Ok(answers)
 }
 
+#[allow(clippy::too_many_lines)]
 fn modal_component(
     component: &Value,
     placement: ModalPlacement,
@@ -798,10 +799,6 @@ pub(crate) struct Before {
     pub(crate) stickers: Option<Vec<StickerInfo>>,
     /// The stage instance, when it was cached.
     pub(crate) stage: Option<StageInfo>,
-}
-
-pub(crate) fn events(gateway: &Gateway, before: &Before) -> Vec<Event> {
-    events_with_modal_components(gateway, before, None)
 }
 
 pub(crate) fn events_with_modal_components(
