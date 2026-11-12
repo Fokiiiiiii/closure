@@ -246,8 +246,6 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/notifications", get(notifications::list))
         .route("/v1/notifications/actions", post(notifications::action))
-        .route("/v1/notifications", get(notifications::list))
-        .route("/v1/notifications/actions", post(notifications::action))
         .route(
             "/v1/guilds/{guild_id}/config",
             get(config::get_config).put(config::put_config),
