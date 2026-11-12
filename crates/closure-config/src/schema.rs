@@ -399,7 +399,7 @@ fn check_levels(schema: &Value, inherited: bool, path: &str) -> Result<(), Strin
 }
 
 /// The widgets a dashboard can draw for a setting.
-const WIDGETS: [&str; 20] = [
+const WIDGETS: [&str; 21] = [
     "ticket-form",
     "hidden",
     "nested-list",
@@ -415,6 +415,7 @@ const WIDGETS: [&str; 20] = [
     "textarea",
     "text-list",
     "user",
+    "users",
     "entries",
     "entries-json",
     "json",
@@ -432,8 +433,8 @@ const CHANNEL_KINDS: [&str; 6] = [
     "stage",
 ];
 
-/// Hints for the dashboard's forms. They are annotations the bot does not act on, so only their
-/// shape is checked, and every other `x-` keyword is passed through as it is.
+/// Hints for dashboard forms. They are annotations the bot does not act on, so only their
+/// shape is checked, and every other x- keyword is passed through as it is.
 fn check_ui_hints(hints: &Value) -> Result<(), String> {
     let Value::Object(map) = hints else {
         return Err("`x-ui` must be an object".to_owned());
@@ -443,6 +444,7 @@ fn check_ui_hints(hints: &Value) -> Result<(), String> {
             .as_str()
             .is_some_and(|text| text.chars().count() <= max)
     };
+    let time_minute = map.get("widget").and_then(Value::as_str) == Some("time-minute");
     for (key, value) in map {
         let valid = match key.as_str() {
             "widget" => value
@@ -456,7 +458,7 @@ fn check_ui_hints(hints: &Value) -> Result<(), String> {
                 names.len() <= 12
                     && names
                         .iter()
-                        .all(|n| n.as_str().is_some_and(|n| n.len() <= 20))
+                        .all(|name| name.as_str().is_some_and(|name| name.len() <= 20))
             }),
             // The kinds of channel a channel field offers; without it only text channels are listed.
             "channel_kinds" => value.as_array().is_some_and(|kinds| {
@@ -467,10 +469,12 @@ fn check_ui_hints(hints: &Value) -> Result<(), String> {
                             .is_some_and(|kind| CHANNEL_KINDS.contains(&kind))
                     })
             }),
-            // Which view a setting belongs to; see the `view` module.
+            // Which view a setting belongs to; see the view module.
             "level" => value
                 .as_str()
                 .is_some_and(|level| matches!(level, "basic" | "advanced")),
+            "max" => time_minute && value.as_u64().is_some_and(|maximum| maximum <= 1440),
+            "allow_24_00" => time_minute && value.as_bool().is_some(),
             _ => false,
         };
         if !valid {
@@ -1408,10 +1412,16 @@ mod tests {
     fn ui_hints_are_accepted_and_kept_in_the_published_schema() {
         let hint =
             json!({ "widget": "roles", "group": "Roles", "order": 3, "help": "Who may act" });
+        let time_minute_hint = json!({
+            "widget": "time-minute",
+            "max": 1440,
+            "allow_24_00": true
+        });
         let schema = json!({
             "type": "object",
             "properties": {
                 "role": { "type": "integer", "x-ui": hint },
+                "minute": { "type": "integer", "x-ui": time_minute_hint },
                 "note": { "type": "string", "x-note": { "anything": [1, 2] } }
             }
         });
@@ -1422,10 +1432,15 @@ mod tests {
         }
         check_supported(&json!({ "x-ui": { "order": 0 } })).unwrap();
         check_supported(&json!({ "x-ui": { "order": 1000, "group": "g".repeat(40) } })).unwrap();
+        check_supported(&json!({ "x-ui": { "widget": "time-minute", "max": 1439 } })).unwrap();
 
         let registry = registry_with(schema);
         let published = document_schema(&registry).unwrap();
         assert!(holds_member(&published, "x-ui", &hint), "{published}");
+        assert!(
+            holds_member(&published, "x-ui", &time_minute_hint),
+            "{published}"
+        );
         assert!(
             holds_member(&published, "x-note", &json!({ "anything": [1, 2] })),
             "{published}"
@@ -1438,6 +1453,11 @@ mod tests {
             json!("role"),
             json!({ "widget": "dropdown" }),
             json!({ "widget": 1 }),
+            json!({ "widget": "text-list", "max": 5 }),
+            json!({ "widget": "time-minute", "max": -1 }),
+            json!({ "widget": "time-minute", "max": 1441 }),
+            json!({ "widget": "time-minute", "max": "1440" }),
+            json!({ "widget": "time-minute", "allow_24_00": "yes" }),
             json!({ "color": "red" }),
             json!({ "group": "g".repeat(41) }),
             json!({ "help": "h".repeat(201) }),
