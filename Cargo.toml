@@ -92,7 +92,7 @@ twilight-http = "0.17"
 twilight-model = "0.17"
 twilight-standby = "0.17"
 unic-langid = "0.9"
-twilight-util = { version = "0.17", features = ["builder", "permission-calculator"] }
+twilight-util = { version = "0.18", features = ["builder", "permission-calculator"] }
 
 # The plugins (https://github.com/Fokiiiiiii/closure-plugins) are built on the crates of this very
 # repository. Where the `plugins` feature pulls them in, they must use these, not a second copy.
