@@ -42,7 +42,7 @@ pub enum Sent {
 }
 
 /// Sends message privately to user, who has to be a member of the guild of ctx. The module
-/// needs the capability SendDirectMessages.
+/// needs the capability `SendDirectMessages`.
 pub async fn send(
     ctx: &EventContext,
     user: UserId,
@@ -52,7 +52,7 @@ pub async fn send(
 }
 
 /// Sends message with buttons or menus privately to a member of the guild of ctx.
-/// The module needs the capability SendDirectMessages and a registered DM component route.
+/// The module needs the capability `SendDirectMessages` and a registered DM component route.
 pub async fn send_with_components(
     ctx: &EventContext,
     user: UserId,

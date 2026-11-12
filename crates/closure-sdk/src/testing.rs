@@ -254,7 +254,7 @@ impl Submit {
         }
     }
 
-    /// The text written in the input custom_id.
+    /// The text written in the input `custom_id`.
     #[must_use]
     pub fn field(mut self, custom_id: &str, value: &str) -> Self {
         let custom_id = custom_id.to_owned();

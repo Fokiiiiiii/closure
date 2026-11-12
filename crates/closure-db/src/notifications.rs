@@ -24,6 +24,28 @@ const PREFERENCES_SELECT: &str = "
     FROM ticket_notification_preferences
     WHERE user_id = $1";
 
+const PREFERENCES_SELECT_FOR_UPDATE: &str = "
+    SELECT user_id,
+           in_app_enabled,
+           discord_dm_enabled,
+           email_enabled,
+           revision,
+           locale,
+           email_ciphertext,
+           email_masked,
+           pending_email_ciphertext,
+           pending_email_masked,
+           email_verified,
+           email_code_hash,
+           EXTRACT(EPOCH FROM email_code_expires_at)::BIGINT AS email_code_expires_at,
+           email_code_attempts,
+           EXTRACT(EPOCH FROM email_requested_at)::BIGINT AS email_requested_at,
+           last_email_request_key,
+           last_email_request_fingerprint
+    FROM ticket_notification_preferences
+    WHERE user_id = $1
+    FOR UPDATE";
+
 #[derive(sqlx::FromRow)]
 struct PreferencesRow {
     user_id: i64,
@@ -266,8 +288,7 @@ async fn ensure_preferences(
     .execute(&mut **tx)
     .await?;
 
-    let sql = format!("{PREFERENCES_SELECT} FOR UPDATE");
-    let row = sqlx::query_as::<_, PreferencesRow>(&sql)
+    let row = sqlx::query_as::<_, PreferencesRow>(PREFERENCES_SELECT_FOR_UPDATE)
         .bind(user_id)
         .fetch_one(&mut **tx)
         .await?;

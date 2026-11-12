@@ -950,6 +950,7 @@ impl ModuleBuilder {
     }
 
     /// The module, or what is wrong with its declaration.
+    #[allow(clippy::too_many_lines)]
     pub fn build(mut self) -> Result<SdkModule, CoreError> {
         self.manifest.description = Self::module_description(&self.manifest);
         // Looked at here and not as each command is added, so the order of the calls does not
@@ -1097,7 +1098,7 @@ fn mark_autocomplete(
     Ok(())
 }
 
-/// A module made with ModuleBuilder.
+/// A module made with `ModuleBuilder`.
 pub struct SdkModule {
     manifest: ModuleManifest,
     routes: HashMap<(String, Option<String>), Route>,

@@ -389,7 +389,7 @@ impl<I: InteractionRef + 'static> Cx<I> {
         crate::dm::send(self.ctx(), user, message).await
     }
 
-    /// Sends a direct message with buttons or menus. The handler must be registered with direct_message_component.
+    /// Sends a direct message with buttons or menus. The handler must be registered with `direct_message_component`.
     pub async fn direct_message_with_components(
         &self,
         user: UserId,
@@ -794,7 +794,7 @@ impl JobCx {
         crate::dm::send(&self.ctx, user, message).await
     }
 
-    /// Sends a direct message with buttons or menus. The handler must be registered with direct_message_component.
+    /// Sends a direct message with buttons or menus. The handler must be registered with `direct_message_component`.
     pub async fn direct_message_with_components(
         &self,
         user: UserId,
