@@ -40,6 +40,12 @@ impl From<DbError> for ApiError {
             DbError::RevisionConflict { actual, .. } => Self::PreconditionFailed {
                 current: actual.unwrap_or(0),
             },
+            DbError::IntegrationSecretAdministratorRequired => Self::Forbidden(
+                "a guild owner or administrator must manage this integration secret".into(),
+            ),
+            DbError::IntegrationSecretStillActive => {
+                Self::Conflict("the integration generation is still active".into())
+            }
             other => Self::Internal(other.to_string()),
         }
     }
@@ -131,7 +137,7 @@ impl IntoResponse for ApiError {
                     StatusCode::PRECONDITION_FAILED,
                     body(
                         "revision_conflict",
-                        "the configuration changed since you loaded it; reload and retry",
+                        "the resource changed since you loaded it; reload and retry",
                     ),
                 );
                 if let Ok(value) = HeaderValue::from_str(&format!("\"{current}\"")) {

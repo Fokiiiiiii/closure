@@ -258,10 +258,16 @@ enum Claimed {
 }
 
 /// The key that makes a send happen once (`Idempotency-Key`), if the caller gave one.
-fn request_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
-    let Some(value) = headers.get("idempotency-key") else {
+pub(super) fn request_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let mut values = headers.get_all("idempotency-key").iter();
+    let Some(value) = values.next() else {
         return Ok(None);
     };
+    if values.next().is_some() {
+        return Err(ApiError::BadRequest(
+            "Idempotency-Key must be a single value".into(),
+        ));
+    }
     value
         .to_str()
         .ok()

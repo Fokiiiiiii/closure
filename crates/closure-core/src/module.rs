@@ -16,9 +16,13 @@ use crate::client::ApiClient;
 use crate::error::{CoreError, ModuleError};
 use crate::event::{CommandInvocation, Event, EventKind, EventKinds, GuildId, UserId};
 use crate::history::MessageHistory;
+use crate::integration_secrets::{
+    IntegrationSecretError, IntegrationSecretGeneration, IntegrationSecretScope,
+    IntegrationSecretService, SecretString,
+};
 use crate::latency::{GatewayLatency, LatencySummary};
 use crate::locale::{ArgValue, Args, Catalog, Locale, Translator};
-use crate::permission::{GuildPermissions, PermissionSpec};
+use crate::permission::{Actor, GuildPermissions, PermissionSpec};
 use crate::schedule::Scheduler;
 use crate::settings::GuildPolicy;
 use crate::storage::Store;
@@ -287,6 +291,27 @@ pub struct CommandSpec {
     pub subcommands: Vec<SubcommandSpec>,
     /// Permissions a member needs to see the command by default. `None` means everyone.
     pub default_member_permissions: Option<Permissions>,
+}
+
+/// A per-guild slash command alias backed by a module-owned record.
+/// The description key is a fixed, module-local catalog key such as `command-tag`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicCommandAlias {
+    pub name: String,
+    pub description_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DynamicCommandChangeError {
+    #[error("dynamic command synchronization is unavailable")]
+    Unavailable,
+    #[error("dynamic command synchronization was rejected")]
+    Rejected,
+}
+
+#[async_trait]
+pub trait DynamicCommandChangeSink: Send + Sync + fmt::Debug {
+    async fn synchronize(&self, guild_id: GuildId) -> Result<(), DynamicCommandChangeError>;
 }
 
 impl CommandSpec {
@@ -655,6 +680,10 @@ pub struct EventContext {
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     bot: Option<UserId>,
     gateway: Arc<GatewayLatency>,
+    integration_secrets: Option<Arc<IntegrationSecretService>>,
+    dashboard_base_url: Option<Arc<str>>,
+    dynamic_command_changes: Option<tokio::sync::mpsc::UnboundedSender<GuildId>>,
+    dynamic_command_changes: Option<Arc<dyn DynamicCommandChangeSink>>,
 }
 
 impl fmt::Debug for EventContext {
@@ -701,6 +730,10 @@ impl EventContext {
             clock: Arc::new(system_unix_now),
             bot: None,
             gateway: Arc::default(),
+            integration_secrets: None,
+            dashboard_base_url: None,
+            dynamic_command_changes: None,
+            dynamic_command_changes: None,
         }
     }
 
@@ -715,6 +748,149 @@ impl EventContext {
     #[must_use]
     pub fn gateway_latency(&self) -> Option<LatencySummary> {
         self.gateway.summary()
+    }
+
+    /// Gives the context access to host-encrypted integration secrets.
+    #[must_use]
+    pub fn with_integration_secrets(mut self, service: Arc<IntegrationSecretService>) -> Self {
+        self.integration_secrets = Some(service);
+        self
+    }
+
+    /// Gives the context a host-validated public Dashboard origin for authenticated links.
+    #[must_use]
+    pub fn with_dashboard_base_url(mut self, base_url: Option<Arc<str>>) -> Self {
+        self.dashboard_base_url = base_url;
+        self
+    }
+
+    /// Gives the context a host-owned channel that synchronizes per-guild dynamic slash commands.
+    #[must_use]
+    pub fn with_dynamic_command_changes(
+        mut self,
+        sink: Option<Arc<dyn DynamicCommandChangeSink>>,
+    ) -> Self {
+        self.dynamic_command_changes = sink;
+        self
+    }
+
+    /// Rebuilds the guild's merged static and module-owned command set before reporting success.
+    pub async fn notify_dynamic_command_changes(&self) -> Result<(), DynamicCommandChangeError> {
+        let sink = self
+            .dynamic_command_changes
+            .as_ref()
+            .ok_or(DynamicCommandChangeError::Unavailable)?;
+        sink.synchronize(self.guild_id).await
+    }
+
+    /// Builds a token-free link to this guild’s authenticated ticket history page.
+    pub fn dashboard_ticket_history_url(&self, channel_id: u64) -> Option<String> {
+        if channel_id == 0 {
+            return None;
+        }
+        let base_url = self.dashboard_base_url.as_deref()?;
+        Some(format!(
+            "{}/g/{}/tickets/{channel_id}",
+            base_url.trim_end_matches('/'),
+            self.guild_id.get()
+        ))
+    }
+
+    /// Notifies the host that this guild’s dynamic command aliases changed.
+    pub fn notify_dynamic_command_changes(&self) {
+        if let Some(sender) = &self.dynamic_command_changes {
+            let _ = sender.send(self.guild_id);
+        }
+    }
+
+    /// Connects this context to the host’s dynamic command synchronization queue.
+    #[must_use]
+    pub fn with_dynamic_command_changes(
+        mut self,
+        sender: Option<tokio::sync::mpsc::UnboundedSender<GuildId>>,
+    ) -> Self {
+        self.dynamic_command_changes = sender;
+        self
+    }
+
+    fn integration_secret_scope(
+        &self,
+        integration_id: &str,
+        generation: &str,
+        secret_name: &str,
+    ) -> Result<IntegrationSecretScope, IntegrationSecretError> {
+        let generation = IntegrationSecretGeneration::new(
+            self.guild_id,
+            self.module.clone(),
+            integration_id,
+            generation,
+        )?;
+        IntegrationSecretScope::new(generation, secret_name)
+    }
+
+    /// Reads a host-encrypted integration secret for this guild and module.
+    pub async fn integration_secret(
+        &self,
+        integration_id: &str,
+        generation: &str,
+        secret_name: &str,
+    ) -> Result<Option<SecretString>, IntegrationSecretError> {
+        let service = self
+            .integration_secrets
+            .as_ref()
+            .ok_or(IntegrationSecretError::Unavailable)?;
+        let scope = self.integration_secret_scope(integration_id, generation, secret_name)?;
+        service.get(&scope).await
+    }
+
+    /// Checks only whether a host-encrypted integration secret exists.
+    pub async fn integration_secret_configured(
+        &self,
+        integration_id: &str,
+        generation: &str,
+        secret_name: &str,
+    ) -> Result<bool, IntegrationSecretError> {
+        let service = self
+            .integration_secrets
+            .as_ref()
+            .ok_or(IntegrationSecretError::Unavailable)?;
+        let scope = self.integration_secret_scope(integration_id, generation, secret_name)?;
+        service.is_configured(&scope).await
+    }
+
+    /// Sets a host-encrypted integration secret after the service checks owner/admin rights.
+    pub async fn set_integration_secret(
+        &self,
+        actor: &Actor,
+        integration_id: &str,
+        generation: &str,
+        secret_name: &str,
+        secret: SecretString,
+        idempotency_key: &str,
+    ) -> Result<(), IntegrationSecretError> {
+        let service = self
+            .integration_secrets
+            .as_ref()
+            .ok_or(IntegrationSecretError::Unavailable)?;
+        let scope = self.integration_secret_scope(integration_id, generation, secret_name)?;
+        service.set(actor, &scope, &secret, idempotency_key).await
+    }
+
+    /// Removes a host-encrypted integration secret after the service checks owner/admin rights.
+    pub async fn remove_integration_secret(
+        &self,
+        actor: &Actor,
+        integration_id: &str,
+        generation: &str,
+        secret_name: &str,
+        idempotency_key: &str,
+    ) -> Result<(), IntegrationSecretError> {
+        let service = self
+            .integration_secrets
+            .as_ref()
+            .ok_or(IntegrationSecretError::Unavailable)?;
+        let scope = self.integration_secret_scope(integration_id, generation, secret_name)?;
+        service.remove(actor, &scope, idempotency_key).await
     }
 
     /// Gives the context the bot's own user id, which is its application id.
@@ -916,6 +1092,89 @@ fn system_unix_now() -> i64 {
         })
 }
 
+/// A module resource that the dashboard may inspect or change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DashboardScope {
+    Guild,
+    PanelList,
+    Panel {
+        panel_id: String,
+    },
+    Ticket {
+        channel_id: u64,
+    },
+    TicketHistory {
+        channel_id: u64,
+    },
+    TicketLabels {
+        cursor: Option<String>,
+    },
+    Gallery,
+    Knowledge {
+        query: Option<String>,
+        cursor: Option<String>,
+    },
+    Tags {
+        query: Option<String>,
+        cursor: Option<String>,
+    },
+    Analytics {
+        period_days: u16,
+        cursor: Option<String>,
+    },
+    IntegrationSecrets,
+}
+
+/// A public, actorless dashboard read. Implementations must return published data only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DashboardPublicScope {
+    KnowledgeIndex {
+        query: Option<String>,
+        category: Option<String>,
+        cursor: Option<String>,
+    },
+    KnowledgeArticle {
+        slug: String,
+    },
+}
+
+/// A dashboard operation already fenced by the revision the caller read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DashboardActionRequest {
+    pub scope: DashboardScope,
+    pub action: String,
+    pub data: serde_json::Value,
+    pub expected_revision: i64,
+    pub idempotency_key: String,
+}
+
+/// State or result from a dashboard operation, with its current storage revision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DashboardActionResult {
+    pub value: serde_json::Value,
+    pub revision: i64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DashboardActionError {
+    #[error("the dashboard action is not supported")]
+    Unsupported,
+    #[error("{0}")]
+    Invalid(String),
+    #[error("not found")]
+    NotFound,
+    #[error("forbidden")]
+    Forbidden,
+    #[error("the resource is already being changed")]
+    Conflict,
+    #[error("the resource changed since it was loaded")]
+    PreconditionFailed { current: i64 },
+    #[error("the module is unavailable")]
+    Unavailable,
+    #[error("{0}")]
+    Internal(String),
+}
+
 /// A unit of bot functionality. Implementations must be cheap to call concurrently: the dispatcher runs
 /// handlers for different guilds in parallel and applies a timeout to each call.
 #[async_trait]
@@ -930,10 +1189,57 @@ pub trait Module: Send + Sync + 'static {
     /// Called for each subscribed event of a guild where the module is enabled.
     async fn on_event(&self, ctx: &EventContext, event: &Event) -> Result<(), ModuleError>;
 
-    /// [`Self::on_event`] that also says whether the modules with a lower priority get the
-    /// event. The dispatcher calls this one; a module that never stops an event leaves it be.
+    /// The dispatcher calls this one; a module that never stops an event leaves it be.
     async fn on_event_flow(&self, ctx: &EventContext, event: &Event) -> Result<Flow, ModuleError> {
         self.on_event(ctx, event).await.map(|()| Flow::Continue)
+    }
+
+    /// Returns guild-specific command aliases backed by this module's durable state.
+    async fn dynamic_command_aliases(
+        &self,
+        _ctx: EventContext,
+    ) -> Result<Vec<DynamicCommandAlias>, ModuleError> {
+        Ok(Vec::new())
+    }
+
+    /// Dispatches a registered per-guild alias. The handler must recheck the same access rules as
+    /// its static command counterpart and return Stop only when it handled the invocation.
+    async fn dispatch_dynamic_command(
+        &self,
+        _ctx: &EventContext,
+        _event: &Event,
+        _alias: &str,
+    ) -> Result<Flow, ModuleError> {
+        Ok(Flow::Continue)
+    }
+
+    /// Reads module-owned dashboard state after the module checks the actor and scope.
+    async fn dashboard_state(
+        &self,
+        _ctx: EventContext,
+        _actor: Actor,
+        _scope: DashboardScope,
+    ) -> Result<DashboardActionResult, DashboardActionError> {
+        Err(DashboardActionError::Unsupported)
+    }
+
+    /// Reads an actorless public dashboard resource; implementations must return published data only.
+    async fn dashboard_public_state(
+        &self,
+        _ctx: EventContext,
+        _scope: DashboardPublicScope,
+    ) -> Result<DashboardActionResult, DashboardActionError> {
+        Err(DashboardActionError::Unsupported)
+    }
+
+    /// Runs a module-owned dashboard operation after the module checks access and the revision.
+    async fn dashboard_action(
+        &self,
+        _ctx: EventContext,
+        _actor: Actor,
+        _request: DashboardActionRequest,
+    ) -> Result<DashboardActionResult, DashboardActionError> {
+        Err(DashboardActionError::Unsupported)
     }
 
     /// Called once during graceful shutdown.

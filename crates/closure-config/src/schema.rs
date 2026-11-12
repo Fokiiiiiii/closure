@@ -399,7 +399,13 @@ fn check_levels(schema: &Value, inherited: bool, path: &str) -> Result<(), Strin
 }
 
 /// The widgets a dashboard can draw for a setting.
-const WIDGETS: [&str; 14] = [
+const WIDGETS: [&str; 20] = [
+    "ticket-form",
+    "hidden",
+    "nested-list",
+    "embed-fields",
+    "access-rules",
+    "ticket-staff-teams",
     "ticket-panel",
     "time-minute",
     "role",

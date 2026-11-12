@@ -13,8 +13,12 @@ axum.workspace = true
 closure-config.workspace = true
 closure-core.workspace = true
 closure-db.workspace = true
+closure-i18n.workspace = true
+closure-i18n.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls", "ring", "webpki-roots"] }
+ring.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

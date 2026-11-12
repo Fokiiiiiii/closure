@@ -59,6 +59,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 twilight-http.workspace = true
 twilight-model.workspace = true
 

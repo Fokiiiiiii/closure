@@ -110,7 +110,7 @@ impl Db {
         Ok(())
     }
 
-    /// Forgets the requests older than [`REQUESTS_KEPT`]. How many.
+    /// Forgets expired API requests and integration-secret idempotency receipts.
     pub async fn purge_requests(&self) -> Result<u64, DbError> {
         let result = sqlx::query(
             "DELETE FROM api_requests WHERE created_at < now() - make_interval(secs => $1)",
@@ -118,6 +118,9 @@ impl Db {
         .bind(REQUESTS_KEPT.as_secs_f64())
         .execute(&self.pool)
         .await?;
+        sqlx::query("DELETE FROM integration_secret_receipts WHERE expires_at <= now()")
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected())
     }
 }

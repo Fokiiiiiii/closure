@@ -15,8 +15,12 @@ use closure_core::client::DiscordApi;
 use closure_core::error::DiscordError;
 use closure_core::event::{Event as ModuleEvent, GuildId, UserId};
 use closure_core::history::HistoryBackend;
+use closure_core::integration_secrets::{
+    IntegrationSecretBackend, IntegrationSecretService, MASTER_KEY_ENV,
+};
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Translator;
+use closure_core::module::{DynamicCommandChangeError, DynamicCommandChangeSink};
 use closure_core::permission::Actor;
 use closure_core::registry::ModuleRegistry;
 use closure_core::schedule::SchedulerBackend;
@@ -26,13 +30,14 @@ use closure_db::{Db, DbOptions};
 use closure_discord::hierarchy::{CacheView, InMemoryCacheView};
 use closure_discord::{
     CommandScope, Dispatcher, DispatcherConfig, GatewayConfig, GatewayHandle, GatewayHealth,
-    TwilightApi, build_commands, gateway_intents, joined_guilds, new_cache, register_commands,
-    run_jobs, start_gateway,
+    TwilightApi, build_commands, build_guild_commands, gateway_intents, joined_guilds, new_cache,
+    register_commands, run_jobs, start_gateway,
 };
 use closure_i18n::TranslatorBuilder;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use secrecy::SecretString;
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use twilight_http::Client;
 use twilight_model::channel::ChannelType;
@@ -49,6 +54,55 @@ const GATEWAY_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const DISPATCHER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const ATTACHMENT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const DASHBOARD_BASE_URL_ENV: &str = "CLOSURE_DASHBOARD_BASE_URL";
+
+fn dashboard_base_url() -> Result<Option<Arc<str>>> {
+    let Some(value) = std::env::var_os(DASHBOARD_BASE_URL_ENV) else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{DASHBOARD_BASE_URL_ENV} must be valid UTF-8"))?;
+    if value.len() > 2_048 || value.trim() != value {
+        anyhow::bail!("{DASHBOARD_BASE_URL_ENV} is invalid");
+    }
+    let parsed = url::Url::parse(&value)
+        .map_err(|_| anyhow::anyhow!("{DASHBOARD_BASE_URL_ENV} is invalid"))?;
+    let host = parsed.host_str().unwrap_or_default();
+    let loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    let secure_scheme = parsed.scheme() == "https";
+    let local_http = parsed.scheme() == "http" && loopback;
+    if parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !(secure_scheme || local_http)
+    {
+        anyhow::bail!(
+            "{DASHBOARD_BASE_URL_ENV} must be an HTTPS origin (or loopback HTTP for local development) without credentials, query, or fragment"
+        );
+    }
+    let normalized = parsed.as_str().trim_end_matches('/').to_owned();
+    Ok(Some(Arc::<str>::from(normalized)))
+}
+
+fn integration_secret_service(db: &Db) -> Result<Option<Arc<IntegrationSecretService>>> {
+    let Some(value) = std::env::var_os(MASTER_KEY_ENV) else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{MASTER_KEY_ENV} must be valid UTF-8"))?;
+    let master_key = SecretString::from(value);
+    let backend: Arc<dyn IntegrationSecretBackend> = Arc::new(db.clone());
+    let service = IntegrationSecretService::new(&master_key, backend).map_err(|_| {
+        anyhow::anyhow!("{MASTER_KEY_ENV} must be exactly 64 hexadecimal characters")
+    })?;
+    Ok(Some(Arc::new(service)))
+}
 
 struct GatewayReadiness(Arc<GatewayHealth>);
 
@@ -94,6 +148,117 @@ impl closure_api::MessageSink for DiscordSink {
                 }
             }
         })
+    }
+}
+
+struct NotificationDiscordSink {
+    api: Arc<TwilightApi>,
+}
+
+impl closure_api::notifications::DirectMessageSink for NotificationDiscordSink {
+    fn send(
+        &self,
+        guild: GuildId,
+        recipient: UserId,
+        content: String,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), closure_api::notifications::DirectMessageError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let action = Action::SendDirectMessage {
+                guild_id: guild,
+                user_id: recipient,
+                content: Some(content),
+                embeds: Vec::new(),
+                components: Vec::new(),
+                files: Vec::new(),
+            };
+            match self.api.execute(action).await {
+                Ok(Outcome::Message(_)) => Ok(()),
+                Ok(_) => Err(closure_api::notifications::DirectMessageError::Permanent),
+                Err(DiscordError::RateLimited { .. } | DiscordError::Transient(_)) => {
+                    Err(closure_api::notifications::DirectMessageError::Retryable)
+                }
+                Err(_) => Err(closure_api::notifications::DirectMessageError::Permanent),
+            }
+        })
+    }
+}
+
+struct DashboardTicketActions {
+    dispatcher: Dispatcher,
+    module: closure_core::module::ModuleId,
+}
+
+impl closure_api::TicketActionSink for DashboardTicketActions {
+    fn state(
+        &self,
+        guild: GuildId,
+        actor: Actor,
+        scope: closure_core::module::DashboardScope,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        closure_core::module::DashboardActionResult,
+                        closure_core::module::DashboardActionError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(
+            self.dispatcher
+                .dashboard_state(&self.module, guild, actor, scope),
+        )
+    }
+
+    fn public_state(
+        &self,
+        guild: GuildId,
+        scope: closure_core::module::DashboardPublicScope,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        closure_core::module::DashboardActionResult,
+                        closure_core::module::DashboardActionError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(
+            self.dispatcher
+                .dashboard_public_state(&self.module, guild, scope),
+        )
+    }
+
+    fn perform(
+        &self,
+        guild: GuildId,
+        actor: Actor,
+        request: closure_core::module::DashboardActionRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        closure_core::module::DashboardActionResult,
+                        closure_core::module::DashboardActionError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(
+            self.dispatcher
+                .dashboard_action(&self.module, guild, actor, request),
+        )
     }
 }
 
@@ -158,6 +323,52 @@ impl closure_api::MemberAccess for CachedAccess {
                 administrator: permissions.contains(Permissions::ADMINISTRATOR),
                 owner,
             }))
+        })
+    }
+
+    fn search_members(
+        &self,
+        guild: GuildId,
+        query: String,
+        limit: u16,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<closure_api::MemberSearchResult>, ()>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.ensure_ready(guild)?;
+            let members = match self
+                .api
+                .execute(Action::SearchMembers {
+                    guild_id: guild,
+                    query,
+                    limit,
+                })
+                .await
+            {
+                Ok(Outcome::Members(members)) => members,
+                _ => return Err(()),
+            };
+            self.ensure_ready(guild)?;
+            Ok(members
+                .into_iter()
+                .map(|member| {
+                    let id = member.user.id.to_string();
+                    let name = member.user.name;
+                    let display_name = member
+                        .nick
+                        .filter(|nickname| !nickname.trim().is_empty())
+                        .unwrap_or_else(|| name.clone());
+                    closure_api::MemberSearchResult {
+                        id,
+                        name,
+                        display_name,
+                    }
+                })
+                .collect())
         })
     }
 }
@@ -527,6 +738,184 @@ async fn publish_commands(
     Ok(())
 }
 
+struct DynamicCommandSyncRequest {
+    guild_id: GuildId,
+    reply: Option<oneshot::Sender<Result<(), DynamicCommandChangeError>>>,
+    attempt: u16,
+}
+
+#[derive(Clone)]
+struct AppDynamicCommandChangeSink {
+    requests: mpsc::Sender<DynamicCommandSyncRequest>,
+}
+
+impl std::fmt::Debug for AppDynamicCommandChangeSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppDynamicCommandChangeSink")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl DynamicCommandChangeSink for AppDynamicCommandChangeSink {
+    async fn synchronize(&self, guild_id: GuildId) -> Result<(), DynamicCommandChangeError> {
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .send(DynamicCommandSyncRequest {
+                guild_id,
+                reply: Some(reply),
+                attempt: 0,
+            })
+            .await
+            .map_err(|_| DynamicCommandChangeError::Unavailable)?;
+        response
+            .await
+            .map_err(|_| DynamicCommandChangeError::Unavailable)?
+    }
+}
+
+async fn synchronize_dynamic_command_guild(
+    http: &Client,
+    application_id: Id<ApplicationMarker>,
+    dispatcher: &Dispatcher,
+    registry: &ModuleRegistry,
+    translator: &dyn Translator,
+    guild_id: GuildId,
+) -> Result<(), DynamicCommandChangeError> {
+    let aliases = dispatcher.collect_dynamic_command_aliases(guild_id).await?;
+    let commands = build_guild_commands(registry, translator, &aliases).map_err(|error| {
+        tracing::warn!(%guild_id, %error, "dynamic command set was rejected");
+        DynamicCommandChangeError::Rejected
+    })?;
+    if let Err(error) = register_commands(
+        http,
+        application_id,
+        CommandScope::Guild(guild_id),
+        &commands,
+    )
+    .await
+    {
+        tracing::warn!(%guild_id, %error, "could not register the guild command set");
+        return Err(if error.is_retryable() {
+            DynamicCommandChangeError::Unavailable
+        } else {
+            DynamicCommandChangeError::Rejected
+        });
+    }
+    dispatcher.install_dynamic_command_aliases(guild_id, aliases)?;
+    Ok(())
+}
+
+async fn run_dynamic_command_sync(
+    mut requests: mpsc::Receiver<DynamicCommandSyncRequest>,
+    retry_requests: mpsc::Sender<DynamicCommandSyncRequest>,
+    http: Arc<Client>,
+    application_id: Id<ApplicationMarker>,
+    dispatcher: Dispatcher,
+    registry: Arc<ModuleRegistry>,
+    translator: Arc<dyn Translator>,
+    shutdown: CancellationToken,
+) {
+    let mut retrying = HashSet::new();
+    let mut retries = JoinSet::new();
+    loop {
+        let request = tokio::select! {
+            () = shutdown.cancelled() => {
+                retries.abort_all();
+                while retries.join_next().await.is_some() {}
+                return;
+            }
+            Some(_) = retries.join_next(), if !retries.is_empty() => continue,
+            request = requests.recv() => request,
+        };
+        let Some(request) = request else {
+            retries.abort_all();
+            while retries.join_next().await.is_some() {}
+            return;
+        };
+        let guild_id = request.guild_id;
+        let attempt = request.attempt;
+        if request.reply.is_none() {
+            retrying.remove(&guild_id);
+        }
+        let result = synchronize_dynamic_command_guild(
+            &http,
+            application_id,
+            &dispatcher,
+            &registry,
+            translator.as_ref(),
+            guild_id,
+        )
+        .await;
+        if let Some(reply) = request.reply {
+            let _ = reply.send(result);
+        }
+        if result == Err(DynamicCommandChangeError::Unavailable) {
+            if !retrying.insert(guild_id) {
+                continue;
+            }
+            let retry_requests = retry_requests.clone();
+            let shutdown = shutdown.clone();
+            retries.spawn(async move {
+                let delay_seconds = (1_u64 << u32::from(attempt.min(6))).min(60);
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_secs(delay_seconds)) => {}
+                }
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    _ = retry_requests
+                        .send(DynamicCommandSyncRequest {
+                            guild_id,
+                            reply: None,
+                            attempt: attempt.saturating_add(1),
+                        }) => {}
+                }
+            });
+        } else {
+            retrying.remove(&guild_id);
+        }
+    }
+}
+
+async fn synchronize_joined_dynamic_commands(
+    http: Arc<Client>,
+    sink: Arc<dyn DynamicCommandChangeSink>,
+    allowed: Option<Arc<HashSet<GuildId>>>,
+    shutdown: CancellationToken,
+) {
+    let mut delay = Duration::from_secs(1);
+    let guilds = loop {
+        match joined_guilds(&http).await {
+            Ok(guilds) => break guilds,
+            Err(error) => {
+                tracing::warn!(%error, ?delay, "could not read guilds for dynamic command recovery");
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = tokio::time::sleep(delay) => {}
+                }
+                delay = Duration::from_secs((delay.as_secs().saturating_mul(2)).min(60));
+            }
+        }
+    };
+    for guild_id in guilds {
+        if allowed
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&guild_id))
+        {
+            continue;
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            result = sink.synchronize(guild_id) => {
+                if let Err(error) = result {
+                    tracing::warn!(%guild_id, ?error, "guild command synchronization was queued for retry");
+                }
+            }
+        }
+    }
+}
+
 /// Empties the commands each guild has of its own; a run that published to one guild left them there, and Discord shows them next to the global ones, so each would appear twice.
 async fn clear_guild_commands(http: &Client, application_id: Id<ApplicationMarker>) {
     let guilds = match joined_guilds(http).await {
@@ -552,6 +941,8 @@ async fn start_api(
     health: Arc<GatewayHealth>,
     access: CachedAccess,
     metrics: PrometheusHandle,
+    dispatcher: Dispatcher,
+    account_vault: Option<Arc<IntegrationSecretService>>,
     shutdown: &CancellationToken,
 ) -> Result<Option<JoinHandle<()>>> {
     let Some(token) = &args.api_admin_token else {
@@ -563,6 +954,10 @@ async fn start_api(
     }
     let sink = Arc::new(DiscordSink {
         api: Arc::clone(&access.api),
+    });
+    let ticket_actions = Arc::new(DashboardTicketActions {
+        dispatcher,
+        module: closure_core::module::ModuleId::new("tickets")?,
     });
     let state = ApiState::new(
         Arc::clone(&core.store),
@@ -580,7 +975,9 @@ async fn start_api(
     )?
     .with_message_history_days(args.message_history_days)
     .with_trusted_proxies(args.api_trusted_proxies.clone())
-    .with_messages(sink);
+    .with_messages(sink)
+    .with_ticket_actions(ticket_actions)
+    .with_account_vault(account_vault);
     let listener = tokio::net::TcpListener::bind(args.api_bind)
         .await
         .with_context(|| format!("could not listen on {}", args.api_bind))?;
@@ -640,7 +1037,6 @@ fn start_storage_upkeep(
     })
 }
 
-/// What has been started and has to be stopped again, however the run ends.
 #[derive(Default)]
 struct Started {
     dispatcher: Option<Dispatcher>,
@@ -649,6 +1045,9 @@ struct Started {
     jobs_task: Option<JoinHandle<()>>,
     changes_task: Option<JoinHandle<()>>,
     hooks: Option<Arc<AppHooks>>,
+    notification_task: Option<JoinHandle<()>>,
+    dynamic_command_task: Option<JoinHandle<()>>,
+    dynamic_command_recovery_task: Option<JoinHandle<()>>,
 }
 
 /// Starts everything that talks to Discord and waits until the process is asked to stop; returns whether the gateway stopped on its own. Whatever was started before an error is left in `started`, so the caller can still shut it down in order.
@@ -672,6 +1071,21 @@ async fn serve(
             .with_webhooks(crate::webhooks::load(&args.webhook_file)?)
             .with_cache(Arc::new(InMemoryCacheView(Arc::clone(&cache)))),
     );
+    let integration_secrets = integration_secret_service(&db)?;
+    let dashboard_base_url = dashboard_base_url()?;
+    let (dynamic_command_changes, dynamic_command_receiver, dynamic_command_requests) =
+        if args.skip_command_registration {
+            (None, None, None)
+        } else {
+            let (requests, receiver) = mpsc::channel(32);
+            (
+                Some(Arc::new(AppDynamicCommandChangeSink {
+                    requests: requests.clone(),
+                }) as Arc<dyn DynamicCommandChangeSink>),
+                Some(receiver),
+                Some(requests),
+            )
+        };
     let dispatcher = started
         .dispatcher
         .insert(
@@ -685,6 +1099,9 @@ async fn serve(
                     bot_id: Some(Id::new(args.application_id.get())),
                     gateway_latency: Arc::clone(&latency),
                     allowed_guilds: allowed.clone().map(Arc::new),
+                    integration_secrets: integration_secrets.clone(),
+                    dashboard_base_url: dashboard_base_url.clone(),
+                    dynamic_command_changes: dynamic_command_changes.clone(),
                     ..DispatcherConfig::default()
                 },
                 Arc::new(db.clone()) as Arc<dyn StorageBackend>,
@@ -696,21 +1113,57 @@ async fn serve(
             .context("a module failed to load")?,
         )
         .clone();
+    let dynamic_command_config_requests = dynamic_command_requests.clone();
+    if let (Some(receiver), Some(retry_requests)) =
+        (dynamic_command_receiver, dynamic_command_requests)
+    {
+        started.dynamic_command_task = Some(tokio::spawn(run_dynamic_command_sync(
+            receiver,
+            retry_requests,
+            Arc::clone(&http),
+            application_id,
+            dispatcher.clone(),
+            Arc::clone(&core.registry),
+            Arc::clone(&core.translator),
+            shutdown.clone(),
+        )));
+    }
     started.jobs_task = Some(tokio::spawn(run_jobs(
         Arc::new(db.clone()),
         dispatcher.clone(),
         shutdown.clone(),
     )));
     let dispatch_changes = dispatcher.clone();
+    let command_sync_requests = dynamic_command_config_requests.clone();
     started.changes_task = Some(tokio::spawn(forward_config_changes(
         Arc::clone(&config_changes),
-        move |guild_id| dispatch_changes.try_dispatch(ModuleEvent::ConfigChanged { guild_id }),
+        move |guild_id| {
+            let sync_queued = command_sync_requests.as_ref().is_none_or(|requests| {
+                requests
+                    .try_send(DynamicCommandSyncRequest {
+                        guild_id,
+                        reply: None,
+                        attempt: 0,
+                    })
+                    .is_ok()
+            });
+            dispatch_changes.try_dispatch(ModuleEvent::ConfigChanged { guild_id }) && sync_queued
+        },
         shutdown.clone(),
     )));
 
     publish_commands(args, &http, application_id, core).await?;
 
     reconcile_joined_guilds(args, &http, db, allowed.as_ref()).await?;
+    if let Some(sync) = dynamic_command_changes.as_ref() {
+        started.dynamic_command_recovery_task =
+            Some(tokio::spawn(synchronize_joined_dynamic_commands(
+                Arc::clone(&http),
+                Arc::clone(sync),
+                allowed.clone().map(Arc::new),
+                shutdown.clone(),
+            )));
+    }
 
     let hooks = Arc::new(AppHooks::new(
         db.clone(),
@@ -733,13 +1186,28 @@ async fn serve(
                 }),
             },
             Arc::clone(&cache),
-            dispatcher,
+            dispatcher.clone(),
             hooks,
             shutdown.clone(),
         )
         .await
         .context("could not start the gateway")?,
     );
+    let notification_access: Arc<dyn closure_api::MemberAccess> = Arc::new(CachedAccess {
+        cache: InMemoryCacheView(Arc::clone(&cache)),
+        api: Arc::clone(&api),
+        health: Arc::new(GatewayReadiness(Arc::clone(gateway.health()))),
+        http: Arc::clone(&http),
+    });
+    started.notification_task = Some(closure_api::notifications::run_worker(
+        db.clone(),
+        notification_access,
+        Arc::new(NotificationDiscordSink {
+            api: Arc::clone(&api),
+        }),
+        integration_secrets.clone(),
+        shutdown.clone(),
+    ));
     started.api_task = start_api(
         args,
         core,
@@ -752,6 +1220,8 @@ async fn serve(
             http: Arc::clone(&http),
         },
         metrics,
+        dispatcher,
+        integration_secrets.clone(),
         shutdown,
     )
     .await?;
@@ -861,6 +1331,15 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Stop taking new work first, then let what is in flight finish.
     shutdown.cancel();
+    if let Some(task) = started.notification_task {
+        stop_task(task, "notifications").await;
+    }
+    if let Some(task) = started.dynamic_command_recovery_task {
+        stop_task(task, "dynamic command recovery").await;
+    }
+    if let Some(task) = started.dynamic_command_task {
+        stop_task(task, "dynamic command synchronization").await;
+    }
     if let Some(gateway) = &started.gateway
         && tokio::time::timeout(GATEWAY_STOP_TIMEOUT, gateway.closed())
             .await

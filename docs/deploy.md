@@ -40,6 +40,8 @@ The bot reads its settings from the environment or from flags (`closure --help`)
 | --- | --- |
 | `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID` | The bot's identity (secret: never commit it). |
 | `DATABASE_URL` | The PostgreSQL database (secret). Migrations run at start. |
+| `INTEGRATION_SECRETS_MASTER_KEY` | 32-byte hexadecimal master key (secret) for encrypted integration credentials and account email addresses. |
+| `TICKETS_EMAIL_SMTP_HOST`, `TICKETS_EMAIL_SMTP_PORT`, `TICKETS_EMAIL_SMTP_USERNAME`, `TICKETS_EMAIL_SMTP_PASSWORD`, `TICKETS_EMAIL_FROM` | Optional transactional account email. TLS is required (STARTTLS or implicit TLS); email remains unavailable until both SMTP and the encryption key are configured. |
 | `API_BIND` | Where the admin API listens, `127.0.0.1:8080` by default. |
 | `API_ADMIN_TOKEN` | Token of the admin API (secret, at least 32 characters). |
 | `BOT_CONFIG` | A bot-wide configuration file (see [configuration](configuration.md)). |

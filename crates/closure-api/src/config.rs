@@ -4,14 +4,16 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use closure_config::{
-    GuildOverrides, View, basic_view, effective_to_yaml, merge_basic, overrides_to_yaml,
-    parse_overrides,
+    ConfigCompiler, GuildOverrides, GuildSettings, View, basic_view, effective_to_yaml,
+    merge_basic, overrides_to_yaml, parse_overrides,
 };
 use closure_core::event::{GuildId, UserId};
+use closure_core::integration_secrets::{IntegrationSecretGeneration, new_integration_generation};
+use closure_core::module::ModuleId;
 use closure_db::AuditEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use twilight_model::id::Id;
 
 use crate::ApiState;
@@ -74,7 +76,7 @@ fn etag(revision: i64) -> HeaderValue {
         .unwrap_or_else(|_| HeaderValue::from_static("\"0\""))
 }
 
-fn with_etag(mut response: Response, revision: i64) -> Response {
+pub(super) fn with_etag(mut response: Response, revision: i64) -> Response {
     response.headers_mut().insert(header::ETAG, etag(revision));
     response
 }
@@ -88,7 +90,7 @@ fn yaml_response(text: String) -> Response {
 }
 
 /// `If-Match: "n"` names the revision being edited; `"0"` means "there is none yet".
-fn expected_revision(headers: &HeaderMap) -> Result<Option<i64>, ApiError> {
+pub(super) fn expected_revision(headers: &HeaderMap) -> Result<Option<i64>, ApiError> {
     let value = headers
         .get(header::IF_MATCH)
         .ok_or(ApiError::PreconditionRequired)?
@@ -206,13 +208,10 @@ pub(crate) async fn put_config(
     if revision != expected.unwrap_or(0) {
         return Err(ApiError::PreconditionFailed { current: revision });
     }
+    let compiler = state.inner.settings.compiler();
     let overrides = match view {
         View::Advanced => parse_body(&body)?,
-        View::Basic => merge_basic(
-            &current,
-            body_text(&body)?,
-            state.inner.settings.compiler().registry(),
-        )?,
+        View::Basic => merge_basic(&current, body_text(&body)?, compiler.registry())?,
     };
     if let Some(user) = actor {
         let access = crate::access::actor_access(&state, guild, user, &current).await?;
@@ -230,7 +229,7 @@ pub(crate) async fn put_config(
                     "changing permissions or moderator_roles requires owner level".into(),
                 ));
             }
-            let settings = state.inner.settings.compiler().compile(&current)?;
+            let settings = compiler.compile(&current)?;
             if stronger_role_added(&current, &overrides, level, settings.permissions())? {
                 return Err(ApiError::Forbidden(
                     "adding a stronger role reference requires owner level".into(),
@@ -238,7 +237,168 @@ pub(crate) async fn put_config(
             }
         }
     }
-    save(&state, guild, expected, overrides, actor).await
+    let (overrides, active_generations, retirements) =
+        normalize_integration_generations(guild, &compiler, &current, overrides)?;
+    let can_retire_secrets = if retirements.is_empty() || actor.is_none() {
+        false
+    } else {
+        let (_, viewer) = crate::tickets::viewer(&state, guild.get(), &headers).await?;
+        viewer.actor.owner || viewer.actor.administrator
+    };
+    save(
+        &state,
+        guild,
+        expected,
+        overrides,
+        actor,
+        &active_generations,
+        &retirements,
+        can_retire_secrets,
+    )
+    .await
+}
+
+/// Adds host-generated immutable generations to ticket integrations and returns active/retired scopes.
+fn normalize_integration_generations(
+    guild: GuildId,
+    compiler: &ConfigCompiler,
+    current: &GuildOverrides,
+    overrides: GuildOverrides,
+) -> Result<
+    (
+        GuildOverrides,
+        Vec<IntegrationSecretGeneration>,
+        Vec<IntegrationSecretGeneration>,
+    ),
+    ApiError,
+> {
+    let current_settings = compiler.compile(current)?;
+    let current_generations = integration_generations(guild, &current_settings)?;
+    let mut serialized =
+        serde_json::to_value(&overrides).map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    if let Some(integrations_value) = serialized
+        .get_mut("modules")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|modules| modules.get_mut("tickets"))
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|module| module.get_mut("config"))
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|config| config.get_mut("integrations"))
+    {
+        let integrations = integrations_value
+            .as_array_mut()
+            .ok_or_else(|| ApiError::BadRequest("ticket integrations must be an array".into()))?;
+        let mut seen = BTreeSet::new();
+        for integration in integrations {
+            let object = integration.as_object_mut().ok_or_else(|| {
+                ApiError::BadRequest("each ticket integration must be an object".into())
+            })?;
+            let id = object
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| valid_integration_id(id))
+                .ok_or_else(|| ApiError::BadRequest("ticket integration ID is invalid".into()))?
+                .to_owned();
+            if !seen.insert(id.clone()) {
+                return Err(ApiError::BadRequest(
+                    "ticket integration IDs must be unique".into(),
+                ));
+            }
+            let supplied = match object.get("generation") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) if value.is_empty() => None,
+                Some(serde_json::Value::String(value)) => Some(value.as_str()),
+                Some(_) => {
+                    return Err(ApiError::BadRequest(
+                        "ticket integration generation is managed by the host".into(),
+                    ));
+                }
+            };
+            if let Some(existing) = current_generations.get(&id) {
+                let expected = existing.generation();
+                if supplied.is_some_and(|generation| generation != expected) {
+                    return Err(ApiError::BadRequest(
+                        "ticket integration generation cannot be changed".into(),
+                    ));
+                }
+                object.insert(
+                    "generation".into(),
+                    serde_json::Value::String(expected.to_owned()),
+                );
+            } else {
+                if supplied.is_some() {
+                    return Err(ApiError::BadRequest(
+                        "ticket integration generation cannot be supplied".into(),
+                    ));
+                }
+                let generation = new_integration_generation().map_err(|_| ApiError::Unavailable)?;
+                object.insert("generation".into(), serde_json::Value::String(generation));
+            }
+        }
+    }
+
+    let overrides: GuildOverrides = serde_json::from_value(serialized)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let next_settings = compiler.compile(&overrides)?;
+    let active_generations = integration_generations(guild, &next_settings)?;
+    let retirements = current_generations
+        .iter()
+        .filter(|(id, old)| {
+            active_generations
+                .get(*id)
+                .is_none_or(|new| new.generation() != old.generation())
+        })
+        .map(|(_, generation)| generation.clone())
+        .collect::<Vec<_>>();
+    let active_generations = active_generations.into_values().collect::<Vec<_>>();
+    Ok((overrides, active_generations, retirements))
+}
+
+fn integration_generations(
+    guild: GuildId,
+    settings: &GuildSettings,
+) -> Result<BTreeMap<String, IntegrationSecretGeneration>, ApiError> {
+    let module = ModuleId::new("tickets").map_err(|error| ApiError::Internal(error.to_string()))?;
+    let integrations = settings
+        .module(&module)
+        .and_then(|module| module.config.get("integrations"))
+        .and_then(serde_json::Value::as_array);
+    let Some(integrations) = integrations else {
+        return Ok(BTreeMap::new());
+    };
+    let mut generations = BTreeMap::new();
+    for integration in integrations {
+        let Some(id) = integration.get("id").and_then(serde_json::Value::as_str) else {
+            return Err(ApiError::Internal(
+                "the stored ticket integration has no ID".into(),
+            ));
+        };
+        let Some(generation) = integration
+            .get("generation")
+            .and_then(serde_json::Value::as_str)
+            .filter(|generation| !generation.is_empty())
+        else {
+            continue;
+        };
+        let generation = IntegrationSecretGeneration::new(guild, module.clone(), id, generation)
+            .map_err(|_| {
+                ApiError::Internal("the stored ticket integration has an invalid generation".into())
+            })?;
+        if generations.insert(id.to_owned(), generation).is_some() {
+            return Err(ApiError::Internal(
+                "the stored ticket configuration has duplicate integration IDs".into(),
+            ));
+        }
+    }
+    Ok(generations)
+}
+
+fn valid_integration_id(id: &str) -> bool {
+    (1..=32).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
 fn stronger_role_added(
@@ -319,6 +479,9 @@ async fn save(
     expected: Option<i64>,
     overrides: GuildOverrides,
     actor: Option<UserId>,
+    active_generations: &[IntegrationSecretGeneration],
+    retirements: &[IntegrationSecretGeneration],
+    can_retire_secrets: bool,
 ) -> Result<Response, ApiError> {
     // Validate before touching the database: an invalid document must never be stored.
     let settings = state.inner.settings.compiler().compile(&overrides)?;
@@ -330,7 +493,15 @@ async fn save(
     let revision = state
         .inner
         .db
-        .save_config(guild, expected, &overrides, actor)
+        .save_config_and_retire_integration_generations(
+            guild,
+            expected,
+            &overrides,
+            actor,
+            active_generations,
+            retirements,
+            can_retire_secrets,
+        )
         .await?;
     if !state.inner.settings.install(guild, revision, settings) {
         // A concurrent edit with a higher revision is already live; that is the one to keep.

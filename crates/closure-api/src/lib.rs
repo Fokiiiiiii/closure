@@ -10,21 +10,27 @@
 //! Everything except the two probes needs the admin bearer token.
 
 mod access;
+mod audit;
 mod auth;
 mod cases;
 mod config;
 mod directory;
 mod error;
 mod messages;
+pub mod notifications;
+pub mod notifications;
 mod ops;
 mod server;
 mod stats;
+mod ticket_actions;
+mod ticket_gallery;
 mod tickets;
 
-pub use access::MemberAccess;
+pub use access::{MemberAccess, MemberSearchResult};
 pub use directory::{Channel, Directory, Guild, GuildDirectory, Role};
 pub use messages::{MessageSink, Post, SendFailure, Sent};
 pub use server::{ServerLimits, serve};
+pub use ticket_actions::TicketActionSink;
 
 use std::fmt;
 use std::sync::Arc;
@@ -35,6 +41,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
 use closure_config::SettingsStore;
+use closure_core::integration_secrets::IntegrationSecretService;
 use closure_db::Db;
 use secrecy::{ExposeSecret, SecretString};
 use tower::limit::GlobalConcurrencyLimitLayer;
@@ -89,6 +96,7 @@ pub(crate) struct Inner {
     /// Proxies whose `X-Forwarded-For` is believed: a login failure is counted for the client the
     /// proxy names, not for the proxy.
     pub(crate) trusted_proxies: Vec<std::net::IpAddr>,
+    pub(crate) account_vault: Option<Arc<IntegrationSecretService>>,
 }
 
 /// Everything the handlers need; cheap to clone.
@@ -97,6 +105,7 @@ pub struct ApiState {
     pub(crate) inner: Arc<Inner>,
     pub(crate) message_history_days: u32,
     pub(crate) messages: Option<Arc<dyn MessageSink>>,
+    pub(crate) ticket_actions: Option<Arc<dyn TicketActionSink>>,
 }
 
 impl fmt::Debug for ApiState {
@@ -130,9 +139,11 @@ impl ApiState {
                 token_digest: auth::digest(token),
                 failures: auth::FailureLimiter::default(),
                 trusted_proxies: Vec::new(),
+                account_vault: None,
             }),
             message_history_days: 7,
             messages: None,
+            ticket_actions: None,
         })
     }
 
@@ -140,6 +151,22 @@ impl ApiState {
     #[must_use]
     pub fn with_messages(mut self, sink: Arc<dyn MessageSink>) -> Self {
         self.messages = Some(sink);
+        self
+    }
+
+    /// Lets the dashboard call ticket operations through the ticket module.
+    #[must_use]
+    pub fn with_ticket_actions(mut self, sink: Arc<dyn TicketActionSink>) -> Self {
+        self.ticket_actions = Some(sink);
+        self
+    }
+
+    /// Supplies the account-scoped encrypted email vault.
+    #[must_use]
+    pub fn with_account_vault(mut self, vault: Option<Arc<IntegrationSecretService>>) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.account_vault = vault;
+        }
         self
     }
 
@@ -172,6 +199,55 @@ pub fn router(state: ApiState) -> Router {
             "/v1/guilds/{guild_id}/access/{user_id}",
             get(access::get_access),
         )
+        .route(
+            "/v1/guilds/{guild_id}/members/search",
+            get(access::search_members),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/public/ticket-knowledge",
+            get(ticket_actions::public_knowledge_state),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/public/ticket-knowledge/{slug}",
+            get(ticket_actions::public_knowledge_article),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/ticket-gallery/templates",
+            get(ticket_gallery::templates),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/ticket-gallery/templates/{template_id}",
+            get(ticket_gallery::template),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/ticket-gallery/templates/{template_id}/imports",
+            post(ticket_gallery::record_import),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/ticket-gallery/submissions",
+            get(ticket_gallery::submissions).post(ticket_gallery::submit),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/ticket-gallery/submissions/{submission_id}/actions",
+            post(ticket_gallery::submission_action),
+        )
+        .route(
+            "/v1/ticket-gallery/templates/{template_id}/review",
+            post(ticket_gallery::review),
+        )
+        .route("/v1/guilds/{guild_id}/audit-events", get(audit::events))
+        .route(
+            "/v1/guilds/{guild_id}/ticket-actions/panels",
+            get(ticket_actions::panels),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/ticket-actions/{scope_kind}/{scope_id}",
+            get(ticket_actions::state).post(ticket_actions::perform),
+        )
+        .route("/v1/notifications", get(notifications::list))
+        .route("/v1/notifications/actions", post(notifications::action))
+        .route("/v1/notifications", get(notifications::list))
+        .route("/v1/notifications/actions", post(notifications::action))
         .route(
             "/v1/guilds/{guild_id}/config",
             get(config::get_config).put(config::put_config),

@@ -24,7 +24,9 @@ mod text_commands;
 pub use antifish::AntiFish;
 pub use api::{RetryPolicy, TwilightApi, joined_guilds};
 pub use breaker::BreakerConfig;
-pub use commands::{CommandBuildError, CommandScope, build_commands, register_commands};
+pub use commands::{
+    CommandBuildError, CommandScope, build_commands, build_guild_commands, register_commands,
+};
 pub use dispatcher::{DispatchError, Dispatcher, DispatcherConfig, JobOutcome};
 pub use fetch::HttpFetcher;
 pub use gateway::{

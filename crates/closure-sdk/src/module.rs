@@ -16,10 +16,12 @@ use closure_core::event::{
 };
 use closure_core::locale::{Args, Locale};
 use closure_core::module::{
-    ChoiceValue, CommandSpec, ContextCommandSpec, ContextKind, EventContext, Module, ModuleId,
-    ModuleManifest, OptionChoice, OptionKind, OptionSpec, SubcommandSpec, TEXTS_KEY,
+    ChoiceValue, CommandSpec, ContextCommandSpec, ContextKind, DashboardActionError,
+    DashboardActionRequest, DashboardActionResult, DashboardPublicScope, DashboardScope,
+    DynamicCommandAlias, EventContext, Module, ModuleId, ModuleManifest, OptionChoice, OptionKind,
+    OptionSpec, SubcommandSpec, TEXTS_KEY,
 };
-use closure_core::permission::{PermissionKey, PermissionSpec};
+use closure_core::permission::{Actor, PermissionKey, PermissionSpec};
 use closure_core::schedule::ScheduledJob;
 use closure_core::subscription::{Flow, Subscription};
 use futures_util::FutureExt;
@@ -280,6 +282,31 @@ type UiRun<I> = dyn Fn(Cx<I>) -> BoxFuture<'static, Result<(), UserError>> + Sen
 
 /// What runs when a job of the module is due.
 type JobRun = dyn Fn(JobCx) -> BoxFuture<'static, Result<(), ModuleError>> + Send + Sync;
+type DashboardStateRun = dyn Fn(
+        EventContext,
+        Actor,
+        DashboardScope,
+    ) -> BoxFuture<'static, Result<DashboardActionResult, DashboardActionError>>
+    + Send
+    + Sync;
+type DashboardPublicStateRun = dyn Fn(
+        EventContext,
+        DashboardPublicScope,
+    ) -> BoxFuture<'static, Result<DashboardActionResult, DashboardActionError>>
+    + Send
+    + Sync;
+type DashboardActionRun = dyn Fn(
+        EventContext,
+        Actor,
+        DashboardActionRequest,
+    ) -> BoxFuture<'static, Result<DashboardActionResult, DashboardActionError>>
+    + Send
+    + Sync;
+type DynamicCommandAliasesRun = dyn Fn(EventContext) -> BoxFuture<'static, Result<Vec<DynamicCommandAlias>, ModuleError>>
+    + Send
+    + Sync;
+type DynamicCommandAliasRun =
+    dyn Fn(CommandCx, String) -> BoxFuture<'static, Result<(), UserError>> + Send + Sync;
 
 /// Builds a module from its commands.
 pub struct ModuleBuilder {
@@ -293,6 +320,11 @@ pub struct ModuleBuilder {
     /// By command, subcommand (group sub, if any) and option.
     autocompletes: HashMap<(String, Option<String>, String), Arc<AutoRun>>,
     contexts: HashMap<(ContextKind, String), ContextRoute>,
+    dashboard_state: Option<Arc<DashboardStateRun>>,
+    dashboard_public_state: Option<Arc<DashboardPublicStateRun>>,
+    dashboard_actions: HashMap<String, Arc<DashboardActionRun>>,
+    dynamic_command_aliases: Option<Arc<DynamicCommandAliasesRun>>,
+    dynamic_command_alias: Option<Arc<DynamicCommandAliasRun>>,
     problem: Option<CoreError>,
     clock: Clock,
 }
@@ -326,6 +358,11 @@ impl ModuleBuilder {
             jobs: HashMap::new(),
             autocompletes: HashMap::new(),
             contexts: HashMap::new(),
+            dashboard_state: None,
+            dashboard_public_state: None,
+            dashboard_actions: HashMap::new(),
+            dynamic_command_aliases: None,
+            dynamic_command_alias: None,
             problem: None,
             clock: Arc::new(Instant::now),
         })
@@ -380,6 +417,97 @@ impl ModuleBuilder {
     #[must_use]
     pub fn catalog(mut self, locale: Locale, source: impl Into<String>) -> Self {
         self.manifest = self.manifest.catalog(locale, source);
+        self
+    }
+
+    /// Handles reads of this module's dashboard state.
+    #[must_use]
+    pub fn dashboard_state<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(EventContext, Actor, DashboardScope) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<DashboardActionResult, DashboardActionError>> + Send + 'static,
+    {
+        if self
+            .dashboard_state
+            .replace(Arc::new(move |ctx, actor, scope| {
+                handler(ctx, actor, scope).boxed()
+            }))
+            .is_some()
+        {
+            self.problem
+                .get_or_insert(self.invalid("", "dashboard state is declared twice".to_owned()));
+        }
+        self
+    }
+
+    /// Handles actorless public dashboard reads; the handler must return only explicitly public data.
+    #[must_use]
+    pub fn dashboard_public_state<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(EventContext, DashboardPublicScope) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<DashboardActionResult, DashboardActionError>> + Send + 'static,
+    {
+        if self
+            .dashboard_public_state
+            .replace(Arc::new(move |ctx, scope| handler(ctx, scope).boxed()))
+            .is_some()
+        {
+            self.problem.get_or_insert(
+                self.invalid("", "dashboard public state is declared twice".to_owned()),
+            );
+        }
+        self
+    }
+
+    /// Registers a dashboard operation under its public action name.
+    #[must_use]
+    pub fn dashboard_action<F, Fut>(mut self, name: &str, handler: F) -> Self
+    where
+        F: Fn(EventContext, Actor, DashboardActionRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<DashboardActionResult, DashboardActionError>> + Send + 'static,
+    {
+        let name = name.to_owned();
+        let run: Arc<DashboardActionRun> =
+            Arc::new(move |ctx, actor, request| handler(ctx, actor, request).boxed());
+        if self.dashboard_actions.insert(name.clone(), run).is_some() {
+            self.problem.get_or_insert(
+                self.invalid(&name, "dashboard action is declared twice".to_owned()),
+            );
+        }
+        self
+    }
+
+    /// Provides this module's guild-specific slash command aliases.
+    #[must_use]
+    pub fn dynamic_command_aliases<F, Fut>(mut self, provider: F) -> Self
+    where
+        F: Fn(EventContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<DynamicCommandAlias>, ModuleError>> + Send + 'static,
+    {
+        let run: Arc<DynamicCommandAliasesRun> = Arc::new(move |ctx| provider(ctx).boxed());
+        if self.dynamic_command_aliases.replace(run).is_some() {
+            self.problem.get_or_insert(
+                self.invalid("", "dynamic command aliases are declared twice".to_owned()),
+            );
+        }
+        self
+    }
+
+    /// Handles an invocation routed to a dynamic slash command alias.
+    #[must_use]
+    pub fn dynamic_command_alias<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(CommandCx, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), UserError>> + Send + 'static,
+    {
+        let run: Arc<DynamicCommandAliasRun> =
+            Arc::new(move |cx, alias| handler(cx, alias).boxed());
+        if self.dynamic_command_alias.replace(run).is_some() {
+            self.problem.get_or_insert(self.invalid(
+                "",
+                "dynamic command alias handler is declared twice".to_owned(),
+            ));
+        }
         self
     }
 
@@ -919,6 +1047,11 @@ impl ModuleBuilder {
             jobs: self.jobs,
             autocompletes: self.autocompletes,
             contexts: self.contexts,
+            dashboard_state: self.dashboard_state,
+            dashboard_public_state: self.dashboard_public_state,
+            dashboard_actions: self.dashboard_actions,
+            dynamic_command_aliases: self.dynamic_command_aliases,
+            dynamic_command_alias: self.dynamic_command_alias,
             cooldowns: Cooldowns::default(),
             clock: self.clock,
         })
@@ -975,6 +1108,11 @@ pub struct SdkModule {
     jobs: HashMap<String, Arc<JobRun>>,
     autocompletes: HashMap<(String, Option<String>, String), Arc<AutoRun>>,
     contexts: HashMap<(ContextKind, String), ContextRoute>,
+    dashboard_state: Option<Arc<DashboardStateRun>>,
+    dashboard_public_state: Option<Arc<DashboardPublicStateRun>>,
+    dashboard_actions: HashMap<String, Arc<DashboardActionRun>>,
+    dynamic_command_aliases: Option<Arc<DynamicCommandAliasesRun>>,
+    dynamic_command_alias: Option<Arc<DynamicCommandAliasRun>>,
     cooldowns: Cooldowns,
     clock: Clock,
 }
@@ -1256,6 +1394,76 @@ fn module_error(error: UserError) -> ModuleError {
 impl Module for SdkModule {
     fn manifest(&self) -> &ModuleManifest {
         &self.manifest
+    }
+
+    async fn dashboard_state(
+        &self,
+        ctx: EventContext,
+        actor: Actor,
+        scope: DashboardScope,
+    ) -> Result<DashboardActionResult, DashboardActionError> {
+        let Some(handler) = self.dashboard_state.as_ref() else {
+            return Err(DashboardActionError::Unsupported);
+        };
+        handler(ctx, actor, scope).await
+    }
+
+    async fn dashboard_public_state(
+        &self,
+        ctx: EventContext,
+        scope: DashboardPublicScope,
+    ) -> Result<DashboardActionResult, DashboardActionError> {
+        let Some(handler) = self.dashboard_public_state.as_ref() else {
+            return Err(DashboardActionError::Unsupported);
+        };
+        handler(ctx, scope).await
+    }
+
+    async fn dashboard_action(
+        &self,
+        ctx: EventContext,
+        actor: Actor,
+        request: DashboardActionRequest,
+    ) -> Result<DashboardActionResult, DashboardActionError> {
+        let Some(handler) = self.dashboard_actions.get(&request.action).cloned() else {
+            return Err(DashboardActionError::Unsupported);
+        };
+        handler(ctx, actor, request).await
+    }
+
+    async fn dynamic_command_aliases(
+        &self,
+        ctx: EventContext,
+    ) -> Result<Vec<DynamicCommandAlias>, ModuleError> {
+        match &self.dynamic_command_aliases {
+            Some(provider) => provider(ctx).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    async fn dispatch_dynamic_command(
+        &self,
+        ctx: &EventContext,
+        event: &Event,
+        alias: &str,
+    ) -> Result<Flow, ModuleError> {
+        let Some(handler) = self.dynamic_command_alias.as_ref() else {
+            return Ok(Flow::Continue);
+        };
+        let Event::Command(invocation) = event else {
+            return Ok(Flow::Continue);
+        };
+        let cx = CommandCx::new(ctx, invocation);
+        match handler(cx.clone(), alias.to_owned()).await {
+            Ok(()) => {
+                if !cx.has_replied() {
+                    let done = cx.core_message("sdk-done", &Args::new());
+                    cx.reply_private(done).await.map_err(module_error)?;
+                }
+            }
+            Err(error) => Self::answer(&cx, error).await?,
+        }
+        Ok(Flow::Stop)
     }
 
     async fn on_event(&self, ctx: &EventContext, event: &Event) -> Result<(), ModuleError> {

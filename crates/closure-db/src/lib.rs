@@ -9,6 +9,8 @@ mod config;
 mod error;
 mod guilds;
 mod history;
+mod integration_secrets;
+pub mod notifications;
 
 #[cfg(test)]
 #[path = "history_file_tests.rs"]
@@ -18,8 +20,13 @@ mod requests;
 pub use requests::{Claim, REQUESTS_KEPT};
 mod scheduler;
 pub use scheduler::{ScheduledPost, Withdrawn};
+pub use ticket_gallery::{
+    GalleryCard, GalleryError, GalleryFilter, GalleryPage, GallerySubmission, GalleryTemplate,
+    NewGalleryTemplate,
+};
 mod stats;
 mod storage;
+mod ticket_gallery;
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -27,7 +34,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-pub use audit::{AuditEvent, AuditRecord};
+pub use audit::{AuditEvent, AuditMetadata, AuditRecord};
 pub use config::{CONFIG_CHANNEL, ConfigEvent, ConfigHistoryEntry, ConfigListener, StoredConfig};
 pub use error::DbError;
 
@@ -160,7 +167,13 @@ mod tests {
                 "module_scores",
                 "module_sets",
                 "saved_messages",
-                "scheduled_jobs"
+                "scheduled_jobs",
+                "ticket_gallery_events",
+                "ticket_gallery_requests",
+                "ticket_gallery_templates",
+                "ticket_notification_outbox",
+                "ticket_notification_preferences",
+                "ticket_notifications"
             ]
         );
     }

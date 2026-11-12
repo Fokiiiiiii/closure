@@ -1,5 +1,6 @@
 use closure_config::GuildOverrides;
 use closure_core::event::{GuildId, UserId};
+use closure_core::integration_secrets::IntegrationSecretGeneration;
 use futures_util::TryStreamExt;
 use sqlx::postgres::PgListener;
 use time::OffsetDateTime;
@@ -58,6 +59,60 @@ impl Db {
         overrides: &GuildOverrides,
         actor: Option<UserId>,
     ) -> Result<i64, DbError> {
+        self.save_config_with_retirements(guild, expected, overrides, actor, &[], &[], true)
+            .await
+    }
+
+    /// Saves configuration and retires removed integration generations in the same transaction.
+    /// `can_retire_secrets` must come from a fresh, verified guild owner/admin actor.
+    pub async fn save_config_and_retire_integration_generations(
+        &self,
+        guild: GuildId,
+        expected: Option<i64>,
+        overrides: &GuildOverrides,
+        actor: Option<UserId>,
+        active_generations: &[IntegrationSecretGeneration],
+        retirements: &[IntegrationSecretGeneration],
+        can_retire_secrets: bool,
+    ) -> Result<i64, DbError> {
+        self.save_config_with_retirements(
+            guild,
+            expected,
+            overrides,
+            actor,
+            active_generations,
+            retirements,
+            can_retire_secrets,
+        )
+        .await
+    }
+
+    async fn save_config_with_retirements(
+        &self,
+        guild: GuildId,
+        expected: Option<i64>,
+        overrides: &GuildOverrides,
+        actor: Option<UserId>,
+        active_generations: &[IntegrationSecretGeneration],
+        retirements: &[IntegrationSecretGeneration],
+        can_retire_secrets: bool,
+    ) -> Result<i64, DbError> {
+        if active_generations
+            .iter()
+            .chain(retirements)
+            .any(|generation| generation.guild_id() != guild)
+        {
+            return Err(DbError::Invalid(
+                "integration secret generation belongs to another guild".into(),
+            ));
+        }
+        if retirements
+            .iter()
+            .any(|generation| active_generations.contains(generation))
+        {
+            return Err(DbError::IntegrationSecretStillActive);
+        }
+
         let guild_id = to_db(guild)?;
         let actor_id = actor.map(to_db).transpose()?;
         let doc = serde_json::to_value(overrides)?;
@@ -108,6 +163,15 @@ impl Db {
                     .await?;
             return Err(DbError::RevisionConflict { expected, actual });
         };
+
+        for generation in retirements {
+            crate::integration_secrets::retire_generation_in_transaction(
+                &mut tx,
+                generation,
+                can_retire_secrets,
+            )
+            .await?;
+        }
 
         sqlx::query(
             "INSERT INTO guild_config_history (guild_id, revision, doc, actor)

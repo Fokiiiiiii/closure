@@ -15,12 +15,14 @@
 //! A translation that is missing, or that Discord would refuse (uppercase or too long names),
 //! is skipped with a warning so one bad string never blocks registering the commands.
 
+use std::collections::HashSet;
+
 use closure_core::error::DiscordError;
 use closure_core::event::{ApplicationId, GuildId};
 use closure_core::locale::{Args, Locale, Translator};
 use closure_core::module::{
-    ChoiceValue, CommandSpec, ContextCommandSpec, ContextKind, ModuleId, OptionKind, OptionSpec,
-    SubcommandSpec,
+    ChoiceValue, CommandSpec, ContextCommandSpec, ContextKind, DynamicCommandAlias, ModuleId,
+    OptionKind, OptionSpec, SubcommandSpec,
 };
 use closure_core::registry::ModuleRegistry;
 use twilight_http::Client;
@@ -308,6 +310,53 @@ fn command(
         })
 }
 
+/// A dynamic tag alias has no options and uses one fixed, module-local description entry.
+fn dynamic_command(
+    module: &ModuleId,
+    alias: &DynamicCommandAlias,
+    translator: &dyn Translator,
+) -> Result<Command, CommandBuildError> {
+    let invalid = |reason: &str| CommandBuildError {
+        module: module.clone(),
+        command: alias.name.clone(),
+        reason: reason.to_owned(),
+    };
+    if !valid_name(&alias.name) {
+        return Err(invalid("dynamic alias name is invalid"));
+    }
+    if alias.description_key.is_empty()
+        || alias.description_key.chars().any(|character| {
+            !(character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_'))
+        })
+    {
+        return Err(invalid("dynamic alias description key is invalid"));
+    }
+    let localizer = Localizer {
+        translator,
+        namespace: module.as_str(),
+    };
+    let description_key = format!("{}.description", alias.description_key);
+    let Some(description) = translator.exact(
+        Locale::DEFAULT,
+        module.as_str(),
+        &description_key,
+        &Args::new(),
+    ) else {
+        return Err(invalid("dynamic alias description translation is missing"));
+    };
+    if !valid_description(&description) {
+        return Err(invalid("dynamic alias description is invalid for Discord"));
+    }
+    CommandBuilder::new(&alias.name, &description, CommandType::ChatInput)
+        .description_localizations(localizer.descriptions(&alias.description_key))
+        .contexts([InteractionContextType::Guild])
+        .validate()
+        .map(CommandBuilder::build)
+        .map_err(|error| invalid(&error.to_string()))
+}
+
 /// A context-menu command: a name, no description and no options.
 fn context_command(
     module: &ModuleId,
@@ -345,6 +394,40 @@ pub fn build_commands(
         .collect::<Result<_, _>>()?;
     for (module, spec) in registry.context_commands() {
         commands.push(context_command(module, spec, translator)?);
+    }
+    Ok(commands)
+}
+
+/// Merges static commands with per-guild aliases without silently dropping collisions or overflow.
+pub fn build_guild_commands(
+    registry: &ModuleRegistry,
+    translator: &dyn Translator,
+    aliases: &[(ModuleId, DynamicCommandAlias)],
+) -> Result<Vec<Command>, CommandBuildError> {
+    let mut commands = build_commands(registry, translator)?;
+    let mut names: HashSet<String> = registry
+        .commands()
+        .map(|(_, spec)| spec.name.clone())
+        .collect();
+    let mut count = names.len();
+
+    for (module, alias) in aliases {
+        if !names.insert(alias.name.clone()) {
+            return Err(CommandBuildError {
+                module: module.clone(),
+                command: alias.name.clone(),
+                reason: "dynamic alias conflicts with another command in this guild".to_owned(),
+            });
+        }
+        if count >= 100 {
+            return Err(CommandBuildError {
+                module: module.clone(),
+                command: alias.name.clone(),
+                reason: "guild has reached Discord's 100 slash command limit".to_owned(),
+            });
+        }
+        commands.push(dynamic_command(module, alias, translator)?);
+        count += 1;
     }
     Ok(commands)
 }

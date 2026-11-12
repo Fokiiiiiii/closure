@@ -1,0 +1,277 @@
+use async_trait::async_trait;
+use closure_core::event::UserId;
+use closure_core::integration_secrets::{
+    IdempotencyDisposition, IntegrationSecretBackend, IntegrationSecretError,
+    IntegrationSecretGeneration, IntegrationSecretMutation, IntegrationSecretScope,
+    SealedIntegrationSecret,
+};
+use sqlx::Row;
+use subtle::ConstantTimeEq;
+
+use crate::Db;
+use crate::ids::to_db;
+
+pub(crate) async fn retire_generation_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    generation: &IntegrationSecretGeneration,
+    can_retire_secrets: bool,
+) -> Result<(), crate::error::DbError> {
+    let guild_id = to_db(generation.guild_id())?;
+    sqlx::query(
+        "INSERT INTO integration_secret_generations
+            (guild_id, module_id, integration_id, generation)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (guild_id, module_id, integration_id, generation) DO NOTHING",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .execute(&mut **transaction)
+    .await?;
+    // A row lock serializes tombstoning against stores for this exact generation.
+    let _retired = sqlx::query_scalar::<_, bool>(
+        "SELECT retired FROM integration_secret_generations
+         WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3 AND generation = $4
+         FOR UPDATE",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let has_secret = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM integration_secrets
+             WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3 AND generation = $4
+         )",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if has_secret && !can_retire_secrets {
+        return Err(crate::error::DbError::IntegrationSecretAdministratorRequired);
+    }
+    sqlx::query(
+        "UPDATE integration_secret_generations
+         SET retired = TRUE, retired_at = COALESCE(retired_at, now())
+         WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3 AND generation = $4",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM integration_secrets
+         WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3 AND generation = $4",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM integration_secret_receipts
+         WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3 AND generation = $4",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+#[async_trait]
+impl IntegrationSecretBackend for Db {
+    async fn load(
+        &self,
+        scope: &IntegrationSecretScope,
+    ) -> Result<Option<SealedIntegrationSecret>, IntegrationSecretError> {
+        let generation = scope.generation_scope();
+        let guild_id =
+            to_db(generation.guild_id()).map_err(|_| IntegrationSecretError::InvalidScope)?;
+        let bytes = sqlx::query(
+            "SELECT s.encrypted_value
+             FROM integration_secrets AS s
+             JOIN integration_secret_generations AS g
+               USING (guild_id, module_id, integration_id, generation)
+             WHERE s.guild_id = $1
+               AND s.module_id = $2
+               AND s.integration_id = $3
+               AND s.generation = $4
+               AND s.secret_name = $5
+               AND NOT g.retired",
+        )
+        .bind(guild_id)
+        .bind(generation.module().as_str())
+        .bind(generation.integration_id())
+        .bind(generation.generation())
+        .bind(scope.secret_name())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| IntegrationSecretError::Storage)?
+        .map(|row| row.try_get::<Vec<u8>, _>("encrypted_value"))
+        .transpose()
+        .map_err(|_| IntegrationSecretError::Storage)?;
+        bytes.map(SealedIntegrationSecret::from_storage).transpose()
+    }
+
+    async fn apply(
+        &self,
+        scope: &IntegrationSecretScope,
+        actor: UserId,
+        request_key_hmac: [u8; 32],
+        fingerprint_hmac: [u8; 32],
+        mutation: IntegrationSecretMutation,
+        encrypted_receipt: SealedIntegrationSecret,
+    ) -> Result<IdempotencyDisposition, IntegrationSecretError> {
+        let generation = scope.generation_scope();
+        let guild_id =
+            to_db(generation.guild_id()).map_err(|_| IntegrationSecretError::InvalidScope)?;
+        let actor_id = to_db(actor).map_err(|_| IntegrationSecretError::InvalidScope)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| IntegrationSecretError::Storage)?;
+
+        sqlx::query(
+            "INSERT INTO integration_secret_generations
+                (guild_id, module_id, integration_id, generation)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (guild_id, module_id, integration_id, generation) DO NOTHING",
+        )
+        .bind(guild_id)
+        .bind(generation.module().as_str())
+        .bind(generation.integration_id())
+        .bind(generation.generation())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| IntegrationSecretError::Storage)?;
+        let retired = sqlx::query_scalar::<_, bool>(
+            "SELECT retired FROM integration_secret_generations
+             WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3 AND generation = $4
+             FOR UPDATE",
+        )
+        .bind(guild_id)
+        .bind(generation.module().as_str())
+        .bind(generation.integration_id())
+        .bind(generation.generation())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| IntegrationSecretError::Storage)?;
+        if retired {
+            return Err(IntegrationSecretError::GenerationRetired);
+        }
+
+        sqlx::query("DELETE FROM integration_secret_receipts WHERE expires_at <= now()")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| IntegrationSecretError::Storage)?;
+        let inserted = sqlx::query(
+            "INSERT INTO integration_secret_receipts
+                (guild_id, module_id, integration_id, generation, secret_name,
+                 actor_id, request_key_hmac, fingerprint_hmac, encrypted_receipt, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + make_interval(secs => $10))
+             ON CONFLICT
+                (guild_id, module_id, integration_id, generation, secret_name, actor_id, request_key_hmac)
+             DO NOTHING",
+        )
+        .bind(guild_id)
+        .bind(generation.module().as_str())
+        .bind(generation.integration_id())
+        .bind(generation.generation())
+        .bind(scope.secret_name())
+        .bind(actor_id)
+        .bind(&request_key_hmac[..])
+        .bind(&fingerprint_hmac[..])
+        .bind(encrypted_receipt.as_bytes())
+        .bind(crate::REQUESTS_KEPT.as_secs_f64())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| IntegrationSecretError::Storage)?
+        .rows_affected();
+        if inserted == 0 {
+            let stored_fingerprint = sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT fingerprint_hmac FROM integration_secret_receipts
+                 WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3
+                   AND generation = $4 AND secret_name = $5 AND actor_id = $6
+                   AND request_key_hmac = $7",
+            )
+            .bind(guild_id)
+            .bind(generation.module().as_str())
+            .bind(generation.integration_id())
+            .bind(generation.generation())
+            .bind(scope.secret_name())
+            .bind(actor_id)
+            .bind(&request_key_hmac[..])
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| IntegrationSecretError::Storage)?
+            .ok_or(IntegrationSecretError::Storage)?;
+            if !constant_time_eq(&stored_fingerprint, &fingerprint_hmac) {
+                return Err(IntegrationSecretError::IdempotencyConflict);
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| IntegrationSecretError::Storage)?;
+            return Ok(IdempotencyDisposition::Replayed);
+        }
+
+        match mutation {
+            IntegrationSecretMutation::Set(secret) => {
+                sqlx::query(
+                    "INSERT INTO integration_secrets
+                        (guild_id, module_id, integration_id, generation, secret_name, encrypted_value)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (guild_id, module_id, integration_id, generation, secret_name)
+                     DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value, updated_at = now()",
+                )
+                .bind(guild_id)
+                .bind(generation.module().as_str())
+                .bind(generation.integration_id())
+                .bind(generation.generation())
+                .bind(scope.secret_name())
+                .bind(secret.as_bytes())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| IntegrationSecretError::Storage)?;
+            }
+            IntegrationSecretMutation::Remove => {
+                sqlx::query(
+                    "DELETE FROM integration_secrets
+                     WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3
+                       AND generation = $4 AND secret_name = $5",
+                )
+                .bind(guild_id)
+                .bind(generation.module().as_str())
+                .bind(generation.integration_id())
+                .bind(generation.generation())
+                .bind(scope.secret_name())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| IntegrationSecretError::Storage)?;
+            }
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|_| IntegrationSecretError::Storage)?;
+        Ok(IdempotencyDisposition::Applied)
+    }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8; 32]) -> bool {
+    left.len() == right.len() && bool::from(left.ct_eq(&right[..]))
+}

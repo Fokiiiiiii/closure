@@ -9,6 +9,7 @@
 //!   call, and a module that keeps failing in a guild is skipped for a while (circuit breaker).
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -25,12 +26,18 @@ use closure_core::event::{
     InteractionRef, InteractionToken, MessageInfo, UserId,
 };
 use closure_core::history::{HistoryBackend, MemoryHistory, MessageHistory};
+use closure_core::integration_secrets::IntegrationSecretService;
 use closure_core::interaction::{
     DirectMessageComponentRoutes, InteractionGuilds, InteractionLimits, Recorded,
 };
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::{Args, Locale, Translator};
-use closure_core::module::{CommandSpec, ContextKind, EventContext, Module, ModuleId};
+use closure_core::module::{
+    CommandSpec, ContextKind, DashboardActionError, DashboardActionRequest, DashboardActionResult,
+    DashboardPublicScope, DashboardScope, DynamicCommandAlias, DynamicCommandChangeError,
+    EventContext, Module, ModuleId,
+};
+use closure_core::permission::Actor;
 use closure_core::registry::ModuleRegistry;
 use closure_core::schedule::{MemoryScheduler, ScheduledJob, Scheduler, SchedulerBackend};
 use closure_core::settings::{ModuleSettings, SettingsProvider};
@@ -85,6 +92,12 @@ pub struct DispatcherConfig {
     pub gateway_latency: Arc<GatewayLatency>,
     /// The guilds whose scheduled jobs may run; `None` runs them for every guild. Set when `ALLOWED_GUILDS` is in use.
     pub allowed_guilds: Option<Arc<HashSet<GuildId>>>,
+    /// Host-encrypted integration secrets, absent when the host master key is unset.
+    pub integration_secrets: Option<Arc<IntegrationSecretService>>,
+    /// A validated public Dashboard origin used only to create token-free deep links.
+    pub dashboard_base_url: Option<Arc<str>>,
+    /// A host-owned callback that synchronizes merged per-guild command sets.
+    pub dynamic_command_changes: Option<Arc<dyn closure_core::module::DynamicCommandChangeSink>>,
 }
 
 impl Default for DispatcherConfig {
@@ -97,6 +110,9 @@ impl Default for DispatcherConfig {
             bot_id: None,
             gateway_latency: Arc::default(),
             allowed_guilds: None,
+            integration_secrets: None,
+            dashboard_base_url: None,
+            dynamic_command_changes: None,
         }
     }
 }
@@ -241,6 +257,8 @@ struct Shared {
     history: Arc<dyn HistoryBackend>,
     config: DispatcherConfig,
     guilds: DashMap<GuildId, Arc<GuildLanes>>,
+    /// Per-guild aliases mapped to the module that owns their durable tag record.
+    dynamic_command_aliases: DashMap<GuildId, HashMap<String, Arc<dyn Module>>>,
     /// The guild of every live interaction, so a module cannot answer another guild's.
     interactions: Arc<InteractionGuilds>,
     dm_component_routes: Arc<DirectMessageComponentRoutes>,
@@ -516,6 +534,7 @@ impl Dispatcher {
             history,
             config,
             guilds: DashMap::new(),
+            dynamic_command_aliases: DashMap::new(),
             interactions,
             dm_component_routes,
             wedged: DashMap::new(),
@@ -529,6 +548,207 @@ impl Dispatcher {
         });
         shared.tracker.spawn(reaper(Arc::clone(&shared)));
         Ok(Self { shared })
+    }
+
+    pub async fn collect_dynamic_command_aliases(
+        &self,
+        guild: GuildId,
+    ) -> Result<Vec<(ModuleId, DynamicCommandAlias)>, DynamicCommandChangeError> {
+        let mut aliases = Vec::new();
+        let mut names = HashSet::new();
+        for module in self.shared.registry.iter() {
+            let id = module.manifest().id.clone();
+            let Some(settings) = self
+                .shared
+                .settings
+                .module(guild, &id)
+                .filter(|settings| settings.enabled)
+            else {
+                continue;
+            };
+            let ctx = context_for(self.shared.as_ref(), guild, &id, &settings);
+            let timeout = self.shared.settings.limits(guild).handler_timeout;
+            let descriptors = match tokio::time::timeout(
+                timeout,
+                AssertUnwindSafe(module.dynamic_command_aliases(ctx)).catch_unwind(),
+            )
+            .await
+            {
+                Ok(Ok(Ok(aliases))) => aliases,
+                Ok(Ok(Err(error))) => {
+                    tracing::warn!(module = %id, %guild, %error, "dynamic command alias collection failed");
+                    return Err(DynamicCommandChangeError::Unavailable);
+                }
+                Ok(Err(_)) => {
+                    tracing::error!(module = %id, %guild, "dynamic command alias collection panicked");
+                    return Err(DynamicCommandChangeError::Unavailable);
+                }
+                Err(_) => {
+                    tracing::error!(module = %id, %guild, timeout = ?timeout, "dynamic command alias collection timed out");
+                    return Err(DynamicCommandChangeError::Unavailable);
+                }
+            };
+            for alias in descriptors {
+                if !valid_dynamic_command_alias(&alias) {
+                    tracing::warn!(module = %id, %guild, "module returned an invalid dynamic command alias");
+                    return Err(DynamicCommandChangeError::Rejected);
+                }
+                if self.shared.registry.command_owner(&alias.name).is_some()
+                    || !names.insert(alias.name.clone())
+                {
+                    tracing::warn!(module = %id, %guild, "module returned a conflicting dynamic command alias");
+                    return Err(DynamicCommandChangeError::Rejected);
+                }
+                aliases.push((id.clone(), alias));
+            }
+        }
+        Ok(aliases)
+    }
+
+    pub fn install_dynamic_command_aliases(
+        &self,
+        guild: GuildId,
+        aliases: Vec<(ModuleId, DynamicCommandAlias)>,
+    ) -> Result<(), DynamicCommandChangeError> {
+        let mut routes = HashMap::with_capacity(aliases.len());
+        for (id, alias) in aliases {
+            if !valid_dynamic_command_alias(&alias)
+                || self.shared.registry.command_owner(&alias.name).is_some()
+            {
+                return Err(DynamicCommandChangeError::Rejected);
+            }
+            let Some(module) = self.shared.registry.get(&id) else {
+                return Err(DynamicCommandChangeError::Unavailable);
+            };
+            if routes.insert(alias.name, Arc::clone(module)).is_some() {
+                return Err(DynamicCommandChangeError::Rejected);
+            }
+        }
+        self.shared.dynamic_command_aliases.insert(guild, routes);
+        Ok(())
+    }
+
+    fn dashboard_context(
+        &self,
+        module_id: &ModuleId,
+        guild: GuildId,
+    ) -> Result<(Arc<dyn Module>, EventContext, Duration), DashboardActionError> {
+        if self.shared.closing.load(Ordering::Acquire)
+            || self
+                .shared
+                .config
+                .allowed_guilds
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(&guild))
+        {
+            return Err(DashboardActionError::Unavailable);
+        }
+        let module = self
+            .shared
+            .registry
+            .get(module_id)
+            .cloned()
+            .ok_or(DashboardActionError::Unsupported)?;
+        let settings = self
+            .shared
+            .settings
+            .module(guild, module_id)
+            .filter(|settings| settings.enabled)
+            .ok_or(DashboardActionError::NotFound)?;
+        let context = context_for(&self.shared, guild, module_id, &settings);
+        let timeout = self.shared.settings.limits(guild).handler_timeout;
+        Ok((module, context, timeout))
+    }
+
+    /// Reads dashboard data through the enabled module, with its usual scoped runtime context.
+    pub async fn dashboard_state(
+        &self,
+        module_id: &ModuleId,
+        guild: GuildId,
+        actor: Actor,
+        scope: DashboardScope,
+    ) -> Result<DashboardActionResult, DashboardActionError> {
+        let (module, context, timeout) = self.dashboard_context(module_id, guild)?;
+        self.call_dashboard(module_id, timeout, async move {
+            module.dashboard_state(context, actor, scope).await
+        })
+        .await
+    }
+
+    /// Reads the plugin's published-only public dashboard projection without a viewer identity.
+    pub async fn dashboard_public_state(
+        &self,
+        module_id: &ModuleId,
+        guild: GuildId,
+        scope: DashboardPublicScope,
+    ) -> Result<DashboardActionResult, DashboardActionError> {
+        let (module, context, timeout) = self.dashboard_context(module_id, guild)?;
+        self.call_dashboard(module_id, timeout, async move {
+            module.dashboard_public_state(context, scope).await
+        })
+        .await
+    }
+
+    /// Runs a dashboard action through the module that owns its state and permission checks.
+    pub async fn dashboard_action(
+        &self,
+        module_id: &ModuleId,
+        guild: GuildId,
+        actor: Actor,
+        request: DashboardActionRequest,
+    ) -> Result<DashboardActionResult, DashboardActionError> {
+        let (module, context, timeout) = self.dashboard_context(module_id, guild)?;
+        self.call_dashboard(module_id, timeout, async move {
+            module.dashboard_action(context, actor, request).await
+        })
+        .await
+    }
+
+    async fn call_dashboard<T, Fut>(
+        &self,
+        module_id: &ModuleId,
+        timeout: Duration,
+        future: Fut,
+    ) -> Result<T, DashboardActionError>
+    where
+        T: Send + 'static,
+        Fut: Future<Output = Result<T, DashboardActionError>> + Send + 'static,
+    {
+        if self.shared.is_wedged(module_id) || self.shared.abort.is_cancelled() {
+            return Err(DashboardActionError::Unavailable);
+        }
+        let mut task = tokio::spawn(future);
+        let result = tokio::select! {
+            biased;
+            () = self.shared.abort.cancelled() => None,
+            result = tokio::time::timeout(timeout, &mut task) => Some(result),
+        };
+        let Some(result) = result else {
+            if !stop_task(&mut task, module_id).await {
+                self.shared.wedge(module_id, task);
+            }
+            return Err(DashboardActionError::Unavailable);
+        };
+        match result {
+            Ok(Ok(Ok(value))) => Ok(value),
+            Ok(Ok(Err(error))) => Err(error),
+            Ok(Err(error)) => {
+                tracing::error!(
+                    module = %module_id,
+                    panic = error.is_panic(),
+                    "dashboard module handler failed"
+                );
+                Err(DashboardActionError::Internal(
+                    "the module handler failed".into(),
+                ))
+            }
+            Err(_) => {
+                if !stop_task(&mut task, module_id).await {
+                    self.shared.wedge(module_id, task);
+                }
+                Err(DashboardActionError::Unavailable)
+            }
+        }
     }
 
     /// Queues an event. Never blocks: when the guild already has `queue_capacity` events waiting or running, the event is dropped and counted.
@@ -1099,7 +1319,7 @@ impl Shared {
     }
 
     /// Takes note of an aborted call that did not stop: it blocks a thread and keeps running until it returns on its own. The module gets no new calls meanwhile, or each would take another worker thread until the runtime has none left.
-    fn wedge(&self, module: &ModuleId, task: JoinHandle<Result<Flow, ModuleError>>) {
+    fn wedge<T: Send + 'static>(&self, module: &ModuleId, task: JoinHandle<T>) {
         let count = Arc::clone(&*self.wedged.entry(module.clone()).or_default());
         let now = count.fetch_add(1, Ordering::AcqRel) + 1;
         metrics::gauge!("closure_module_wedged_calls", "module" => module.to_string())
@@ -1140,7 +1360,25 @@ async fn handle_event(
     match &**event {
         Event::Command(invocation) => {
             let owner = shared.registry.command_owner(&invocation.command);
-            handle_interaction(shared, guild, state, event, owner, invocation).await;
+            if owner.is_some() {
+                handle_interaction(shared, guild, state, event, owner, invocation, None).await;
+            } else {
+                let dynamic_owner = shared
+                    .dynamic_command_aliases
+                    .get(&guild)
+                    .and_then(|aliases| aliases.get(&invocation.command).map(Arc::clone));
+                let dynamic_alias = dynamic_owner.as_ref().map(|_| invocation.command.as_str());
+                handle_interaction(
+                    shared,
+                    guild,
+                    state,
+                    event,
+                    dynamic_owner.as_ref(),
+                    invocation,
+                    dynamic_alias,
+                )
+                .await;
+            }
             return None;
         }
         Event::ContextCommand(invocation) => {
@@ -1149,7 +1387,7 @@ async fn handle_event(
                 ContextTarget::Message(_) => ContextKind::Message,
             };
             let owner = shared.registry.context_owner(&invocation.command, kind);
-            handle_interaction(shared, guild, state, event, owner, invocation).await;
+            handle_interaction(shared, guild, state, event, owner, invocation, None).await;
             return None;
         }
         Event::Autocomplete(query) => {
@@ -1159,12 +1397,12 @@ async fn handle_event(
         }
         Event::Component(click) | Event::DirectMessageComponent(click) => {
             let owner = shared.registry.interaction_owner(&click.custom_id);
-            handle_interaction(shared, guild, state, event, owner, click).await;
+            handle_interaction(shared, guild, state, event, owner, click, None).await;
             return None;
         }
         Event::Modal(submission) => {
             let owner = shared.registry.interaction_owner(&submission.custom_id);
-            handle_interaction(shared, guild, state, event, owner, submission).await;
+            handle_interaction(shared, guild, state, event, owner, submission, None).await;
             return None;
         }
         Event::Scheduled(job) => {
@@ -1181,9 +1419,9 @@ async fn handle_event(
         .map(|(module, subscription)| (Arc::clone(module), subscription.priority))
         .collect();
     for group in receivers.chunk_by(|a, b| a.1 == b.1) {
-        let calls = group
-            .iter()
-            .map(|(module, _)| call_module(shared, guild, state, Arc::clone(module), event, None));
+        let calls = group.iter().map(|(module, _)| {
+            call_module(shared, guild, state, Arc::clone(module), event, None, None)
+        });
         let verdicts = futures_util::future::join_all(calls).await;
         if verdicts
             .iter()
@@ -1216,7 +1454,7 @@ async fn handle_job(
     let Some(module) = shared.registry.get(&job.module) else {
         return JobOutcome::Gone;
     };
-    match call_module(shared, guild, state, Arc::clone(module), event, None).await {
+    match call_module(shared, guild, state, Arc::clone(module), event, None, None).await {
         Verdict::Done(Flow::Stop) => JobOutcome::Dropped,
         Verdict::Done(_) => JobOutcome::Done,
         Verdict::Failed(error) => JobOutcome::Failed(error.to_string()),
@@ -1245,6 +1483,7 @@ async fn call_module(
     module: Arc<dyn Module>,
     event: &Arc<Event>,
     deadline: Option<Duration>,
+    dynamic_alias: Option<&str>,
 ) -> Verdict {
     let id = module.manifest().id.clone();
     let Some(settings) = shared.settings.module(guild, &id).filter(|s| s.enabled) else {
@@ -1271,12 +1510,17 @@ async fn call_module(
     };
     let started = Instant::now();
     let announcing = matches!(**event, Event::CaseCreated(_));
+    let dynamic_alias = dynamic_alias.map(str::to_owned);
     let mut task = tokio::spawn({
         let event = Arc::clone(event);
         async move {
-            HANDLING_CASE_ANNOUNCEMENT
-                .scope(announcing, module.on_event_flow(&ctx, &event))
-                .await
+            let handler = async move {
+                match dynamic_alias {
+                    Some(alias) => module.dispatch_dynamic_command(&ctx, &event, &alias).await,
+                    None => module.on_event_flow(&ctx, &event).await,
+                }
+            };
+            HANDLING_CASE_ANNOUNCEMENT.scope(announcing, handler).await
         }
     });
     let waited = tokio::select! {
@@ -1309,6 +1553,16 @@ async fn call_module(
     metrics::histogram!("closure_handler_seconds", "module" => id.to_string())
         .record(started.elapsed().as_secs_f64());
     verdict
+}
+
+fn valid_dynamic_command_alias(alias: &DynamicCommandAlias) -> bool {
+    let valid_key = |key: &str, max_len| {
+        (1..=max_len).contains(&key.len())
+            && key.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+    };
+    valid_key(&alias.name, 32) && valid_key(&alias.description_key, 64)
 }
 
 fn context_for(
@@ -1361,7 +1615,13 @@ fn context_for(
         id.clone(),
         guild,
     ))
-    .with_gateway_latency(Arc::clone(&shared.config.gateway_latency));
+    .with_gateway_latency(Arc::clone(&shared.config.gateway_latency))
+    .with_dashboard_base_url(shared.config.dashboard_base_url.clone())
+    .with_dynamic_command_changes(shared.config.dynamic_command_changes.clone());
+    let context = match &shared.config.integration_secrets {
+        Some(service) => context.with_integration_secrets(Arc::clone(service)),
+        None => context,
+    };
     match shared.config.bot_id {
         Some(bot) => context.with_bot(bot),
         None => context,
@@ -1414,6 +1674,7 @@ async fn handle_interaction(
     event: &Arc<Event>,
     owner: Option<&Arc<dyn Module>>,
     invocation: &dyn InteractionRef,
+    dynamic_alias: Option<&str>,
 ) {
     let locale = invocation
         .locale()
@@ -1442,9 +1703,19 @@ async fn handle_interaction(
         return;
     }
 
-    let verdict = call_module(shared, guild, state, Arc::clone(module), event, None).await;
+    let verdict = call_module(
+        shared,
+        guild,
+        state,
+        Arc::clone(module),
+        event,
+        None,
+        dynamic_alias,
+    )
+    .await;
     let message = match verdict {
-        Verdict::Done(_) => return,
+        Verdict::Done(flow) if dynamic_alias.is_none() || matches!(flow, Flow::Stop) => return,
+        Verdict::Done(_) => text(shared, locale, "error-command-failed"),
         Verdict::Failed(ModuleError::Discord(error)) => {
             user_message(shared.translator.as_ref(), locale, &error)
         }
@@ -1488,6 +1759,7 @@ async fn handle_autocomplete(
         Arc::clone(module),
         event,
         Some(AUTOCOMPLETE_DEADLINE),
+        None,
     )
     .await;
     if !matches!(verdict, Verdict::Done(_)) {
@@ -1629,6 +1901,27 @@ fn notice_in_channel(shared: &Shared, token: &InteractionToken, message: String,
             }
         }
     });
+}
+
+#[cfg(test)]
+mod dynamic_alias_validation_tests {
+    use super::*;
+
+    #[test]
+    fn validates_dynamic_alias_name_and_description_key() {
+        let alias = |name: &str, description_key: &str| DynamicCommandAlias {
+            name: name.to_owned(),
+            description_key: description_key.to_owned(),
+        };
+
+        assert!(valid_dynamic_command_alias(&alias("tag-1", "command-tag")));
+        assert!(!valid_dynamic_command_alias(&alias("Tag", "command-tag")));
+        assert!(!valid_dynamic_command_alias(&alias(
+            &"a".repeat(33),
+            "command-tag"
+        )));
+        assert!(!valid_dynamic_command_alias(&alias("tag", &"a".repeat(65))));
+    }
 }
 
 #[cfg(test)]

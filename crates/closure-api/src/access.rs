@@ -3,13 +3,23 @@ use std::pin::Pin;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
+    http::{HeaderMap, HeaderValue, Response, header},
+    response::IntoResponse,
 };
 use closure_core::event::{GuildId, UserId};
 use closure_core::permission::{Actor, GuildPermissions, Level, PermissionKey, Reason};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::{ApiState, config::guild_id, error::ApiError};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemberSearchResult {
+    pub id: String,
+    pub name: String,
+    pub display_name: String,
+}
 
 pub trait MemberAccess: Send + Sync {
     fn member(
@@ -17,6 +27,24 @@ pub trait MemberAccess: Send + Sync {
         guild: GuildId,
         user: UserId,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Actor>, ()>> + Send + '_>>;
+
+    fn search_members(
+        &self,
+        _guild: GuildId,
+        _query: String,
+        _limit: u16,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MemberSearchResult>, ()>> + Send + '_>> {
+        Box::pin(async { Err(()) })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemberSearchQuery {
+    scope_kind: String,
+    scope_id: String,
+    q: String,
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,6 +121,63 @@ pub(crate) async fn get_access(
     Ok(Json(
         evaluate(&state, guild, user, settings.permissions()).await?,
     ))
+}
+
+pub(crate) async fn search_members(
+    State(state): State<ApiState>,
+    Path(raw_guild): Path<u64>,
+    headers: HeaderMap,
+    Query(query): Query<MemberSearchQuery>,
+) -> Result<Response, ApiError> {
+    let (guild, viewer) = crate::tickets::viewer(&state, raw_guild, &headers).await?;
+    let search = query.q.trim();
+    let length = search.chars().count();
+    if !(1..=100).contains(&length) || search.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest(
+            "q must be 1 to 100 printable characters".into(),
+        ));
+    }
+    let scope = crate::ticket_actions::scope(&query.scope_kind, &query.scope_id)?;
+    match &scope {
+        closure_core::module::DashboardScope::Guild => {
+            if !viewer.can_manage {
+                let (_, current) = crate::config::stored(&state, guild).await?;
+                let settings = state.inner.settings.compiler().compile(&current)?;
+                let key = PermissionKey::new("dashboard.edit")
+                    .map_err(|error| ApiError::Internal(error.to_string()))?;
+                if !settings.permissions().check(&viewer.actor, &key).allowed {
+                    return Err(ApiError::Forbidden(
+                        "searching server members needs ticket management or dashboard edit access"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        closure_core::module::DashboardScope::Panel { .. } => {
+            let sink = state.ticket_actions.as_ref().ok_or(ApiError::Unavailable)?;
+            sink.state(guild, viewer.actor.clone(), scope.clone())
+                .await
+                .map_err(|error| crate::ticket_actions::map_error(error, false))?;
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "member search scope must be guild or panel".into(),
+            ));
+        }
+    }
+    let limit = query.limit.unwrap_or(25).clamp(1, 25) as u16;
+    let members = state
+        .inner
+        .access
+        .search_members(guild, search.to_owned(), limit)
+        .await
+        .map_err(|()| ApiError::Unavailable)?;
+    let truncated = members.len() == usize::from(limit);
+    let mut response = Json(json!({ "members": members, "truncated": truncated })).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 /// The actor's access level on the dashboard of `guild`, and whether `dashboard.edit` is allowed, from the stored settings.

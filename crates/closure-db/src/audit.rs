@@ -8,6 +8,7 @@ use crate::ids::{from_db, to_db};
 const MAX_ACTION_CHARS: usize = 64;
 const MAX_PAYLOAD_BYTES: usize = 16 * 1024;
 const MAX_RECENT: u32 = 500;
+const MAX_METADATA_SCAN: u32 = 10_001;
 
 /// Something the bot did that an administrator may later want to explain.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +28,14 @@ pub struct AuditRecord {
     pub actor: Option<UserId>,
     pub action: String,
     pub payload: serde_json::Value,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuditMetadata {
+    pub id: i64,
+    pub actor: Option<UserId>,
+    pub action: String,
     pub created_at: OffsetDateTime,
 }
 
@@ -63,6 +72,38 @@ impl Db {
         .fetch_one(&self.pool)
         .await?;
         Ok(id)
+    }
+
+    /// Returns only actor/time/action metadata for recent configuration updates.
+    /// The payload column is intentionally not read or returned.
+    pub async fn recent_config_audit_metadata(
+        &self,
+        guild: GuildId,
+        limit: u32,
+    ) -> Result<Vec<AuditMetadata>, DbError> {
+        let rows = sqlx::query_as::<_, (i64, Option<i64>, String, OffsetDateTime)>(
+            "SELECT id, actor, action, created_at
+             FROM audit_events
+             WHERE guild_id = $1
+               AND action = 'config.update'
+               AND created_at >= NOW() - INTERVAL '90 days'
+             ORDER BY created_at DESC, id DESC LIMIT $2",
+        )
+        .bind(to_db(guild)?)
+        .bind(i64::from(limit.clamp(1, MAX_METADATA_SCAN)))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|(id, actor, action, created_at)| {
+                Ok(AuditMetadata {
+                    id,
+                    actor: actor.map(from_db).transpose()?,
+                    action,
+                    created_at,
+                })
+            })
+            .collect()
     }
 
     /// The most recent events of a guild, newest first.

@@ -20,6 +20,7 @@ pub mod history;
 #[cfg(test)]
 #[path = "history_file_tests.rs"]
 mod history_file_tests;
+pub mod integration_secrets;
 pub mod interaction;
 pub mod latency;
 pub mod links;

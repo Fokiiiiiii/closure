@@ -19,6 +19,10 @@ pub enum DbError {
     IdOutOfRange(u64),
     #[error("database returned an invalid id {0}")]
     InvalidStoredId(i64),
+    #[error("an administrator is required to remove a configured integration secret")]
+    IntegrationSecretAdministratorRequired,
+    #[error("cannot retire an integration generation still present in the saved configuration")]
+    IntegrationSecretStillActive,
     /// A stored document no longer parses, e.g. after a schema change. Other guilds are
     /// unaffected; the caller decides whether to fall back to defaults.
     #[error("stored configuration of guild {guild} cannot be read: {source}")]
