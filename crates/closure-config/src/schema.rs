@@ -137,18 +137,28 @@ fn module_entries(
             .or_else(|| core_lookup(locale)("module-description"))
             .unwrap_or_else(|| manifest.description.clone());
         let mut config_schema = manifest.config_schema.clone();
-        closure_core::module::localize_descriptions(
-            &mut config_schema,
-            &manifest.catalogs,
-            locale,
-            &core_lookup(locale),
-        );
         let module_id = manifest.id.to_string();
         let refuse = |message: String| ConfigError::BadModuleSchema {
             module: module_id.clone(),
             message,
         };
         check_supported(&config_schema).map_err(refuse)?;
+
+        let core = core_lookup(locale);
+        let text_in = |wanted: Locale, key: &str| {
+            manifest
+                .catalogs
+                .iter()
+                .find(|catalog| catalog.locale == wanted)
+                .and_then(|catalog| closure_core::module::catalog_text(&catalog.source, key))
+        };
+        let lookup = |key: &str| {
+            text_in(locale, key)
+                .or_else(|| text_in(Locale::DEFAULT, key))
+                .or_else(|| core(key))
+        };
+        closure_core::module::resolve_descriptions(&mut config_schema, &lookup);
+        localize_title_annotations(&mut config_schema, &lookup);
         let mut properties = Map::new();
         // The parser also reads `"yes"` and the like as a boolean.
         properties.insert(
@@ -193,6 +203,57 @@ fn module_entries(
         );
     }
     Ok(module_properties)
+}
+
+/// Resolves localized schema titles and enum labels without changing the values accepted by the
+/// schema. The label map is an annotation beside an unchanged string enum.
+fn localize_title_annotations(schema: &mut Value, lookup: &dyn Fn(&str) -> Option<String>) {
+    match schema {
+        Value::Object(map) => {
+            let title_key = map
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|key| key.starts_with("config-"))
+                .map(str::to_owned);
+            if let Some(key) = title_key
+                && let Some(text) = lookup(&key)
+            {
+                map.insert("title".to_owned(), Value::String(text));
+            }
+
+            let enum_label_keys = map
+                .get("x-enum-labels")
+                .and_then(Value::as_object)
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|(value, key)| {
+                            key.as_str()
+                                .filter(|key| key.starts_with("config-"))
+                                .map(|key| (value.clone(), key.to_owned()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if let Some(Value::Object(labels)) = map.get_mut("x-enum-labels") {
+                for (value, key) in enum_label_keys {
+                    if let Some(text) = lookup(&key) {
+                        labels.insert(value, Value::String(text));
+                    }
+                }
+            }
+
+            for inner in map.values_mut() {
+                localize_title_annotations(inner, lookup);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                localize_title_annotations(item, lookup);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Where the document wants a number or a boolean, the parser also takes the text of one (`"1"`,
@@ -484,6 +545,30 @@ fn check_ui_hints(hints: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn check_enum_labels(schema: &Map<String, Value>, labels: &Value) -> Result<(), String> {
+    let Value::Object(labels) = labels else {
+        return Err("x-enum-labels must be an object".to_owned());
+    };
+    let Some(Value::Array(enum_items)) = schema.get("enum") else {
+        return Err("x-enum-labels requires an enum".to_owned());
+    };
+    let enum_values: BTreeSet<&str> = enum_items.iter().filter_map(Value::as_str).collect();
+    if enum_values.is_empty() || enum_values.len() != enum_items.len() {
+        return Err("x-enum-labels requires distinct string enum values".to_owned());
+    }
+    if labels.is_empty() {
+        return Err("x-enum-labels cannot be empty".to_owned());
+    }
+    for (value, key) in labels {
+        if !enum_values.contains(value.as_str())
+            || key.as_str().is_none_or(|key| !key.starts_with("config-"))
+        {
+            return Err("x-enum-labels must map enum values to config catalog keys".to_owned());
+        }
+    }
+    Ok(())
+}
+
 /// Looks at the places where a schema can have keywords. What a keyword holds that is not a schema
 /// (`const`, `enum`, `default`, annotations, keywords nobody here knows) is data and left alone.
 fn scan(schema: &Value, top: bool) -> Result<(), String> {
@@ -511,6 +596,9 @@ fn scan(schema: &Value, top: bool) -> Result<(), String> {
         }
         if keyword == "x-ui" {
             check_ui_hints(inner)?;
+        }
+        if keyword == "x-enum-labels" {
+            check_enum_labels(map, inner)?;
         }
         if SCHEMA_MAPS.contains(&keyword) {
             if let Value::Object(named) = inner {
@@ -2037,5 +2125,68 @@ mod tests {
                 Some(&json!(expected))
             );
         }
+    }
+
+    #[test]
+    fn schema_titles_and_enum_labels_use_catalog_fallbacks_without_changing_values() {
+        let mut manifest = ModuleManifest::new(ModuleId::new("warn").unwrap(), "Warn", "0.1.0");
+        manifest.config_schema = json!({
+            "type": "object",
+            "properties": {
+                "form_title": {
+                    "type": "string",
+                    "title": "config-warn-form-title-label"
+                },
+                "panel_display": {
+                    "type": "string",
+                    "enum": ["buttons", "select"],
+                    "x-enum-labels": {
+                        "buttons": "config-warn-panel-display-buttons",
+                        "select": "config-warn-panel-display-select"
+                    }
+                }
+            }
+        });
+        let manifest = manifest
+            .catalog(
+                Locale::En,
+                "config-warn-form-title-label = Form title
+config-warn-panel-display-buttons = Buttons
+config-warn-panel-display-select = Select",
+            )
+            .catalog(
+                Locale::Ja,
+                "config-warn-form-title-label = フォーム名
+config-warn-panel-display-buttons = ボタン",
+            );
+        let module: Arc<dyn Module> = Arc::new(StubModule(manifest));
+        let registry = ModuleRegistry::new(vec![module]).unwrap();
+
+        let schema = document_schema_in(&registry, View::Advanced, Locale::Ja).unwrap();
+        assert!(
+            holds_member(&schema, "title", &json!("フォーム名")),
+            "{schema}"
+        );
+        assert!(
+            holds_member(
+                &schema,
+                "x-enum-labels",
+                &json!({ "buttons": "ボタン", "select": "Select" })
+            ),
+            "{schema}"
+        );
+        assert!(
+            holds_member(&schema, "enum", &json!(["buttons", "select"])),
+            "{schema}"
+        );
+
+        assert!(
+            check_supported(&json!({
+                "type": "string",
+                "enum": ["buttons", "select"],
+                "x-enum-labels": { "other": "config-warn-panel-display-other" }
+            }))
+            .is_err()
+        );
     }
 }
