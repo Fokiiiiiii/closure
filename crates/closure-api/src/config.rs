@@ -238,7 +238,7 @@ pub(crate) async fn put_config(
         }
     }
     let (overrides, active_generations, retirements) =
-        normalize_integration_generations(&guild, compiler, &current, overrides)?;
+        normalize_integration_generations(guild, compiler, &current, &overrides)?;
     let can_retire_secrets = if retirements.is_empty() || actor.is_none() {
         false
     } else {
@@ -260,10 +260,10 @@ pub(crate) async fn put_config(
 
 /// Adds host-generated immutable generations to ticket integrations and returns active/retired scopes.
 fn normalize_integration_generations(
-    guild: &GuildId,
+    guild: GuildId,
     compiler: &ConfigCompiler,
     current: &GuildOverrides,
-    overrides: GuildOverrides,
+    overrides: &GuildOverrides,
 ) -> Result<
     (
         GuildOverrides,
@@ -273,9 +273,9 @@ fn normalize_integration_generations(
     ApiError,
 > {
     let current_settings = compiler.compile(current)?;
-    let current_generations = integration_generations(*guild, &current_settings)?;
+    let current_generations = integration_generations(guild, &current_settings)?;
     let mut serialized =
-        serde_json::to_value(&overrides).map_err(|error| ApiError::Internal(error.to_string()))?;
+        serde_json::to_value(overrides).map_err(|error| ApiError::Internal(error.to_string()))?;
 
     if let Some(integrations_value) = serialized
         .get_mut("modules")
@@ -341,7 +341,7 @@ fn normalize_integration_generations(
     let overrides: GuildOverrides = serde_json::from_value(serialized)
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     let next_settings = compiler.compile(&overrides)?;
-    let active_generations = integration_generations(*guild, &next_settings)?;
+    let active_generations = integration_generations(guild, &next_settings)?;
     let retirements = current_generations
         .iter()
         .filter(|(id, old)| {

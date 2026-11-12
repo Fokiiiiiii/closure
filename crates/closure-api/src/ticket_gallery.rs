@@ -655,7 +655,7 @@ fn valid_text(value: &str, label: &str, max_chars: usize) -> Result<String, ApiE
     if value.is_empty()
         || value.chars().count() > max_chars
         || value.chars().any(char::is_control)
-        || has_server_reference(&value)
+        || has_server_reference(value)
     {
         return Err(ApiError::BadRequest(format!("{label} is invalid")));
     }

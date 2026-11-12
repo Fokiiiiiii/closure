@@ -491,7 +491,6 @@ pub(super) fn map_error(error: DashboardActionError, action: bool) -> ApiError {
         DashboardActionError::PreconditionFailed { current } => {
             ApiError::PreconditionFailed { current }
         }
-        DashboardActionError::Unavailable => ApiError::Unavailable,
         DashboardActionError::Internal(detail) => ApiError::Internal(detail),
     }
 }
