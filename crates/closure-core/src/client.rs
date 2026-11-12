@@ -259,7 +259,7 @@ impl ApiClient {
         user_id: UserId,
         module_id: ModuleId,
         custom_ids: Vec<String>,
-        message: Message,
+        message: Box<Message>,
     ) -> Result<Outcome, DiscordError> {
         let route = DirectMessageComponentRoute {
             message_id: message.id,
