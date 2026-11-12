@@ -2026,8 +2026,8 @@ async fn ticket_api_pages_open_tickets_and_scopes_access_to_guild_and_panel(pool
                 "number": channel - 100,
                 "opener": 10,
                 "claimed_by": null,
-                "created": channel as i64,
-                "closing": if channel == 103 { Some(channel as i64) } else { None },
+                "created": i64::from(channel),
+                "closing": if channel == 103 { Some(i64::from(channel)) } else { None },
                 "staff_roles": roles,
                 "panel": { "id": "support-a" }
             }),

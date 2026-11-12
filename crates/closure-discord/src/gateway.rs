@@ -1053,6 +1053,11 @@ fn guild_to_request(event: &Event, limit: u64) -> Option<Id<GuildMarker>> {
     }
 }
 
+#[cfg(test)]
+fn handle_event(context: &ShardContext, id: ShardId, latency: Option<Duration>, event: &Event) {
+    handle_event_with_modal_components(context, id, latency, event, None);
+}
+
 fn handle_event_with_modal_components(
     context: &ShardContext,
     id: ShardId,

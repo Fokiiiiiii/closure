@@ -180,11 +180,10 @@ impl closure_api::notifications::DirectMessageSink for NotificationDiscordSink {
             };
             match self.api.execute(action).await {
                 Ok(Outcome::Message(_)) => Ok(()),
-                Ok(_) => Err(closure_api::notifications::DirectMessageError::Permanent),
                 Err(DiscordError::RateLimited { .. } | DiscordError::Transient(_)) => {
                     Err(closure_api::notifications::DirectMessageError::Retryable)
                 }
-                Err(_) => Err(closure_api::notifications::DirectMessageError::Permanent),
+                Ok(_) | Err(_) => Err(closure_api::notifications::DirectMessageError::Permanent),
             }
         })
     }
@@ -340,7 +339,7 @@ impl closure_api::MemberAccess for CachedAccess {
     > {
         Box::pin(async move {
             self.ensure_ready(guild)?;
-            let members = match self
+            let Ok(Outcome::Members(members)) = self
                 .api
                 .execute(Action::SearchMembers {
                     guild_id: guild,
@@ -348,9 +347,8 @@ impl closure_api::MemberAccess for CachedAccess {
                     limit,
                 })
                 .await
-            {
-                Ok(Outcome::Members(members)) => members,
-                _ => return Err(()),
+            else {
+                return Err(());
             };
             self.ensure_ready(guild)?;
             Ok(members
@@ -806,6 +804,8 @@ async fn synchronize_dynamic_command_guild(
     Ok(())
 }
 
+// shortcut: keep the sync worker dependencies explicit; bundle only if another is added.
+#[allow(clippy::too_many_arguments)]
 async fn run_dynamic_command_sync(
     mut requests: mpsc::Receiver<DynamicCommandSyncRequest>,
     retry_requests: mpsc::Sender<DynamicCommandSyncRequest>,
@@ -863,7 +863,7 @@ async fn run_dynamic_command_sync(
                     () = tokio::time::sleep(Duration::from_secs(delay_seconds)) => {}
                 }
                 tokio::select! {
-                    () = shutdown.cancelled() => return,
+                    () = shutdown.cancelled() => (),
                     _ = retry_requests
                         .send(DynamicCommandSyncRequest {
                             guild_id,
@@ -934,6 +934,8 @@ async fn clear_guild_commands(http: &Client, application_id: Id<ApplicationMarke
 }
 
 /// Starts the HTTP API, or reports that it is disabled when no admin token was given.
+// shortcut: keep API startup dependencies explicit; bundle only if this grows further.
+#[allow(clippy::too_many_arguments)]
 async fn start_api(
     args: &Args,
     core: &Core,
@@ -1051,6 +1053,8 @@ struct Started {
 }
 
 /// Starts everything that talks to Discord and waits until the process is asked to stop; returns whether the gateway stopped on its own. Whatever was started before an error is left in `started`, so the caller can still shut it down in order.
+// shortcut: keep startup ordering visible; split a phase only if it obscures cleanup.
+#[allow(clippy::too_many_lines)]
 async fn serve(
     args: &Args,
     core: &Core,
@@ -1071,7 +1075,7 @@ async fn serve(
             .with_webhooks(crate::webhooks::load(&args.webhook_file)?)
             .with_cache(Arc::new(InMemoryCacheView(Arc::clone(&cache)))),
     );
-    let integration_secrets = integration_secret_service(&db)?;
+    let integration_secrets = integration_secret_service(db)?;
     let dashboard_base_url = dashboard_base_url()?;
     let (dynamic_command_changes, dynamic_command_receiver, dynamic_command_requests) =
         if args.skip_command_registration {

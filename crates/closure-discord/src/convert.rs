@@ -801,6 +801,11 @@ pub(crate) struct Before {
     pub(crate) stage: Option<StageInfo>,
 }
 
+#[cfg(test)]
+pub(crate) fn events(gateway: &Gateway, before: &Before) -> Vec<Event> {
+    events_with_modal_components(gateway, before, None)
+}
+
 pub(crate) fn events_with_modal_components(
     gateway: &Gateway,
     before: &Before,
@@ -1537,7 +1542,7 @@ mod tests {
         assert!(matches!(
             events.as_slice(),
             [Event::ThreadDeleted { guild_id, thread_id, parent_id }]
-                if *guild_id == Id::new(1) && *thread_id == Id::new(20) && *parent_id == Id::new(2)
+                if guild_id == Id::new(1) && thread_id == Id::new(20) && parent_id == Id::new(2)
         ));
     }
 
