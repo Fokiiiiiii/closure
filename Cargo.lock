@@ -522,7 +522,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "twilight-http",
- "twilight-model",
+ "twilight-model 0.18.0",
  "url",
 ]
 
@@ -552,7 +552,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -580,7 +580,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -596,7 +596,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
  "url",
  "zeroize",
 ]
@@ -616,7 +616,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -645,7 +645,7 @@ dependencies = [
  "twilight-cache-inmemory",
  "twilight-gateway",
  "twilight-http",
- "twilight-model",
+ "twilight-model 0.18.0",
  "twilight-util",
 ]
 
@@ -675,7 +675,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -689,7 +689,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -703,7 +703,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -717,7 +717,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -739,7 +739,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -765,7 +765,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -779,7 +779,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -793,7 +793,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -808,7 +808,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -823,7 +823,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -837,7 +837,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -852,7 +852,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
  "url",
 ]
 
@@ -867,7 +867,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -894,7 +894,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -908,7 +908,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -931,7 +931,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
  "twilight-util",
 ]
 
@@ -946,7 +946,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -1008,7 +1008,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.18.0",
  "url",
 ]
 
@@ -1035,7 +1035,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "twilight-http",
- "twilight-model",
+ "twilight-model 0.18.0",
 ]
 
 [[package]]
@@ -2871,7 +2871,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "twilight-model",
+ "twilight-model 0.17.1",
 ]
 
 [[package]]
@@ -2889,7 +2889,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-service",
- "twilight-model",
+ "twilight-model 0.17.1",
  "twilight-util",
 ]
 
@@ -2921,7 +2921,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.17.1",
  "twilight-util",
 ]
 
@@ -2937,7 +2937,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "twilight-model",
+ "twilight-model 0.17.1",
  "twilight-util",
 ]
 
@@ -2954,7 +2954,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "twilight-model",
+ "twilight-model 0.17.1",
  "twilight-util",
  "unicode-normalization",
 ]
@@ -4410,7 +4410,7 @@ dependencies = [
  "bitflags",
  "dashmap",
  "serde",
- "twilight-model",
+ "twilight-model 0.17.1",
 ]
 
 [[package]]
@@ -4431,7 +4431,7 @@ dependencies = [
  "tracing",
  "twilight-gateway-queue",
  "twilight-http",
- "twilight-model",
+ "twilight-model 0.17.1",
 ]
 
 [[package]]
@@ -4464,7 +4464,7 @@ dependencies = [
  "tokio",
  "tracing",
  "twilight-http-ratelimiting",
- "twilight-model",
+ "twilight-model 0.17.1",
  "twilight-validate",
 ]
 
@@ -4494,12 +4494,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "twilight-model"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fdf271db1a859666b6ce10bb1bba03bf8d2bc55e13cdb1f70da75a7b8ae962"
+dependencies = [
+ "bitflags",
+ "serde",
+ "serde-value",
+ "serde_repr",
+ "time",
+]
+
+[[package]]
 name = "twilight-util"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e71de79d48ce27aba1f591b10c84677f1317489c2ea154d9b8ed01efa8bceb53"
 dependencies = [
- "twilight-model",
+ "twilight-model 0.17.1",
  "twilight-validate",
 ]
 
@@ -4509,7 +4522,7 @@ version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6a27472e023e3841d1c4e4e20253ed796e8440aada8b5205b8544f1172e661d"
 dependencies = [
- "twilight-model",
+ "twilight-model 0.17.1",
 ]
 
 [[package]]
