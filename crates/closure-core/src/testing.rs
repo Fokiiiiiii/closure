@@ -4,13 +4,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
+use twilight_model::channel::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType};
 use twilight_model::channel::{Channel, Message};
 use twilight_model::guild::audit_log::{AuditLog, AuditLogEntry};
 use twilight_model::guild::invite::Invite;
 use twilight_model::guild::{Guild, Member, Role};
 
 use crate::action::{
-    Action, AuditLogQuery, InteractionResponse, MessageCursor, NewChannel, Outcome, OverwriteTarget,
+    Action, AuditLogQuery, InteractionResponse, MessageCursor, NewChannel, Outcome, OverwriteSpec,
+    OverwriteTarget,
 };
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
@@ -67,6 +69,30 @@ fn created_channel(id: u64, name: &str, parent: Option<ChannelId>, topic: Option
         "parent_id": parent.map(|parent| parent.get().to_string()),
     }))
     .unwrap_or_else(|error| unreachable!("a channel of the test double is valid: {error}"))
+}
+
+fn channel_overwrite_matches(overwrite: &PermissionOverwrite, target: OverwriteTarget) -> bool {
+    match target {
+        OverwriteTarget::Role(role) => {
+            overwrite.kind == PermissionOverwriteType::Role && overwrite.id.get() == role.get()
+        }
+        OverwriteTarget::Member(user) => {
+            overwrite.kind == PermissionOverwriteType::Member && overwrite.id.get() == user.get()
+        }
+    }
+}
+
+fn new_channel_overwrite(spec: &OverwriteSpec) -> PermissionOverwrite {
+    let (id, kind) = match spec.target {
+        OverwriteTarget::Role(role) => (role.cast(), PermissionOverwriteType::Role),
+        OverwriteTarget::Member(user) => (user.cast(), PermissionOverwriteType::Member),
+    };
+    PermissionOverwrite {
+        allow: Some(spec.allow),
+        deny: Some(spec.deny),
+        id,
+        kind,
+    }
 }
 
 fn created_role(id: u64, name: &str) -> Role {
@@ -309,6 +335,44 @@ impl MockApi {
                 .map_or(Outcome::None, |(channel, _)| self.sent(channel))),
             Action::GetAuditLog { query, .. } => {
                 Ok(Outcome::AuditLog(Box::new(self.audit_log_for(query))))
+            }
+            Action::SetPermissionOverwrite {
+                channel_id,
+                overwrite,
+                ..
+            } => {
+                let replacement = new_channel_overwrite(overwrite);
+                let mut guild_channels = lock(&self.guild_channels);
+                if let Some(channel) = guild_channels
+                    .values_mut()
+                    .flatten()
+                    .find(|channel| channel.id == *channel_id)
+                {
+                    let overwrites = channel.permission_overwrites.get_or_insert_with(Vec::new);
+                    if let Some(index) = overwrites
+                        .iter()
+                        .position(|current| channel_overwrite_matches(current, overwrite.target))
+                    {
+                        overwrites[index] = replacement;
+                    } else {
+                        overwrites.push(replacement);
+                    }
+                }
+                Ok(Outcome::None)
+            }
+            Action::DeletePermissionOverwrite {
+                channel_id, target, ..
+            } => {
+                let mut guild_channels = lock(&self.guild_channels);
+                if let Some(channel) = guild_channels
+                    .values_mut()
+                    .flatten()
+                    .find(|channel| channel.id == *channel_id)
+                    && let Some(overwrites) = channel.permission_overwrites.as_mut()
+                {
+                    overwrites.retain(|current| !channel_overwrite_matches(current, *target));
+                }
+                Ok(Outcome::None)
             }
             // Writes that return a new object are recorded but answered with `Outcome::None`.
             _ => Ok(Outcome::None),
