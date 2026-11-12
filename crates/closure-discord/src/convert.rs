@@ -21,7 +21,6 @@ use twilight_model::application::interaction::InteractionDataResolved;
 use twilight_model::application::interaction::application_command::{
     CommandDataOption, CommandOptionValue as TwilightValue,
 };
-use twilight_model::application::interaction::modal::ModalInteractionComponent;
 use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
 use twilight_model::channel::message::sticker::Sticker;
 use twilight_model::channel::message::{EmojiReactionType, Message, MessageType};
@@ -565,7 +564,7 @@ fn modal_component(
                     check_modal_string(value, 1, 100)?;
                     Ok(value.to_owned())
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, &'static str>>()?;
             if values.iter().collect::<BTreeSet<_>>().len() != values.len() {
                 return Err("a checkbox group answer contains duplicate values");
             }

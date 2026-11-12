@@ -125,6 +125,7 @@ impl IntegrationSecretBackend for Db {
         bytes.map(SealedIntegrationSecret::from_storage).transpose()
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn apply(
         &self,
         scope: &IntegrationSecretScope,

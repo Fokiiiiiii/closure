@@ -46,6 +46,7 @@ const PREFERENCES_SELECT_FOR_UPDATE: &str = "
     WHERE user_id = $1
     FOR UPDATE";
 
+#[allow(clippy::struct_excessive_bools)] // Independent stored preference switches.
 #[derive(sqlx::FromRow)]
 struct PreferencesRow {
     user_id: i64,
@@ -91,6 +92,7 @@ impl From<PreferencesRow> for StoredNotificationPreferences {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)] // Independent notification preference switches.
 #[derive(Clone)]
 pub struct StoredNotificationPreferences {
     pub user_id: i64,
@@ -110,6 +112,14 @@ pub struct StoredNotificationPreferences {
     pub email_requested_at: Option<i64>,
     pub last_email_request_key: Option<String>,
     pub last_email_request_fingerprint: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for StoredNotificationPreferences {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Do not expose user IDs, email ciphertext, or verification state.
+        f.debug_struct("StoredNotificationPreferences")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for StoredNotificationPreferences {
@@ -150,6 +160,13 @@ pub struct NotificationItem {
     pub read_at: Option<i64>,
 }
 
+impl std::fmt::Debug for NotificationItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Notification text may contain user-provided content.
+        f.debug_struct("NotificationItem").finish_non_exhaustive()
+    }
+}
+
 #[derive(FromRow)]
 struct NotificationRow {
     id: i64,
@@ -188,6 +205,13 @@ pub struct NotificationPage {
     pub notifications: Vec<NotificationItem>,
     pub unread_count: i64,
     pub next_cursor: Option<i64>,
+}
+
+impl std::fmt::Debug for NotificationPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Nested preferences and notifications are intentionally redacted.
+        f.debug_struct("NotificationPage").finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -244,6 +268,14 @@ pub struct ClaimedNotificationEvent {
     pub in_app_done: bool,
     pub discord_dm_done: bool,
     pub email_done: bool,
+}
+
+impl std::fmt::Debug for ClaimedNotificationEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Delivery records contain recipient IDs and notification content.
+        f.debug_struct("ClaimedNotificationEvent")
+            .finish_non_exhaustive()
+    }
 }
 
 impl TryFrom<OutboxRow> for ClaimedNotificationEvent {
@@ -532,6 +564,8 @@ impl Db {
         Ok(revision)
     }
 
+    // Keep independent verification fields explicit at the database boundary.
+    #[allow(clippy::too_many_arguments)]
     pub async fn begin_email_verification(
         &self,
         user: u64,
@@ -782,6 +816,8 @@ impl Db {
         Ok(revision)
     }
 
+    // These payload fields map independently to the notification row.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_gallery_notification(
         &self,
         recipient_id: u64,

@@ -387,8 +387,10 @@ impl Db {
         } else {
             Vec::new()
         };
-        let next_offset = (filter.offset + (templates.len() as i64) < total)
-            .then_some(filter.offset + templates.len() as i64);
+        let next_offset = i64::try_from(templates.len())
+            .ok()
+            .and_then(|page_len| filter.offset.checked_add(page_len))
+            .filter(|next_offset| *next_offset < total);
         Ok(GalleryPage {
             featured,
             templates,
@@ -402,12 +404,12 @@ impl Db {
         &self,
         id: i64,
     ) -> Result<Option<GalleryTemplate>, GalleryError> {
-        let row: Option<TemplateRow> = sqlx::query_as(concat!(
+        let row: Option<TemplateRow> = sqlx::query_as(
             "SELECT id, kind, title, description, category, tags, payload, author_name, import_count,
                     extract(epoch FROM COALESCE(published_at, created_at))::bigint, featured
              FROM ticket_gallery_templates
              WHERE id = $1 AND status = 'approved'"
-        ))
+        )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -597,6 +599,7 @@ impl Db {
         Ok(submission)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn ticket_gallery_review(
         &self,
         reviewer_id: i64,

@@ -65,6 +65,7 @@ impl Db {
 
     /// Saves configuration and retires removed integration generations in the same transaction.
     /// `can_retire_secrets` must come from a fresh, verified guild owner/admin actor.
+    #[allow(clippy::too_many_arguments)]
     pub async fn save_config_and_retire_integration_generations(
         &self,
         guild: GuildId,
@@ -87,6 +88,7 @@ impl Db {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn save_config_with_retirements(
         &self,
         guild: GuildId,

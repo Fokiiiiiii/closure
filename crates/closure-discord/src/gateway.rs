@@ -23,7 +23,7 @@ use tokio_util::task::TaskTracker;
 use twilight_cache_inmemory::{InMemoryCache, ResourceType};
 use twilight_gateway::error::{ReceiveMessageError, ReceiveMessageErrorType};
 use twilight_gateway::{
-    CloseFrame, Config, Event, EventTypeFlags, Intents, Message, Shard, ShardId, StreamExt as _,
+    CloseFrame, Config, Event, EventTypeFlags, Intents, Message, Shard, ShardId,
     create_recommended, parse,
 };
 use twilight_http::Client;
@@ -838,7 +838,6 @@ async fn next_event_with_modal_raw(
                     Err(error) => return Some(Err(error)),
                 }
             }
-            Ok(_) => continue,
         }
     }
 }
