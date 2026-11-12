@@ -237,6 +237,7 @@ pub fn text_input(
 
 /// Wraps one modal input in Discord's current Label component. A legacy one-input row returned
 /// by `text_input` is unwrapped for use as the Label's child.
+#[allow(deprecated)]
 #[must_use]
 pub fn label(
     label: impl Into<String>,
@@ -247,7 +248,6 @@ pub fn label(
         ModalComponent::Component(Component::ActionRow(row)) => {
             if let [Component::TextInput(input)] = row.components.as_slice() {
                 let mut input = input.clone();
-                #[allow(deprecated)]
                 input.label = None;
                 ModalComponent::from(Component::TextInput(input))
             } else if let [child] = row.components.as_slice() {
