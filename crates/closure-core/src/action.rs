@@ -177,6 +177,8 @@ pub struct ChannelPatch {
     pub parent_id: Option<Option<ChannelId>>,
 }
 
+// Preserve missing, explicit null, and a value for the tri-state parent field.
+#[allow(clippy::option_option, clippy::ref_option)]
 mod optional_channel_parent {
     use super::ChannelId;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -513,12 +515,6 @@ impl<'de> Deserialize<'de> for ModalComponent {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let component_type = value
-            .get("type")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| serde::de::Error::custom("modal component type is missing"))?;
-
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct LabelValue {
@@ -551,6 +547,12 @@ impl<'de> Deserialize<'de> for ModalComponent {
             max_values: Option<u8>,
             options: Vec<ModalOption>,
         }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let component_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| serde::de::Error::custom("modal component type is missing"))?;
 
         match component_type {
             18 => {
@@ -706,7 +708,7 @@ pub enum Action {
         channel_id: ChannelId,
         message_id: MessageId,
     },
-    /// Privately to a member of guild_id: the host checks membership before sending. Buttons
+    /// Privately to a member of `guild_id`: the host checks membership before sending. Buttons
     /// are routed only from their saved message record to a direct-message handler.
     SendDirectMessage {
         guild_id: GuildId,
@@ -1464,7 +1466,7 @@ fn check_modal_input(
             check_modal_custom_id(custom_id, custom_ids)?;
             check_modal_options(options, 1, 10)?;
             let option_count = u8::try_from(options.len()).unwrap_or(u8::MAX);
-            let min = min_values.unwrap_or(if *required == Some(false) { 0 } else { 1 });
+            let min = min_values.unwrap_or(u8::from(*required != Some(false)));
             let max = max_values.unwrap_or(option_count);
             ensure(max >= 1 && max <= option_count && min <= max, || {
                 "checkbox group selection limits must fit its options".into()
@@ -1547,6 +1549,7 @@ fn check_modal_options(
 }
 
 impl Action {
+    #[must_use]
     pub fn custom_ids(&self) -> Vec<&str> {
         fn of(components: &[Component]) -> Vec<&str> {
             let mut found = Vec::new();
@@ -2023,6 +2026,7 @@ impl Action {
 
     /// Every channel the action targets or refers to; their guilds have to be looked up (see [`DiscordApi::channel_guild`](crate::client::DiscordApi::channel_guild)).
     /// The match has no wildcard arm, so a new action cannot be added without deciding this.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn channels(&self) -> Vec<ChannelId> {
         match self {

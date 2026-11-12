@@ -364,7 +364,7 @@ pub struct ModalSubmission {
     pub locale: Option<Locale>,
     /// The id the module gave the modal; it starts with the id of the module.
     pub custom_id: String,
-    /// The text of each TextInput, by the input's id, in the order of the modal.
+    /// The text of each `TextInput`, by the input's id, in the order of the modal.
     pub fields: Vec<(String, String)>,
     /// Typed values of the supported interactive modal components.
     #[serde(default)]

@@ -261,7 +261,7 @@ impl fmt::Debug for DirectMessageComponentRoutes {
     }
 }
 
-const DM_COMPONENT_ROUTE_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+const DM_COMPONENT_ROUTE_TTL: Duration = Duration::from_hours(8760);
 
 impl DirectMessageComponentRoutes {
     #[must_use]

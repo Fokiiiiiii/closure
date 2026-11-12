@@ -247,6 +247,7 @@ pub fn label(
         ModalComponent::Component(Component::ActionRow(row)) => {
             if let [Component::TextInput(input)] = row.components.as_slice() {
                 let mut input = input.clone();
+                #[allow(deprecated)]
                 input.label = None;
                 ModalComponent::from(Component::TextInput(input))
             } else if let [child] = row.components.as_slice() {

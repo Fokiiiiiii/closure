@@ -782,6 +782,7 @@ impl EventContext {
     }
 
     /// Builds a token-free link to this guild’s authenticated ticket history page.
+    #[must_use]
     pub fn dashboard_ticket_history_url(&self, channel_id: u64) -> Option<String> {
         if channel_id == 0 {
             return None;

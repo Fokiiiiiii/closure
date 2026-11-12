@@ -213,64 +213,10 @@ impl ApiClient {
                 Some((routes, guild_id, user_id, module_id, custom_ids)),
                 Ok(Outcome::Message(message)),
             ) => {
-                let route = DirectMessageComponentRoute {
-                    message_id: message.id,
-                    channel_id: message.channel_id,
-                    guild_id,
-                    module_id,
-                    user_id,
-                    custom_ids,
-                };
-                match routes.record(&route).await {
-                    Ok(()) => Ok(Outcome::Message(message)),
-                    Err(error) => {
-                        tracing::error!(
-                            guild = %guild_id,
-                            module = %route.module_id,
-                            user = %user_id,
-                            message = %route.message_id,
-                            channel = %route.channel_id,
-                            %error,
-                            "direct message sent but component route could not be saved"
-                        );
-                        // This host-only compensation targets only the DM message returned above.
-                        // It does not grant the module DeleteMessages or accept a channel from it.
-                        let cleanup = match crate::action::Reason::new(
-                            "DM component route registration failed",
-                        ) {
-                            Ok(reason) => {
-                                self.api
-                                    .execute(Action::DeleteMessage {
-                                        channel_id: route.channel_id,
-                                        message_id: route.message_id,
-                                        reason,
-                                    })
-                                    .await
-                            }
-                            Err(error) => Err(error),
-                        };
-                        match cleanup {
-                            Ok(_) => tracing::warn!(
-                                guild = %guild_id,
-                                module = %route.module_id,
-                                user = %user_id,
-                                message = %route.message_id,
-                                channel = %route.channel_id,
-                                "unroutable DM cleanup request completed"
-                            ),
-                            Err(cleanup_error) => tracing::error!(
-                                guild = %guild_id,
-                                module = %route.module_id,
-                                user = %user_id,
-                                message = %route.message_id,
-                                channel = %route.channel_id,
-                                %cleanup_error,
-                                "DM route save and message cleanup failed; the button remains unroutable"
-                            ),
-                        }
-                        Err(DiscordError::DirectMessageComponentsNotRoutable)
-                    }
-                }
+                self.record_dm_component_route(
+                    routes, guild_id, user_id, module_id, custom_ids, message,
+                )
+                .await
             }
             (
                 Some((_, guild_id, user_id, module_id, _)),
@@ -304,6 +250,73 @@ impl ApiClient {
             "discord action"
         );
         result
+    }
+
+    async fn record_dm_component_route(
+        &self,
+        routes: Arc<DirectMessageComponentRoutes>,
+        guild_id: GuildId,
+        user_id: UserId,
+        module_id: ModuleId,
+        custom_ids: Vec<String>,
+        message: Message,
+    ) -> Result<Outcome, DiscordError> {
+        let route = DirectMessageComponentRoute {
+            message_id: message.id,
+            channel_id: message.channel_id,
+            guild_id,
+            module_id,
+            user_id,
+            custom_ids,
+        };
+        match routes.record(&route).await {
+            Ok(()) => Ok(Outcome::Message(message)),
+            Err(error) => {
+                tracing::error!(
+                    guild = %guild_id,
+                    module = %route.module_id,
+                    user = %user_id,
+                    message = %route.message_id,
+                    channel = %route.channel_id,
+                    %error,
+                    "direct message sent but component route could not be saved"
+                );
+                // This host-only compensation targets only the DM message returned above.
+                // It does not grant the module DeleteMessages or accept a channel from it.
+                let cleanup = match Reason::new("DM component route registration failed") {
+                    Ok(reason) => {
+                        self.api
+                            .execute(Action::DeleteMessage {
+                                channel_id: route.channel_id,
+                                message_id: route.message_id,
+                                reason,
+                            })
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                match cleanup {
+                    Ok(_) => tracing::warn!(
+                        guild = %guild_id,
+                        module = %route.module_id,
+                        user = %user_id,
+                        message = %route.message_id,
+                        channel = %route.channel_id,
+                        "unroutable DM cleanup request completed"
+                    ),
+                    Err(cleanup_error) => tracing::error!(
+                        guild = %guild_id,
+                        module = %route.module_id,
+                        user = %user_id,
+                        message = %route.message_id,
+                        channel = %route.channel_id,
+                        %cleanup_error,
+                        "DM route save and message cleanup failed; the button remains unroutable"
+                    ),
+                }
+                Err(DiscordError::DirectMessageComponentsNotRoutable)
+            }
+        }
     }
 
     /// Refuses `action` unless everything it touches belongs to `scope`: every channel it

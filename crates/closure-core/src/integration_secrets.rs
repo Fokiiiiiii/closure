@@ -272,14 +272,14 @@ impl IntegrationSecretService {
             return Err(IntegrationSecretError::InvalidIdempotencyKey);
         }
         let sealed = self.seal(scope, secret)?;
-        let request_key_hmac = self.request_key_hmac(scope, actor.user, idempotency_key);
+        let request_key_hmac = self.request_key_hmac(scope, actor.user, idempotency_key)?;
         let fingerprint_hmac = self.fingerprint_hmac(
             scope,
             actor.user,
             MUTATION_SET,
             idempotency_key,
             Some(secret.expose_secret()),
-        );
+        )?;
         let receipt = self.seal_receipt(
             scope,
             actor.user,
@@ -310,9 +310,9 @@ impl IntegrationSecretService {
         if !valid_idempotency_key(idempotency_key) {
             return Err(IntegrationSecretError::InvalidIdempotencyKey);
         }
-        let request_key_hmac = self.request_key_hmac(scope, actor.user, idempotency_key);
+        let request_key_hmac = self.request_key_hmac(scope, actor.user, idempotency_key)?;
         let fingerprint_hmac =
-            self.fingerprint_hmac(scope, actor.user, MUTATION_REMOVE, idempotency_key, None);
+            self.fingerprint_hmac(scope, actor.user, MUTATION_REMOVE, idempotency_key, None)?;
         let receipt = self.seal_receipt(
             scope,
             actor.user,
@@ -351,11 +351,11 @@ impl IntegrationSecretService {
         {
             return Err(IntegrationSecretError::InvalidSecret);
         }
-        let aad = account_secret_associated_data(owner, namespace, field);
-        Ok(self
-            .seal_payload(&aad, cleartext.as_bytes())?
-            .as_bytes()
-            .to_vec())
+        let aad = account_secret_associated_data(owner, namespace, field)?;
+        let sealed = self.seal_payload(&aad, cleartext.as_bytes())?;
+        let ciphertext = sealed.as_bytes().to_vec();
+        drop(secret);
+        Ok(ciphertext)
     }
 
     /// Opens an account-owned ciphertext only for the authenticated owner and original AAD scope.
@@ -375,10 +375,8 @@ impl IntegrationSecretService {
             return Err(IntegrationSecretError::Authentication);
         }
         let sealed = SealedIntegrationSecret::from_storage(envelope.to_vec())?;
-        self.open_payload(
-            &account_secret_associated_data(owner, namespace, field),
-            sealed,
-        )
+        let aad = account_secret_associated_data(owner, namespace, field)?;
+        self.open_payload(&aad, sealed)
     }
 
     /// Computes a domain-separated keyed token digest for one account namespace.
@@ -399,8 +397,8 @@ impl IntegrationSecretService {
         let mut context = hmac::Context::with_key(&self.account_hmac_key);
         context.update(b"closure.account-secret.token-hmac.v1");
         context.update(&owner.get().to_be_bytes());
-        update_hmac_part(&mut context, namespace.as_bytes());
-        update_hmac_part(&mut context, message);
+        update_hmac_part(&mut context, namespace.as_bytes())?;
+        update_hmac_part(&mut context, message)?;
         Ok(hmac_tag(context))
     }
 
@@ -409,12 +407,12 @@ impl IntegrationSecretService {
         scope: &IntegrationSecretScope,
         actor: UserId,
         idempotency_key: &str,
-    ) -> [u8; 32] {
+    ) -> Result<[u8; 32], IntegrationSecretError> {
         let mut context = hmac::Context::with_key(&self.idempotency_key);
         context.update(b"closure.integration-secret.request-key.v1\\0");
-        update_scope_hmac(&mut context, scope, actor);
-        update_hmac_part(&mut context, idempotency_key.as_bytes());
-        hmac_tag(context)
+        update_scope_hmac(&mut context, scope, actor)?;
+        update_hmac_part(&mut context, idempotency_key.as_bytes())?;
+        Ok(hmac_tag(context))
     }
 
     fn fingerprint_hmac(
@@ -424,20 +422,20 @@ impl IntegrationSecretService {
         action: u8,
         idempotency_key: &str,
         value: Option<&str>,
-    ) -> [u8; 32] {
+    ) -> Result<[u8; 32], IntegrationSecretError> {
         let mut context = hmac::Context::with_key(&self.idempotency_key);
         context.update(b"closure.integration-secret.fingerprint.v1\\0");
-        update_scope_hmac(&mut context, scope, actor);
+        update_scope_hmac(&mut context, scope, actor)?;
         context.update(&[action]);
-        update_hmac_part(&mut context, idempotency_key.as_bytes());
+        update_hmac_part(&mut context, idempotency_key.as_bytes())?;
         match value {
             Some(value) => {
                 context.update(&[1]);
-                update_hmac_part(&mut context, value.as_bytes());
+                update_hmac_part(&mut context, value.as_bytes())?;
             }
             None => context.update(&[0]),
         }
-        hmac_tag(context)
+        Ok(hmac_tag(context))
     }
 
     fn seal(
@@ -452,7 +450,8 @@ impl IntegrationSecretService {
         {
             return Err(IntegrationSecretError::InvalidSecret);
         }
-        self.seal_payload(&associated_data(scope, b"secret"), cleartext.as_bytes())
+        let aad = associated_data(scope, b"secret")?;
+        self.seal_payload(&aad, cleartext.as_bytes())
     }
 
     fn seal_receipt(
@@ -464,7 +463,7 @@ impl IntegrationSecretService {
         action: u8,
     ) -> Result<SealedIntegrationSecret, IntegrationSecretError> {
         let receipt = [RECEIPT_VERSION, action, RECEIPT_COMPLETED];
-        let aad = receipt_associated_data(scope, actor, request_key_hmac, fingerprint_hmac);
+        let aad = receipt_associated_data(scope, actor, request_key_hmac, fingerprint_hmac)?;
         self.seal_payload(&aad, &receipt)
     }
 
@@ -498,7 +497,8 @@ impl IntegrationSecretService {
         scope: &IntegrationSecretScope,
         secret: SealedIntegrationSecret,
     ) -> Result<SecretString, IntegrationSecretError> {
-        self.open_payload(&associated_data(scope, b"secret"), secret)
+        let aad = associated_data(scope, b"secret")?;
+        self.open_payload(&aad, secret)
     }
 
     fn open_payload(
@@ -520,7 +520,7 @@ impl IntegrationSecretService {
             .open_in_place(
                 Nonce::assume_unique_for_key(nonce),
                 Aad::from(aad),
-                &mut *buffer,
+                &mut buffer,
             )
             .map_err(|_| IntegrationSecretError::Authentication)?
             .len();
@@ -589,7 +589,7 @@ fn decode_master_key(input: &str) -> Result<[u8; 32], IntegrationSecretError> {
         return Err(IntegrationSecretError::InvalidMasterKey);
     }
     let mut key = [0_u8; 32];
-    for (index, pair) in input.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in input.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         key[index] = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
     }
     Ok(key)
@@ -604,10 +604,13 @@ fn hex_value(byte: u8) -> Result<u8, IntegrationSecretError> {
     }
 }
 
-fn associated_data(scope: &IntegrationSecretScope, purpose: &[u8]) -> Vec<u8> {
+fn associated_data(
+    scope: &IntegrationSecretScope,
+    purpose: &[u8],
+) -> Result<Vec<u8>, IntegrationSecretError> {
     let generation = scope.generation_scope();
     let mut aad = b"closure.integration-secret.aad.v1".to_vec();
-    append_aad_part(&mut aad, purpose);
+    append_aad_part(&mut aad, purpose)?;
     aad.extend_from_slice(&generation.guild_id().get().to_be_bytes());
     for part in [
         generation.module().as_str(),
@@ -615,9 +618,9 @@ fn associated_data(scope: &IntegrationSecretScope, purpose: &[u8]) -> Vec<u8> {
         generation.generation(),
         scope.secret_name(),
     ] {
-        append_aad_part(&mut aad, part.as_bytes());
+        append_aad_part(&mut aad, part.as_bytes())?;
     }
-    aad
+    Ok(aad)
 }
 
 fn receipt_associated_data(
@@ -625,17 +628,19 @@ fn receipt_associated_data(
     actor: UserId,
     request_key_hmac: &[u8; 32],
     fingerprint_hmac: &[u8; 32],
-) -> Vec<u8> {
-    let mut aad = associated_data(scope, b"receipt");
+) -> Result<Vec<u8>, IntegrationSecretError> {
+    let mut aad = associated_data(scope, b"receipt")?;
     aad.extend_from_slice(&actor.get().to_be_bytes());
     aad.extend_from_slice(request_key_hmac);
     aad.extend_from_slice(fingerprint_hmac);
-    aad
+    Ok(aad)
 }
 
-fn append_aad_part(aad: &mut Vec<u8>, part: &[u8]) {
-    aad.extend_from_slice(&(part.len() as u32).to_be_bytes());
+fn append_aad_part(aad: &mut Vec<u8>, part: &[u8]) -> Result<(), IntegrationSecretError> {
+    let length = u32::try_from(part.len()).map_err(|_| IntegrationSecretError::InvalidScope)?;
+    aad.extend_from_slice(&length.to_be_bytes());
     aad.extend_from_slice(part);
+    Ok(())
 }
 
 fn valid_idempotency_key(key: &str) -> bool {
@@ -645,19 +650,29 @@ fn valid_idempotency_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-fn update_scope_hmac(context: &mut hmac::Context, scope: &IntegrationSecretScope, actor: UserId) {
+fn update_scope_hmac(
+    context: &mut hmac::Context,
+    scope: &IntegrationSecretScope,
+    actor: UserId,
+) -> Result<(), IntegrationSecretError> {
     let generation = scope.generation_scope();
     context.update(&generation.guild_id().get().to_be_bytes());
-    update_hmac_part(context, generation.module().as_str().as_bytes());
-    update_hmac_part(context, generation.integration_id().as_bytes());
-    update_hmac_part(context, generation.generation().as_bytes());
-    update_hmac_part(context, scope.secret_name().as_bytes());
+    update_hmac_part(context, generation.module().as_str().as_bytes())?;
+    update_hmac_part(context, generation.integration_id().as_bytes())?;
+    update_hmac_part(context, generation.generation().as_bytes())?;
+    update_hmac_part(context, scope.secret_name().as_bytes())?;
     context.update(&actor.get().to_be_bytes());
+    Ok(())
 }
 
-fn update_hmac_part(context: &mut hmac::Context, part: &[u8]) {
-    context.update(&(part.len() as u32).to_be_bytes());
+fn update_hmac_part(
+    context: &mut hmac::Context,
+    part: &[u8],
+) -> Result<(), IntegrationSecretError> {
+    let length = u32::try_from(part.len()).map_err(|_| IntegrationSecretError::InvalidSecret)?;
+    context.update(&length.to_be_bytes());
     context.update(part);
+    Ok(())
 }
 
 fn hmac_tag(context: hmac::Context) -> [u8; 32] {
@@ -699,10 +714,14 @@ fn valid_account_component(value: &str) -> bool {
         })
 }
 
-fn account_secret_associated_data(owner: UserId, namespace: &str, field: &str) -> Vec<u8> {
+fn account_secret_associated_data(
+    owner: UserId,
+    namespace: &str,
+    field: &str,
+) -> Result<Vec<u8>, IntegrationSecretError> {
     let mut aad = b"closure.account-secret.aad.v1".to_vec();
     aad.extend_from_slice(&owner.get().to_be_bytes());
-    append_aad_part(&mut aad, namespace.as_bytes());
-    append_aad_part(&mut aad, field.as_bytes());
-    aad
+    append_aad_part(&mut aad, namespace.as_bytes())?;
+    append_aad_part(&mut aad, field.as_bytes())?;
+    Ok(aad)
 }
