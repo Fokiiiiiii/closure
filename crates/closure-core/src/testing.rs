@@ -58,11 +58,12 @@ async fn yield_now() {
 
 /// A role as Discord answers its creation: no permissions, not hoisted, not managed.
 /// A channel as Discord answers when the bot made it.
-fn created_channel(id: u64, name: &str, parent: Option<ChannelId>) -> Channel {
+fn created_channel(id: u64, name: &str, parent: Option<ChannelId>, topic: Option<&str>) -> Channel {
     serde_json::from_value(serde_json::json!({
         "id": id.to_string(),
         "type": 0,
         "name": name,
+        "topic": topic,
         "parent_id": parent.map(|parent| parent.get().to_string()),
     }))
     .unwrap_or_else(|error| unreachable!("a channel of the test double is valid: {error}"))
@@ -317,7 +318,7 @@ impl MockApi {
     /// A created channel gets the next id, and Discord knows it from then on.
     fn create_channel(&self, guild_id: GuildId, spec: &NewChannel) -> Outcome {
         let id = 600 + self.next_id();
-        let channel = created_channel(id, &spec.name, spec.parent_id);
+        let channel = created_channel(id, &spec.name, spec.parent_id, spec.topic.as_deref());
         lock(&self.guild_channels)
             .entry(guild_id)
             .or_default()
