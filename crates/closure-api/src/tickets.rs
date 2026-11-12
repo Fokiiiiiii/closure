@@ -77,25 +77,25 @@ struct ClosedFilters {
 impl ClosedFilters {
     fn matches(&self, history: &TicketHistory) -> bool {
         self.ticket_number
-            .map_or(true, |number| history.number == number)
+            .is_none_or(|number| history.number == number)
             && self
                 .username_openers
                 .as_ref()
-                .map_or(true, |openers| openers.contains(&history.opener))
-            && self.opener.map_or(true, |opener| history.opener == opener)
+                .is_none_or(|openers| openers.contains(&history.opener))
+            && self.opener.is_none_or(|opener| history.opener == opener)
             && self
                 .closer
-                .map_or(true, |closer| history.closer == Some(closer))
-            && self.panel.as_deref().map_or(true, |panel| {
+                .is_none_or(|closer| history.closer == Some(closer))
+            && self.panel.as_deref().is_none_or(|panel| {
                 panel_id(history.panel.as_ref()) == Some(panel)
             })
-            && self.rating.map_or(true, |rating| {
+            && self.rating.is_none_or(|rating| {
                 history.rating.as_ref().map(|value| value.score) == Some(rating)
             })
             && self
                 .claimed_by
-                .map_or(true, |claimed_by| history.claimed_by == Some(claimed_by))
-            && self.reason.as_deref().map_or(true, |query| {
+                .is_none_or(|claimed_by| history.claimed_by == Some(claimed_by))
+            && self.reason.as_deref().is_none_or(|query| {
                 history
                     .reason
                     .as_deref()
@@ -202,11 +202,18 @@ struct TranscriptSpan {
     rich: Option<Value>,
 }
 
+// Keep stored span IDs typed while this API returns message spans only.
 #[derive(Deserialize)]
 enum TranscriptSpanPart {
     Message { message_id: u64, author_id: u64 },
-    Opener { user_id: u64 },
-    FormAnswers { user_id: u64 },
+    Opener {
+        #[expect(dead_code)]
+        user_id: u64,
+    },
+    FormAnswers {
+        #[expect(dead_code)]
+        user_id: u64,
+    },
 }
 
 pub(super) struct Viewer {
@@ -263,6 +270,7 @@ pub(crate) async fn list(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn closed_filters(
     state: &ApiState,
     guild: GuildId,
@@ -370,13 +378,14 @@ async fn closed_filters(
             panel: panel.map(str::to_owned),
             rating: query.rating,
             claimed_by,
-            reason: reason.map(|reason| reason.to_lowercase()),
+            reason: reason.map(str::to_lowercase),
             labels,
         },
         username_truncated,
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn get(
     State(state): State<ApiState>,
     Path((raw_guild, raw_channel)): Path<(u64, u64)>,
@@ -719,6 +728,7 @@ async fn list_open(
     Ok((tickets, next_before))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn list_closed(
     store: &Store,
     viewer: &Viewer,
