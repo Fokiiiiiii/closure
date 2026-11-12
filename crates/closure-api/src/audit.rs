@@ -14,7 +14,7 @@ const MAX_LIMIT: u32 = 2_500;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AuditQuery {
+pub(super) struct AuditQuery {
     limit: Option<u32>,
     user_id: Option<String>,
     action_type: Option<String>,
@@ -72,9 +72,9 @@ pub(crate) async fn events(
     {
         return Err(ApiError::BadRequest("audit filter is invalid".into()));
     }
-    let source_matches = action_type.map_or(true, |value| value == "settings_update")
-        && resource_type.map_or(true, |value| value == "settings")
-        && outcome.map_or(true, |value| value == "success");
+    let source_matches = action_type.is_none_or(|value| value == "settings_update")
+        && resource_type.is_none_or(|value| value == "settings")
+        && outcome.is_none_or(|value| value == "success");
 
     let records = state
         .inner
@@ -89,15 +89,14 @@ pub(crate) async fn events(
             let timestamp = record.created_at.unix_timestamp();
             let actor_id = record
                 .actor
-                .map(|actor| actor.to_string())
-                .unwrap_or_else(|| "system".to_owned());
+                .map_or_else(|| "system".to_owned(), |actor| actor.to_string());
             let matches = source_matches
                 && query
                     .user_id
                     .as_deref()
-                    .map_or(true, |user_id| actor_id == user_id)
-                && query.date_from.map_or(true, |from| timestamp >= from)
-                && query.date_to.map_or(true, |to| timestamp <= to);
+                    .is_none_or(|user_id| actor_id == user_id)
+                && query.date_from.is_none_or(|from| timestamp >= from)
+                && query.date_to.is_none_or(|to| timestamp <= to);
             matches.then(|| {
                 json!({
                     "timestamp": timestamp,

@@ -86,9 +86,10 @@ impl ClosedFilters {
             && self
                 .closer
                 .is_none_or(|closer| history.closer == Some(closer))
-            && self.panel.as_deref().is_none_or(|panel| {
-                panel_id(history.panel.as_ref()) == Some(panel)
-            })
+            && self
+                .panel
+                .as_deref()
+                .is_none_or(|panel| panel_id(history.panel.as_ref()) == Some(panel))
             && self.rating.is_none_or(|rating| {
                 history.rating.as_ref().map(|value| value.score) == Some(rating)
             })
@@ -205,7 +206,10 @@ struct TranscriptSpan {
 // Keep stored span IDs typed while this API returns message spans only.
 #[derive(Deserialize)]
 enum TranscriptSpanPart {
-    Message { message_id: u64, author_id: u64 },
+    Message {
+        message_id: u64,
+        author_id: u64,
+    },
     Opener {
         #[expect(dead_code)]
         user_id: u64,

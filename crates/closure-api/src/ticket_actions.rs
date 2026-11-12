@@ -48,7 +48,7 @@ pub trait TicketActionSink: Send + Sync {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ActionStateQuery {
+pub(super) struct ActionStateQuery {
     cursor: Option<String>,
     q: Option<String>,
     days: Option<u16>,
@@ -56,7 +56,7 @@ struct ActionStateQuery {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PublicKnowledgeQuery {
+pub(super) struct PublicKnowledgeQuery {
     q: Option<String>,
     category: Option<String>,
     cursor: Option<String>,
@@ -396,7 +396,7 @@ fn query_cursor(cursor: Option<String>) -> Result<Option<String>, ApiError> {
             (1..=32)
                 .contains(&cursor.len())
                 .then_some(())
-                .filter(|_| {
+                .filter(|()| {
                     cursor.bytes().all(|byte| {
                         byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
                     })
@@ -415,7 +415,7 @@ fn tag_cursor(cursor: Option<String>) -> Result<Option<String>, ApiError> {
             (1..=16)
                 .contains(&cursor.len())
                 .then_some(())
-                .filter(|_| {
+                .filter(|()| {
                     cursor.bytes().all(|byte| {
                         byte.is_ascii_lowercase()
                             || byte.is_ascii_digit()
@@ -437,7 +437,7 @@ fn analytics_cursor(cursor: Option<String>) -> Result<Option<String>, ApiError> 
             (1..=128)
                 .contains(&cursor.len())
                 .then_some(())
-                .filter(|_| {
+                .filter(|()| {
                     cursor
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
@@ -477,7 +477,9 @@ pub(super) fn map_error(error: DashboardActionError, action: bool) -> ApiError {
         DashboardActionError::Unsupported if action => {
             ApiError::BadRequest("unsupported ticket action".into())
         }
-        DashboardActionError::Unsupported => ApiError::Unavailable,
+        DashboardActionError::Unsupported | DashboardActionError::Unavailable => {
+            ApiError::Unavailable
+        }
         DashboardActionError::Invalid(message) => ApiError::BadRequest(message),
         DashboardActionError::NotFound => ApiError::NotFound("no such ticket or panel".into()),
         DashboardActionError::Forbidden => {

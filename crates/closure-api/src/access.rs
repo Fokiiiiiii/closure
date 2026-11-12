@@ -40,7 +40,7 @@ pub trait MemberAccess: Send + Sync {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MemberSearchQuery {
+pub(super) struct MemberSearchQuery {
     scope_kind: String,
     scope_id: String,
     q: String,
@@ -165,7 +165,8 @@ pub(crate) async fn search_members(
             ));
         }
     }
-    let limit = query.limit.unwrap_or(25).clamp(1, 25) as u16;
+    let limit = u16::try_from(query.limit.unwrap_or(25).clamp(1, 25))
+        .map_err(|_| ApiError::BadRequest("member limit is invalid".into()))?;
     let members = state
         .inner
         .access

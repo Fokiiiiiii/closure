@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::Write as _;
 
 use axum::{
     Json,
@@ -131,7 +132,7 @@ pub(crate) async fn templates(
         })
         .await
         .map_err(gallery_error)?;
-    Ok(no_store(Json(gallery_page_json(page)).into_response()))
+    Ok(no_store(Json(gallery_page_json(&page)).into_response()))
 }
 
 pub(crate) async fn template(
@@ -169,7 +170,7 @@ pub(crate) async fn submissions(
         .map_err(gallery_error)?;
     Ok(no_store(
         Json(json!({
-            "submissions": submissions.into_iter().map(submission_json).collect::<Vec<_>>()
+            "submissions": submissions.iter().map(submission_json).collect::<Vec<_>>()
         }))
         .into_response(),
     ))
@@ -192,11 +193,11 @@ pub(crate) async fn submit(
     let source_guild_id = i64::try_from(guild.get())
         .map_err(|_| ApiError::BadRequest("guild ID is invalid".into()))?;
     let (template, source_id) = validated_source_request(
-        body.kind,
+        &body.kind,
         body.source_id,
-        body.title,
-        body.description,
-        body.category,
+        &body.title,
+        &body.description,
+        &body.category,
         body.tags,
         body.author_name,
         source_guild_id,
@@ -234,10 +235,11 @@ pub(crate) async fn submit(
         .await
         .map_err(gallery_error)?;
     Ok(no_store(
-        Json(json!({ "submission": submission_json(submission) })).into_response(),
+        Json(json!({ "submission": submission_json(&submission) })).into_response(),
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn submission_action(
     State(state): State<ApiState>,
     Path((raw_guild, raw_id)): Path<(u64, String)>,
@@ -265,15 +267,18 @@ pub(crate) async fn submission_action(
             }
             let (template, source_id) = validated_source_request(
                 body.kind
+                    .as_deref()
                     .ok_or_else(|| ApiError::BadRequest("template type is required".into()))?,
                 body.source_id
                     .ok_or_else(|| ApiError::BadRequest("template source is required".into()))?,
                 body.title
+                    .as_deref()
                     .ok_or_else(|| ApiError::BadRequest("template title is required".into()))?,
-                body.description.ok_or_else(|| {
+                body.description.as_deref().ok_or_else(|| {
                     ApiError::BadRequest("template description is required".into())
                 })?,
                 body.category
+                    .as_deref()
                     .ok_or_else(|| ApiError::BadRequest("template category is required".into()))?,
                 body.tags
                     .ok_or_else(|| ApiError::BadRequest("template tags are required".into()))?,
@@ -350,7 +355,7 @@ pub(crate) async fn submission_action(
         _ => return Err(ApiError::BadRequest("submission action is invalid".into())),
     };
     Ok(no_store(
-        Json(json!({ "submission": submission_json(submission) })).into_response(),
+        Json(json!({ "submission": submission_json(&submission) })).into_response(),
     ))
 }
 
@@ -404,7 +409,7 @@ pub(crate) async fn review(
                 "approved reviews cannot include a rejection reason".into(),
             ));
         }
-        ("rejected", Some(reason)) => Some(valid_text(reason, "review reason", 500)?),
+        ("rejected", Some(reason)) => Some(valid_text(&reason, "review reason", 500)?),
         ("rejected", None) => {
             return Err(ApiError::BadRequest(
                 "a rejection reason is required".into(),
@@ -461,7 +466,7 @@ async fn gallery_source_payload(
     let sink = state.ticket_actions.as_ref().ok_or(ApiError::Unavailable)?;
     let mut export_key = String::from("e");
     for byte in Sha256::digest(request_key.as_bytes()).iter().take(31) {
-        export_key.push_str(&format!("{byte:02x}"));
+        let _ = write!(export_key, "{byte:02x}");
     }
     let result = sink
         .perform(
@@ -518,7 +523,7 @@ fn gallery_error(error: GalleryError) -> ApiError {
     }
 }
 
-fn gallery_page_json(page: GalleryPage) -> Value {
+fn gallery_page_json(page: &GalleryPage) -> Value {
     json!({
         "featured": page.featured.iter().map(card_json).collect::<Vec<_>>(),
         "templates": page.templates.iter().map(card_json).collect::<Vec<_>>(),
@@ -551,7 +556,7 @@ fn template_json(template: GalleryTemplate) -> Value {
     value
 }
 
-fn submission_json(submission: GallerySubmission) -> Value {
+fn submission_json(submission: &GallerySubmission) -> Value {
     json!({
         "id": submission.id,
         "kind": submission.kind,
@@ -572,12 +577,13 @@ fn submission_json(submission: GallerySubmission) -> Value {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validated_source_request(
-    kind: String,
+    kind: &str,
     source_id: String,
-    title: String,
-    description: String,
-    category: String,
+    title: &str,
+    description: &str,
+    category: &str,
     tags: Vec<String>,
     author_name: Option<String>,
     source_guild_id: i64,
@@ -608,7 +614,7 @@ fn validated_source_request(
     let mut normalized_tags = Vec::with_capacity(tags.len());
     let mut seen = HashSet::new();
     for tag in tags {
-        let tag = valid_text(tag, "template tag", 24)?.to_ascii_lowercase();
+        let tag = valid_text(&tag, "template tag", 24)?.to_ascii_lowercase();
         if !tag
             .chars()
             .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_'))
@@ -619,7 +625,7 @@ fn validated_source_request(
         normalized_tags.push(tag);
     }
     let author_name = match author_name {
-        Some(name) if !name.trim().is_empty() => valid_text(name, "author name", 80)?,
+        Some(name) if !name.trim().is_empty() => valid_text(&name, "author name", 80)?,
         _ => "Community member".to_owned(),
     };
     Ok((
@@ -644,16 +650,16 @@ fn valid_category(category: &str) -> bool {
     )
 }
 
-fn valid_text(value: String, label: &str, max_chars: usize) -> Result<String, ApiError> {
-    let value = value.trim().to_owned();
+fn valid_text(value: &str, label: &str, max_chars: usize) -> Result<String, ApiError> {
+    let value = value.trim();
     if value.is_empty()
         || value.chars().count() > max_chars
-        || value.chars().any(|ch| ch.is_control())
+        || value.chars().any(char::is_control)
         || has_server_reference(&value)
     {
         return Err(ApiError::BadRequest(format!("{label} is invalid")));
     }
-    Ok(value)
+    Ok(value.to_owned())
 }
 
 fn has_forbidden_controls(value: &str) -> bool {
@@ -1086,6 +1092,7 @@ fn sanitize_form(payload: &Value) -> Result<Value, ApiError> {
     Ok(json!({ "title": title, "questions": safe_questions }))
 }
 
+#[allow(clippy::too_many_lines)]
 fn sanitize_question(value: &Value) -> Result<Value, ApiError> {
     if let Some(text) = value.as_str() {
         if text.trim().is_empty() || text.chars().count() > 45 || has_forbidden_controls(text) {
@@ -1116,7 +1123,7 @@ fn sanitize_question(value: &Value) -> Result<Value, ApiError> {
             "placeholder",
             "description",
         ],
-        "string_select" => &[
+        "string_select" | "checkbox_group" => &[
             "type",
             "label",
             "description",
@@ -1134,15 +1141,6 @@ fn sanitize_question(value: &Value) -> Result<Value, ApiError> {
             "max_values",
         ],
         "radio_group" => &["type", "label", "description", "required", "options"],
-        "checkbox_group" => &[
-            "type",
-            "label",
-            "description",
-            "required",
-            "options",
-            "min_values",
-            "max_values",
-        ],
         "display" => &["type", "content"],
         _ => return Err(ApiError::BadRequest("form question type is invalid".into())),
     };
@@ -1171,10 +1169,8 @@ fn sanitize_question(value: &Value) -> Result<Value, ApiError> {
             safe.insert(key.to_owned(), Value::String(value));
         }
     }
-    for key in ["required"] {
-        if let Some(value) = optional_bool(object, key)? {
-            safe.insert(key.into(), Value::Bool(value));
-        }
+    if let Some(value) = optional_bool(object, "required")? {
+        safe.insert("required".into(), Value::Bool(value));
     }
     for key in ["min_length", "max_length", "min_values", "max_values"] {
         if let Some(value) = object.get(key).filter(|value| !value.is_null()) {

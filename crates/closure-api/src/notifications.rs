@@ -41,7 +41,7 @@ const OUTBOX_LEASE_SECONDS: i64 = 120;
 const OUTBOX_MAX_ATTEMPTS: i32 = 10;
 const OUTBOX_POLL: Duration = Duration::from_secs(2);
 const OUTBOX_BATCH: usize = 16;
-const OUTBOX_PURGE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const OUTBOX_PURGE_INTERVAL: Duration = Duration::from_hours(6);
 const EMAIL_SECRET_NAMESPACE: &str = "ticket_notifications";
 const EMAIL_SECRET_FIELD: &str = "email";
 const EMAIL_TOKEN_NAMESPACE: &str = "ticket_notifications_email";
@@ -193,7 +193,6 @@ fn request_locale(headers: &HeaderMap) -> Option<MessageLocale> {
 
 fn locale_tag(locale: MessageLocale) -> &'static str {
     match locale {
-        MessageLocale::En => "en",
         MessageLocale::Ja => "ja",
         _ => "en",
     }
@@ -415,6 +414,7 @@ struct RemoveEmail {
     confirm: bool,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn action(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -533,7 +533,7 @@ pub(crate) async fn action(
                 (normalize_email(secret.expose_secret())?, encrypted, masked)
             };
             let mailbox = parse_mailbox(&email)
-                .map_err(|_| ApiError::BadRequest("enter a valid email address".into()))?;
+                .map_err(|()| ApiError::BadRequest("enter a valid email address".into()))?;
             let code = verification_code()?;
             let expires_at = now.saturating_add(VERIFICATION_TTL_SECONDS);
             let code_hash = vault
@@ -698,7 +698,8 @@ fn normalize_email(value: &str) -> Result<String, ApiError> {
     {
         return Err(ApiError::BadRequest("enter a valid email address".into()));
     }
-    parse_mailbox(email).map_err(|_| ApiError::BadRequest("enter a valid email address".into()))?;
+    parse_mailbox(email)
+        .map_err(|()| ApiError::BadRequest("enter a valid email address".into()))?;
     Ok(email.to_owned())
 }
 
@@ -806,6 +807,7 @@ pub fn run_worker(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn process_event(
     db: &Db,
     access: &dyn MemberAccess,
@@ -814,14 +816,11 @@ async fn process_event(
     email: Option<&EmailSender>,
     event: ClaimedNotificationEvent,
 ) {
-    let guild = match config::guild_id(event.guild_id) {
-        Ok(guild) => guild,
-        Err(_) => {
-            let _ = db
-                .abandon_notification_outbox(event.event_id, event.attempts, "permanent")
-                .await;
-            return;
-        }
+    let Ok(guild) = config::guild_id(event.guild_id) else {
+        let _ = db
+            .abandon_notification_outbox(event.event_id, event.attempts, "permanent")
+            .await;
+        return;
     };
     let recipient = twilight_model::id::Id::new(event.recipient_id);
     match access.member(guild, recipient).await {
@@ -842,12 +841,9 @@ async fn process_event(
         }
     }
 
-    let preferences = match db.notification_preferences(event.recipient_id).await {
-        Ok(preferences) => preferences,
-        Err(_) => {
-            retry_outbox(db, &event, "transient").await;
-            return;
-        }
+    let Ok(preferences) = db.notification_preferences(event.recipient_id).await else {
+        retry_outbox(db, &event, "transient").await;
+        return;
     };
     let locale = saved_locale(&preferences.locale);
     let Some((title, body, href)) = notification_content(&event, locale) else {
@@ -952,53 +948,47 @@ async fn process_event(
                     .await;
                 return;
             };
-            let address = match vault.open_account_secret(
+            let Ok(address) = vault.open_account_secret(
                 recipient,
                 recipient,
                 EMAIL_SECRET_NAMESPACE,
                 EMAIL_SECRET_FIELD,
                 encrypted,
-            ) {
-                Ok(address) => address,
-                Err(_) => {
-                    let _ = db
-                        .abandon_notification_outbox(event.event_id, event.attempts, "permanent")
-                        .await;
-                    return;
-                }
+            ) else {
+                let _ = db
+                    .abandon_notification_outbox(event.event_id, event.attempts, "permanent")
+                    .await;
+                return;
             };
-            let recipient_mailbox = match parse_mailbox(address.expose_secret()) {
-                Ok(mailbox) => mailbox,
-                Err(_) => {
-                    let _ = db
-                        .abandon_notification_outbox(event.event_id, event.attempts, "permanent")
-                        .await;
-                    return;
-                }
+            let Ok(recipient_mailbox) = parse_mailbox(address.expose_secret()) else {
+                let _ = db
+                    .abandon_notification_outbox(event.event_id, event.attempts, "permanent")
+                    .await;
+                return;
             };
             let message_body = if body.is_empty() {
                 title.clone()
             } else {
                 format!("{title}\n\n{body}")
             };
-            match sender.send(recipient_mailbox, &title, &message_body).await {
-                Ok(()) => {
-                    if !db
-                        .complete_notification_outbox_channel(
-                            event.event_id,
-                            event.attempts,
-                            NotificationOutboxChannel::Email,
-                        )
-                        .await
-                        .unwrap_or(false)
-                    {
-                        return;
-                    }
-                }
-                Err(()) => {
-                    retry_outbox(db, &event, "transient").await;
-                    return;
-                }
+            if sender
+                .send(recipient_mailbox, &title, &message_body)
+                .await
+                .is_err()
+            {
+                retry_outbox(db, &event, "transient").await;
+                return;
+            }
+            if !db
+                .complete_notification_outbox_channel(
+                    event.event_id,
+                    event.attempts,
+                    NotificationOutboxChannel::Email,
+                )
+                .await
+                .unwrap_or(false)
+            {
+                return;
             }
         } else if !db
             .complete_notification_outbox_channel(
@@ -1025,7 +1015,11 @@ async fn retry_outbox(db: &Db, event: &ClaimedNotificationEvent, failure: &'stat
             .await;
         return;
     }
-    let shift = event.attempts.saturating_sub(1).clamp(0, 10) as u32;
+    let shift = event
+        .attempts
+        .saturating_sub(1)
+        .clamp(0, 10)
+        .cast_unsigned();
     let delay = (5_i64 * (1_i64 << shift)).min(3600);
     let _ = db
         .retry_notification_outbox(event.event_id, event.attempts, delay, failure)

@@ -187,6 +187,7 @@ impl ApiState {
 }
 
 /// The complete application.
+#[allow(clippy::too_many_lines)]
 pub fn router(state: ApiState) -> Router {
     let protected = Router::new()
         .route("/metrics", get(ops::metrics))
