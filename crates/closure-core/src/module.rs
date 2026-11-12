@@ -682,7 +682,6 @@ pub struct EventContext {
     gateway: Arc<GatewayLatency>,
     integration_secrets: Option<Arc<IntegrationSecretService>>,
     dashboard_base_url: Option<Arc<str>>,
-    dynamic_command_changes: Option<tokio::sync::mpsc::UnboundedSender<GuildId>>,
     dynamic_command_changes: Option<Arc<dyn DynamicCommandChangeSink>>,
 }
 
@@ -732,7 +731,6 @@ impl EventContext {
             gateway: Arc::default(),
             integration_secrets: None,
             dashboard_base_url: None,
-            dynamic_command_changes: None,
             dynamic_command_changes: None,
         }
     }
@@ -794,23 +792,6 @@ impl EventContext {
             base_url.trim_end_matches('/'),
             self.guild_id.get()
         ))
-    }
-
-    /// Notifies the host that this guild’s dynamic command aliases changed.
-    pub fn notify_dynamic_command_changes(&self) {
-        if let Some(sender) = &self.dynamic_command_changes {
-            let _ = sender.send(self.guild_id);
-        }
-    }
-
-    /// Connects this context to the host’s dynamic command synchronization queue.
-    #[must_use]
-    pub fn with_dynamic_command_changes(
-        mut self,
-        sender: Option<tokio::sync::mpsc::UnboundedSender<GuildId>>,
-    ) -> Self {
-        self.dynamic_command_changes = sender;
-        self
     }
 
     fn integration_secret_scope(

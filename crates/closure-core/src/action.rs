@@ -1481,6 +1481,8 @@ fn check_modal_input(
     }
 }
 
+// shortcut: keep legacy TextInput label validation; remove when legacy modal rows are dropped.
+#[allow(deprecated)]
 fn check_modal_text_input(
     input: &twilight_model::channel::message::component::TextInput,
     custom_ids: &mut BTreeSet<String>,
