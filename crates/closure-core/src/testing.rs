@@ -88,8 +88,8 @@ fn new_channel_overwrite(spec: &OverwriteSpec) -> PermissionOverwrite {
         OverwriteTarget::Member(user) => (user.cast(), PermissionOverwriteType::Member),
     };
     PermissionOverwrite {
-        allow: Some(spec.allow),
-        deny: Some(spec.deny),
+        allow: spec.allow,
+        deny: spec.deny,
         id,
         kind,
     }
