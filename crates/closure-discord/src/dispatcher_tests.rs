@@ -3492,6 +3492,8 @@ async fn a_dm_component_uses_the_saved_message_route_not_its_placeholder_guild()
         DispatcherConfig::default(),
     )
     .await;
+    assert_eq!(module.log(), ["load"]);
+    module.log.lock().unwrap().clear();
     let custom_id = "tools:rate:7:ticket-1";
     DirectMessageComponentRoutes::new(Arc::clone(&h.storage) as Arc<dyn StorageBackend>)
         .record(&DirectMessageComponentRoute {
@@ -3584,6 +3586,8 @@ async fn a_dm_component_does_not_bypass_the_configured_guild_allowlist() {
         },
     )
     .await;
+    assert_eq!(module.log(), ["load"]);
+    module.log.lock().unwrap().clear();
     let custom_id = "tools:rate:7:ticket-1";
     DirectMessageComponentRoutes::new(Arc::clone(&h.storage) as Arc<dyn StorageBackend>)
         .record(&DirectMessageComponentRoute {
