@@ -1515,7 +1515,7 @@ mod tests {
             "user_id": "7",
             "custom_ids": ["tickets:rate:7:ticket-1"]
         });
-        let lifetime = Duration::from_secs(365 * 24 * 60 * 60);
+        let lifetime = Duration::from_hours(8760);
 
         StorageBackend::insert_direct_message_component_route(
             &db,

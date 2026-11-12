@@ -1542,7 +1542,7 @@ mod tests {
         assert!(matches!(
             events.as_slice(),
             [Event::ThreadDeleted { guild_id, thread_id, parent_id }]
-                if guild_id == Id::new(1) && thread_id == Id::new(20) && parent_id == Id::new(2)
+                if *guild_id == Id::new(1) && *thread_id == Id::new(20) && *parent_id == Id::new(2)
         ));
     }
 
