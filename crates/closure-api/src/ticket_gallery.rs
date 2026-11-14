@@ -21,6 +21,8 @@ use crate::{ApiState, config::actor, error::ApiError, tickets};
 const MAX_OFFSET: u32 = 10_000;
 const DEFAULT_LIMIT: u16 = 24;
 const MAX_LIMIT: u16 = 50;
+const OWNER_DEFAULT_LIMIT: u16 = 100;
+const OWNER_MAX_LIMIT: u16 = 100;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +33,7 @@ pub(crate) struct GalleryQuery {
     sort: Option<String>,
     offset: Option<u32>,
     limit: Option<u16>,
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +79,14 @@ pub(crate) struct GalleryReviewBody {
 #[serde(deny_unknown_fields)]
 pub(crate) struct EmptyBody {}
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OwnerQuery {
+    q: Option<String>,
+    cursor: Option<String>,
+    limit: Option<u16>,
+}
+
 pub(crate) async fn templates(
     State(state): State<ApiState>,
     Path(raw_guild): Path<u64>,
@@ -99,17 +110,7 @@ pub(crate) async fn templates(
     if category.is_some_and(|category| !valid_category(category)) {
         return Err(ApiError::BadRequest("template category is invalid".into()));
     }
-    let query_text = query
-        .q
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if query_text
-        .is_some_and(|value| value.chars().count() > 100 || value.chars().any(char::is_control))
-    {
-        return Err(ApiError::BadRequest("search query is invalid".into()));
-    }
-    let query_text = query_text.map(escape_like);
+    let query_text = gallery_search(query.q.as_deref())?;
     let sort = query.sort.as_deref().unwrap_or("newest");
     if !matches!(sort, "popular" | "newest") {
         return Err(ApiError::BadRequest("template sort is invalid".into()));
@@ -129,6 +130,7 @@ pub(crate) async fn templates(
             sort,
             offset: i64::from(offset),
             limit: i64::from(limit),
+            cursor: query.cursor.as_deref(),
         })
         .await
         .map_err(gallery_error)?;
@@ -158,19 +160,31 @@ pub(crate) async fn submissions(
     State(state): State<ApiState>,
     Path(raw_guild): Path<u64>,
     headers: HeaderMap,
+    Query(query): Query<OwnerQuery>,
 ) -> Result<Response, ApiError> {
     let (_, viewer) = tickets::viewer(&state, raw_guild, &headers).await?;
     require_manage(viewer.can_manage)?;
     let actor_id = user_db_id(viewer.actor.user.get())?;
-    let submissions = state
+    let search = gallery_search(query.q.as_deref())?;
+    let limit = query.limit.unwrap_or(OWNER_DEFAULT_LIMIT);
+    if !(1..=OWNER_MAX_LIMIT).contains(&limit) {
+        return Err(ApiError::BadRequest("gallery page is invalid".into()));
+    }
+    let page = state
         .inner
         .db
-        .ticket_gallery_submissions(actor_id)
+        .ticket_gallery_submissions(
+            actor_id,
+            search.as_deref(),
+            query.cursor.as_deref(),
+            i64::from(limit),
+        )
         .await
         .map_err(gallery_error)?;
     Ok(no_store(
         Json(json!({
-            "submissions": submissions.iter().map(submission_json).collect::<Vec<_>>()
+            "submissions": page.submissions.iter().map(submission_json).collect::<Vec<_>>(),
+            "next_cursor": page.next_cursor,
         }))
         .into_response(),
     ))
@@ -370,13 +384,15 @@ pub(crate) async fn record_import(
     let id = template_id(&raw_id)?;
     let key = request_key(&headers)?;
     let actor_id = user_db_id(viewer.actor.user.get())?;
+    let guild_id = i64::try_from(guild.get())
+        .map_err(|_| ApiError::BadRequest("guild ID is invalid".into()))?;
     let fingerprint = fingerprint(&json!({
         "action": "import", "template_id": id, "guild_id": guild.get()
     }))?;
     let import_count = state
         .inner
         .db
-        .ticket_gallery_record_import(actor_id, id, &key, &fingerprint)
+        .ticket_gallery_record_import(actor_id, guild_id, id, &key, &fingerprint)
         .await
         .map_err(gallery_error)?;
     Ok(no_store(
@@ -473,7 +489,10 @@ async fn gallery_source_payload(
             guild,
             actor,
             DashboardActionRequest {
-                scope: DashboardScope::Gallery,
+                scope: DashboardScope::Gallery {
+                    cursor: None,
+                    query: None,
+                },
                 action: "gallery.export".into(),
                 data: json!({ "kind": kind, "source_id": source_id }),
                 expected_revision: 0,
@@ -516,6 +535,7 @@ fn dashboard_error(error: DashboardActionError) -> ApiError {
 fn gallery_error(error: GalleryError) -> ApiError {
     match error {
         GalleryError::NotFound => ApiError::NotFound("gallery item not found".into()),
+        GalleryError::InvalidCursor => ApiError::BadRequest("gallery cursor is invalid".into()),
         GalleryError::Conflict => {
             ApiError::Conflict("gallery item changed; reload and retry".into())
         }
@@ -529,7 +549,8 @@ fn gallery_page_json(page: &GalleryPage) -> Value {
         "templates": page.templates.iter().map(card_json).collect::<Vec<_>>(),
         "total": page.total,
         "offset": page.offset,
-        "next_offset": page.next_offset,
+        "next_offset": public_next_offset(page.next_offset),
+        "next_cursor": page.next_cursor,
     })
 }
 
@@ -575,6 +596,28 @@ fn submission_json(submission: &GallerySubmission) -> Value {
         "updated_at": submission.updated_at,
         "published_at": submission.published_at,
     })
+}
+
+#[cfg(test)]
+mod public_offset_tests {
+    use super::*;
+
+    #[test]
+    fn offers_no_offset_past_the_maximum_and_points_to_the_cursor() {
+        let page = GalleryPage {
+            featured: Vec::new(),
+            templates: Vec::new(),
+            total: 20_000,
+            offset: 10_000,
+            next_offset: Some(10_024),
+            next_cursor: Some("n.1.2".into()),
+        };
+
+        let value = gallery_page_json(&page);
+
+        assert!(value["next_offset"].is_null());
+        assert_eq!(value["next_cursor"], "n.1.2");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -685,6 +728,20 @@ fn has_server_reference(value: &str) -> bool {
     ]
     .iter()
     .any(|marker| value.contains(marker))
+}
+
+fn gallery_search(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let value = raw.map(str::trim).filter(|value| !value.is_empty());
+    if value.is_some_and(|value| value.chars().count() > 100 || value.chars().any(char::is_control))
+    {
+        return Err(ApiError::BadRequest("search query is invalid".into()));
+    }
+    Ok(value.map(escape_like))
+}
+
+/// Offsets past `MAX_OFFSET` are refused by the endpoint, so they are not offered either.
+fn public_next_offset(next: Option<i64>) -> Option<i64> {
+    next.filter(|offset| *offset <= i64::from(MAX_OFFSET))
 }
 
 fn escape_like(value: &str) -> String {

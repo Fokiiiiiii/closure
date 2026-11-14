@@ -693,6 +693,132 @@ pub(crate) async fn history(
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
+#[derive(Serialize)]
+struct OrphanSecretList {
+    orphans: Vec<OrphanSecret>,
+}
+
+#[derive(Serialize)]
+struct OrphanSecret {
+    integration_id: String,
+    generation: String,
+    secret_name: String,
+    updated_at_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OrphanSecretTarget {
+    integration_id: String,
+    generation: String,
+    secret_name: String,
+}
+
+/// Only the owner or an administrator may list or delete stored integration secrets.
+async fn secret_manager(
+    state: &ApiState,
+    guild: GuildId,
+    headers: &HeaderMap,
+) -> Result<UserId, ApiError> {
+    let (_, viewer) = crate::tickets::viewer(state, guild.get(), headers).await?;
+    if viewer.actor.owner || viewer.actor.administrator {
+        Ok(viewer.actor.user)
+    } else {
+        Err(ApiError::Forbidden(
+            "a guild owner or administrator must manage integration secrets".into(),
+        ))
+    }
+}
+
+/// Lists the stored secret values that no saved integration names: their places only, never values.
+pub(crate) async fn list_orphan_secrets(
+    State(state): State<ApiState>,
+    Path(guild): Path<u64>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let guild = guild_id(guild)?;
+    secret_manager(&state, guild, &headers).await?;
+    let orphans = state
+        .inner
+        .db
+        .list_orphan_integration_secrets(guild)
+        .await?;
+    let body = OrphanSecretList {
+        orphans: orphans
+            .into_iter()
+            .map(|orphan| OrphanSecret {
+                integration_id: orphan.integration_id,
+                generation: orphan.generation,
+                secret_name: orphan.secret_name,
+                updated_at_unix: orphan.updated_at.unix_timestamp(),
+            })
+            .collect(),
+    };
+    Ok(Json(body).into_response())
+}
+
+/// Whether a target names a place a stored integration secret can have.
+fn valid_orphan_target(target: &OrphanSecretTarget) -> bool {
+    valid_integration_id(&target.integration_id)
+        && target.generation.len() == 32
+        && target
+            .generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && (1..=64).contains(&target.secret_name.len())
+        && target.secret_name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+}
+
+/// Deletes one stored secret value that no saved integration names. The body is
+/// `{"integration_id": "...", "generation": "...", "secret_name": "..."}`.
+pub(crate) async fn delete_orphan_secret(
+    State(state): State<ApiState>,
+    Path(guild): Path<u64>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let guild = guild_id(guild)?;
+    let actor = secret_manager(&state, guild, &headers).await?;
+    let target: OrphanSecretTarget = serde_json::from_slice(&body).map_err(|_| {
+        ApiError::BadRequest("the body must name integration_id, generation and secret_name".into())
+    })?;
+    if !valid_orphan_target(&target) {
+        return Err(ApiError::BadRequest(
+            "the integration secret target is malformed".into(),
+        ));
+    }
+    let deleted = state
+        .inner
+        .db
+        .delete_orphan_integration_secret(
+            guild,
+            &target.integration_id,
+            &target.generation,
+            &target.secret_name,
+        )
+        .await?;
+    if !deleted {
+        return Err(ApiError::NotFound(
+            "no stored value of that name is an orphan".into(),
+        ));
+    }
+    let audit = AuditEvent {
+        guild_id: guild,
+        actor: Some(actor),
+        action: "integration_secret.orphan_delete".into(),
+        payload: json!({
+            "integration_id": target.integration_id,
+            "generation": target.generation,
+            "secret_name": target.secret_name,
+        }),
+    };
+    if let Err(error) = state.inner.db.record_audit(&audit).await {
+        tracing::warn!(%error, %guild, "could not record the orphan secret deletion in the audit trail");
+    }
+    Ok(Json(json!({ "deleted": true })).into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,6 +851,30 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn orphan_targets_must_name_a_well_formed_place() {
+        let target =
+            |integration_id: &str, generation: &str, secret_name: &str| OrphanSecretTarget {
+                integration_id: integration_id.into(),
+                generation: generation.into(),
+                secret_name: secret_name.into(),
+            };
+        let generation = "0123456789abcdef0123456789abcdef";
+        assert!(valid_orphan_target(&target("crm", generation, "api-token")));
+        assert!(!valid_orphan_target(&target(
+            "CRM",
+            generation,
+            "api-token"
+        )));
+        assert!(!valid_orphan_target(&target("crm", "0123", "api-token")));
+        assert!(!valid_orphan_target(&target("crm", generation, "")));
+        assert!(!valid_orphan_target(&target(
+            "crm",
+            generation,
+            "Api Token"
+        )));
     }
 
     #[test]

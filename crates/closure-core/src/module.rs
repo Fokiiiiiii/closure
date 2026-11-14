@@ -1091,7 +1091,10 @@ pub enum DashboardScope {
     TicketLabels {
         cursor: Option<String>,
     },
-    Gallery,
+    Gallery {
+        cursor: Option<String>,
+        query: Option<String>,
+    },
     Knowledge {
         query: Option<String>,
         cursor: Option<String>,

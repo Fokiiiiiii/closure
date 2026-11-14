@@ -111,5 +111,6 @@ role-updated-reason = 制限に使うロールを Closure が更新しました�
 ticket-notification-gallery-approved = ギャラリーへの投稿「{ $title }」が承認されました。
 ticket-notification-gallery-rejected = ギャラリーへの投稿「{ $title }」が却下されました。
 ticket-notification-review-reason = 審査理由: { $reason }
+ticket-notification-email-quota-exceeded = 確認メールの送信回数が上限に達しました。しばらく待ってから再度お試しください。
 ticket-notification-email-verification-subject = メールアドレスを確認してください
 ticket-notification-email-verification-body = 確認コードは { $code } です。有効期限は15分です。

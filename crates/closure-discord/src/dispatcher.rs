@@ -22,13 +22,15 @@ use closure_core::cases::{Case, CaseBackend, CaseError, Cases, MemoryCases, NewC
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::ModuleError;
 use closure_core::event::{
-    AutocompleteInvocation, CommandInvocation, ComponentInvocation, ContextTarget, Event, GuildId,
-    InteractionRef, InteractionToken, MessageInfo, UserId,
+    AutocompleteInvocation, ChannelId, CommandInvocation, ComponentInvocation, ContextTarget,
+    Event, GuildId, InteractionRef, InteractionToken, MessageId, MessageInfo, ModalSubmission,
+    UserId,
 };
 use closure_core::history::{HistoryBackend, MemoryHistory, MessageHistory};
 use closure_core::integration_secrets::IntegrationSecretService;
 use closure_core::interaction::{
-    DirectMessageComponentRoutes, InteractionGuilds, InteractionLimits, Recorded,
+    DirectMessageComponentRoute, DirectMessageComponentRoutes, InteractionGuilds,
+    InteractionLimits, Recorded,
 };
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::{Args, Locale, Translator};
@@ -433,7 +435,9 @@ fn ordering_key(event: &Event) -> u64 {
         Event::Autocomplete(query) => query.user.id.get(),
         Event::ContextCommand(invocation) => invocation.user.id.get(),
         Event::Component(click) | Event::DirectMessageComponent(click) => click.user.id.get(),
-        Event::Modal(submission) => submission.user.id.get(),
+        Event::Modal(submission) | Event::DirectMessageModal { submission, .. } => {
+            submission.user.id.get()
+        }
         Event::Scheduled(job) => u64::try_from(job.id).unwrap_or(0),
         Event::GuildAvailable { .. } | Event::GuildRemoved { .. } | Event::ConfigChanged { .. } => {
             0
@@ -885,6 +889,10 @@ impl Dispatcher {
             Event::DirectMessageComponent(click) => {
                 self.enqueue_direct_message_component(click, outcome)
             }
+            Event::DirectMessageModal {
+                message_id,
+                submission,
+            } => self.enqueue_direct_message_modal(message_id, submission, outcome),
             event => self.enqueue_recorded_at(
                 event,
                 outcome,
@@ -980,33 +988,42 @@ impl Dispatcher {
         true
     }
 
-    fn enqueue_direct_message_component(
-        &self,
-        click: ComponentInvocation,
-        outcome: Option<oneshot::Sender<JobOutcome>>,
-    ) -> bool {
+    /// Holds a DM click or modal until the host has checked its route. `None` when the queue is full
+    /// or closing; the caller then drops it.
+    fn admit_direct_message(&self, raw_event: Event) -> Option<(Instant, Arc<AtomicBool>)> {
         let pending = self.shared.pending_total.fetch_add(1, Ordering::AcqRel);
         if pending >= self.shared.config.interaction_limits.total {
             self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
             metrics::counter!("closure_events_dropped_total", "reason" => "dm_component_queue_full")
                 .increment(1);
-            return false;
+            return None;
         }
         if self.shared.closing.load(Ordering::Acquire) {
             self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
-            return false;
+            return None;
         }
-
         let enqueued = Instant::now();
         let claim = Arc::new(AtomicBool::new(false));
-        let raw_event = Arc::new(Event::DirectMessageComponent(click.clone()));
         self.shared.tracker.spawn(answer_when_busy(
             Arc::clone(&self.shared),
             None,
-            raw_event,
+            Arc::new(raw_event),
             Arc::clone(&claim),
             enqueued + INTERACTION_DEADLINE,
         ));
+        Some((enqueued, claim))
+    }
+
+    fn enqueue_direct_message_component(
+        &self,
+        click: ComponentInvocation,
+        outcome: Option<oneshot::Sender<JobOutcome>>,
+    ) -> bool {
+        let Some((enqueued, claim)) =
+            self.admit_direct_message(Event::DirectMessageComponent(click.clone()))
+        else {
+            return false;
+        };
         let dispatcher = self.clone();
         self.shared.tracker.spawn(async move {
             dispatcher
@@ -1014,6 +1031,55 @@ impl Dispatcher {
                 .await;
         });
         true
+    }
+
+    fn enqueue_direct_message_modal(
+        &self,
+        message_id: MessageId,
+        submission: ModalSubmission,
+        outcome: Option<oneshot::Sender<JobOutcome>>,
+    ) -> bool {
+        let Some((enqueued, claim)) = self.admit_direct_message(Event::DirectMessageModal {
+            message_id,
+            submission: submission.clone(),
+        }) else {
+            return false;
+        };
+        let dispatcher = self.clone();
+        self.shared.tracker.spawn(async move {
+            dispatcher
+                .resolve_direct_message_modal(message_id, submission, outcome, enqueued, claim)
+                .await;
+        });
+        true
+    }
+
+    /// The checks a saved DM route makes before a click or submission goes on, apart from its custom id.
+    fn direct_route_accepts(
+        &self,
+        route: &DirectMessageComponentRoute,
+        message_id: MessageId,
+        channel_id: ChannelId,
+        user_id: UserId,
+        bot: bool,
+    ) -> bool {
+        let allowed = self
+            .shared
+            .config
+            .allowed_guilds
+            .as_ref()
+            .is_none_or(|guilds| guilds.contains(&route.guild_id));
+        let enabled = self
+            .shared
+            .settings
+            .module(route.guild_id, &route.module_id)
+            .is_some_and(|settings| settings.enabled);
+        allowed
+            && enabled
+            && route.message_id == message_id
+            && route.channel_id == channel_id
+            && route.user_id == user_id
+            && !bot
     }
 
     async fn resolve_direct_message_component(
@@ -1037,23 +1103,15 @@ impl Dispatcher {
                     .registry
                     .interaction_owner(&click.custom_id)
                     .is_some_and(|module| module.manifest().id == route.module_id);
-                let allowed = self
-                    .shared
-                    .config
-                    .allowed_guilds
-                    .as_ref()
-                    .is_none_or(|guilds| guilds.contains(&route.guild_id));
-                let enabled = self
-                    .shared
-                    .settings
-                    .module(route.guild_id, &route.module_id)
-                    .is_some_and(|settings| settings.enabled);
-                let matches_record = route.message_id == click.message_id
-                    && route.channel_id == click.channel_id
-                    && route.user_id == click.user.id
-                    && route.custom_ids.contains(&click.custom_id)
-                    && !click.user.bot;
-                if owner_matches && allowed && enabled && matches_record {
+                let matches_record = route.custom_ids.contains(&click.custom_id)
+                    && self.direct_route_accepts(
+                        &route,
+                        click.message_id,
+                        click.channel_id,
+                        click.user.id,
+                        click.user.bot,
+                    );
+                if owner_matches && matches_record {
                     click.guild_id = route.guild_id;
                     if !self.enqueue_recorded_at(
                         Event::DirectMessageComponent(click.clone()),
@@ -1063,20 +1121,16 @@ impl Dispatcher {
                         Arc::clone(&claim),
                         false,
                     ) {
-                        self.refuse_direct_message_component(&click, &claim, "error-busy")
+                        self.refuse_direct_message(&click, &claim, "error-busy")
                             .await;
                     }
                 } else {
-                    self.refuse_direct_message_component(
-                        &click,
-                        &claim,
-                        "error-dm-component-invalid",
-                    )
-                    .await;
+                    self.refuse_direct_message(&click, &claim, "error-dm-component-invalid")
+                        .await;
                 }
             }
             Ok(None) => {
-                self.refuse_direct_message_component(&click, &claim, "error-dm-component-invalid")
+                self.refuse_direct_message(&click, &claim, "error-dm-component-invalid")
                     .await;
             }
             Err(error) => {
@@ -1086,24 +1140,92 @@ impl Dispatcher {
                     %error,
                     "could not look up a direct-message component route"
                 );
-                self.refuse_direct_message_component(&click, &claim, "error-internal")
+                self.refuse_direct_message(&click, &claim, "error-internal")
                     .await;
             }
         }
         self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
     }
 
-    async fn refuse_direct_message_component(
+    /// A modal from a DM is checked against the route of the message it was opened from, and the
+    /// module that owns its custom id must be the one that route belongs to.
+    async fn resolve_direct_message_modal(
         &self,
-        click: &ComponentInvocation,
+        message_id: MessageId,
+        mut submission: ModalSubmission,
+        outcome: Option<oneshot::Sender<JobOutcome>>,
+        enqueued: Instant,
+        claim: Arc<AtomicBool>,
+    ) {
+        let route = tokio::select! {
+            () = self.shared.cancel.cancelled() => {
+                self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
+                return;
+            }
+            route = self.shared.dm_component_routes.get(message_id) => route,
+        };
+        match route {
+            Ok(Some(route)) => {
+                let owner_matches = self
+                    .shared
+                    .registry
+                    .interaction_owner(&submission.custom_id)
+                    .is_some_and(|module| module.manifest().id == route.module_id);
+                if owner_matches
+                    && self.direct_route_accepts(
+                        &route,
+                        message_id,
+                        submission.channel_id,
+                        submission.user.id,
+                        submission.user.bot,
+                    )
+                {
+                    submission.guild_id = route.guild_id;
+                    if !self.enqueue_recorded_at(
+                        Event::Modal(submission.clone()),
+                        outcome,
+                        None,
+                        enqueued,
+                        Arc::clone(&claim),
+                        false,
+                    ) {
+                        self.refuse_direct_message(&submission, &claim, "error-busy")
+                            .await;
+                    }
+                } else {
+                    self.refuse_direct_message(&submission, &claim, "error-dm-component-invalid")
+                        .await;
+                }
+            }
+            Ok(None) => {
+                self.refuse_direct_message(&submission, &claim, "error-dm-component-invalid")
+                    .await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    message = %message_id,
+                    channel = %submission.channel_id,
+                    %error,
+                    "could not look up a direct-message modal's route"
+                );
+                self.refuse_direct_message(&submission, &claim, "error-internal")
+                    .await;
+            }
+        }
+        self.shared.pending_total.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    async fn refuse_direct_message(
+        &self,
+        invocation: &dyn InteractionRef,
         claim: &Arc<AtomicBool>,
         key: &str,
     ) {
         if claim.swap(true, Ordering::AcqRel) {
             return;
         }
-        let locale = click.locale.unwrap_or(Locale::DEFAULT);
-        reply(&self.shared, click, text(&self.shared, locale, key)).await;
+        let locale = invocation.locale().unwrap_or(Locale::DEFAULT);
+        reply(&self.shared, invocation, text(&self.shared, locale, key)).await;
     }
 
     /// Lanes of `guild`, created on first use and rebuilt when the configured lane count changed while nothing was pending. The pending count is raised under the map lock so the reaper cannot release lanes about to receive an event; returns `None` once shutdown has begun.

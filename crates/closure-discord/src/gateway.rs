@@ -1099,7 +1099,10 @@ fn handle_event_with_modal_components(
     for converted in
         crate::convert::events_with_modal_components(event, &before, raw_modal_components)
     {
-        if matches!(&converted, ModuleEvent::DirectMessageComponent(_)) {
+        if matches!(
+            &converted,
+            ModuleEvent::DirectMessageComponent(_) | ModuleEvent::DirectMessageModal { .. }
+        ) {
             context.dispatcher.dispatch(converted);
             continue;
         }

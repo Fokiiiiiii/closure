@@ -12,7 +12,7 @@ use closure_core::integration_secrets::IntegrationSecretService;
 use closure_core::locale::{Args, Locale as MessageLocale, Translator};
 use closure_db::notifications::{
     ClaimedNotificationEvent, EmailRequestOutcome, EmailVerificationOutcome,
-    NotificationOutboxChannel,
+    EmailVerificationRequest, NotificationOutboxChannel, StoredNotificationPreferences,
 };
 use closure_i18n::{CORE_NAMESPACE, FluentTranslator, TranslatorBuilder};
 use lettre::{
@@ -20,6 +20,7 @@ use lettre::{
     message::{Mailbox, header::ContentType},
     transport::smtp::authentication::Credentials,
 };
+use ring::digest::{SHA256, digest};
 use ring::rand::{SecureRandom, SystemRandom};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -47,6 +48,8 @@ const EMAIL_SECRET_NAMESPACE: &str = "ticket_notifications";
 const EMAIL_SECRET_FIELD: &str = "email";
 const EMAIL_TOKEN_NAMESPACE: &str = "ticket_notifications_email";
 const EMAIL_TOKEN_DOMAIN: &[u8] = b"verification:v1:";
+const EMAIL_PAYLOAD_NAMESPACE: &str = "ticket_notifications_email_payload";
+const EMAIL_PAYLOAD_FIELD: &str = "payload";
 
 #[derive(Debug, Clone, Copy)]
 pub enum DirectMessageError {
@@ -111,7 +114,7 @@ impl EmailSender {
     // A Message-ID derived from the delivery identity lets the relay and the recipient
     // recognise a resend of the same notification.
     fn message_id(&self, local_part: &str) -> String {
-        format!("<{local_part}@{}>", self.from.email.domain())
+        delivery_message_id(&self.from, local_part)
     }
 
     async fn send(
@@ -128,6 +131,78 @@ impl EmailSender {
             .map(|_| ())
             .map_err(|_| ())
     }
+}
+
+fn delivery_message_id(from: &Mailbox, local_part: &str) -> String {
+    format!("<{local_part}@{}>", from.email.domain())
+}
+
+// Hashed without the account, so the per-address limit counts mails across accounts.
+fn recipient_hash(email: &str) -> Vec<u8> {
+    digest(
+        &SHA256,
+        format!("recipient:v1:{}", email.to_ascii_lowercase()).as_bytes(),
+    )
+    .as_ref()
+    .to_vec()
+}
+
+fn seal_payload(
+    vault: &IntegrationSecretService,
+    actor: UserId,
+    email: &str,
+    code: &str,
+) -> Result<Vec<u8>, ApiError> {
+    let cleartext = serde_json::to_string(&json!({"address": email, "code": code }))
+        .map_err(|_| ApiError::Internal("email verification is unavailable".into()))?;
+    vault
+        .seal_account_secret(
+            actor,
+            actor,
+            EMAIL_PAYLOAD_NAMESPACE,
+            EMAIL_PAYLOAD_FIELD,
+            SecretString::from(cleartext),
+        )
+        .map_err(|_| ApiError::Internal("email verification is unavailable".into()))
+}
+
+fn open_payload(
+    vault: &IntegrationSecretService,
+    actor: UserId,
+    payload: &[u8],
+) -> Result<(String, String), ApiError> {
+    let unavailable = || ApiError::Internal("email verification is unavailable".into());
+    let secret = vault
+        .open_account_secret(
+            actor,
+            actor,
+            EMAIL_PAYLOAD_NAMESPACE,
+            EMAIL_PAYLOAD_FIELD,
+            payload,
+        )
+        .map_err(|_| unavailable())?;
+    let value: Value = serde_json::from_str(secret.expose_secret()).map_err(|_| unavailable())?;
+    let address = value["address"]
+        .as_str()
+        .ok_or_else(unavailable)?
+        .to_owned();
+    let code = value["code"].as_str().ok_or_else(unavailable)?.to_owned();
+    Ok((address, code))
+}
+
+fn quota_message(locale: MessageLocale) -> String {
+    translated(
+        locale,
+        "ticket-notification-email-quota-exceeded",
+        &Args::new(),
+    )
+    .unwrap_or_else(|| match locale {
+        MessageLocale::Ja => {
+            "確認メールの送信回数が上限に達しました。しばらく待ってから再度お試しください。"
+                .to_owned()
+        }
+        _ => "Too many verification emails were requested recently. Try again later.".to_owned(),
+    })
 }
 
 fn parse_mailbox(raw: &str) -> Result<Mailbox, ()> {
@@ -502,133 +577,7 @@ pub(crate) async fn action(
         "request_email_verification" => {
             let data: RequestEmail = serde_json::from_value(request.data)
                 .map_err(|_| ApiError::BadRequest("invalid email address".into()))?;
-            let sender = EmailSender::from_env()
-                .ok_or_else(|| ApiError::BadRequest("email verification is unavailable".into()))?;
-            let vault =
-                state.inner.account_vault.as_ref().ok_or_else(|| {
-                    ApiError::BadRequest("email verification is unavailable".into())
-                })?;
-            let locale_preferences = state
-                .inner
-                .db
-                .notification_preferences(user)
-                .await
-                .map_err(map_db_error)?;
-            let email_locale = saved_locale(&locale_preferences.locale);
-            let (email, encrypted, masked) = if let Some(raw_email) = data.email {
-                let email = normalize_email(&raw_email)?;
-                let encrypted = vault
-                    .seal_account_secret(
-                        actor,
-                        actor,
-                        EMAIL_SECRET_NAMESPACE,
-                        EMAIL_SECRET_FIELD,
-                        SecretString::from(email.clone()),
-                    )
-                    .map_err(|_| ApiError::Internal("email verification is unavailable".into()))?;
-                let masked = masked_email(&email)
-                    .ok_or_else(|| ApiError::BadRequest("enter a valid email address".into()))?;
-                (email, encrypted, masked)
-            } else {
-                let preferences = state
-                    .inner
-                    .db
-                    .notification_preferences(user)
-                    .await
-                    .map_err(map_db_error)?;
-                let encrypted = preferences
-                    .pending_email_ciphertext
-                    .clone()
-                    .ok_or_else(|| {
-                        ApiError::BadRequest("there is no pending email address".into())
-                    })?;
-                let masked = preferences.pending_email_masked.clone().ok_or_else(|| {
-                    ApiError::BadRequest("there is no pending email address".into())
-                })?;
-                let secret = vault
-                    .open_account_secret(
-                        actor,
-                        actor,
-                        EMAIL_SECRET_NAMESPACE,
-                        EMAIL_SECRET_FIELD,
-                        &encrypted,
-                    )
-                    .map_err(|_| ApiError::Internal("email verification is unavailable".into()))?;
-                (normalize_email(secret.expose_secret())?, encrypted, masked)
-            };
-            let mailbox = parse_mailbox(&email)
-                .map_err(|()| ApiError::BadRequest("enter a valid email address".into()))?;
-            let code = verification_code()?;
-            let expires_at = now.saturating_add(VERIFICATION_TTL_SECONDS);
-            let code_hash = vault
-                .account_token_hmac(
-                    actor,
-                    actor,
-                    EMAIL_TOKEN_NAMESPACE,
-                    &verification_message(user, expires_at, &code),
-                )
-                .map_err(|_| ApiError::Internal("email verification is unavailable".into()))?;
-            let fingerprint = vault
-                .account_token_hmac(
-                    actor,
-                    actor,
-                    EMAIL_TOKEN_NAMESPACE,
-                    &request_fingerprint(&email),
-                )
-                .map_err(|_| ApiError::Internal("email verification is unavailable".into()))?;
-            let outcome = state
-                .inner
-                .db
-                .begin_email_verification(
-                    user,
-                    expected,
-                    encrypted,
-                    masked,
-                    code_hash.to_vec(),
-                    expires_at,
-                    key.clone(),
-                    fingerprint.to_vec(),
-                    now,
-                )
-                .await
-                .map_err(map_db_error)?;
-            match outcome {
-                EmailRequestOutcome::Replay { revision } => {
-                    (revision, json!({"verification_sent": true}))
-                }
-                EmailRequestOutcome::Started { revision } => {
-                    let (subject, body) = verification_email(email_locale, &code);
-                    let sent = sender.send(mailbox, &subject, &body, None).await.is_ok();
-                    if !sent {
-                        let _ = state.inner.db.cancel_email_verification(user, &key).await;
-                        return Err(ApiError::Internal(
-                            "email verification delivery failed".into(),
-                        ));
-                    }
-                    if state
-                        .inner
-                        .db
-                        .mark_email_verification_sent(user, &key)
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!("email verification sent state was not recorded");
-                    }
-                    (revision, json!({"verification_sent": true}))
-                }
-                EmailRequestOutcome::Cooldown {
-                    retry_after_seconds,
-                } => {
-                    return Err(ApiError::Conflict(format!(
-                        "a verification code was recently sent; retry in {retry_after_seconds} seconds"
-                    )));
-                }
-                EmailRequestOutcome::IdempotencyConflict => {
-                    return Err(ApiError::Conflict(
-                        "Idempotency-Key was already used for another email address".into(),
-                    ));
-                }
-            }
+            request_email_verification(&state, actor, &key, expected, now, data).await?
         }
         "verify_email" => {
             let data: VerifyEmail = serde_json::from_value(request.data)
@@ -704,6 +653,195 @@ pub(crate) async fn action(
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(config::with_etag(response, revision))
+}
+
+// The address to verify: the one given now, or the one already pending for this account.
+async fn resolve_verification_address(
+    state: &ApiState,
+    actor: UserId,
+    data: RequestEmail,
+) -> Result<(String, Vec<u8>, String), ApiError> {
+    let user = actor.get();
+    let vault = state
+        .inner
+        .account_vault
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("email verification is unavailable".into()))?;
+    let (email, encrypted, masked) = if let Some(raw_email) = data.email {
+        let email = normalize_email(&raw_email)?;
+        let encrypted = vault
+            .seal_account_secret(
+                actor,
+                actor,
+                EMAIL_SECRET_NAMESPACE,
+                EMAIL_SECRET_FIELD,
+                SecretString::from(email.clone()),
+            )
+            .map_err(|_| ApiError::Internal("email verification is unavailable".into()))?;
+        let masked = masked_email(&email)
+            .ok_or_else(|| ApiError::BadRequest("enter a valid email address".into()))?;
+        (email, encrypted, masked)
+    } else {
+        let preferences = state
+            .inner
+            .db
+            .notification_preferences(user)
+            .await
+            .map_err(map_db_error)?;
+        let encrypted = preferences
+            .pending_email_ciphertext
+            .clone()
+            .ok_or_else(|| ApiError::BadRequest("there is no pending email address".into()))?;
+        let masked = preferences
+            .pending_email_masked
+            .clone()
+            .ok_or_else(|| ApiError::BadRequest("there is no pending email address".into()))?;
+        let secret = vault
+            .open_account_secret(
+                actor,
+                actor,
+                EMAIL_SECRET_NAMESPACE,
+                EMAIL_SECRET_FIELD,
+                &encrypted,
+            )
+            .map_err(|_| ApiError::Internal("email verification is unavailable".into()))?;
+        (normalize_email(secret.expose_secret())?, encrypted, masked)
+    };
+    Ok((email, encrypted, masked))
+}
+
+async fn request_email_verification(
+    state: &ApiState,
+    actor: UserId,
+    key: &str,
+    expected: i64,
+    now: i64,
+    data: RequestEmail,
+) -> Result<(i64, Value), ApiError> {
+    let user = actor.get();
+    let unavailable = || ApiError::BadRequest("email verification is unavailable".into());
+    let sender = EmailSender::from_env().ok_or_else(unavailable)?;
+    let vault = state.inner.account_vault.as_ref().ok_or_else(unavailable)?;
+    let locale_preferences = state
+        .inner
+        .db
+        .notification_preferences(user)
+        .await
+        .map_err(map_db_error)?;
+    let email_locale = saved_locale(&locale_preferences.locale);
+    let (email, encrypted, masked) = resolve_verification_address(state, actor, data).await?;
+    parse_mailbox(&email)
+        .map_err(|()| ApiError::BadRequest("enter a valid email address".into()))?;
+    let code = verification_code()?;
+    let expires_at = now.saturating_add(VERIFICATION_TTL_SECONDS);
+    let code_hash = vault
+        .account_token_hmac(
+            actor,
+            actor,
+            EMAIL_TOKEN_NAMESPACE,
+            &verification_message(user, expires_at, &code),
+        )
+        .map_err(|_| ApiError::Internal("email verification is unavailable".into()))?;
+    let fingerprint = vault
+        .account_token_hmac(
+            actor,
+            actor,
+            EMAIL_TOKEN_NAMESPACE,
+            &request_fingerprint(&email),
+        )
+        .map_err(|_| ApiError::Internal("email verification is unavailable".into()))?;
+    let payload = seal_payload(vault, actor, &email, &code)?;
+    let outcome = state
+        .inner
+        .db
+        .begin_email_verification(EmailVerificationRequest {
+            user,
+            expected_revision: expected,
+            email_ciphertext: encrypted,
+            email_masked: masked,
+            code_hash: code_hash.to_vec(),
+            code_expires_at: expires_at,
+            request_key: key.to_owned(),
+            request_fingerprint: fingerprint.to_vec(),
+            payload_ciphertext: payload,
+            recipient_hash: recipient_hash(&email),
+            now,
+        })
+        .await
+        .map_err(map_db_error)?;
+    match outcome {
+        EmailRequestOutcome::Replay { revision } => {
+            Ok((revision, json!({"verification_sent": true})))
+        }
+        EmailRequestOutcome::Started { revision } => {
+            let mailbox = parse_mailbox(&email)
+                .map_err(|()| ApiError::BadRequest("enter a valid email address".into()))?;
+            let (subject, body) = verification_email(email_locale, &code);
+            send_verification(state, &sender, user, key, mailbox, &subject, &body).await?;
+            Ok((revision, json!({"verification_sent": true})))
+        }
+        // The same request again after a stopped send: the stored code is sent, no new code is issued.
+        EmailRequestOutcome::Resume { revision, payload } => {
+            let (address, code) = open_payload(vault, actor, &payload)?;
+            let mailbox = parse_mailbox(&address).map_err(|()| unavailable())?;
+            let (subject, body) = verification_email(email_locale, &code);
+            send_verification(state, &sender, user, key, mailbox, &subject, &body).await?;
+            Ok((revision, json!({"verification_sent": true})))
+        }
+        EmailRequestOutcome::Cooldown {
+            retry_after_seconds,
+        } => Err(ApiError::Conflict(format!(
+            "a verification code was recently sent; retry in {retry_after_seconds} seconds"
+        ))),
+        EmailRequestOutcome::IdempotencyConflict => Err(ApiError::Conflict(
+            "Idempotency-Key was already used for another email address".into(),
+        )),
+        EmailRequestOutcome::QuotaExceeded { .. } => {
+            Err(ApiError::Conflict(quota_message(email_locale)))
+        }
+    }
+}
+
+async fn send_verification(
+    state: &ApiState,
+    sender: &EmailSender,
+    user: u64,
+    key: &str,
+    mailbox: Mailbox,
+    subject: &str,
+    body: &str,
+) -> Result<(), ApiError> {
+    // The Message-ID comes from the request key, so a resend of the same request reuses it.
+    let message_id = sender.message_id(&format!("ticket-verification-{key}"));
+    if sender
+        .send(mailbox, subject, body, Some(message_id))
+        .await
+        .is_err()
+    {
+        // The key, cooldown and payload stay, so the same Idempotency-Key can resume the send.
+        if state
+            .inner
+            .db
+            .mark_email_verification_failed(user, key)
+            .await
+            .is_err()
+        {
+            tracing::warn!("email verification failed state was not recorded");
+        }
+        return Err(ApiError::Internal(
+            "email verification delivery failed".into(),
+        ));
+    }
+    if state
+        .inner
+        .db
+        .mark_email_verification_sent(user, key)
+        .await
+        .is_err()
+    {
+        tracing::warn!("email verification sent state was not recorded");
+    }
+    Ok(())
 }
 
 fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -812,12 +950,7 @@ pub fn run_worker(
                 _ = ticks.tick() => {}
             }
             if last_purge.elapsed() >= OUTBOX_PURGE_INTERVAL {
-                if db.purge_notification_outbox().await.is_err() {
-                    tracing::warn!("notification outbox cleanup failed");
-                }
-                if db.purge_expired_email_verifications().await.is_err() {
-                    tracing::warn!("expired email verification cleanup failed");
-                }
+                run_periodic_purges(&db).await;
                 last_purge = Instant::now();
             }
             for _ in 0..OUTBOX_BATCH {
@@ -843,7 +976,32 @@ pub fn run_worker(
     })
 }
 
-#[allow(clippy::too_many_lines)]
+// One pass of the periodic cleanup. Each step runs even when an earlier one fails.
+async fn run_periodic_purges(db: &Db) {
+    if db.purge_notification_outbox().await.is_err() {
+        tracing::warn!("notification outbox cleanup failed");
+    }
+    if db.purge_expired_notifications().await.is_err() {
+        tracing::warn!("expired notification cleanup failed");
+    }
+    if db.purge_email_send_history().await.is_err() {
+        tracing::warn!("email send history cleanup failed");
+    }
+    if db.purge_expired_email_verifications().await.is_err() {
+        tracing::warn!("expired email verification cleanup failed");
+    }
+    if db.ticket_gallery_purge_expired().await.is_err() {
+        tracing::warn!("ticket gallery cleanup failed");
+    }
+}
+
+struct DeliveryContent {
+    title: String,
+    body: String,
+    href: String,
+}
+
+// A channel records its own outcome, so one failing channel does not hold back the others.
 async fn process_event(
     db: &Db,
     access: &dyn MemberAccess,
@@ -888,181 +1046,236 @@ async fn process_event(
             .await;
         return;
     };
+    let content = DeliveryContent { title, body, href };
 
-    // A failing channel must not hold back the others; the event is retried or deferred at the end.
-    let mut retry_later = false;
-    let mut email_waiting = false;
-
-    if !event.in_app_done {
-        if preferences.in_app_enabled {
-            let submission_title = safe_notification_text(&event.title, 100);
-            let reason = event
-                .reason
-                .as_deref()
-                .map(|reason| safe_notification_text(reason, 500))
-                .filter(|reason| !reason.is_empty());
-            if db
-                .insert_gallery_notification(
-                    event.recipient_id,
-                    event.guild_id,
-                    event.event_id,
-                    &event.event_type,
-                    &submission_title,
-                    reason.as_deref(),
-                    &href,
-                    event.occurred_at,
-                )
-                .await
-                .is_err()
-            {
-                retry_later = true;
-            }
-        }
-        if !retry_later
-            && !db
-                .complete_notification_outbox_channel(
-                    event.event_id,
-                    event.attempts,
-                    NotificationOutboxChannel::InApp,
-                )
-                .await
-                .unwrap_or(false)
-        {
-            return;
-        }
+    let settled = deliver_in_app(db, &event, &preferences, &content).await
+        && deliver_direct_message(
+            db,
+            direct_messages,
+            &event,
+            &preferences,
+            guild,
+            recipient,
+            &content,
+        )
+        .await
+        && deliver_email(db, email, vault, &event, &preferences, &content).await;
+    if !settled {
+        // The lease was lost; the worker that holds it now settles the event.
+        return;
     }
-
-    if !event.discord_dm_done {
-        if preferences.discord_dm_enabled {
-            let content = if body.is_empty() {
-                title.clone()
-            } else {
-                format!("{title}\n\n{body}")
-            };
-            match direct_messages.send(guild, recipient, content).await {
-                Ok(()) | Err(DirectMessageError::Permanent) => {
-                    if !db
-                        .complete_notification_outbox_channel(
-                            event.event_id,
-                            event.attempts,
-                            NotificationOutboxChannel::DiscordDm,
-                        )
-                        .await
-                        .unwrap_or(false)
-                    {
-                        return;
-                    }
-                }
-                Err(DirectMessageError::Retryable) => retry_later = true,
-            }
-        } else if !db
-            .complete_notification_outbox_channel(
-                event.event_id,
-                event.attempts,
-                NotificationOutboxChannel::DiscordDm,
-            )
-            .await
-            .unwrap_or(false)
-        {
-            return;
-        }
-    }
-
-    if !event.email_done {
-        if !(preferences.email_enabled && preferences.email_verified) {
-            if !db
-                .complete_notification_outbox_channel(
-                    event.event_id,
-                    event.attempts,
-                    NotificationOutboxChannel::Email,
-                )
-                .await
-                .unwrap_or(false)
-            {
-                return;
-            }
-        } else if let (Some(vault), Some(sender), Some(encrypted)) =
-            (vault, email, preferences.email_ciphertext.as_deref())
-        {
-            let Ok(address) = vault.open_account_secret(
-                recipient,
-                recipient,
-                EMAIL_SECRET_NAMESPACE,
-                EMAIL_SECRET_FIELD,
-                encrypted,
-            ) else {
-                let _ = db
-                    .abandon_notification_outbox(event.event_id, event.attempts, "permanent")
-                    .await;
-                return;
-            };
-            let Ok(recipient_mailbox) = parse_mailbox(address.expose_secret()) else {
-                let _ = db
-                    .abandon_notification_outbox(event.event_id, event.attempts, "permanent")
-                    .await;
-                return;
-            };
-            let message_body = if body.is_empty() {
-                title.clone()
-            } else {
-                format!("{title}\n\n{body}")
-            };
-            let message_id = sender.message_id(&format!("ticket-notification-{}", event.event_id));
-            if sender
-                .send(recipient_mailbox, &title, &message_body, Some(message_id))
-                .await
-                .is_err()
-            {
-                retry_later = true;
-            } else if !db
-                .complete_notification_outbox_channel(
-                    event.event_id,
-                    event.attempts,
-                    NotificationOutboxChannel::Email,
-                )
-                .await
-                .unwrap_or(false)
-            {
-                return;
-            }
-        } else {
-            // Not configured yet: the event waits instead of being marked as delivered.
-            email_waiting = true;
-        }
-    }
-
-    if retry_later {
-        retry_outbox(db, &event, "transient").await;
-    } else if email_waiting {
+    let finished = db
+        .finish_notification_outbox(event.event_id, event.attempts)
+        .await
+        .unwrap_or(false);
+    if !finished {
         let _ = db
-            .defer_notification_outbox(
-                event.event_id,
-                event.attempts,
-                OUTBOX_NOT_READY_DELAY_SECONDS,
-            )
-            .await;
-    } else {
-        let _ = db
-            .finish_notification_outbox(event.event_id, event.attempts)
+            .release_notification_outbox(event.event_id, event.attempts)
             .await;
     }
 }
 
+// Each channel is retried on its own schedule: 5 seconds, doubling, capped at one hour.
+fn channel_retry_delay(prior_attempts: i32) -> i64 {
+    let shift = prior_attempts.clamp(0, 10).cast_unsigned();
+    (5_i64 * (1_i64 << shift)).min(3600)
+}
+
+async fn complete_channel(
+    db: &Db,
+    event: &ClaimedNotificationEvent,
+    channel: NotificationOutboxChannel,
+    status: &'static str,
+) -> bool {
+    db.complete_notification_outbox_channel(event.event_id, event.attempts, channel, status)
+        .await
+        .unwrap_or(false)
+}
+
+async fn retry_channel(
+    db: &Db,
+    event: &ClaimedNotificationEvent,
+    channel: NotificationOutboxChannel,
+    status: &'static str,
+    prior_attempts: i32,
+) -> bool {
+    db.retry_notification_channel(
+        event.event_id,
+        event.attempts,
+        channel,
+        status,
+        channel_retry_delay(prior_attempts),
+        OUTBOX_MAX_ATTEMPTS,
+    )
+    .await
+    .unwrap_or(false)
+}
+
+async fn deliver_in_app(
+    db: &Db,
+    event: &ClaimedNotificationEvent,
+    preferences: &StoredNotificationPreferences,
+    content: &DeliveryContent,
+) -> bool {
+    if event.in_app_done || !event.in_app_due {
+        return true;
+    }
+    if !preferences.in_app_enabled {
+        return complete_channel(db, event, NotificationOutboxChannel::InApp, "skipped").await;
+    }
+    let submission_title = safe_notification_text(&event.title, 100);
+    let reason = event
+        .reason
+        .as_deref()
+        .map(|reason| safe_notification_text(reason, 500))
+        .filter(|reason| !reason.is_empty());
+    match db
+        .insert_gallery_notification(
+            event.recipient_id,
+            event.guild_id,
+            event.event_id,
+            &event.event_type,
+            &submission_title,
+            reason.as_deref(),
+            &content.href,
+            event.occurred_at,
+        )
+        .await
+    {
+        Ok(_) => complete_channel(db, event, NotificationOutboxChannel::InApp, "sent").await,
+        Err(_) => {
+            retry_channel(
+                db,
+                event,
+                NotificationOutboxChannel::InApp,
+                "pending",
+                event.in_app_attempts,
+            )
+            .await
+        }
+    }
+}
+
+async fn deliver_direct_message(
+    db: &Db,
+    direct_messages: &dyn DirectMessageSink,
+    event: &ClaimedNotificationEvent,
+    preferences: &StoredNotificationPreferences,
+    guild: GuildId,
+    recipient: UserId,
+    content: &DeliveryContent,
+) -> bool {
+    if event.discord_dm_done || !event.discord_dm_due {
+        return true;
+    }
+    if !preferences.discord_dm_enabled {
+        return complete_channel(db, event, NotificationOutboxChannel::DiscordDm, "skipped").await;
+    }
+    let text = if content.body.is_empty() {
+        content.title.clone()
+    } else {
+        format!("{}\n\n{}", content.title, content.body)
+    };
+    match direct_messages.send(guild, recipient, text).await {
+        Ok(()) => complete_channel(db, event, NotificationOutboxChannel::DiscordDm, "sent").await,
+        Err(DirectMessageError::Permanent) => {
+            complete_channel(db, event, NotificationOutboxChannel::DiscordDm, "failed").await
+        }
+        Err(DirectMessageError::Retryable) => {
+            retry_channel(
+                db,
+                event,
+                NotificationOutboxChannel::DiscordDm,
+                "pending",
+                event.discord_dm_attempts,
+            )
+            .await
+        }
+    }
+}
+
+async fn deliver_email(
+    db: &Db,
+    email: Option<&EmailSender>,
+    vault: Option<&IntegrationSecretService>,
+    event: &ClaimedNotificationEvent,
+    preferences: &StoredNotificationPreferences,
+    content: &DeliveryContent,
+) -> bool {
+    if event.email_done || !event.email_due {
+        return true;
+    }
+    if !(preferences.email_enabled && preferences.email_verified) {
+        return complete_channel(db, event, NotificationOutboxChannel::Email, "skipped").await;
+    }
+    let (Some(vault), Some(sender), Some(encrypted)) =
+        (vault, email, preferences.email_ciphertext.as_deref())
+    else {
+        // Not configured yet: the channel waits instead of being marked as delivered.
+        return db
+            .defer_notification_channel(
+                event.event_id,
+                event.attempts,
+                NotificationOutboxChannel::Email,
+                OUTBOX_NOT_READY_DELAY_SECONDS,
+            )
+            .await
+            .unwrap_or(false);
+    };
+    let owner = twilight_model::id::Id::new(event.recipient_id);
+    let Ok(address) = vault.open_account_secret(
+        owner,
+        owner,
+        EMAIL_SECRET_NAMESPACE,
+        EMAIL_SECRET_FIELD,
+        encrypted,
+    ) else {
+        return complete_channel(db, event, NotificationOutboxChannel::Email, "failed").await;
+    };
+    let Ok(mailbox) = parse_mailbox(address.expose_secret()) else {
+        return complete_channel(db, event, NotificationOutboxChannel::Email, "failed").await;
+    };
+    let message_body = if content.body.is_empty() {
+        content.title.clone()
+    } else {
+        format!("{}\n\n{}", content.title, content.body)
+    };
+    let message_id = sender.message_id(&format!("ticket-notification-{}", event.event_id));
+    match sender
+        .send(mailbox, &content.title, &message_body, Some(message_id))
+        .await
+    {
+        Ok(()) => complete_channel(db, event, NotificationOutboxChannel::Email, "sent").await,
+        // After a failed SMTP call the delivery may or may not have happened. The retry reuses
+        // the same Message-ID, so a relay that recognises it can drop the duplicate.
+        Err(()) => {
+            retry_channel(
+                db,
+                event,
+                NotificationOutboxChannel::Email,
+                "unknown",
+                event.email_attempts,
+            )
+            .await
+        }
+    }
+}
+
+// Counts against the whole event, for member lookups and storage failures.
 async fn retry_outbox(db: &Db, event: &ClaimedNotificationEvent, failure: &'static str) {
-    if event.attempts >= OUTBOX_MAX_ATTEMPTS {
+    if event.event_failures.saturating_add(1) >= OUTBOX_MAX_ATTEMPTS {
         let _ = db
             .abandon_notification_outbox(event.event_id, event.attempts, "delivery_exhausted")
             .await;
         return;
     }
-    let shift = event
-        .attempts
-        .saturating_sub(1)
-        .clamp(0, 10)
-        .cast_unsigned();
-    let delay = (5_i64 * (1_i64 << shift)).min(3600);
     let _ = db
-        .retry_notification_outbox(event.event_id, event.attempts, delay, failure)
+        .retry_notification_outbox(
+            event.event_id,
+            event.attempts,
+            channel_retry_delay(event.event_failures),
+            failure,
+        )
         .await;
 }
 
@@ -1207,9 +1420,65 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        // The claim itself is one attempt; waiting for configuration does not add a retry.
         assert_eq!(
             (email_done, finished, abandoned, attempts),
-            (false, false, false, 0)
+            (false, false, false, 1)
+        );
+    }
+
+    #[sqlx::test(migrations = "../closure-db/migrations")]
+    async fn a_long_direct_message_outage_gives_up_on_that_channel_only(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO ticket_notification_preferences (user_id, discord_dm_enabled) VALUES (42, TRUE)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_event(&pool, 42).await;
+        let db = Db::from_pool(pool.clone());
+
+        for _ in 0..=OUTBOX_MAX_ATTEMPTS {
+            // Make every channel due again, as if its backoff had elapsed.
+            sqlx::query(
+                "UPDATE ticket_notification_outbox
+                 SET available_at = now(), locked_until = NULL, discord_dm_next_at = now()",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let Some(event) = db
+                .claim_notification_outbox(OUTBOX_LEASE_SECONDS)
+                .await
+                .unwrap()
+            else {
+                break;
+            };
+            process_event(
+                &db,
+                &AllowAll,
+                &DirectMessages(DirectMessageError::Retryable),
+                None,
+                None,
+                event,
+            )
+            .await;
+        }
+
+        let (abandoned, finished): (bool, bool) = sqlx::query_as(
+            "SELECT abandoned_at IS NOT NULL, completed_at IS NOT NULL
+             FROM ticket_notification_outbox",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !abandoned,
+            "the event was abandoned by a direct-message outage"
+        );
+        assert!(
+            finished,
+            "the other channels should finish once direct messages give up"
         );
     }
 
@@ -1230,5 +1499,61 @@ mod tests {
             raw.contains("Message-ID: <ticket-notification-7@example.com>"),
             "{raw}"
         );
+    }
+
+    #[test]
+    fn a_resent_verification_reuses_the_message_id_of_its_request() {
+        let from = parse_mailbox("closure@example.com").unwrap();
+        let first = delivery_message_id(&from, "ticket-verification-req-1");
+        assert_eq!(
+            first,
+            delivery_message_id(&from, "ticket-verification-req-1")
+        );
+        assert_ne!(
+            first,
+            delivery_message_id(&from, "ticket-verification-req-2")
+        );
+        assert_eq!(first, "<ticket-verification-req-1@example.com>");
+    }
+
+    #[test]
+    fn channel_retries_double_and_stop_at_one_hour() {
+        assert_eq!(channel_retry_delay(0), 5);
+        assert_eq!(channel_retry_delay(1), 10);
+        assert_eq!(channel_retry_delay(2), 20);
+        assert_eq!(channel_retry_delay(20), 3600);
+    }
+
+    #[sqlx::test(migrations = "../closure-db/migrations")]
+    async fn the_periodic_purge_removes_gallery_requests_older_than_the_retention(pool: PgPool) {
+        let template: i64 = sqlx::query_scalar(
+            "INSERT INTO ticket_gallery_templates
+                (kind, title, description, category, payload, author_id, source_guild_id, author_name, status)
+             VALUES ('panel', 'Title', 'Description', 'support', '{}'::jsonb, 1, 10, 'author', 'approved')
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ticket_gallery_requests (actor_id, request_key, action, fingerprint, template_id, created_at)
+             VALUES (7, 'old', 'import', $1, $2, now() - make_interval(days => 400)),
+                    (7, 'recent', 'import', $1, $2, now())",
+        )
+        .bind(vec![1_u8; 32])
+        .bind(template)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let db = Db::from_pool(pool.clone());
+
+        run_periodic_purges(&db).await;
+
+        let kept: Vec<String> =
+            sqlx::query_scalar("SELECT request_key FROM ticket_gallery_requests")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(kept, vec!["recent".to_owned()]);
     }
 }

@@ -11,6 +11,8 @@ pub enum GalleryError {
     NotFound,
     #[error("gallery item changed or the request key was reused")]
     Conflict,
+    #[error("gallery cursor does not match the requested sort")]
+    InvalidCursor,
 }
 
 impl From<sqlx::Error> for GalleryError {
@@ -33,6 +35,8 @@ pub struct GalleryFilter<'a> {
     pub sort: &'a str,
     pub offset: i64,
     pub limit: i64,
+    /// Opaque keyset position from a previous page; when set, `offset` is ignored.
+    pub cursor: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +98,83 @@ pub struct GalleryPage {
     pub total: i64,
     pub offset: i64,
     pub next_offset: Option<i64>,
+    pub next_cursor: Option<String>,
 }
+
+/// Opaque keyset position of a gallery page. Sort keys are whole seconds, the same values
+/// the cards expose as `created_at` and `updated_at`, so a row can rebuild its own cursor.
+/// Keyset position just after `card` in the given listing order.
+fn page_cursor(sort: &str, card: &GalleryCard) -> String {
+    if sort == "popular" {
+        GalleryCursor::Popular {
+            imports: card.import_count,
+            at: card.created_at,
+            id: card.id,
+        }
+    } else {
+        GalleryCursor::Newest {
+            at: card.created_at,
+            id: card.id,
+        }
+    }
+    .encode()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GalleryCursor {
+    Newest { at: i64, id: i64 },
+    Popular { imports: i64, at: i64, id: i64 },
+    Owner { at: i64, id: i64 },
+}
+
+impl GalleryCursor {
+    #[must_use]
+    pub fn encode(self) -> String {
+        match self {
+            Self::Newest { at, id } => format!("n.{at}.{id}"),
+            Self::Popular { imports, at, id } => format!("p.{imports}.{at}.{id}"),
+            Self::Owner { at, id } => format!("o.{at}.{id}"),
+        }
+    }
+
+    #[must_use]
+    pub fn decode(raw: &str) -> Option<Self> {
+        match raw.split('.').collect::<Vec<_>>().as_slice() {
+            ["n", at, id] => Some(Self::Newest {
+                at: at.parse().ok()?,
+                id: id.parse().ok()?,
+            }),
+            ["p", imports, at, id] => Some(Self::Popular {
+                imports: imports.parse().ok()?,
+                at: at.parse().ok()?,
+                id: id.parse().ok()?,
+            }),
+            ["o", at, id] => Some(Self::Owner {
+                at: at.parse().ok()?,
+                id: id.parse().ok()?,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GallerySubmissionPage {
+    pub submissions: Vec<GallerySubmission>,
+    pub next_cursor: Option<String>,
+}
+
+/// Rows removed by one `ticket_gallery_purge_expired` call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GalleryPurge {
+    pub requests: u64,
+    pub events: u64,
+}
+
+/// Gallery requests and events are kept this long; older rows are purged.
+pub const GALLERY_RETENTION_DAYS: i64 = 365;
+/// Upper bound of rows deleted per table by one purge call.
+pub const GALLERY_PURGE_BATCH: i64 = 500;
 
 type CardRow = (
     i64,
@@ -140,6 +220,18 @@ type SubmissionRow = (
     Option<i64>,
 );
 type RequestRow = (String, Vec<u8>, i64);
+
+macro_rules! listed_at {
+    () => {
+        "extract(epoch FROM COALESCE(published_at, created_at))::bigint"
+    };
+}
+
+macro_rules! owner_at {
+    () => {
+        "extract(epoch FROM updated_at)::bigint"
+    };
+}
 
 macro_rules! card_columns {
     () => {
@@ -324,6 +416,22 @@ async fn submission_by_id(
 }
 
 impl Db {
+    async fn featured_cards(&self) -> Result<Vec<GalleryCard>, GalleryError> {
+        sqlx::query_as::<_, CardRow>(concat!(
+            "SELECT ",
+            card_columns!(),
+            " FROM ticket_gallery_templates
+              WHERE status = 'approved' AND featured
+              ORDER BY published_at DESC NULLS LAST, id DESC
+              LIMIT 6"
+        ))
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(card_from_row)
+        .collect::<Result<Vec<_>, _>>()
+    }
+
     pub async fn ticket_gallery_list(
         &self,
         filter: &GalleryFilter<'_>,
@@ -342,61 +450,90 @@ impl Db {
         .fetch_one(&self.pool)
         .await?;
 
-        let templates = sqlx::query_as::<_, CardRow>(concat!(
+        let cursor = filter
+            .cursor
+            .map(|raw| GalleryCursor::decode(raw).ok_or(GalleryError::InvalidCursor))
+            .transpose()?;
+        let (cursor_imports, cursor_at, cursor_id) = match (cursor, filter.sort) {
+            (None, _) => (None, None, None),
+            (Some(GalleryCursor::Newest { at, id }), "newest") => (None, Some(at), Some(id)),
+            (Some(GalleryCursor::Popular { imports, at, id }), "popular") => {
+                (Some(imports), Some(at), Some(id))
+            }
+            _ => return Err(GalleryError::InvalidCursor),
+        };
+        let offset = if cursor.is_some() { 0 } else { filter.offset };
+        let page_len = usize::try_from(filter.limit).unwrap_or(0);
+
+        let mut rows = sqlx::query_as::<_, CardRow>(concat!(
             "SELECT ",
             card_columns!(),
             " FROM ticket_gallery_templates
-             WHERE status = 'approved'
-               AND ($1::text IS NULL OR kind = $1)
-               AND ($2::text IS NULL OR category = $2)
-               AND ($3::text IS NULL OR title ILIKE '%' || $3 || '%' OR description ILIKE '%' || $3 || '%')
-             ORDER BY CASE WHEN $4::text = 'popular' THEN import_count END DESC NULLS LAST,
-                      published_at DESC NULLS LAST, id DESC
-             LIMIT $5 OFFSET $6"
+              WHERE status = 'approved'
+                AND ($1::text IS NULL OR kind = $1)
+                AND ($2::text IS NULL OR category = $2)
+                AND ($3::text IS NULL OR title ILIKE '%' || $3 || '%' OR description ILIKE '%' || $3 || '%')
+                AND ($8::bigint IS NULL OR CASE WHEN $4::text = 'popular'
+                    THEN (import_count, ",
+            listed_at!(),
+            ", id) < ($7::bigint, $8::bigint, $9::bigint)
+                    ELSE (",
+            listed_at!(),
+            ", id) < ($8::bigint, $9::bigint) END)
+              ORDER BY CASE WHEN $4::text = 'popular' THEN import_count END DESC NULLS LAST,
+                       ",
+            listed_at!(),
+            " DESC, id DESC
+              LIMIT $5 OFFSET $6"
         ))
         .bind(filter.kind)
         .bind(filter.category)
         .bind(filter.query)
         .bind(filter.sort)
-        .bind(filter.limit)
-        .bind(filter.offset)
+        .bind(i64::try_from(page_len.saturating_add(1)).unwrap_or(i64::MAX))
+        .bind(offset)
+        .bind(cursor_imports)
+        .bind(cursor_at)
+        .bind(cursor_id)
         .fetch_all(&self.pool)
         .await?
         .into_iter()
         .map(card_from_row)
         .collect::<Result<Vec<_>, _>>()?;
 
+        let has_more = rows.len() > page_len;
+        rows.truncate(page_len);
+        let next_cursor = if has_more {
+            rows.last().map(|card| page_cursor(filter.sort, card))
+        } else {
+            None
+        };
+        let next_offset = if cursor.is_none() {
+            i64::try_from(rows.len())
+                .ok()
+                .and_then(|page_len| offset.checked_add(page_len))
+                .filter(|next_offset| *next_offset < total)
+        } else {
+            None
+        };
+
         let featured = if filter.kind.is_none()
             && filter.category.is_none()
             && filter.query.is_none()
             && filter.offset == 0
+            && cursor.is_none()
         {
-            sqlx::query_as::<_, CardRow>(concat!(
-                "SELECT ",
-                card_columns!(),
-                " FROM ticket_gallery_templates
-                 WHERE status = 'approved' AND featured
-                 ORDER BY published_at DESC NULLS LAST, id DESC
-                 LIMIT 6"
-            ))
-            .fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .map(card_from_row)
-            .collect::<Result<Vec<_>, _>>()?
+            self.featured_cards().await?
         } else {
             Vec::new()
         };
-        let next_offset = i64::try_from(templates.len())
-            .ok()
-            .and_then(|page_len| filter.offset.checked_add(page_len))
-            .filter(|next_offset| *next_offset < total);
         Ok(GalleryPage {
             featured,
-            templates,
+            templates: rows,
             total,
             offset: filter.offset,
             next_offset,
+            next_cursor,
         })
     }
 
@@ -419,21 +556,62 @@ impl Db {
     pub async fn ticket_gallery_submissions(
         &self,
         actor_id: i64,
-    ) -> Result<Vec<GallerySubmission>, GalleryError> {
-        let rows: Vec<SubmissionRow> = sqlx::query_as(concat!(
+        query: Option<&str>,
+        cursor: Option<&str>,
+        limit: i64,
+    ) -> Result<GallerySubmissionPage, GalleryError> {
+        let cursor = cursor
+            .map(|raw| GalleryCursor::decode(raw).ok_or(GalleryError::InvalidCursor))
+            .transpose()?;
+        let (cursor_at, cursor_id) = match cursor {
+            None => (None, None),
+            Some(GalleryCursor::Owner { at, id }) => (Some(at), Some(id)),
+            Some(_) => return Err(GalleryError::InvalidCursor),
+        };
+        let page_len = usize::try_from(limit).unwrap_or(0);
+        let mut rows: Vec<SubmissionRow> = sqlx::query_as(concat!(
             "SELECT ",
             submission_columns!(),
             " FROM ticket_gallery_templates
-             WHERE author_id = $1
-             ORDER BY updated_at DESC, id DESC
-             LIMIT 100"
+              WHERE author_id = $1
+                AND ($2::text IS NULL OR title ILIKE '%' || $2 || '%' OR description ILIKE '%' || $2 || '%')
+                AND ($3::bigint IS NULL OR (",
+            owner_at!(),
+            ", id) < ($3::bigint, $4::bigint))
+              ORDER BY ",
+            owner_at!(),
+            " DESC, id DESC
+              LIMIT $5"
         ))
         .bind(actor_id)
+        .bind(query)
+        .bind(cursor_at)
+        .bind(cursor_id)
+        .bind(limit.saturating_add(1))
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
+
+        let has_more = rows.len() > page_len;
+        rows.truncate(page_len);
+        let next_cursor = if has_more {
+            rows.last().map(|row| {
+                GalleryCursor::Owner {
+                    at: row.14,
+                    id: row.0,
+                }
+                .encode()
+            })
+        } else {
+            None
+        };
+        let submissions = rows
+            .into_iter()
             .map(submission_from_row)
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(GallerySubmissionPage {
+            submissions,
+            next_cursor,
+        })
     }
 
     pub async fn ticket_gallery_submit(
@@ -683,9 +861,12 @@ impl Db {
         Ok(submission)
     }
 
+    /// Records a successful import by a guild. `import_count` moves only when this guild
+    /// has not imported the template before, so repeated requests cannot inflate it.
     pub async fn ticket_gallery_record_import(
         &self,
         actor_id: i64,
+        guild_id: i64,
         id: i64,
         request_key: &str,
         fingerprint: &[u8; 32],
@@ -705,19 +886,83 @@ impl Db {
             tx.commit().await?;
             return Ok(count);
         }
-        let count: Option<i64> = sqlx::query_scalar(
-            "UPDATE ticket_gallery_templates
-             SET import_count = import_count + 1
+        // Locking the approved row serializes concurrent imports of one template.
+        let current: Option<i64> = sqlx::query_scalar(
+            "SELECT import_count FROM ticket_gallery_templates
              WHERE id = $1 AND status = 'approved'
-             RETURNING import_count",
+             FOR UPDATE",
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let count = count.ok_or(GalleryError::NotFound)?;
+        let current = current.ok_or(GalleryError::NotFound)?;
+        let recorded: Option<i64> = sqlx::query_scalar(
+            "INSERT INTO ticket_gallery_installations (guild_id, template_id)
+             VALUES ($1, $2)
+             ON CONFLICT (guild_id, template_id) DO NOTHING
+             RETURNING template_id",
+        )
+        .bind(guild_id)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let count = if recorded.is_some() {
+            sqlx::query_scalar(
+                "UPDATE ticket_gallery_templates
+                 SET import_count = import_count + 1
+                 WHERE id = $1
+                 RETURNING import_count",
+            )
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            current
+        };
         insert_request(&mut tx, actor_id, request_key, "import", fingerprint, id).await?;
         tx.commit().await?;
         Ok(count)
+    }
+
+    /// Deletes up to `GALLERY_PURGE_BATCH` request and event rows per table that are older
+    /// than `GALLERY_RETENTION_DAYS`. Events with a pending notification are kept.
+    pub async fn ticket_gallery_purge_expired(&self) -> Result<GalleryPurge, GalleryError> {
+        let requests = sqlx::query(
+            "DELETE FROM ticket_gallery_requests
+             WHERE (actor_id, request_key) IN (
+                 SELECT actor_id, request_key
+                 FROM ticket_gallery_requests
+                 WHERE created_at < now() - make_interval(days => $1::int)
+                 ORDER BY created_at
+                 LIMIT $2
+             )",
+        )
+        .bind(GALLERY_RETENTION_DAYS)
+        .bind(GALLERY_PURGE_BATCH)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        let events = sqlx::query(
+            "DELETE FROM ticket_gallery_events
+             WHERE event_id IN (
+                 SELECT e.event_id
+                 FROM ticket_gallery_events e
+                 WHERE e.occurred_at < now() - make_interval(days => $1::int)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM ticket_notification_outbox o
+                       WHERE o.event_id = e.event_id
+                         AND o.completed_at IS NULL AND o.abandoned_at IS NULL
+                   )
+                 ORDER BY e.occurred_at
+                 LIMIT $2
+             )",
+        )
+        .bind(GALLERY_RETENTION_DAYS)
+        .bind(GALLERY_PURGE_BATCH)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(GalleryPurge { requests, events })
     }
 }
 
@@ -741,4 +986,256 @@ async fn submission_author_id(
         .fetch_optional(&mut **tx)
         .await?
         .ok_or(GalleryError::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+
+    const FINGERPRINT: [u8; 32] = [1_u8; 32];
+
+    async fn approved_template(pool: &PgPool, author_id: i64, minutes_ago: i32) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO ticket_gallery_templates
+             (kind, title, description, category, payload, author_id, source_guild_id, author_name, status, published_at)
+             VALUES ('panel', 'Title', 'Description', 'general', '{}', $1, 900, 'Author', 'approved',
+                     now() - make_interval(mins => $2))
+             RETURNING id",
+        )
+        .bind(author_id)
+        .bind(minutes_ago)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    fn newest_filter(offset: i64, cursor: Option<&str>) -> GalleryFilter<'_> {
+        GalleryFilter {
+            kind: None,
+            category: None,
+            query: None,
+            sort: "newest",
+            offset,
+            limit: 2,
+            cursor,
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn list_pages_do_not_repeat_rows_when_a_newer_template_appears(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        for minutes_ago in 1..=4 {
+            approved_template(&pool, 9, minutes_ago).await;
+        }
+        let first = db
+            .ticket_gallery_list(&newest_filter(0, None))
+            .await
+            .unwrap();
+        let first_ids: Vec<i64> = first.templates.iter().map(|card| card.id).collect();
+        approved_template(&pool, 9, 0).await;
+
+        let cursor = first
+            .next_cursor
+            .as_deref()
+            .expect("the first page has a next cursor");
+        let second = db
+            .ticket_gallery_list(&newest_filter(0, Some(cursor)))
+            .await
+            .unwrap();
+        let second_ids: Vec<i64> = second.templates.iter().map(|card| card.id).collect();
+
+        let mut all = first_ids.clone();
+        all.extend(second_ids);
+        let mut unique = all.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(all.len(), 4);
+        assert_eq!(unique.len(), all.len(), "a row was returned twice: {all:?}");
+    }
+
+    #[test]
+    fn cursors_round_trip_and_reject_other_shapes() {
+        let cursors = [
+            GalleryCursor::Newest { at: -5, id: 7 },
+            GalleryCursor::Popular {
+                imports: 3,
+                at: 1_700_000_000,
+                id: 9,
+            },
+            GalleryCursor::Owner {
+                at: 1_700_000_001,
+                id: 11,
+            },
+        ];
+        for cursor in cursors {
+            assert_eq!(GalleryCursor::decode(&cursor.encode()), Some(cursor));
+        }
+        for raw in ["", "x.1.2", "n.1", "p.1.2", "n.a.2", "o.1.2.3"] {
+            assert_eq!(GalleryCursor::decode(raw), None, "{raw} must be rejected");
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn an_owner_sees_every_submission_across_pages(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        sqlx::query(
+            "INSERT INTO ticket_gallery_templates
+             (kind, title, description, category, payload, author_id, source_guild_id, author_name)
+             SELECT 'panel', 'Title', 'Description', 'general', '{}', 7, 900, 'Author'
+             FROM generate_series(1, 105)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = db
+                .ticket_gallery_submissions(7, None, cursor.as_deref(), 50)
+                .await
+                .unwrap();
+            seen.extend(page.submissions.iter().map(|submission| submission.id));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        let mut unique = seen.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(seen.len(), 105);
+        assert_eq!(unique.len(), 105);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_guild_counts_once_however_many_requests_it_sends(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        let id = approved_template(&pool, 9, 1).await;
+
+        let first = db
+            .ticket_gallery_record_import(7, 800, id, "import-a", &FINGERPRINT)
+            .await
+            .unwrap();
+        let second = db
+            .ticket_gallery_record_import(8, 800, id, "import-b", &FINGERPRINT)
+            .await
+            .unwrap();
+        let replayed = db
+            .ticket_gallery_record_import(7, 800, id, "import-a", &FINGERPRINT)
+            .await
+            .unwrap();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 1);
+        assert_eq!(replayed, 1);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn each_distinct_guild_adds_one_import(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        let id = approved_template(&pool, 9, 1).await;
+
+        db.ticket_gallery_record_import(7, 800, id, "import-a", &FINGERPRINT)
+            .await
+            .unwrap();
+        let count = db
+            .ticket_gallery_record_import(7, 801, id, "import-b", &FINGERPRINT)
+            .await
+            .unwrap();
+
+        assert_eq!(count, 2);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn purge_removes_old_rows_in_bounded_batches(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        let id = approved_template(&pool, 9, 1).await;
+        sqlx::query(
+            "INSERT INTO ticket_gallery_requests (actor_id, request_key, action, fingerprint, template_id, created_at)
+             SELECT 7, 'old-' || n, 'import', $1, $2, now() - make_interval(days => 400)
+             FROM generate_series(1, 600) AS n",
+        )
+        .bind(FINGERPRINT.as_slice())
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ticket_gallery_requests (actor_id, request_key, action, fingerprint, template_id)
+             VALUES (7, 'recent', 'import', $1, $2)",
+        )
+        .bind(FINGERPRINT.as_slice())
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let first = db.ticket_gallery_purge_expired().await.unwrap();
+        let second = db.ticket_gallery_purge_expired().await.unwrap();
+
+        assert_eq!(first.requests, 500);
+        assert_eq!(second.requests, 100);
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM ticket_gallery_requests")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn purge_keeps_old_events_that_still_await_delivery(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        db.migrate().await.unwrap();
+        let id = approved_template(&pool, 9, 1).await;
+        let old_delivered: i64 = sqlx::query_scalar(
+            "INSERT INTO ticket_gallery_events
+             (submission_id, guild_id, revision, recipient_id, reviewer_id, event_type, status, title, occurred_at)
+             VALUES ($1, 900, 1, 9, 5, 'gallery.approved', 'approved', 'Title', now() - make_interval(days => 400))
+             RETURNING event_id",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let old_pending: i64 = sqlx::query_scalar(
+            "INSERT INTO ticket_gallery_events
+             (submission_id, guild_id, revision, recipient_id, reviewer_id, event_type, status, title, occurred_at)
+             VALUES ($1, 900, 2, 9, 5, 'gallery.approved', 'approved', 'Title', now() - make_interval(days => 400))
+             RETURNING event_id",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ticket_notification_outbox (event_id, completed_at) VALUES ($1, now())",
+        )
+        .bind(old_delivered)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO ticket_notification_outbox (event_id) VALUES ($1)")
+            .bind(old_pending)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let purged = db.ticket_gallery_purge_expired().await.unwrap();
+
+        assert_eq!(purged.events, 1);
+        let remaining: Vec<i64> = sqlx::query_scalar("SELECT event_id FROM ticket_gallery_events")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, [old_pending]);
+    }
 }

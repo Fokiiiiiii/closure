@@ -7,6 +7,7 @@ use closure_core::action::{Action, InteractionResponse};
 use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::client::{ApiClient, DiscordApi};
 use closure_core::error::{DiscordError, ModuleError};
+use closure_core::event::ModalSubmission;
 use closure_core::event::{
     ChannelId, CommandInvocation, CommandOption, CommandOptionValue, ComponentInvocation, Event,
     EventKind, InteractionToken, MessageInfo, UserInfo,
@@ -78,6 +79,7 @@ enum Behavior {
     ReadHistoryOfMessage,
     /// Logs the command, subcommand and options of a command it gets.
     LogCommand,
+    LogModal,
     /// Asks for a form in answer to the command.
     AskForForm,
     /// Answers the command with a message and logs whether Discord took the answer.
@@ -395,6 +397,17 @@ impl Module for Probe {
                     Err(error) => format!("history:error:{error}"),
                 };
                 self.log.lock().unwrap().push(line);
+                Ok(())
+            }
+            Behavior::LogModal => {
+                if let Event::Modal(submission) = event {
+                    self.log.lock().unwrap().push(format!(
+                        "modal:{}:{}:{}",
+                        submission.guild_id.get(),
+                        submission.custom_id,
+                        submission.user.id.get()
+                    ));
+                }
                 Ok(())
             }
             Behavior::LogCommand => {
@@ -3655,4 +3668,186 @@ async fn a_dm_component_does_not_bypass_the_configured_guild_allowlist() {
         1,
         "the host refuses before module dispatch"
     );
+}
+
+fn direct_modal(message_id: u64, channel_id: u64, user_id: u64, custom_id: &str) -> Event {
+    Event::DirectMessageModal {
+        message_id: Id::new(message_id),
+        submission: ModalSubmission {
+            interaction_id: Id::new(53),
+            application_id: Id::new(60),
+            token: InteractionToken::new("dm-modal-token"),
+            guild_id: Id::new(999),
+            channel_id: Id::new(channel_id),
+            user: user(user_id),
+            roles: Vec::new(),
+            invoker_permissions: Permissions::empty(),
+            locale: Some(Locale::Ja),
+            custom_id: custom_id.into(),
+            fields: vec![("why".into(), "spam".into())],
+            values: Vec::new(),
+        },
+    }
+}
+
+async fn save_dm_modal_route(storage: &Arc<MemoryStorage>, message_id: u64, user_id: u64) {
+    DirectMessageComponentRoutes::new(Arc::clone(storage) as Arc<dyn StorageBackend>)
+        .record(&DirectMessageComponentRoute {
+            message_id: Id::new(message_id),
+            channel_id: Id::new(300),
+            guild_id: Id::new(1),
+            module_id: ModuleId::new("tools").unwrap(),
+            user_id: Id::new(user_id),
+            custom_ids: vec!["tools:rate:7:ticket-1".into()],
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_dm_modal_reaches_the_module_of_its_saved_route_in_that_guild() {
+    let module = Probe::new(
+        "tools",
+        &[EventKind::Modal],
+        &[Capability::RespondToInteractions],
+    );
+    module.set(Behavior::LogModal);
+    let h = harness(
+        &[(&module, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+    module.log.lock().unwrap().clear();
+    save_dm_modal_route(&h.storage, 900, 7).await;
+
+    h.dispatcher
+        .dispatch(direct_modal(900, 300, 7, "tools:survey:7"));
+    h.dispatcher.flush().await;
+
+    assert_eq!(module.log(), ["modal", "modal:1:tools:survey:7:7"]);
+    assert!(h.api.actions().is_empty());
+}
+
+#[tokio::test]
+async fn a_dm_modal_from_another_recipient_channel_message_or_module_is_refused() {
+    let module = Probe::new(
+        "tools",
+        &[EventKind::Modal],
+        &[Capability::RespondToInteractions],
+    );
+    module.set(Behavior::LogModal);
+    let h = harness(
+        &[(&module, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+    module.log.lock().unwrap().clear();
+    save_dm_modal_route(&h.storage, 900, 7).await;
+
+    let refused = [
+        direct_modal(900, 300, 8, "tools:survey:7"),
+        direct_modal(900, 301, 7, "tools:survey:7"),
+        direct_modal(901, 300, 7, "tools:survey:7"),
+        direct_modal(900, 300, 7, "other:survey:7"),
+    ];
+    for (count, event) in refused.into_iter().enumerate() {
+        h.dispatcher.dispatch(event);
+        h.dispatcher.flush().await;
+        assert!(
+            module.log().is_empty(),
+            "refused modal {count} reached the module"
+        );
+        assert_eq!(
+            h.api.actions().len(),
+            count + 1,
+            "refused modal {count} gets only a host refusal"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_dm_modal_whose_route_has_expired_is_refused() {
+    let module = Probe::new(
+        "tools",
+        &[EventKind::Modal],
+        &[Capability::RespondToInteractions],
+    );
+    module.set(Behavior::LogModal);
+    let h = harness(
+        &[(&module, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+    module.log.lock().unwrap().clear();
+    let route = DirectMessageComponentRoute {
+        message_id: Id::new(900),
+        channel_id: Id::new(300),
+        guild_id: Id::new(1),
+        module_id: ModuleId::new("tools").unwrap(),
+        user_id: Id::new(7),
+        custom_ids: vec!["tools:rate:7:ticket-1".into()],
+    };
+    h.storage
+        .insert_direct_message_component_route(
+            Id::new(900),
+            serde_json::to_value(&route).unwrap(),
+            // The store keeps a route for at least a second.
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+
+    h.dispatcher
+        .dispatch(direct_modal(900, 300, 7, "tools:survey:7"));
+    h.dispatcher.flush().await;
+
+    assert!(module.log().is_empty());
+    assert_eq!(
+        h.api.actions().len(),
+        1,
+        "an expired route gets only a host refusal"
+    );
+}
+
+#[tokio::test]
+async fn a_guild_modal_is_delivered_without_a_dm_route() {
+    let module = Probe::new(
+        "tools",
+        &[EventKind::Modal],
+        &[Capability::RespondToInteractions],
+    );
+    module.set(Behavior::LogModal);
+    let h = harness(
+        &[(&module, true)],
+        limits(64, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+    module.log.lock().unwrap().clear();
+
+    h.dispatcher.dispatch(Event::Modal(ModalSubmission {
+        interaction_id: Id::new(54),
+        application_id: Id::new(60),
+        token: InteractionToken::new("guild-modal-token"),
+        guild_id: Id::new(GUILD),
+        channel_id: Id::new(3),
+        user: user(7),
+        roles: Vec::new(),
+        invoker_permissions: Permissions::empty(),
+        locale: Some(Locale::Ja),
+        custom_id: "tools:survey:7".into(),
+        fields: Vec::new(),
+        values: Vec::new(),
+    }));
+    h.dispatcher.flush().await;
+
+    assert_eq!(
+        module.log(),
+        ["modal", &format!("modal:{GUILD}:tools:survey:7:7")]
+    );
+    assert!(h.api.actions().is_empty());
 }

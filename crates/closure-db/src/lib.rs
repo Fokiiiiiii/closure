@@ -162,6 +162,7 @@ mod tests {
                 "guilds",
                 "integration_secret_generations",
                 "integration_secret_receipts",
+                "integration_secret_tombstones",
                 "integration_secrets",
                 "message_file_usage",
                 "message_files",
@@ -173,8 +174,10 @@ mod tests {
                 "saved_messages",
                 "scheduled_jobs",
                 "ticket_gallery_events",
+                "ticket_gallery_installations",
                 "ticket_gallery_requests",
                 "ticket_gallery_templates",
+                "ticket_notification_email_sends",
                 "ticket_notification_outbox",
                 "ticket_notification_preferences",
                 "ticket_notifications"

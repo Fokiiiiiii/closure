@@ -259,6 +259,14 @@ pub fn router(state: ApiState) -> Router {
             get(config::effective),
         )
         .route("/v1/guilds/{guild_id}/config/history", get(config::history))
+        .route(
+            "/v1/guilds/{guild_id}/integration-secrets/orphans",
+            get(config::list_orphan_secrets),
+        )
+        .route(
+            "/v1/guilds/{guild_id}/integration-secrets/orphans/delete",
+            post(config::delete_orphan_secret),
+        )
         .route("/v1/guilds/{guild_id}/messages", post(messages::send))
         .route(
             "/v1/guilds/{guild_id}/cases",

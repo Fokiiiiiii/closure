@@ -643,6 +643,12 @@ pub enum Event {
     /// A DM click awaiting host validation against the saved send record. The dispatcher replaces
     /// its placeholder guild id before any module sees it.
     DirectMessageComponent(ComponentInvocation),
+    /// A modal submitted in a DM, awaiting host validation against the saved route of the message it
+    /// came from. The dispatcher replaces its placeholder guild id, then sends it on as a `Modal`.
+    DirectMessageModal {
+        message_id: MessageId,
+        submission: ModalSubmission,
+    },
     /// A modal of the module that the user sent.
     Modal(ModalSubmission),
     /// The user is typing in an option of a command of the module; answer with the choices.
@@ -864,7 +870,7 @@ impl Event {
             Self::CaseCreated(_) => EventKind::CaseCreated,
             Self::Command(_) => EventKind::Command,
             Self::Component(_) | Self::DirectMessageComponent(_) => EventKind::Component,
-            Self::Modal(_) => EventKind::Modal,
+            Self::Modal(_) | Self::DirectMessageModal { .. } => EventKind::Modal,
             Self::Autocomplete(_) => EventKind::Autocomplete,
             Self::ContextCommand(_) => EventKind::ContextCommand,
             Self::Scheduled(_) => EventKind::Scheduled,
@@ -889,7 +895,9 @@ impl Event {
             | Self::ChannelDeleted(channel) => Some(channel.id),
             Self::Command(invocation) => Some(invocation.channel_id),
             Self::Component(click) | Self::DirectMessageComponent(click) => Some(click.channel_id),
-            Self::Modal(submission) => Some(submission.channel_id),
+            Self::Modal(submission) | Self::DirectMessageModal { submission, .. } => {
+                Some(submission.channel_id)
+            }
             Self::Autocomplete(query) => Some(query.channel_id),
             Self::ContextCommand(invocation) => Some(invocation.channel_id),
             // A thread counts as part of its parent channel, the way a filter reads it.
@@ -913,7 +921,9 @@ impl Event {
             | Self::BanRemoved { user, .. } => user.bot,
             Self::Command(invocation) => invocation.user.bot,
             Self::Component(click) | Self::DirectMessageComponent(click) => click.user.bot,
-            Self::Modal(submission) => submission.user.bot,
+            Self::Modal(submission) | Self::DirectMessageModal { submission, .. } => {
+                submission.user.bot
+            }
             Self::Autocomplete(query) => query.user.bot,
             Self::ContextCommand(invocation) => invocation.user.bot,
             Self::RolesChanged(change) => change.user.bot,
@@ -929,7 +939,9 @@ impl Event {
             Self::MemberJoined(member) | Self::MemberUpdated(member) => &member.roles,
             Self::Command(invocation) => &invocation.roles,
             Self::Component(click) | Self::DirectMessageComponent(click) => &click.roles,
-            Self::Modal(submission) => &submission.roles,
+            Self::Modal(submission) | Self::DirectMessageModal { submission, .. } => {
+                &submission.roles
+            }
             Self::Autocomplete(query) => &query.roles,
             Self::ContextCommand(invocation) => &invocation.roles,
             _ => &[],
@@ -975,7 +987,9 @@ impl Event {
             Self::StageUpdated { after, .. } => after.guild_id,
             Self::Command(invocation) => invocation.guild_id,
             Self::Component(click) | Self::DirectMessageComponent(click) => click.guild_id,
-            Self::Modal(submission) => submission.guild_id,
+            Self::Modal(submission) | Self::DirectMessageModal { submission, .. } => {
+                submission.guild_id
+            }
             Self::Autocomplete(query) => query.guild_id,
             Self::ContextCommand(invocation) => invocation.guild_id,
             Self::Scheduled(job) => job.guild_id,
@@ -989,7 +1003,9 @@ impl Event {
         match self {
             Self::Command(invocation) => Some(&invocation.token),
             Self::Component(click) | Self::DirectMessageComponent(click) => Some(&click.token),
-            Self::Modal(submission) => Some(&submission.token),
+            Self::Modal(submission) | Self::DirectMessageModal { submission, .. } => {
+                Some(&submission.token)
+            }
             Self::Autocomplete(query) => Some(&query.token),
             Self::ContextCommand(invocation) => Some(&invocation.token),
             _ => None,

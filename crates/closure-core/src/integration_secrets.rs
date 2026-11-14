@@ -1,4 +1,5 @@
 //! Guild-, module-, and integration-scoped secrets encrypted at rest by the host.
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -23,10 +24,15 @@ const GENERATION_BYTES: usize = 16;
 const GENERATION_HEX_BYTES: usize = GENERATION_BYTES * 2;
 const SECRET_NAME_MAX_BYTES: usize = 64;
 const MAX_SECRET_BYTES: usize = 16 * 1024;
-const ENVELOPE_VERSION: u8 = 1;
+/// Version 1 envelopes: version, nonce, ciphertext and tag. They were all written under the one key.
+const ENVELOPE_VERSION_KEYLESS: u8 = 1;
+/// Version 2 envelopes: version, key ID, nonce, ciphertext and tag.
+const ENVELOPE_VERSION_KEYED: u8 = 2;
+/// The ID new envelopes are sealed under. Only this key exists today; rotation is not implemented.
+const CURRENT_KEY_ID: u8 = 1;
 const GCM_TAG_BYTES: usize = 16;
-const ENVELOPE_HEADER_BYTES: usize = 1 + aead::NONCE_LEN;
-const MAX_ENVELOPE_BYTES: usize = ENVELOPE_HEADER_BYTES + MAX_SECRET_BYTES + GCM_TAG_BYTES;
+const MIN_ENVELOPE_BYTES: usize = 1 + aead::NONCE_LEN + GCM_TAG_BYTES;
+const MAX_ENVELOPE_BYTES: usize = 2 + aead::NONCE_LEN + MAX_SECRET_BYTES + GCM_TAG_BYTES;
 const MUTATION_SET: u8 = 1;
 const MUTATION_REMOVE: u8 = 2;
 const RECEIPT_VERSION: u8 = 1;
@@ -150,12 +156,7 @@ pub struct SealedIntegrationSecret(Vec<u8>);
 
 impl SealedIntegrationSecret {
     pub fn from_storage(bytes: Vec<u8>) -> Result<Self, IntegrationSecretError> {
-        if bytes.len() < ENVELOPE_HEADER_BYTES + GCM_TAG_BYTES
-            || bytes.len() > MAX_ENVELOPE_BYTES
-            || bytes[0] != ENVELOPE_VERSION
-        {
-            return Err(IntegrationSecretError::Authentication);
-        }
+        parse_envelope(&bytes)?;
         Ok(Self(bytes))
     }
 
@@ -206,7 +207,7 @@ pub trait IntegrationSecretBackend: Send + Sync {
 
 /// Encrypts secrets before persistence and decrypts them only for the owning module and guild.
 pub struct IntegrationSecretService {
-    key: LessSafeKey,
+    keys: BTreeMap<u8, LessSafeKey>,
     idempotency_key: hmac::Key,
     account_hmac_key: hmac::Key,
     backend: Arc<dyn IntegrationSecretBackend>,
@@ -236,7 +237,7 @@ impl IntegrationSecretService {
         let account_hmac_key =
             derive_hmac_key(&master_hmac, b"closure.account-secret.token-hmac-key.v1");
         Ok(Self {
-            key: LessSafeKey::new(unbound),
+            keys: BTreeMap::from([(CURRENT_KEY_ID, LessSafeKey::new(unbound))]),
             idempotency_key,
             account_hmac_key,
             backend,
@@ -369,11 +370,6 @@ impl IntegrationSecretService {
     ) -> Result<SecretString, IntegrationSecretError> {
         require_owner(actor, owner)?;
         validate_account_scope(owner, namespace, field)?;
-        if envelope.len() < ENVELOPE_HEADER_BYTES + GCM_TAG_BYTES
-            || envelope.len() > MAX_ENVELOPE_BYTES
-        {
-            return Err(IntegrationSecretError::Authentication);
-        }
         let sealed = SealedIntegrationSecret::from_storage(envelope.to_vec())?;
         let aad = account_secret_associated_data(owner, namespace, field)?;
         self.open_payload(&aad, sealed)
@@ -477,16 +473,20 @@ impl IntegrationSecretService {
             .fill(&mut nonce)
             .map_err(|_| IntegrationSecretError::Unavailable)?;
         let mut buffer = Zeroizing::new(cleartext.to_vec());
-        self.key
-            .seal_in_place_append_tag(
-                Nonce::assume_unique_for_key(nonce),
-                Aad::from(aad),
-                &mut *buffer,
-            )
-            .map_err(|_| IntegrationSecretError::Authentication)?;
+        let key = self
+            .keys
+            .get(&CURRENT_KEY_ID)
+            .ok_or(IntegrationSecretError::Unavailable)?;
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(aad),
+            &mut *buffer,
+        )
+        .map_err(|_| IntegrationSecretError::Authentication)?;
 
-        let mut envelope = Vec::with_capacity(ENVELOPE_HEADER_BYTES + buffer.len());
-        envelope.push(ENVELOPE_VERSION);
+        let mut envelope = Vec::with_capacity(2 + aead::NONCE_LEN + buffer.len());
+        envelope.push(ENVELOPE_VERSION_KEYED);
+        envelope.push(CURRENT_KEY_ID);
         envelope.extend_from_slice(&nonce);
         envelope.extend_from_slice(&buffer);
         SealedIntegrationSecret::from_storage(envelope)
@@ -507,16 +507,17 @@ impl IntegrationSecretService {
         secret: SealedIntegrationSecret,
     ) -> Result<SecretString, IntegrationSecretError> {
         let envelope = Zeroizing::new(secret.0);
-        if envelope.len() < ENVELOPE_HEADER_BYTES + GCM_TAG_BYTES || envelope[0] != ENVELOPE_VERSION
-        {
-            return Err(IntegrationSecretError::Authentication);
-        }
-        let nonce: [u8; aead::NONCE_LEN] = envelope[1..ENVELOPE_HEADER_BYTES]
+        let parts = parse_envelope(&envelope)?;
+        let key = self
+            .keys
+            .get(&parts.key_id)
+            .ok_or(IntegrationSecretError::Authentication)?;
+        let nonce: [u8; aead::NONCE_LEN] = parts
+            .nonce
             .try_into()
             .map_err(|_| IntegrationSecretError::Authentication)?;
-        let mut buffer = Zeroizing::new(envelope[ENVELOPE_HEADER_BYTES..].to_vec());
-        let cleartext_len = self
-            .key
+        let mut buffer = Zeroizing::new(parts.ciphertext.to_vec());
+        let cleartext_len = key
             .open_in_place(
                 Nonce::assume_unique_for_key(nonce),
                 Aad::from(aad),
@@ -551,6 +552,34 @@ pub fn new_integration_generation() -> Result<String, IntegrationSecretError> {
         generation.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     Ok(generation)
+}
+
+/// The parts of a stored envelope, borrowed from it. Only versions 1 and 2 are known.
+struct EnvelopeParts<'a> {
+    key_id: u8,
+    nonce: &'a [u8],
+    ciphertext: &'a [u8],
+}
+
+fn parse_envelope(bytes: &[u8]) -> Result<EnvelopeParts<'_>, IntegrationSecretError> {
+    if bytes.len() < MIN_ENVELOPE_BYTES || bytes.len() > MAX_ENVELOPE_BYTES {
+        return Err(IntegrationSecretError::Authentication);
+    }
+    // Version 1 has no key ID byte, so its nonce starts one byte earlier than version 2's.
+    let (key_id, nonce_start) = match bytes[0] {
+        ENVELOPE_VERSION_KEYLESS => (CURRENT_KEY_ID, 1),
+        ENVELOPE_VERSION_KEYED => (bytes[1], 2),
+        _ => return Err(IntegrationSecretError::Authentication),
+    };
+    let body_start = nonce_start + aead::NONCE_LEN;
+    if bytes.len() < body_start + GCM_TAG_BYTES {
+        return Err(IntegrationSecretError::Authentication);
+    }
+    Ok(EnvelopeParts {
+        key_id,
+        nonce: &bytes[nonce_start..body_start],
+        ciphertext: &bytes[body_start..],
+    })
 }
 
 fn require_administrator(actor: &Actor) -> Result<(), IntegrationSecretError> {
@@ -724,4 +753,153 @@ fn account_secret_associated_data(
     append_aad_part(&mut aad, namespace.as_bytes())?;
     append_aad_part(&mut aad, field.as_bytes())?;
     Ok(aad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_MASTER_KEY: &str =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const TEST_GENERATION: &str = "0123456789abcdef0123456789abcdef";
+
+    struct NoBackend;
+
+    #[async_trait]
+    impl IntegrationSecretBackend for NoBackend {
+        async fn load(
+            &self,
+            _scope: &IntegrationSecretScope,
+        ) -> Result<Option<SealedIntegrationSecret>, IntegrationSecretError> {
+            Err(IntegrationSecretError::Unavailable)
+        }
+
+        async fn apply(
+            &self,
+            _scope: &IntegrationSecretScope,
+            _actor: UserId,
+            _request_key_hmac: [u8; 32],
+            _fingerprint_hmac: [u8; 32],
+            _mutation: IntegrationSecretMutation,
+            _encrypted_receipt: SealedIntegrationSecret,
+        ) -> Result<IdempotencyDisposition, IntegrationSecretError> {
+            Err(IntegrationSecretError::Unavailable)
+        }
+    }
+
+    fn service() -> IntegrationSecretService {
+        let master = SecretString::from(String::from(TEST_MASTER_KEY));
+        IntegrationSecretService::new(&master, Arc::new(NoBackend)).unwrap()
+    }
+
+    fn scope(secret_name: &str) -> IntegrationSecretScope {
+        let generation = IntegrationSecretGeneration::new(
+            GuildId::new(1),
+            ModuleId::new("tickets").unwrap(),
+            "crm",
+            TEST_GENERATION,
+        )
+        .unwrap();
+        IntegrationSecretScope::new(generation, secret_name).unwrap()
+    }
+
+    /// The envelope written before the key ID existed: version 1, nonce, ciphertext and tag.
+    fn version_one_envelope(
+        scope: &IntegrationSecretScope,
+        cleartext: &[u8],
+    ) -> SealedIntegrationSecret {
+        let key_bytes = decode_master_key(TEST_MASTER_KEY).unwrap();
+        let key = LessSafeKey::new(UnboundKey::new(&aead::AES_256_GCM, &key_bytes).unwrap());
+        let nonce = [7_u8; aead::NONCE_LEN];
+        let aad = associated_data(scope, b"secret").unwrap();
+        let mut buffer = cleartext.to_vec();
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(aad.as_slice()),
+            &mut buffer,
+        )
+        .unwrap();
+        let mut envelope = vec![1_u8];
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&buffer);
+        SealedIntegrationSecret::from_storage(envelope).unwrap()
+    }
+
+    /// A version 2 envelope sealed under the test key, so only the key ID decides whether it opens.
+    fn version_two_envelope(
+        scope: &IntegrationSecretScope,
+        key_id: u8,
+        cleartext: &[u8],
+    ) -> SealedIntegrationSecret {
+        let key_bytes = decode_master_key(TEST_MASTER_KEY).unwrap();
+        let key = LessSafeKey::new(UnboundKey::new(&aead::AES_256_GCM, &key_bytes).unwrap());
+        let nonce = [9_u8; aead::NONCE_LEN];
+        let aad = associated_data(scope, b"secret").unwrap();
+        let mut buffer = cleartext.to_vec();
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(aad.as_slice()),
+            &mut buffer,
+        )
+        .unwrap();
+        let mut envelope = vec![2_u8, key_id];
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&buffer);
+        SealedIntegrationSecret::from_storage(envelope).unwrap()
+    }
+
+    #[test]
+    fn version_one_envelopes_stored_before_the_key_id_still_open() {
+        let service = service();
+        let scope = scope("token");
+        let sealed = version_one_envelope(&scope, b"old-value");
+        let opened = service.open(&scope, sealed).unwrap();
+        assert_eq!(opened.expose_secret(), "old-value");
+    }
+
+    #[test]
+    fn new_envelopes_are_version_two_with_the_current_key_id() {
+        let service = service();
+        let scope = scope("token");
+        let sealed = service
+            .seal(&scope, &SecretString::from(String::from("new-value")))
+            .unwrap();
+        assert_eq!(sealed.as_bytes()[0], 2);
+        assert_eq!(sealed.as_bytes()[1], 1);
+        let opened = service.open(&scope, sealed).unwrap();
+        assert_eq!(opened.expose_secret(), "new-value");
+    }
+
+    #[test]
+    fn an_unknown_key_id_is_rejected() {
+        let service = service();
+        let scope = scope("token");
+        let forged = version_two_envelope(&scope, 9, b"new-value");
+        assert!(matches!(
+            service.open(&scope, forged),
+            Err(IntegrationSecretError::Authentication)
+        ));
+    }
+
+    #[test]
+    fn a_secret_opened_under_another_scope_is_rejected() {
+        let service = service();
+        let sealed = service
+            .seal(&scope("token"), &SecretString::from(String::from("value")))
+            .unwrap();
+        assert!(matches!(
+            service.open(&scope("extra"), sealed),
+            Err(IntegrationSecretError::Authentication)
+        ));
+    }
+
+    #[test]
+    fn an_unknown_envelope_version_is_rejected() {
+        let mut bytes = vec![3_u8];
+        bytes.extend_from_slice(&[0_u8; 40]);
+        assert!(matches!(
+            SealedIntegrationSecret::from_storage(bytes),
+            Err(IntegrationSecretError::Authentication)
+        ));
+    }
 }

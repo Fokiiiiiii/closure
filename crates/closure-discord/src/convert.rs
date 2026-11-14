@@ -299,6 +299,15 @@ fn interaction_event(interaction: &Interaction) -> Option<Event> {
     interaction_event_with_modal_components(interaction, None)
 }
 
+/// A DM has no guild id, and its channel is a private one.
+fn is_direct_message(interaction: &Interaction) -> bool {
+    interaction.guild_id.is_none()
+        && interaction
+            .channel
+            .as_ref()
+            .is_some_and(|channel| channel.kind == ChannelType::Private)
+}
+
 fn interaction_event_with_modal_components(
     interaction: &Interaction,
     raw_modal_components: Option<&Value>,
@@ -316,9 +325,36 @@ fn interaction_event_with_modal_components(
             autocomplete(interaction).map(Event::Autocomplete)
         }
         InteractionType::MessageComponent => component(interaction),
+        InteractionType::ModalSubmit if is_direct_message(interaction) => {
+            direct_modal(interaction, raw_modal_components).map(|(message_id, submission)| {
+                Event::DirectMessageModal {
+                    message_id,
+                    submission,
+                }
+            })
+        }
         InteractionType::ModalSubmit => modal(interaction, raw_modal_components).map(Event::Modal),
         _ => None,
     }
+}
+
+/// The origin of a DM interaction. The guild is a placeholder: the dispatcher replaces it with the
+/// guild of the saved route.
+fn direct_origin(interaction: &Interaction) -> Option<Origin> {
+    Some(Origin {
+        interaction_id: interaction.id,
+        application_id: interaction.application_id,
+        token: InteractionToken::new(interaction.token.clone()),
+        guild_id: Id::new(1),
+        channel_id: interaction.channel.as_ref()?.id,
+        user: user(interaction.author()?),
+        roles: Vec::new(),
+        invoker_permissions: twilight_model::guild::Permissions::empty(),
+        locale: interaction
+            .locale
+            .as_deref()
+            .and_then(Locale::from_discord_tag),
+    })
 }
 
 fn component(interaction: &Interaction) -> Option<Event> {
@@ -584,10 +620,29 @@ fn modal_component(
 }
 
 fn modal(interaction: &Interaction, raw_components: Option<&Value>) -> Option<ModalSubmission> {
+    let origin = origin(interaction)?;
+    modal_from(interaction, raw_components, origin)
+}
+
+/// A modal from a DM is only accepted with the message it was opened from: the dispatcher checks
+/// that message's saved route before the module sees the submission.
+fn direct_modal(
+    interaction: &Interaction,
+    raw_components: Option<&Value>,
+) -> Option<(closure_core::event::MessageId, ModalSubmission)> {
+    let message_id = interaction.message.as_ref()?.id;
+    let origin = direct_origin(interaction)?;
+    Some((message_id, modal_from(interaction, raw_components, origin)?))
+}
+
+fn modal_from(
+    interaction: &Interaction,
+    raw_components: Option<&Value>,
+    origin: Origin,
+) -> Option<ModalSubmission> {
     let Some(InteractionData::ModalSubmit(data)) = &interaction.data else {
         return None;
     };
-    let origin = origin(interaction)?;
     let components = match raw_components {
         Some(components) => components.clone(),
         None => serde_json::to_value(&data.components).ok()?,
@@ -1889,6 +1944,72 @@ mod tests {
         assert_eq!(form.field("note"), Some("twice"));
         assert_eq!(form.field("other"), None);
         assert_eq!(form.channel_id.get(), 3);
+    }
+
+    fn dm_message_json() -> Value {
+        json!({
+            "id": "900", "channel_id": "77", "author": user_json("99", true), "content": "survey",
+            "timestamp": "2026-10-24T00:00:00.000000+00:00", "edited_timestamp": null,
+            "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+            "attachments": [], "embeds": [], "pinned": false, "type": 0
+        })
+    }
+
+    #[test]
+    fn a_dm_modal_submission_carries_the_message_it_came_from() {
+        let raw_components = json!([
+            { "type": 1, "id": 1, "components": [
+                { "type": 4, "id": 2, "custom_id": "why", "value": "spam" } ] }
+        ]);
+        let gateway = user_interaction(
+            5,
+            &json!({"custom_id": "survey:why", "components": raw_components.clone()}),
+            &json!({
+                "guild_id": null,
+                "member": null,
+                "user": user_json("7", false),
+                "channel": { "id": "77", "type": 1 },
+                "message": dm_message_json()
+            }),
+        );
+        let events =
+            events_with_modal_components(&gateway, &Before::default(), Some(&raw_components));
+        let [
+            Event::DirectMessageModal {
+                message_id,
+                submission,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected a direct-message modal");
+        };
+        assert_eq!(message_id.get(), 900);
+        assert_eq!(submission.custom_id, "survey:why");
+        assert_eq!(submission.field("why"), Some("spam"));
+        assert_eq!(submission.channel_id.get(), 77);
+        assert_eq!(submission.user.id.get(), 7);
+        assert!(submission.roles.is_empty());
+    }
+
+    #[test]
+    fn a_dm_modal_submission_without_its_source_message_is_dropped() {
+        let raw_components = json!([
+            { "type": 1, "id": 1, "components": [
+                { "type": 4, "id": 2, "custom_id": "why", "value": "spam" } ] }
+        ]);
+        let gateway = user_interaction(
+            5,
+            &json!({"custom_id": "survey:why", "components": raw_components.clone()}),
+            &json!({
+                "guild_id": null,
+                "member": null,
+                "user": user_json("7", false),
+                "channel": { "id": "77", "type": 1 }
+            }),
+        );
+        let events =
+            events_with_modal_components(&gateway, &Before::default(), Some(&raw_components));
+        assert!(events.is_empty());
     }
 
     #[test]

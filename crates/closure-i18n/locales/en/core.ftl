@@ -123,5 +123,6 @@ role-updated-reason = Closure updated the role that restrictions give.
 ticket-notification-gallery-approved = Your gallery submission “{ $title }” was approved.
 ticket-notification-gallery-rejected = Your gallery submission “{ $title }” was rejected.
 ticket-notification-review-reason = Review reason: { $reason }
+ticket-notification-email-quota-exceeded = Too many verification emails were requested recently. Try again later.
 ticket-notification-email-verification-subject = Verify your email address
 ticket-notification-email-verification-body = Your verification code is { $code}. It expires in 15 minutes.

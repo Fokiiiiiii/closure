@@ -257,7 +257,10 @@ pub(super) fn scope(kind: &str, id: &str) -> Result<DashboardScope, ApiError> {
             cursor: None,
         }),
         "labels" if id == "labels" => Ok(DashboardScope::TicketLabels { cursor: None }),
-        "gallery" if id == "gallery" => Ok(DashboardScope::Gallery),
+        "gallery" if id == "gallery" => Ok(DashboardScope::Gallery {
+            cursor: None,
+            query: None,
+        }),
         "analytics" if id == "analytics" => Ok(DashboardScope::Analytics {
             period_days: 30,
             cursor: None,
@@ -343,6 +346,7 @@ fn state_scope(kind: &str, id: &str, query: ActionStateQuery) -> Result<Dashboar
                 cursor: label_cursor(query.cursor)?,
             })
         }
+        DashboardScope::Gallery { .. } => gallery_scope(query),
         DashboardScope::Analytics { .. } => {
             if query.q.is_some() {
                 return Err(ApiError::BadRequest(
@@ -362,12 +366,35 @@ fn state_scope(kind: &str, id: &str, query: ActionStateQuery) -> Result<Dashboar
         scope => {
             if query.cursor.is_some() || query.q.is_some() || query.days.is_some() {
                 return Err(ApiError::BadRequest(
-                    "query parameters are only valid for knowledge, tags, labels, or analytics state".into(),
+                    "query parameters are only valid for knowledge, tags, labels, gallery, or analytics state".into(),
                 ));
             }
             Ok(scope)
         }
     }
+}
+
+fn gallery_scope(query: ActionStateQuery) -> Result<DashboardScope, ApiError> {
+    if query.days.is_some() {
+        return Err(ApiError::BadRequest(
+            "days is not valid for gallery state".into(),
+        ));
+    }
+    let search = query
+        .q
+        .map(|query| query.trim().to_owned())
+        .filter(|query| !query.is_empty());
+    if search.as_ref().is_some_and(|search| {
+        !(1..=100).contains(&search.chars().count()) || search.chars().any(char::is_control)
+    }) {
+        return Err(ApiError::BadRequest(
+            "q must be 1 to 100 printable characters".into(),
+        ));
+    }
+    Ok(DashboardScope::Gallery {
+        cursor: gallery_cursor(query.cursor)?,
+        query: search,
+    })
 }
 
 fn label_cursor(cursor: Option<String>) -> Result<Option<String>, ApiError> {
@@ -403,6 +430,18 @@ fn query_cursor(cursor: Option<String>) -> Result<Option<String>, ApiError> {
                 })
                 .map(|()| cursor.clone())
                 .ok_or_else(|| ApiError::BadRequest("cursor is invalid".into()))
+        })
+        .transpose()
+}
+
+fn gallery_cursor(cursor: Option<String>) -> Result<Option<String>, ApiError> {
+    cursor
+        .map(|cursor| cursor.trim().to_owned())
+        .filter(|cursor| !cursor.is_empty())
+        .map(|cursor| {
+            (cursor.chars().count() <= 200)
+                .then_some(cursor)
+                .ok_or_else(|| ApiError::BadRequest("gallery cursor is invalid".into()))
         })
         .transpose()
 }
@@ -500,4 +539,94 @@ fn no_store(mut response: Response) -> Response {
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(cursor: Option<&str>, q: Option<&str>, days: Option<u16>) -> ActionStateQuery {
+        ActionStateQuery {
+            cursor: cursor.map(str::to_owned),
+            q: q.map(str::to_owned),
+            days,
+        }
+    }
+
+    fn gallery_parts(
+        result: Result<DashboardScope, ApiError>,
+    ) -> Option<(Option<String>, Option<String>)> {
+        match result {
+            Ok(DashboardScope::Gallery { cursor, query }) => Some((cursor, query)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn gallery_state_carries_trimmed_query_and_cursor_into_scope() {
+        let scope = state_scope(
+            "gallery",
+            "gallery",
+            query(Some("abc-1"), Some("  welcome "), None),
+        );
+
+        assert_eq!(
+            gallery_parts(scope),
+            Some((Some("abc-1".into()), Some("welcome".into())))
+        );
+    }
+
+    #[test]
+    fn gallery_state_treats_empty_query_and_cursor_as_absent() {
+        let scope = state_scope("gallery", "gallery", query(Some("  "), Some("   "), None));
+
+        assert_eq!(gallery_parts(scope), Some((None, None)));
+    }
+
+    #[test]
+    fn gallery_state_accepts_query_of_exactly_one_hundred_characters() {
+        let text = "a".repeat(100);
+        let scope = state_scope("gallery", "gallery", query(None, Some(&text), None));
+
+        assert_eq!(gallery_parts(scope), Some((None, Some(text))));
+    }
+
+    #[test]
+    fn gallery_state_rejects_query_over_one_hundred_characters() {
+        let text = "a".repeat(101);
+
+        let scope = state_scope("gallery", "gallery", query(None, Some(&text), None));
+
+        assert!(matches!(scope, Err(ApiError::BadRequest(_))));
+    }
+
+    #[test]
+    fn gallery_state_rejects_cursor_over_two_hundred_characters() {
+        let cursor = "c".repeat(201);
+
+        let scope = state_scope("gallery", "gallery", query(Some(&cursor), None, None));
+
+        assert!(matches!(scope, Err(ApiError::BadRequest(_))));
+    }
+
+    #[test]
+    fn gallery_state_rejects_days() {
+        let scope = state_scope("gallery", "gallery", query(None, None, Some(30)));
+
+        assert!(matches!(scope, Err(ApiError::BadRequest(_))));
+    }
+
+    #[test]
+    fn guild_state_still_rejects_query_parameters() {
+        let scope = state_scope("guild", "guild", query(None, Some("x"), None));
+
+        assert!(matches!(scope, Err(ApiError::BadRequest(_))));
+    }
+
+    #[test]
+    fn guild_state_without_query_parameters_is_unchanged() {
+        let scope = state_scope("guild", "guild", query(None, None, None));
+
+        assert!(matches!(scope, Ok(DashboardScope::Guild)));
+    }
 }
