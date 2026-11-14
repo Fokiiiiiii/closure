@@ -125,6 +125,12 @@ impl Db {
             .execute(&mut *tx)
             .await?;
 
+        // Read under the row lock the update takes, so the names compared are the ones it replaces.
+        let previous: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT doc FROM guild_config WHERE guild_id = $1 FOR UPDATE")
+                .bind(guild_id)
+                .fetch_optional(&mut *tx)
+                .await?;
         let saved: Option<i64> = match expected {
             None => {
                 sqlx::query_scalar(
@@ -174,6 +180,14 @@ impl Db {
             )
             .await?;
         }
+        crate::integration_secrets::remove_dropped_secrets_in_transaction(
+            &mut tx,
+            guild,
+            previous.as_ref(),
+            &doc,
+            can_retire_secrets,
+        )
+        .await?;
 
         sqlx::query(
             "INSERT INTO guild_config_history (guild_id, revision, doc, actor)
@@ -329,6 +343,11 @@ mod tests {
     use std::time::Duration;
 
     use closure_config::parse_overrides;
+    use closure_core::integration_secrets::{
+        IntegrationSecretBackend, IntegrationSecretGeneration, IntegrationSecretScope,
+    };
+    use closure_core::module::ModuleId;
+    use serde_json::json;
     use sqlx::PgPool;
     use twilight_model::id::Id;
 
@@ -573,5 +592,149 @@ mod tests {
 
         let outcome = tokio::time::timeout(Duration::from_millis(300), listener.next()).await;
         assert!(outcome.is_err(), "no event expected, got {outcome:?}");
+    }
+
+    fn crm(guild: u64) -> IntegrationSecretGeneration {
+        IntegrationSecretGeneration::new(
+            Id::new(guild),
+            ModuleId::new("tickets").unwrap(),
+            "crm",
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap()
+    }
+
+    fn crm_document(secrets: &[&str]) -> GuildOverrides {
+        serde_json::from_value(json!({
+            "modules": { "tickets": { "config": { "integrations": [{
+                "id": "crm",
+                "auth": "bearer",
+                "url": "https://example.com/hook",
+                "secrets": secrets,
+                "generation": "0123456789abcdef0123456789abcdef",
+            }] } } }
+        }))
+        .unwrap()
+    }
+
+    async fn seed_secret(pool: &PgPool, guild: i64, name: &str) {
+        sqlx::query(
+            "INSERT INTO integration_secret_generations (guild_id, module_id, integration_id, generation)
+             VALUES ($1, 'tickets', 'crm', '0123456789abcdef0123456789abcdef') ON CONFLICT DO NOTHING",
+        )
+        .bind(guild)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO integration_secrets
+                (guild_id, module_id, integration_id, generation, secret_name, encrypted_value)
+             VALUES ($1, 'tickets', 'crm', '0123456789abcdef0123456789abcdef', $2, $3)",
+        )
+        .bind(guild)
+        .bind(name)
+        .bind(vec![1_u8; 40])
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn stored_names(pool: &PgPool, guild: i64) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT secret_name FROM integration_secrets
+             WHERE guild_id = $1 AND module_id = 'tickets' AND integration_id = 'crm'
+               AND generation = '0123456789abcdef0123456789abcdef'
+             ORDER BY secret_name",
+        )
+        .bind(guild)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn save_crm(
+        db: &Db,
+        expected: Option<i64>,
+        document: &GuildOverrides,
+        can_retire_secrets: bool,
+    ) -> Result<i64, DbError> {
+        db.save_config_and_retire_integration_generations(
+            Id::new(1),
+            expected,
+            document,
+            None,
+            &[crm(1)],
+            &[],
+            can_retire_secrets,
+        )
+        .await
+    }
+
+    #[sqlx::test]
+    async fn dropping_a_secret_name_removes_its_stored_value(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        let first = save_crm(&db, None, &crm_document(&["token", "extra"]), true)
+            .await
+            .unwrap();
+        seed_secret(&pool, 1, "token").await;
+        seed_secret(&pool, 1, "extra").await;
+
+        save_crm(&db, Some(first), &crm_document(&["token"]), true)
+            .await
+            .unwrap();
+
+        assert_eq!(stored_names(&pool, 1).await, ["token"]);
+    }
+
+    #[sqlx::test]
+    async fn a_name_added_back_after_removal_does_not_revive_its_old_value(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        let first = save_crm(&db, None, &crm_document(&["token", "extra"]), true)
+            .await
+            .unwrap();
+        seed_secret(&pool, 1, "extra").await;
+        let second = save_crm(&db, Some(first), &crm_document(&["token"]), true)
+            .await
+            .unwrap();
+
+        save_crm(&db, Some(second), &crm_document(&["token", "extra"]), true)
+            .await
+            .unwrap();
+
+        let scope = IntegrationSecretScope::new(crm(1), "extra").unwrap();
+        assert_eq!(db.load(&scope).await.unwrap(), None);
+    }
+
+    #[sqlx::test]
+    async fn saving_without_dropping_a_name_keeps_its_value(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        let first = save_crm(&db, None, &crm_document(&["token", "extra"]), true)
+            .await
+            .unwrap();
+        seed_secret(&pool, 1, "token").await;
+        seed_secret(&pool, 1, "extra").await;
+
+        save_crm(&db, Some(first), &crm_document(&["token", "extra"]), false)
+            .await
+            .unwrap();
+
+        assert_eq!(stored_names(&pool, 1).await, ["extra", "token"]);
+    }
+
+    #[sqlx::test]
+    async fn dropping_a_stored_name_needs_an_administrator_and_changes_nothing(pool: PgPool) {
+        let db = Db::from_pool(pool.clone());
+        let first = save_crm(&db, None, &crm_document(&["token", "extra"]), true)
+            .await
+            .unwrap();
+        seed_secret(&pool, 1, "extra").await;
+
+        let refused = save_crm(&db, Some(first), &crm_document(&["token"]), false).await;
+
+        assert!(matches!(
+            refused,
+            Err(DbError::IntegrationSecretAdministratorRequired)
+        ));
+        assert_eq!(stored_names(&pool, 1).await, ["extra"]);
     }
 }

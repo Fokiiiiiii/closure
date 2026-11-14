@@ -1095,7 +1095,12 @@ fn sanitize_form(payload: &Value) -> Result<Value, ApiError> {
 #[allow(clippy::too_many_lines)]
 fn sanitize_question(value: &Value) -> Result<Value, ApiError> {
     if let Some(text) = value.as_str() {
-        if text.trim().is_empty() || text.chars().count() > 45 || has_forbidden_controls(text) {
+        // Same text rules as a labelled question: a legacy string is not a way around them.
+        if text.trim().is_empty()
+            || text.chars().count() > 45
+            || has_forbidden_controls(text)
+            || has_server_reference(text)
+        {
             return Err(ApiError::BadRequest("form question is invalid".into()));
         }
         return Ok(value.clone());
@@ -1216,4 +1221,27 @@ fn sanitize_form_options(kind: &str, value: &Value) -> Result<Value, ApiError> {
         safe.push(item);
     }
     Ok(Value::Array(safe))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_string_question_gets_the_same_server_reference_check_as_a_labelled_one() {
+        let legacy = sanitize_question(&json!("Join https://discord.gg/abc123 first"));
+        let labelled = sanitize_question(
+            &json!({ "type": "text", "label": "Join https://discord.gg/abc123 first" }),
+        );
+        assert!(labelled.is_err());
+        assert!(legacy.is_err());
+    }
+
+    #[test]
+    fn legacy_string_question_stays_as_it_was_when_it_is_plain_text() {
+        assert_eq!(
+            sanitize_question(&json!("What is your favourite colour?")).unwrap(),
+            json!("What is your favourite colour?")
+        );
+    }
 }

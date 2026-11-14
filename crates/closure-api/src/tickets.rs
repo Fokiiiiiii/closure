@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::extract::{Path, Query, State, rejection::QueryRejection};
+use axum::http::{HeaderMap, Uri};
 use closure_core::capability::{Capability, CapabilitySet};
 use closure_core::event::GuildId;
 use closure_core::module::ModuleId;
@@ -27,6 +27,7 @@ const SCAN_BATCH: usize = 100;
 const MAX_SCAN: usize = 1000;
 const TRANSCRIPT_PAGE_SIZE: usize = 4;
 const CURSOR_SENTINEL: &str = "99999999999999999999";
+const DEFAULT_STAFF_TEAM_ID: &str = "default";
 
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
@@ -41,7 +42,8 @@ pub(crate) struct ListQuery {
     rating: Option<u8>,
     claimed_by: Option<String>,
     close_reason: Option<String>,
-    #[serde(default, rename = "label")]
+    // Filled from the raw query: serde_urlencoded cannot read repeated keys into a Vec field.
+    #[serde(skip)]
     labels: Vec<String>,
     include_total: Option<bool>,
 }
@@ -130,6 +132,8 @@ struct OpenTicket {
     closed: bool,
     #[serde(default)]
     staff_roles: Option<Vec<u64>>,
+    #[serde(default)]
+    staff_access: Option<HistoryStaffAccess>,
     #[serde(default)]
     panel: Option<Value>,
     #[serde(default)]
@@ -237,12 +241,25 @@ struct CurrentStaffTeam {
     users: Vec<u64>,
 }
 
+fn list_query(uri: &Uri) -> Result<ListQuery, ApiError> {
+    let rejected = |error: QueryRejection| ApiError::BadRequest(error.to_string());
+    let Query(mut query) = Query::<ListQuery>::try_from_uri(uri).map_err(rejected)?;
+    let Query(pairs) = Query::<Vec<(String, String)>>::try_from_uri(uri).map_err(rejected)?;
+    query.labels = pairs
+        .into_iter()
+        .filter(|(key, _)| key == "label")
+        .map(|(_, value)| value)
+        .collect();
+    Ok(query)
+}
+
 pub(crate) async fn list(
     State(state): State<ApiState>,
     Path(raw_guild): Path<u64>,
     headers: HeaderMap,
-    Query(query): Query<ListQuery>,
+    uri: Uri,
 ) -> Result<Json<Value>, ApiError> {
+    let query = list_query(&uri)?;
     let (guild, viewer) = viewer(&state, raw_guild, &headers).await?;
     let limit = query.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let store = ticket_store(&state, guild)?;
@@ -422,8 +439,7 @@ pub(crate) async fn get(
         .map_err(storage_error)?
         .filter(|entry| !entry.closed)
     {
-        let staff_roles = open_staff_roles(&entry, &viewer.default_staff_roles);
-        if !can_view(&viewer, &staff_roles) {
+        if !can_view_open(&viewer, &entry) {
             return Err(no_ticket());
         }
         if start > 0 {
@@ -618,15 +634,27 @@ fn can_view_history(viewer: &Viewer, history: &TicketHistory) -> bool {
         return true;
     }
     if let Some(snapshot) = &history.staff_access {
-        // A deleted team grants nothing, and a removed member loses the old tickets too.
-        return snapshot.teams.iter().any(|team| {
-            team_grants(viewer, &team.users, &team.roles)
-                && viewer.staff_teams.iter().any(|current| {
-                    current.id == team.id && team_grants(viewer, &current.users, &current.roles)
-                })
-        });
+        return snapshot_grants(viewer, snapshot);
     }
     can_view(viewer, &history.staff_roles)
+}
+
+// Mirrors the plugin's may_access: a snapshot team grants only while the current config still lists it.
+fn snapshot_grants(viewer: &Viewer, snapshot: &HistoryStaffAccess) -> bool {
+    snapshot.teams.iter().any(|team| {
+        team_grants(viewer, &team.users, &team.roles) && current_team_includes(viewer, team)
+    })
+}
+
+fn current_team_includes(viewer: &Viewer, team: &HistoryStaffTeam) -> bool {
+    // The default team has no current config entry, so like the plugin its snapshot alone decides.
+    if team.id == DEFAULT_STAFF_TEAM_ID {
+        return true;
+    }
+    viewer
+        .staff_teams
+        .iter()
+        .any(|current| current.id == team.id && team_grants(viewer, &current.users, &current.roles))
 }
 
 fn can_read_history(viewer: &Viewer, history: &TicketHistory) -> bool {
@@ -634,6 +662,16 @@ fn can_read_history(viewer: &Viewer, history: &TicketHistory) -> bool {
         || (history.status == "closed"
             && !history.opener_erased
             && viewer.actor.user.get() == history.opener)
+}
+
+fn can_view_open(viewer: &Viewer, ticket: &OpenTicket) -> bool {
+    match &ticket.staff_access {
+        Some(snapshot) => viewer.can_manage || snapshot_grants(viewer, snapshot),
+        None => can_view(
+            viewer,
+            &open_staff_roles(ticket, &viewer.default_staff_roles),
+        ),
+    }
 }
 
 fn open_staff_roles(ticket: &OpenTicket, defaults: &[u64]) -> Vec<u64> {
@@ -714,8 +752,7 @@ async fn list_open(
             if ticket.closed {
                 continue;
             }
-            let staff_roles = open_staff_roles(&ticket, &viewer.default_staff_roles);
-            if can_view(viewer, &staff_roles) {
+            if can_view_open(viewer, &ticket) {
                 if tickets.len() == limit {
                     more_visible = true;
                     break;
@@ -1248,5 +1285,121 @@ mod tests {
     fn deleting_a_staff_team_revokes_its_members_old_ticket_access() {
         let history = history(&[11]);
         assert!(!can_view_history(&viewer(11, vec![]), &history));
+    }
+
+    fn open_ticket(staff_access: Option<&Value>, staff_roles: Option<&[u64]>) -> OpenTicket {
+        serde_json::from_value(json!({
+            "number": 1,
+            "opener": 99,
+            "created": 0,
+            "staff_access": staff_access,
+            "staff_roles": staff_roles,
+        }))
+        .unwrap()
+    }
+
+    fn viewer_in_roles(user: u64, roles: &[u64], staff_teams: Vec<CurrentStaffTeam>) -> Viewer {
+        let mut viewer = viewer(user, staff_teams);
+        viewer.actor.roles = roles.iter().map(|role| Id::new(*role)).collect();
+        viewer
+    }
+
+    #[test]
+    fn repeated_label_parameters_are_all_kept() {
+        let uri: Uri = "/x?state=closed&label=a&label=b&limit=5".parse().unwrap();
+        let query = list_query(&uri).unwrap();
+        assert_eq!(query.labels, ["a", "b"]);
+        assert_eq!(query.limit, Some(5));
+    }
+
+    #[test]
+    fn open_ticket_is_visible_to_a_user_named_directly_in_its_team() {
+        let ticket = open_ticket(
+            Some(&json!({"teams": [{"id": "ops", "users": [10]}]})),
+            None,
+        );
+        let current = vec![ops_team(vec![10])];
+        assert!(can_view_open(&viewer(10, current.clone()), &ticket));
+        assert!(!can_view_open(&viewer(11, current), &ticket));
+    }
+
+    #[test]
+    fn open_ticket_is_visible_to_a_role_on_its_team() {
+        let ticket = open_ticket(Some(&json!({"teams": [{"id": "ops", "roles": [7]}]})), None);
+        let current = vec![CurrentStaffTeam {
+            id: "ops".into(),
+            roles: vec![7],
+            users: vec![],
+        }];
+        assert!(can_view_open(
+            &viewer_in_roles(10, &[7], current.clone()),
+            &ticket
+        ));
+        assert!(!can_view_open(&viewer_in_roles(10, &[8], current), &ticket));
+    }
+
+    #[test]
+    fn open_ticket_with_a_team_snapshot_ignores_its_legacy_staff_roles() {
+        let ticket = open_ticket(
+            Some(&json!({"teams": [{"id": "ops", "users": [10]}]})),
+            Some(&[7]),
+        );
+        assert!(!can_view_open(
+            &viewer_in_roles(11, &[7], vec![ops_team(vec![10])]),
+            &ticket
+        ));
+    }
+
+    #[test]
+    fn open_ticket_loses_access_when_its_member_is_removed_from_the_current_team() {
+        let ticket = open_ticket(
+            Some(&json!({"teams": [{"id": "ops", "users": [10, 11]}]})),
+            None,
+        );
+        let current = vec![ops_team(vec![11])];
+        assert!(!can_view_open(&viewer(10, current.clone()), &ticket));
+        assert!(can_view_open(&viewer(11, current), &ticket));
+    }
+
+    #[test]
+    fn open_ticket_loses_access_when_its_team_is_deleted() {
+        let ticket = open_ticket(
+            Some(&json!({"teams": [{"id": "ops", "users": [11]}]})),
+            None,
+        );
+        assert!(!can_view_open(&viewer(11, vec![]), &ticket));
+    }
+
+    #[test]
+    fn open_ticket_in_the_default_team_is_visible_without_a_current_team_entry() {
+        let ticket = open_ticket(
+            Some(&json!({"teams": [{"id": "default", "users": [10]}]})),
+            None,
+        );
+        assert!(can_view_open(&viewer(10, vec![]), &ticket));
+    }
+
+    #[test]
+    fn closing_open_ticket_keeps_the_same_visibility_rule() {
+        let mut ticket = open_ticket(
+            Some(&json!({"teams": [{"id": "ops", "users": [10]}]})),
+            None,
+        );
+        ticket.closing = Some(1);
+        assert!(can_view_open(
+            &viewer(10, vec![ops_team(vec![10])]),
+            &ticket
+        ));
+        assert!(!can_view_open(
+            &viewer(11, vec![ops_team(vec![10])]),
+            &ticket
+        ));
+    }
+
+    #[test]
+    fn open_ticket_without_a_snapshot_uses_its_legacy_staff_roles() {
+        let ticket = open_ticket(None, Some(&[7]));
+        assert!(can_view_open(&viewer_in_roles(10, &[7], vec![]), &ticket));
+        assert!(!can_view_open(&viewer(10, vec![]), &ticket));
     }
 }

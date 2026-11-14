@@ -1,15 +1,172 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use async_trait::async_trait;
-use closure_core::event::UserId;
+use closure_core::event::{GuildId, UserId};
 use closure_core::integration_secrets::{
     IdempotencyDisposition, IntegrationSecretBackend, IntegrationSecretError,
     IntegrationSecretGeneration, IntegrationSecretMutation, IntegrationSecretScope,
     SealedIntegrationSecret,
 };
+use closure_core::module::ModuleId;
+use serde_json::Value;
 use sqlx::Row;
 use subtle::ConstantTimeEq;
 
 use crate::Db;
 use crate::ids::to_db;
+
+/// A secret name an edit drops from an integration that keeps its generation.
+pub(crate) struct RemovedSecret {
+    generation: IntegrationSecretGeneration,
+    secret_name: String,
+}
+
+/// The names each integration of `document` lists, keyed by ID, for integrations with a generation.
+fn integrations_by_id(document: &Value) -> BTreeMap<String, (String, BTreeSet<String>)> {
+    document
+        .pointer("/modules/tickets/config/integrations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|integration| {
+            let id = integration.get("id")?.as_str()?;
+            let generation = integration
+                .get("generation")?
+                .as_str()
+                .filter(|generation| !generation.is_empty())?;
+            let names = integration
+                .get("secrets")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            Some((id.to_owned(), (generation.to_owned(), names)))
+        })
+        .collect()
+}
+
+/// Names that `next` drops from an integration whose generation `previous` shares. A generation change
+/// is retirement's job, so those integrations are left out here.
+pub(crate) fn removed_secret_names(
+    guild: GuildId,
+    previous: Option<&Value>,
+    next: &Value,
+) -> Result<Vec<RemovedSecret>, crate::error::DbError> {
+    let Some(previous) = previous else {
+        return Ok(Vec::new());
+    };
+    let module = ModuleId::new("tickets")
+        .map_err(|error| crate::error::DbError::Invalid(error.to_string()))?;
+    let after = integrations_by_id(next);
+    let mut removed = Vec::new();
+    for (integration_id, (generation, names)) in integrations_by_id(previous) {
+        let Some((next_generation, next_names)) = after.get(&integration_id) else {
+            continue;
+        };
+        if *next_generation != generation {
+            continue;
+        }
+        for secret_name in names.difference(next_names) {
+            let scope = IntegrationSecretGeneration::new(
+                guild,
+                module.clone(),
+                integration_id.clone(),
+                generation.clone(),
+            )
+            .map_err(|_| {
+                crate::error::DbError::Invalid(
+                    "the stored ticket integration has an invalid generation".into(),
+                )
+            })?;
+            removed.push(RemovedSecret {
+                generation: scope,
+                secret_name: secret_name.clone(),
+            });
+        }
+    }
+    Ok(removed)
+}
+
+/// Removes the stored values of every name `next` drops, inside the caller's save transaction.
+pub(crate) async fn remove_dropped_secrets_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    guild: GuildId,
+    previous: Option<&Value>,
+    next: &Value,
+    can_retire_secrets: bool,
+) -> Result<(), crate::error::DbError> {
+    for removed in removed_secret_names(guild, previous, next)? {
+        remove_secret_name_in_transaction(transaction, &removed, can_retire_secrets).await?;
+    }
+    Ok(())
+}
+
+/// Deletes a dropped name's stored value and its idempotency receipts in the save's transaction.
+/// A stored value needs the administrator permission, as retirement does.
+pub(crate) async fn remove_secret_name_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    removed: &RemovedSecret,
+    can_retire_secrets: bool,
+) -> Result<(), crate::error::DbError> {
+    let generation = &removed.generation;
+    let guild_id = to_db(generation.guild_id())?;
+    // The row lock serializes the removal against stores for this generation, as retirement does.
+    sqlx::query(
+        "SELECT retired FROM integration_secret_generations
+         WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3 AND generation = $4
+         FOR UPDATE",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let has_value = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM integration_secrets
+             WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3
+               AND generation = $4 AND secret_name = $5
+         )",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .bind(&removed.secret_name)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if has_value && !can_retire_secrets {
+        return Err(crate::error::DbError::IntegrationSecretAdministratorRequired);
+    }
+    sqlx::query(
+        "DELETE FROM integration_secrets
+         WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3
+           AND generation = $4 AND secret_name = $5",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .bind(&removed.secret_name)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM integration_secret_receipts
+         WHERE guild_id = $1 AND module_id = $2 AND integration_id = $3
+           AND generation = $4 AND secret_name = $5",
+    )
+    .bind(guild_id)
+    .bind(generation.module().as_str())
+    .bind(generation.integration_id())
+    .bind(generation.generation())
+    .bind(&removed.secret_name)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
 
 pub(crate) async fn retire_generation_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,

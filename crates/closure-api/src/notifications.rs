@@ -39,6 +39,7 @@ const VERIFICATION_TTL_SECONDS: i64 = 15 * 60;
 const SMTP_TIMEOUT: Duration = Duration::from_secs(10);
 const OUTBOX_LEASE_SECONDS: i64 = 120;
 const OUTBOX_MAX_ATTEMPTS: i32 = 10;
+const OUTBOX_NOT_READY_DELAY_SECONDS: i64 = 300;
 const OUTBOX_POLL: Duration = Duration::from_secs(2);
 const OUTBOX_BATCH: usize = 16;
 const OUTBOX_PURGE_INTERVAL: Duration = Duration::from_hours(6);
@@ -107,14 +108,20 @@ impl EmailSender {
         Some(Self { transport, from })
     }
 
-    async fn send(&self, recipient: Mailbox, subject: &str, body: &str) -> Result<(), ()> {
-        let message = Message::builder()
-            .from(self.from.clone())
-            .to(recipient)
-            .subject(subject)
-            .header(ContentType::TEXT_PLAIN)
-            .body(body.to_owned())
-            .map_err(|_| ())?;
+    // A Message-ID derived from the delivery identity lets the relay and the recipient
+    // recognise a resend of the same notification.
+    fn message_id(&self, local_part: &str) -> String {
+        format!("<{local_part}@{}>", self.from.email.domain())
+    }
+
+    async fn send(
+        &self,
+        recipient: Mailbox,
+        subject: &str,
+        body: &str,
+        message_id: Option<String>,
+    ) -> Result<(), ()> {
+        let message = outbound_message(&self.from, recipient, subject, body, message_id)?;
         self.transport
             .send(message)
             .await
@@ -135,6 +142,23 @@ fn parse_mailbox(raw: &str) -> Result<Mailbox, ()> {
         return Err(());
     }
     email.parse::<Mailbox>().map_err(|_| ())
+}
+
+fn outbound_message(
+    from: &Mailbox,
+    recipient: Mailbox,
+    subject: &str,
+    body: &str,
+    message_id: Option<String>,
+) -> Result<Message, ()> {
+    Message::builder()
+        .from(from.clone())
+        .to(recipient)
+        .subject(subject)
+        .message_id(message_id)
+        .header(ContentType::TEXT_PLAIN)
+        .body(body.to_owned())
+        .map_err(|_| ())
 }
 
 fn now_unix() -> Result<i64, ApiError> {
@@ -574,12 +598,21 @@ pub(crate) async fn action(
                 }
                 EmailRequestOutcome::Started { revision } => {
                     let (subject, body) = verification_email(email_locale, &code);
-                    let sent = sender.send(mailbox, &subject, &body).await.is_ok();
+                    let sent = sender.send(mailbox, &subject, &body, None).await.is_ok();
                     if !sent {
                         let _ = state.inner.db.cancel_email_verification(user, &key).await;
                         return Err(ApiError::Internal(
                             "email verification delivery failed".into(),
                         ));
+                    }
+                    if state
+                        .inner
+                        .db
+                        .mark_email_verification_sent(user, &key)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("email verification sent state was not recorded");
                     }
                     (revision, json!({"verification_sent": true}))
                 }
@@ -782,6 +815,9 @@ pub fn run_worker(
                 if db.purge_notification_outbox().await.is_err() {
                     tracing::warn!("notification outbox cleanup failed");
                 }
+                if db.purge_expired_email_verifications().await.is_err() {
+                    tracing::warn!("expired email verification cleanup failed");
+                }
                 last_purge = Instant::now();
             }
             for _ in 0..OUTBOX_BATCH {
@@ -853,6 +889,10 @@ async fn process_event(
         return;
     };
 
+    // A failing channel must not hold back the others; the event is retried or deferred at the end.
+    let mut retry_later = false;
+    let mut email_waiting = false;
+
     if !event.in_app_done {
         if preferences.in_app_enabled {
             let submission_title = safe_notification_text(&event.title, 100);
@@ -875,18 +915,18 @@ async fn process_event(
                 .await
                 .is_err()
             {
-                retry_outbox(db, &event, "transient").await;
-                return;
+                retry_later = true;
             }
         }
-        if !db
-            .complete_notification_outbox_channel(
-                event.event_id,
-                event.attempts,
-                NotificationOutboxChannel::InApp,
-            )
-            .await
-            .unwrap_or(false)
+        if !retry_later
+            && !db
+                .complete_notification_outbox_channel(
+                    event.event_id,
+                    event.attempts,
+                    NotificationOutboxChannel::InApp,
+                )
+                .await
+                .unwrap_or(false)
         {
             return;
         }
@@ -913,10 +953,7 @@ async fn process_event(
                         return;
                     }
                 }
-                Err(DirectMessageError::Retryable) => {
-                    retry_outbox(db, &event, "transient").await;
-                    return;
-                }
+                Err(DirectMessageError::Retryable) => retry_later = true,
             }
         } else if !db
             .complete_notification_outbox_channel(
@@ -932,22 +969,21 @@ async fn process_event(
     }
 
     if !event.email_done {
-        if preferences.email_enabled && preferences.email_verified {
-            let (Some(vault), Some(sender), Some(encrypted)) =
-                (vault, email, preferences.email_ciphertext.as_deref())
-            else {
-                let _ = db
-                    .complete_notification_outbox_channel(
-                        event.event_id,
-                        event.attempts,
-                        NotificationOutboxChannel::Email,
-                    )
-                    .await;
-                let _ = db
-                    .finish_notification_outbox(event.event_id, event.attempts)
-                    .await;
+        if !(preferences.email_enabled && preferences.email_verified) {
+            if !db
+                .complete_notification_outbox_channel(
+                    event.event_id,
+                    event.attempts,
+                    NotificationOutboxChannel::Email,
+                )
+                .await
+                .unwrap_or(false)
+            {
                 return;
-            };
+            }
+        } else if let (Some(vault), Some(sender), Some(encrypted)) =
+            (vault, email, preferences.email_ciphertext.as_deref())
+        {
             let Ok(address) = vault.open_account_secret(
                 recipient,
                 recipient,
@@ -971,15 +1007,14 @@ async fn process_event(
             } else {
                 format!("{title}\n\n{body}")
             };
+            let message_id = sender.message_id(&format!("ticket-notification-{}", event.event_id));
             if sender
-                .send(recipient_mailbox, &title, &message_body)
+                .send(recipient_mailbox, &title, &message_body, Some(message_id))
                 .await
                 .is_err()
             {
-                retry_outbox(db, &event, "transient").await;
-                return;
-            }
-            if !db
+                retry_later = true;
+            } else if !db
                 .complete_notification_outbox_channel(
                     event.event_id,
                     event.attempts,
@@ -990,22 +1025,27 @@ async fn process_event(
             {
                 return;
             }
-        } else if !db
-            .complete_notification_outbox_channel(
-                event.event_id,
-                event.attempts,
-                NotificationOutboxChannel::Email,
-            )
-            .await
-            .unwrap_or(false)
-        {
-            return;
+        } else {
+            // Not configured yet: the event waits instead of being marked as delivered.
+            email_waiting = true;
         }
     }
 
-    let _ = db
-        .finish_notification_outbox(event.event_id, event.attempts)
-        .await;
+    if retry_later {
+        retry_outbox(db, &event, "transient").await;
+    } else if email_waiting {
+        let _ = db
+            .defer_notification_outbox(
+                event.event_id,
+                event.attempts,
+                OUTBOX_NOT_READY_DELAY_SECONDS,
+            )
+            .await;
+    } else {
+        let _ = db
+            .finish_notification_outbox(event.event_id, event.attempts)
+            .await;
+    }
 }
 
 async fn retry_outbox(db: &Db, event: &ClaimedNotificationEvent, failure: &'static str) {
@@ -1024,4 +1064,171 @@ async fn retry_outbox(db: &Db, event: &ClaimedNotificationEvent, failure: &'stat
     let _ = db
         .retry_notification_outbox(event.event_id, event.attempts, delay, failure)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use closure_core::permission::Actor;
+    use sqlx::PgPool;
+
+    use super::*;
+
+    struct AllowAll;
+
+    impl MemberAccess for AllowAll {
+        fn member(
+            &self,
+            _guild: GuildId,
+            user: UserId,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<Actor>, ()>> + Send + '_>> {
+            Box::pin(async move {
+                Ok(Some(Actor {
+                    user,
+                    roles: vec![],
+                    administrator: false,
+                    owner: false,
+                }))
+            })
+        }
+    }
+
+    struct DirectMessages(DirectMessageError);
+
+    impl DirectMessageSink for DirectMessages {
+        fn send(
+            &self,
+            _guild: GuildId,
+            _recipient: UserId,
+            _content: String,
+        ) -> Pin<Box<dyn Future<Output = Result<(), DirectMessageError>> + Send + '_>> {
+            let error = self.0;
+            Box::pin(async move { Err(error) })
+        }
+    }
+
+    async fn seed_event(pool: &PgPool, recipient: i64) {
+        let submission: i64 = sqlx::query_scalar(
+            "INSERT INTO ticket_gallery_templates
+                (kind, title, description, category, payload, author_id, source_guild_id, author_name, status)
+             VALUES ('panel', 'Title', 'Description', 'support', '{}'::jsonb, 1, 10, 'author', 'approved')
+             RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let event: i64 = sqlx::query_scalar(
+            "INSERT INTO ticket_gallery_events
+                (submission_id, guild_id, revision, recipient_id, reviewer_id, event_type, status, title)
+             VALUES ($1, 10, 1, $2, 2, 'gallery.approved', 'approved', 'Title')
+             RETURNING event_id",
+        )
+        .bind(submission)
+        .bind(recipient)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ticket_notification_outbox (event_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        )
+        .bind(event)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn claim(db: &Db) -> ClaimedNotificationEvent {
+        db.claim_notification_outbox(OUTBOX_LEASE_SECONDS)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../closure-db/migrations")]
+    async fn a_retryable_direct_message_does_not_hold_back_the_email_channel(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO ticket_notification_preferences (user_id, discord_dm_enabled) VALUES (42, TRUE)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_event(&pool, 42).await;
+        let db = Db::from_pool(pool.clone());
+        let event = claim(&db).await;
+
+        process_event(
+            &db,
+            &AllowAll,
+            &DirectMessages(DirectMessageError::Retryable),
+            None,
+            None,
+            event,
+        )
+        .await;
+
+        let (email_done, dm_done, finished): (bool, bool, bool) = sqlx::query_as(
+            "SELECT email_done, discord_dm_done, completed_at IS NOT NULL
+             FROM ticket_notification_outbox",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((email_done, dm_done, finished), (true, false, false));
+    }
+
+    #[sqlx::test(migrations = "../closure-db/migrations")]
+    async fn a_verified_email_waits_for_configuration_instead_of_being_dropped(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO ticket_notification_preferences
+                (user_id, email_enabled, email_verified, email_ciphertext, email_masked)
+             VALUES (42, TRUE, TRUE, $1, 'a***@example.com')",
+        )
+        .bind(vec![0_u8])
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_event(&pool, 42).await;
+        let db = Db::from_pool(pool.clone());
+        let event = claim(&db).await;
+
+        process_event(
+            &db,
+            &AllowAll,
+            &DirectMessages(DirectMessageError::Permanent),
+            None,
+            None,
+            event,
+        )
+        .await;
+
+        let (email_done, finished, abandoned, attempts): (bool, bool, bool, i32) = sqlx::query_as(
+            "SELECT email_done, completed_at IS NOT NULL, abandoned_at IS NOT NULL, attempts
+             FROM ticket_notification_outbox",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (email_done, finished, abandoned, attempts),
+            (false, false, false, 0)
+        );
+    }
+
+    #[test]
+    fn outbox_mail_carries_the_message_id_it_was_given() {
+        let from = parse_mailbox("closure@example.com").unwrap();
+        let recipient = parse_mailbox("member@example.org").unwrap();
+        let message = outbound_message(
+            &from,
+            recipient,
+            "Subject",
+            "Body",
+            Some("<ticket-notification-7@example.com>".to_owned()),
+        )
+        .unwrap();
+        let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
+        assert!(
+            raw.contains("Message-ID: <ticket-notification-7@example.com>"),
+            "{raw}"
+        );
+    }
 }

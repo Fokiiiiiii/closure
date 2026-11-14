@@ -912,6 +912,11 @@ impl Dispatcher {
         }
         metrics::counter!("closure_events_total", "kind" => kind).increment(1);
 
+        let command = event.interaction_token().is_some();
+        // Checked before a lane reservation is taken, so a refused command gives nothing back.
+        if command && claim.load(Ordering::Acquire) {
+            return false;
+        }
         let guild = event.guild_id();
         let limits = self.shared.settings.limits(guild);
         let Some(lanes) = self.lanes_for(guild, limits.concurrency) else {
@@ -919,10 +924,6 @@ impl Dispatcher {
             return false;
         };
 
-        let command = event.interaction_token().is_some();
-        if command && claim.load(Ordering::Acquire) {
-            return false;
-        }
         let budget = lanes.state.budget(command);
         if budget.fetch_add(1, Ordering::AcqRel) >= limits.queue_capacity {
             budget.fetch_sub(1, Ordering::AcqRel);

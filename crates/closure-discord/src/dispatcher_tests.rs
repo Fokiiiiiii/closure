@@ -2822,6 +2822,37 @@ fn command_with(guild: u64, token: &str) -> Event {
 }
 
 #[tokio::test]
+async fn a_command_already_claimed_as_busy_takes_no_guild_reservation() {
+    let module = Probe::with_command("tools", "ping");
+    let h = harness(
+        &[(&module, true)],
+        limits(1, 4),
+        DispatcherConfig::default(),
+    )
+    .await;
+
+    let claimed = Arc::new(AtomicBool::new(true));
+    let accepted = h.dispatcher.enqueue_recorded_at(
+        command_with(1, "late"),
+        None,
+        None,
+        Instant::now(),
+        claimed,
+        false,
+    );
+
+    assert!(!accepted);
+    assert_eq!(h.dispatcher.pending(), 0);
+    let pending = h
+        .dispatcher
+        .shared
+        .guilds
+        .get(&Id::new(1))
+        .map_or(0, |lanes| lanes.state.pending.load(Ordering::Acquire));
+    assert_eq!(pending, 0, "a refused command must not keep its guild busy");
+}
+
+#[tokio::test]
 async fn a_command_whose_interaction_cannot_be_recorded_is_not_handed_to_a_module() {
     let module = Probe::with_command("tools", "ping");
     let config = DispatcherConfig {

@@ -3,6 +3,8 @@ use subtle::ConstantTimeEq;
 
 use crate::{Db, DbError};
 
+const EXPIRED_VERIFICATION_PURGE_BATCH: i64 = 500;
+
 const PREFERENCES_SELECT: &str = "
     SELECT user_id,
            in_app_enabled,
@@ -17,6 +19,7 @@ const PREFERENCES_SELECT: &str = "
            email_verified,
            email_code_hash,
            EXTRACT(EPOCH FROM email_code_expires_at)::BIGINT AS email_code_expires_at,
+           (email_code_sent_at IS NOT NULL) AS email_code_sent,
            email_code_attempts,
            EXTRACT(EPOCH FROM email_requested_at)::BIGINT AS email_requested_at,
            last_email_request_key,
@@ -38,6 +41,7 @@ const PREFERENCES_SELECT_FOR_UPDATE: &str = "
            email_verified,
            email_code_hash,
            EXTRACT(EPOCH FROM email_code_expires_at)::BIGINT AS email_code_expires_at,
+           (email_code_sent_at IS NOT NULL) AS email_code_sent,
            email_code_attempts,
            EXTRACT(EPOCH FROM email_requested_at)::BIGINT AS email_requested_at,
            last_email_request_key,
@@ -62,6 +66,7 @@ struct PreferencesRow {
     email_verified: bool,
     email_code_hash: Option<Vec<u8>>,
     email_code_expires_at: Option<i64>,
+    email_code_sent: bool,
     email_code_attempts: i16,
     email_requested_at: Option<i64>,
     last_email_request_key: Option<String>,
@@ -84,6 +89,7 @@ impl From<PreferencesRow> for StoredNotificationPreferences {
             email_verified: row.email_verified,
             email_code_hash: row.email_code_hash,
             email_code_expires_at: row.email_code_expires_at,
+            email_code_sent: row.email_code_sent,
             email_code_attempts: row.email_code_attempts,
             email_requested_at: row.email_requested_at,
             last_email_request_key: row.last_email_request_key,
@@ -108,6 +114,7 @@ pub struct StoredNotificationPreferences {
     pub email_verified: bool,
     pub email_code_hash: Option<Vec<u8>>,
     pub email_code_expires_at: Option<i64>,
+    pub email_code_sent: bool,
     pub email_code_attempts: i16,
     pub email_requested_at: Option<i64>,
     pub last_email_request_key: Option<String>,
@@ -138,6 +145,7 @@ impl Default for StoredNotificationPreferences {
             email_verified: false,
             email_code_hash: None,
             email_code_expires_at: None,
+            email_code_sent: false,
             email_code_attempts: 0,
             email_requested_at: None,
             last_email_request_key: None,
@@ -594,9 +602,10 @@ impl Db {
                 return Ok(EmailRequestOutcome::IdempotencyConflict);
             }
             if current.email_verified
-                || current
-                    .email_code_expires_at
-                    .is_some_and(|expires| expires > now)
+                || (current.email_code_sent
+                    && current
+                        .email_code_expires_at
+                        .is_some_and(|expires| expires > now))
             {
                 tx.commit().await?;
                 return Ok(EmailRequestOutcome::Replay {
@@ -630,6 +639,7 @@ impl Db {
                  email_code_hash = $4,
                  email_code_expires_at = to_timestamp($5),
                  email_code_attempts = 0,
+                 email_code_sent_at = NULL,
                  email_requested_at = to_timestamp($6),
                  last_email_request_key = $7,
                  last_email_request_fingerprint = $8,
@@ -652,6 +662,7 @@ impl Db {
         Ok(EmailRequestOutcome::Started { revision })
     }
 
+    // Keeps email_requested_at: a failed send must not reopen the cooldown.
     pub async fn cancel_email_verification(
         &self,
         user: u64,
@@ -665,7 +676,6 @@ impl Db {
                  email_code_hash = NULL,
                  email_code_expires_at = NULL,
                  email_code_attempts = 0,
-                 email_requested_at = NULL,
                  last_email_request_key = NULL,
                  last_email_request_fingerprint = NULL,
                  revision = revision + 1,
@@ -1009,6 +1019,75 @@ impl Db {
         Ok(result.rows_affected() == 1)
     }
 
+    pub async fn mark_email_verification_sent(
+        &self,
+        user: u64,
+        request_key: &str,
+    ) -> Result<(), DbError> {
+        let user = snowflake(user)?;
+        sqlx::query(
+            "UPDATE ticket_notification_preferences
+             SET email_code_sent_at = now()
+             WHERE user_id = $1 AND last_email_request_key = $2 AND email_code_sent_at IS NULL",
+        )
+        .bind(user)
+        .bind(request_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // Waiting for configuration is not a failed delivery, so the attempt is handed back.
+    pub async fn defer_notification_outbox(
+        &self,
+        event_id: i64,
+        attempt: i32,
+        delay_seconds: i64,
+    ) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE ticket_notification_outbox
+             SET available_at = now() + $3 * interval '1 second',
+                 locked_until = NULL,
+                 attempts = attempts - 1
+             WHERE event_id = $1 AND attempts = $2
+               AND completed_at IS NULL AND abandoned_at IS NULL",
+        )
+        .bind(event_id)
+        .bind(attempt)
+        .bind(delay_seconds.max(1))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn purge_expired_email_verifications(&self) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "UPDATE ticket_notification_preferences
+             SET pending_email_ciphertext = NULL,
+                 pending_email_masked = NULL,
+                 email_code_hash = NULL,
+                 email_code_expires_at = NULL,
+                 email_code_attempts = 0,
+                 email_code_sent_at = NULL,
+                 email_requested_at = NULL,
+                 last_email_request_key = NULL,
+                 last_email_request_fingerprint = NULL,
+                 revision = revision + 1,
+                 updated_at = now()
+             WHERE user_id IN (
+                 SELECT user_id
+                 FROM ticket_notification_preferences
+                 WHERE pending_email_ciphertext IS NOT NULL
+                   AND (email_code_expires_at IS NULL OR email_code_expires_at <= now())
+                 LIMIT $1
+             )",
+        )
+        .bind(EXPIRED_VERIFICATION_PURGE_BATCH)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn purge_notification_outbox(&self) -> Result<u64, DbError> {
         let result = sqlx::query(
             "DELETE FROM ticket_notification_outbox
@@ -1018,5 +1097,135 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+
+    async fn database(pool: PgPool) -> Db {
+        let db = Db::from_pool(pool);
+        db.migrate().await.unwrap();
+        db
+    }
+
+    async fn start(
+        db: &Db,
+        user: u64,
+        expected_revision: i64,
+        key: &str,
+        seed: u8,
+        now: i64,
+    ) -> EmailRequestOutcome {
+        db.begin_email_verification(
+            user,
+            expected_revision,
+            vec![1],
+            "a***@example.com".to_owned(),
+            vec![seed; 32],
+            now + 900,
+            key.to_owned(),
+            vec![seed; 32],
+            now,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn an_unsent_request_is_not_answered_as_sent_when_replayed(pool: PgPool) {
+        let db = database(pool).await;
+        let EmailRequestOutcome::Started { revision } = start(&db, 7, 0, "req-1", 3, 1_000).await
+        else {
+            panic!("the first request starts");
+        };
+        // The process stopped before the code was delivered; the same request arrives again.
+        let replay = start(&db, 7, revision, "req-1", 3, 1_005).await;
+        assert!(
+            matches!(replay, EmailRequestOutcome::Cooldown { .. }),
+            "an unsent request must not be answered as sent, got {replay:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn cancelling_a_failed_send_keeps_the_cooldown(pool: PgPool) {
+        let db = database(pool).await;
+        let EmailRequestOutcome::Started { revision } = start(&db, 7, 0, "req-1", 3, 1_000).await
+        else {
+            panic!("the first request starts");
+        };
+        db.cancel_email_verification(7, "req-1").await.unwrap();
+        let current = db.notification_preferences(7).await.unwrap().revision;
+        assert!(current > revision);
+        let retry = start(&db, 7, current, "req-2", 4, 1_010).await;
+        assert!(
+            matches!(
+                retry,
+                EmailRequestOutcome::Cooldown {
+                    retry_after_seconds: 50
+                }
+            ),
+            "a failed send must not reopen the 60 second cooldown, got {retry:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_replay_of_a_delivered_code_is_not_sent_again(pool: PgPool) {
+        let db = database(pool).await;
+        let EmailRequestOutcome::Started { revision } = start(&db, 7, 0, "req-1", 3, 1_000).await
+        else {
+            panic!("the first request starts");
+        };
+        db.mark_email_verification_sent(7, "req-1").await.unwrap();
+        let replay = start(&db, 7, revision, "req-1", 3, 1_005).await;
+        assert!(
+            matches!(replay, EmailRequestOutcome::Replay { .. }),
+            "a delivered code is answered as a replay, got {replay:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn an_unsent_request_is_resent_once_the_cooldown_has_passed(pool: PgPool) {
+        let db = database(pool).await;
+        let EmailRequestOutcome::Started { revision } = start(&db, 7, 0, "req-1", 3, 1_000).await
+        else {
+            panic!("the first request starts");
+        };
+        let replay = start(&db, 7, revision, "req-1", 3, 1_100).await;
+        assert!(
+            matches!(replay, EmailRequestOutcome::Started { .. }),
+            "an unsent request gets a fresh code after the cooldown, got {replay:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn only_expired_pending_addresses_are_purged(pool: PgPool) {
+        let db = database(pool).await;
+        start(&db, 7, 0, "req-7", 3, 1_000).await;
+        db.begin_email_verification(
+            8,
+            0,
+            vec![1],
+            "a***@example.com".to_owned(),
+            vec![4; 32],
+            4_000_000_000,
+            "req-8".to_owned(),
+            vec![4; 32],
+            1_000,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(db.purge_expired_email_verifications().await.unwrap(), 1);
+
+        let expired = db.notification_preferences(7).await.unwrap();
+        assert!(expired.pending_email_ciphertext.is_none());
+        assert!(expired.email_code_hash.is_none());
+        let active = db.notification_preferences(8).await.unwrap();
+        assert!(active.pending_email_ciphertext.is_some());
+        assert!(active.email_code_hash.is_some());
     }
 }

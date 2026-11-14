@@ -240,7 +240,8 @@ pub(crate) async fn put_config(
     let (overrides, active_generations, retirements) =
         normalize_integration_generations(guild, compiler, &current, &overrides)?;
     let rerouted = credential_routes_changed(&current, &overrides)?;
-    let can_retire_secrets = if (retirements.is_empty() && !rerouted) || actor.is_none() {
+    // A dropped secret name can carry a stored value too, so the permission is checked whenever a member saves.
+    let can_retire_secrets = if actor.is_none() {
         false
     } else {
         let (_, viewer) = crate::tickets::viewer(&state, guild.get(), &headers).await?;
