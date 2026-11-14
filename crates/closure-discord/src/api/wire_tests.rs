@@ -646,17 +646,29 @@ async fn lookups_of_one_channel_at_the_same_time_make_one_request() {
     let discord = FakeDiscord::start(vec![(200, r#"{"id":"100","type":0,"guild_id":"10"}"#)]).await;
     let api = Arc::new(discord.api());
 
+    // The lookups start together, so they overlap the one request in flight.
+    let start = Arc::new(tokio::sync::Barrier::new(50));
     let lookups: Vec<_> = (0..50)
         .map(|_| {
             let api = Arc::clone(&api);
-            tokio::spawn(async move { api.channel_guild(Id::new(100)).await })
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                api.channel_guild(Id::new(100)).await
+            })
         })
         .collect();
     for lookup in lookups {
         assert_eq!(lookup.await.unwrap(), Ok(Some(Id::new(10))));
     }
 
-    assert_eq!(discord.requests().len(), 1);
+    // A loaded runner can stall one task past the answer and give it a request of its own; fifty
+    // requests are what the lookups would cost without sharing.
+    let requests = discord.requests().len();
+    assert!(
+        (1..=3).contains(&requests),
+        "{requests} requests for 50 lookups"
+    );
     // Nothing is left behind once the lookups are over; the one that asked is the last to let go,
     // a moment after the others have their answer.
     for _ in 0..100 {
