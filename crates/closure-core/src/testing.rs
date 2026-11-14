@@ -12,7 +12,7 @@ use twilight_model::guild::{Guild, Member, Role};
 
 use crate::action::{
     Action, AuditLogQuery, InteractionResponse, MessageCursor, NewChannel, Outcome, OverwriteSpec,
-    OverwriteTarget,
+    OverwriteTarget, ThreadKind,
 };
 use crate::client::DiscordApi;
 use crate::error::{DiscordError, ModuleError};
@@ -69,6 +69,22 @@ fn created_channel(id: u64, name: &str, parent: Option<ChannelId>, topic: Option
         "parent_id": parent.map(|parent| parent.get().to_string()),
     }))
     .unwrap_or_else(|error| unreachable!("a channel of the test double is valid: {error}"))
+}
+
+/// A thread under `parent`, as Discord answers its creation.
+fn created_thread(id: u64, name: &str, parent: ChannelId, kind: ThreadKind) -> Channel {
+    // Discord's channel types of a public and a private thread.
+    let channel_type = match kind {
+        ThreadKind::Public => 11,
+        ThreadKind::Private => 12,
+    };
+    serde_json::from_value(serde_json::json!({
+        "id": id.to_string(),
+        "type": channel_type,
+        "name": name,
+        "parent_id": parent.get().to_string(),
+    }))
+    .unwrap_or_else(|error| unreachable!("a thread of the test double is valid: {error}"))
 }
 
 fn channel_overwrite_matches(overwrite: &PermissionOverwrite, target: OverwriteTarget) -> bool {
@@ -220,6 +236,26 @@ impl MockApi {
             // A created channel gets the next id, and Discord knows it from then on.
             Action::CreateChannel { guild_id, spec, .. } => {
                 Ok(self.create_channel(*guild_id, spec))
+            }
+            // A thread goes under a channel of a guild the pretend Discord knows, and is listed there.
+            Action::CreateThread {
+                channel_id,
+                name,
+                kind,
+                ..
+            } => {
+                let guild = lock(&self.channels)
+                    .get(channel_id)
+                    .copied()
+                    .flatten()
+                    .ok_or(DiscordError::NotFound)?;
+                let thread = created_thread(600 + self.next_id(), name, *channel_id, *kind);
+                lock(&self.guild_channels)
+                    .entry(guild)
+                    .or_default()
+                    .push(thread.clone());
+                lock(&self.channels).insert(thread.id, Some(guild));
+                Ok(Outcome::Channel(Box::new(thread)))
             }
             // A created role gets the next id, so a test can tell the roles it made apart.
             Action::CreateRole { guild_id, spec, .. } => {
@@ -380,6 +416,13 @@ impl MockApi {
                 let refused = lock(&self.bulk_ban_refused);
                 let (failed, banned) = user_ids.iter().partition(|user| refused.contains(*user));
                 Ok(Outcome::BulkBan { banned, failed })
+            }
+            // A deleted channel is no longer listed or fetched; its guild stays known to the mock.
+            Action::DeleteChannel { channel_id, .. } => {
+                for channels in lock(&self.guild_channels).values_mut() {
+                    channels.retain(|channel| channel.id != *channel_id);
+                }
+                Ok(Outcome::None)
             }
             // Writes that return a new object are recorded but answered with `Outcome::None`.
             _ => Ok(Outcome::None),
@@ -881,5 +924,60 @@ mod tests {
         let listed = api.execute(Action::ListChannels { guild_id: guild }).await;
         assert_eq!(listed, Ok(Outcome::Channels(vec![])));
         assert_eq!(api.actions().len(), 2, "the failed call is still recorded");
+    }
+
+    #[tokio::test]
+    async fn a_thread_is_created_under_its_channel_and_deleted_again() {
+        let api = MockApi::default();
+        let guild = GuildId::new(1);
+        let parent = ChannelId::new(10);
+        api.add_channel(parent, Some(guild));
+        let created = api
+            .execute(Action::CreateThread {
+                channel_id: parent,
+                name: "ticket-1".into(),
+                source: None,
+                kind: crate::action::ThreadKind::Private,
+                auto_archive_minutes: 1440,
+            })
+            .await;
+        let Ok(Outcome::Channel(thread)) = created else {
+            panic!("a thread is created: {created:?}");
+        };
+        assert_eq!(thread.name.as_deref(), Some("ticket-1"));
+        assert_eq!(thread.parent_id, Some(parent));
+        let id = thread.id;
+        let fetched = api.execute(Action::GetChannel { channel_id: id }).await;
+        assert_eq!(fetched, Ok(Outcome::Channel(thread.clone())));
+        let reason = crate::action::Reason::new("test").unwrap();
+        api.execute(Action::DeleteChannel {
+            channel_id: id,
+            reason,
+        })
+        .await
+        .unwrap();
+        let gone = api.execute(Action::GetChannel { channel_id: id }).await;
+        assert_eq!(gone, Ok(Outcome::None));
+    }
+
+    #[tokio::test]
+    async fn a_failed_thread_creation_leaves_no_thread_behind() {
+        let api = MockApi::default();
+        let guild = GuildId::new(1);
+        let parent = ChannelId::new(10);
+        api.add_channel(parent, Some(guild));
+        api.fail_nth(1, DiscordError::Forbidden("no".into()));
+        let create = api
+            .execute(Action::CreateThread {
+                channel_id: parent,
+                name: "ticket-1".into(),
+                source: None,
+                kind: crate::action::ThreadKind::Public,
+                auto_archive_minutes: 1440,
+            })
+            .await;
+        assert!(create.is_err());
+        let listed = api.execute(Action::ListChannels { guild_id: guild }).await;
+        assert_eq!(listed, Ok(Outcome::Channels(vec![])));
     }
 }

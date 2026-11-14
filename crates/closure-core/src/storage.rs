@@ -1615,6 +1615,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_prefix_listing_keeps_every_live_key_under_it_and_drops_expired_ones() {
+        let f = fixture();
+        let store = f.store("ticket", 1);
+        store.set("ticket:601", &"open").await.unwrap();
+        store.set("ticket:604", &"open").await.unwrap();
+        store
+            .set_for("ticket:605", &"short", Duration::from_secs(60))
+            .await
+            .unwrap();
+        f.advance(60);
+        let keys: Vec<String> = store
+            .list("ticket:", 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(keys, ["ticket:601", "ticket:604"]);
+        assert_eq!(store.get::<String>("ticket:605").await.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn keys_values_and_the_capability_are_checked() {
         let f = fixture();
         let store = f.store("warn", 1);

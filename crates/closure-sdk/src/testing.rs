@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use closure_core::action::{Action, InteractionReply, InteractionResponse, ModalComponent};
 use closure_core::cases::{Case, CaseBackend, Cases, MemoryCases};
 use closure_core::client::ApiClient;
@@ -20,17 +21,17 @@ use closure_core::history::{
 use closure_core::interaction::{DirectMessageComponentRoutes, InteractionGuilds};
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::{Locale, Translator};
-use closure_core::module::{EventContext, Module};
+use closure_core::module::{EventContext, Module, ModuleId};
 use closure_core::permission::GuildPermissions;
 use closure_core::registry::ModuleRegistry;
 use closure_core::schedule::{MemoryScheduler, Scheduler, SchedulerBackend, backoff};
 use closure_core::settings::GuildPolicy;
-use closure_core::storage::{MemoryStorage, StorageBackend, Store};
+use closure_core::storage::{Entry, Expect, MemoryStorage, StorageBackend, StorageError, Store};
 use closure_core::subscription::Flow;
 use closure_core::testing::MockApi;
 use closure_i18n::TranslatorBuilder;
 use twilight_model::channel::message::{Component, Embed};
-use twilight_model::guild::Permissions;
+use twilight_model::guild::{Member, Permissions, Role};
 use twilight_model::id::Id;
 
 use crate::module::{Choice, ModuleBuilder, SdkModule};
@@ -522,6 +523,349 @@ impl Message {
     }
 }
 
+/// The storage of a harness: the memory a module keeps, with writes a test can make fail.
+struct FaultyStorage {
+    inner: MemoryStorage,
+    faults: Mutex<WriteFaults>,
+}
+
+/// The writes a test has made fail: the next few, those under a key prefix, and those under a
+/// prefix after a number of writes have gone through.
+#[derive(Default)]
+struct WriteFaults {
+    next: Option<(usize, StorageError)>,
+    prefix: Option<(String, StorageError)>,
+    after: Option<(String, usize, StorageError)>,
+}
+
+impl FaultyStorage {
+    fn new(inner: MemoryStorage) -> Self {
+        Self {
+            inner,
+            faults: Mutex::new(WriteFaults::default()),
+        }
+    }
+
+    fn faults(&self) -> std::sync::MutexGuard<'_, WriteFaults> {
+        self.faults.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn fail_next(&self, count: usize, error: StorageError) {
+        self.faults().next = Some((count, error));
+    }
+
+    fn fail_prefix(&self, prefix: &str, error: StorageError) {
+        self.faults().prefix = Some((prefix.to_owned(), error));
+    }
+
+    fn fail_after(&self, prefix: &str, passes: usize, error: StorageError) {
+        self.faults().after = Some((prefix.to_owned(), passes, error));
+    }
+
+    fn recover(&self) {
+        *self.faults() = WriteFaults::default();
+    }
+
+    /// Fails a write to `key` if a fault says so; a failed write stores nothing.
+    fn check_write(&self, key: &str) -> Result<(), StorageError> {
+        let mut faults = self.faults();
+        if let Some((prefix, error)) = &faults.prefix
+            && key.starts_with(prefix.as_str())
+        {
+            return Err(error.clone());
+        }
+        if let Some((prefix, passes, error)) = &mut faults.after
+            && key.starts_with(prefix.as_str())
+        {
+            if *passes == 0 {
+                return Err(error.clone());
+            }
+            *passes -= 1;
+        }
+        if let Some((remaining, error)) = &mut faults.next
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            return Err(error.clone());
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl StorageBackend for FaultyStorage {
+    async fn get(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        key: &str,
+    ) -> Result<Option<Entry>, StorageError> {
+        self.inner.get(module, guild, key).await
+    }
+
+    async fn put(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        key: &str,
+        value: serde_json::Value,
+        ttl: Option<Duration>,
+        expect: Expect,
+    ) -> Result<i64, StorageError> {
+        self.check_write(key)?;
+        self.inner.put(module, guild, key, value, ttl, expect).await
+    }
+
+    async fn delete(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        key: &str,
+    ) -> Result<bool, StorageError> {
+        self.check_write(key)?;
+        self.inner.delete(module, guild, key).await
+    }
+
+    async fn get_direct_message_component_route(
+        &self,
+        message_id: MessageId,
+    ) -> Result<Option<Entry>, StorageError> {
+        self.inner
+            .get_direct_message_component_route(message_id)
+            .await
+    }
+
+    async fn insert_direct_message_component_route(
+        &self,
+        message_id: MessageId,
+        value: serde_json::Value,
+        ttl: Duration,
+    ) -> Result<(), StorageError> {
+        self.check_write(&message_id.get().to_string())?;
+        self.inner
+            .insert_direct_message_component_route(message_id, value, ttl)
+            .await
+    }
+
+    async fn list(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        self.inner.list(module, guild, prefix, limit).await
+    }
+
+    async fn list_after(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        self.inner
+            .list_after(module, guild, prefix, after, limit)
+            .await
+    }
+
+    async fn list_numeric_suffix_before(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        prefix: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(String, Entry)>, StorageError> {
+        self.inner
+            .list_numeric_suffix_before(module, guild, prefix, before, limit)
+            .await
+    }
+
+    async fn counter_add(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        counter: &str,
+        subject: u64,
+        delta: i64,
+    ) -> Result<i64, StorageError> {
+        self.check_write(counter)?;
+        self.inner
+            .counter_add(module, guild, counter, subject, delta)
+            .await
+    }
+
+    async fn counter_get(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        counter: &str,
+        subject: u64,
+        window: Option<Duration>,
+    ) -> Result<i64, StorageError> {
+        self.inner
+            .counter_get(module, guild, counter, subject, window)
+            .await
+    }
+
+    async fn counter_reset(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        counter: &str,
+        subject: u64,
+    ) -> Result<(), StorageError> {
+        self.check_write(counter)?;
+        self.inner
+            .counter_reset(module, guild, counter, subject)
+            .await
+    }
+
+    async fn score_add(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        subject: u64,
+        delta: i64,
+    ) -> Result<i64, StorageError> {
+        self.check_write(name)?;
+        self.inner
+            .score_add(module, guild, name, subject, delta)
+            .await
+    }
+
+    async fn score_get(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        subject: u64,
+    ) -> Result<i64, StorageError> {
+        self.inner.score_get(module, guild, name, subject).await
+    }
+
+    async fn score_put(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        subject: u64,
+        value: i64,
+    ) -> Result<(), StorageError> {
+        self.check_write(name)?;
+        self.inner
+            .score_put(module, guild, name, subject, value)
+            .await
+    }
+
+    async fn score_top(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<(u64, i64)>, StorageError> {
+        self.inner.score_top(module, guild, name, limit).await
+    }
+
+    async fn score_above(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        value: i64,
+    ) -> Result<u64, StorageError> {
+        self.inner.score_above(module, guild, name, value).await
+    }
+
+    async fn score_count(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+    ) -> Result<u64, StorageError> {
+        self.inner.score_count(module, guild, name).await
+    }
+
+    async fn set_add(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        member: u64,
+    ) -> Result<bool, StorageError> {
+        self.check_write(name)?;
+        self.inner.set_add(module, guild, name, member).await
+    }
+
+    async fn set_remove(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        member: u64,
+    ) -> Result<bool, StorageError> {
+        self.check_write(name)?;
+        self.inner.set_remove(module, guild, name, member).await
+    }
+
+    async fn set_has(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        member: u64,
+    ) -> Result<bool, StorageError> {
+        self.inner.set_has(module, guild, name, member).await
+    }
+
+    async fn set_count(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+    ) -> Result<u64, StorageError> {
+        self.inner.set_count(module, guild, name).await
+    }
+
+    async fn set_sample(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        self.inner.set_sample(module, guild, name, count).await
+    }
+
+    async fn set_after(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        after: u64,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        self.inner
+            .set_after(module, guild, name, after, count)
+            .await
+    }
+
+    async fn set_take(
+        &self,
+        module: &ModuleId,
+        guild: GuildId,
+        name: &str,
+        count: usize,
+    ) -> Result<Vec<u64>, StorageError> {
+        self.check_write(name)?;
+        self.inner.set_take(module, guild, name, count).await
+    }
+}
+
 /// A module, its guild and a pretend Discord.
 pub struct Harness {
     module: Arc<SdkModule>,
@@ -531,7 +875,7 @@ pub struct Harness {
     permissions: Mutex<GuildPermissions>,
     config: Mutex<serde_json::Value>,
     other_config: Mutex<Option<serde_json::Value>>,
-    storage: Arc<MemoryStorage>,
+    storage: Arc<FaultyStorage>,
     scheduler: Arc<MemoryScheduler>,
     cases: Arc<MemoryCases>,
     history: Arc<MemoryHistory>,
@@ -558,6 +902,9 @@ const OTHER_OWNER: u64 = 999_999_999;
 
 /// The bot's own user id (its application id) in every run, until a test changes it.
 const BOT: u64 = 9_999;
+
+/// The role the bot holds once a test gives it permissions.
+const BOT_ROLE: u64 = 9_998;
 
 impl Harness {
     /// Builds the module on a test clock (see [`Self::advance`]); messages are in every catalog language.
@@ -586,8 +933,9 @@ impl Harness {
         };
         let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(unix_now.clone());
         // A room of ten thousand entries: a test that fills it does not wait for a million writes.
-        let storage =
-            Arc::new(MemoryStorage::with_clock(unix_now.clone()).with_entry_quota(10_000));
+        let storage = Arc::new(FaultyStorage::new(
+            MemoryStorage::with_clock(unix_now.clone()).with_entry_quota(10_000),
+        ));
         let cases = Arc::new(MemoryCases::with_clock(unix_now.clone()));
         let history = Arc::new(MemoryHistory::default());
         let scheduler = Arc::new(MemoryScheduler::with_clock(unix_now));
@@ -737,6 +1085,59 @@ impl Harness {
         self.gateway.record(shard, latency);
     }
 
+    /// Makes the next `count` writes to the module's storage (sets, deletes, counters, scores and
+    /// sets) fail with `error`; a failed write stores nothing.
+    pub fn fail_next_store_writes(&self, count: usize, error: StorageError) {
+        self.storage.fail_next(count, error);
+    }
+
+    /// Makes every write to a key that starts with `prefix` fail with `error`, until
+    /// [`Self::recover_store_writes`].
+    pub fn fail_store_writes_for(&self, prefix: &str, error: StorageError) {
+        self.storage.fail_prefix(prefix, error);
+    }
+
+    /// Lets the first `skip` writes under `prefix` through, then fails the ones after them.
+    pub fn fail_store_writes_after(&self, prefix: &str, skip: usize, error: StorageError) {
+        self.storage.fail_after(prefix, skip, error);
+    }
+
+    /// Lets the writes to the module's storage succeed again.
+    pub fn recover_store_writes(&self) {
+        self.storage.recover();
+    }
+
+    /// Makes the bot a member of the guild, holding one role with `permissions`, as Discord has it.
+    /// Does nothing while the bot's id is unknown.
+    pub fn set_bot_permissions(&self, permissions: Permissions) {
+        let Some(bot) = self.bot_id() else {
+            return;
+        };
+        let guild = Id::new(GUILD);
+        let role: Role = serde_json::from_value(serde_json::json!({
+            "id": BOT_ROLE.to_string(), "name": "bot", "color": 0, "hoist": false,
+            "managed": false, "mentionable": false, "permissions": permissions.bits().to_string(),
+            "position": 1, "flags": 0, "icon": null, "unicode_emoji": null, "tags": null,
+            "colors": { "primary_color": 0, "secondary_color": null, "tertiary_color": null },
+        }))
+        .unwrap_or_else(|error| panic!("the bot's role: {error}"));
+        let mut roles: Vec<Role> = self
+            .api
+            .roles(guild)
+            .into_iter()
+            .filter(|existing| existing.id.get() != BOT_ROLE)
+            .collect();
+        roles.push(role);
+        self.api.set_roles(guild, roles);
+        let member: Member = serde_json::from_value(serde_json::json!({
+            "deaf": false, "mute": false, "flags": 0, "roles": [BOT_ROLE.to_string()],
+            "user": { "id": bot.to_string(), "username": "bot", "discriminator": "0",
+                      "avatar": null, "bot": true },
+        }))
+        .unwrap_or_else(|error| panic!("the bot's member: {error}"));
+        self.api.set_member(guild, member);
+    }
+
     /// Lets time pass for the cooldowns.
     pub fn advance(&self, by: Duration) {
         *self.elapsed.lock().unwrap_or_else(PoisonError::into_inner) += by;
@@ -830,7 +1231,7 @@ impl Harness {
                 continue;
             }
             let (id, token, attempt) = (job.id, job.token, job.attempt);
-            let ctx = self.context(job.guild_id);
+            let ctx = self.context_in(job.guild_id);
             let result = self
                 .module
                 .on_event_flow(&ctx, &Event::Scheduled(job))
@@ -897,8 +1298,15 @@ impl Harness {
             .collect()
     }
 
-    /// What the module gets with an event of `guild`.
-    fn context(&self, guild: GuildId) -> EventContext {
+    /// The module's context in the guild of the invocations, as its handlers get it.
+    #[must_use]
+    pub fn context(&self) -> EventContext {
+        self.context_in(Id::new(GUILD))
+    }
+
+    /// The module's context in `guild`, as its handlers get it there.
+    #[must_use]
+    pub fn context_in(&self, guild: GuildId) -> EventContext {
         let manifest = self.module.manifest();
         let client = ApiClient::new(
             Arc::clone(&self.api) as _,
@@ -1003,7 +1411,7 @@ impl Harness {
         if !wanted {
             return Ok(None);
         }
-        let ctx = self.context(event.guild_id());
+        let ctx = self.context_in(event.guild_id());
         self.module.on_event_flow(&ctx, &event).await.map(Some)
     }
 
@@ -1253,7 +1661,7 @@ impl Harness {
 
     /// Hands the event to the module and returns what it answered meanwhile.
     async fn deliver(&self, guild: GuildId, event: Event) -> Result<Vec<Reply>, ModuleError> {
-        let ctx = self.context(guild);
+        let ctx = self.context_in(guild);
         let before = self.api.actions().len();
         self.module.on_event(&ctx, &event).await?;
         Ok(self.api.actions()[before..]
@@ -1304,7 +1712,7 @@ impl Harness {
         };
         let before = self.api.actions().len();
         self.module
-            .on_event(&self.context(guild), &Event::Autocomplete(event))
+            .on_event(&self.context_in(guild), &Event::Autocomplete(event))
             .await?;
         let choices = self.api.actions()[before..]
             .iter()
