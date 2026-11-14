@@ -180,6 +180,8 @@ pub struct MockApi {
     /// The guilds whose invites are switched off by an edit, as the pretend Discord reports them.
     invites_disabled: Mutex<HashSet<GuildId>>,
     lookups: Mutex<usize>,
+    /// The users a bulk ban does not reach, as the pretend Discord answers for it.
+    bulk_ban_refused: Mutex<HashSet<UserId>>,
     /// The invites each guild has, as the pretend Discord lists them.
     guild_invites: Mutex<HashMap<GuildId, Vec<Invite>>>,
     /// Who reacted to each message the test declared reactors for, by id, oldest id first.
@@ -373,6 +375,11 @@ impl MockApi {
                     overwrites.retain(|current| !channel_overwrite_matches(current, *target));
                 }
                 Ok(Outcome::None)
+            }
+            Action::BulkBan { user_ids, .. } => {
+                let refused = lock(&self.bulk_ban_refused);
+                let (failed, banned) = user_ids.iter().partition(|user| refused.contains(*user));
+                Ok(Outcome::BulkBan { banned, failed })
             }
             // Writes that return a new object are recorded but answered with `Outcome::None`.
             _ => Ok(Outcome::None),
@@ -614,6 +621,11 @@ impl MockApi {
             lock(&self.channels).insert(channel.id, Some(guild));
         }
         lock(&self.guild_channels).insert(guild, channels);
+    }
+
+    /// Declares that a bulk ban does not reach `user` (Discord lists them as failed).
+    pub fn refuse_in_bulk_ban(&self, user: UserId) {
+        lock(&self.bulk_ban_refused).insert(user);
     }
 
     /// Declares the name of `guild`, which the pretend Discord gives when the guild is asked for.

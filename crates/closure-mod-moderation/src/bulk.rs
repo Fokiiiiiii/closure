@@ -4,6 +4,7 @@
 //! The work is a stored queue run a few members per batch; each member is checked again on their turn.
 //! how many were done, left out and failed, and `/bulk retry` takes the failed ones again.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use closure_core::action::{Action, MentionPolicy};
@@ -775,25 +776,40 @@ fn attempt_key(id: i64, user: u64) -> String {
     format!("bulk-done:{id}:{user}")
 }
 
-/// Does the action on one member once. A member done before keeps its receipt, and a timed
-/// punishment that ran out during a stop is not made again.
-async fn act_on(
+/// The members of a batch that share one duration, with the key and end of each one's attempt.
+type BanGroup = (Option<Duration>, Vec<(UserId, String, Option<i64>)>);
+
+/// What an attempt on one member comes to before the action is taken.
+enum Begun {
+    /// Done before, or a timed punishment that ran out during a stop: nothing is made again.
+    Finished,
+    /// The target check refused the member.
+    Refused(UserError),
+    /// To be punished now, for `left` (None when for good), and recorded under `key`.
+    Ready {
+        key: String,
+        ends: Option<i64>,
+        left: Option<Duration>,
+    },
+}
+
+/// Starts the attempt on one member: keeps the receipt of an earlier try, or writes a new one.
+async fn begin(
     ctx: &EventContext,
-    punisher: &Punisher<'_>,
     actor: &Actor,
     operation: &Operation,
     id: i64,
     user: UserId,
-) -> Result<Result<(), UserError>, ModuleError> {
+) -> Result<Begun, ModuleError> {
     let key = attempt_key(id, user.get());
     let earlier: Option<Attempt> = ctx.store().get(&key).await.map_err(|e| stored(&e))?;
     if earlier.as_ref().is_some_and(|attempt| attempt.done) {
-        return Ok(Ok(()));
+        return Ok(Begun::Finished);
     }
     if operation.what != What::Unban
         && let Err(error) = check_target_of(ctx, actor, user).await
     {
-        return Ok(Err(error));
+        return Ok(Begun::Refused(error));
     }
     let now = ctx.now();
     let (ends, resumed) = if let Some(attempt) = earlier {
@@ -823,10 +839,52 @@ async fn act_on(
             .set_for(&key, &attempt, KEEP)
             .await
             .map_err(|e| stored(&e))?;
-        return Ok(Ok(()));
+        return Ok(Begun::Finished);
     }
     let left =
         ends.map(|ends| Duration::from_secs(u64::try_from(ends.saturating_sub(now)).unwrap_or(0)));
+    Ok(Begun::Ready { key, ends, left })
+}
+
+/// Records what the action on a member came to: the receipt of a case, or the error.
+async fn settle(
+    ctx: &EventContext,
+    key: &str,
+    ends: Option<i64>,
+    made: Result<i64, UserError>,
+) -> Result<Result<(), UserError>, ModuleError> {
+    match made {
+        Ok(number) => {
+            let attempt = Attempt {
+                ends,
+                done: true,
+                case: Some(number),
+            };
+            ctx.store()
+                .set_for(key, &attempt, KEEP)
+                .await
+                .map_err(|e| stored(&e))?;
+            Ok(Ok(()))
+        }
+        Err(error) => Ok(Err(error)),
+    }
+}
+
+/// Does the action on one member once. A member done before keeps its receipt, and a timed
+/// punishment that ran out during a stop is not made again.
+async fn act_on(
+    ctx: &EventContext,
+    punisher: &Punisher<'_>,
+    actor: &Actor,
+    operation: &Operation,
+    id: i64,
+    user: UserId,
+) -> Result<Result<(), UserError>, ModuleError> {
+    let (key, ends, left) = match begin(ctx, actor, operation, id, user).await? {
+        Begun::Finished => return Ok(Ok(())),
+        Begun::Refused(error) => return Ok(Err(error)),
+        Begun::Ready { key, ends, left } => (key, ends, left),
+    };
     let reason = Some(operation.reason.clone());
     let made = match operation.what {
         What::Ban => punisher
@@ -848,21 +906,66 @@ async fn act_on(
             .map(|done| done.case.number),
         What::Unban => punisher.unban(user, reason).await.map(|case| case.number),
     };
-    match made {
-        Ok(number) => {
-            let attempt = Attempt {
-                ends,
-                done: true,
-                case: Some(number),
-            };
-            ctx.store()
-                .set_for(&key, &attempt, KEEP)
-                .await
-                .map_err(|e| stored(&e))?;
-            Ok(Ok(()))
+    settle(ctx, &key, ends, made).await
+}
+
+/// Bans the members of one batch in bulk requests, and returns what became of each member. The
+/// members that are not banned in bulk keep their outcome from the single ban that followed.
+async fn ban_batch(
+    ctx: &EventContext,
+    punisher: &Punisher<'_>,
+    actor: &Actor,
+    operation: &Operation,
+    id: i64,
+    members: &[u64],
+) -> Result<HashMap<u64, Result<(), UserError>>, ModuleError> {
+    let mut outcomes = HashMap::new();
+    // One request names one duration, so the members are grouped by the time each still has.
+    let mut groups: Vec<BanGroup> = Vec::new();
+    for &member in members {
+        let user = UserId::new(member);
+        match begin(ctx, actor, operation, id, user).await? {
+            Begun::Finished => {
+                outcomes.insert(member, Ok(()));
+            }
+            Begun::Refused(error) => {
+                outcomes.insert(member, Err(error));
+            }
+            Begun::Ready { key, ends, left } => {
+                match groups
+                    .iter_mut()
+                    .find(|(group_left, _)| *group_left == left)
+                {
+                    Some((_, group)) => group.push((user, key, ends)),
+                    None => groups.push((left, vec![(user, key, ends)])),
+                }
+            }
         }
-        Err(error) => Ok(Err(error)),
     }
+    let reason = Some(operation.reason.clone());
+    for (left, group) in groups {
+        let targets: Vec<UserId> = group.iter().map(|(user, _, _)| *user).collect();
+        let mut pending: HashMap<UserId, (String, Option<i64>)> = group
+            .into_iter()
+            .map(|(user, key, ends)| (user, (key, ends)))
+            .collect();
+        let results = punisher
+            .ban_many(
+                &targets,
+                left,
+                operation.delete_days.saturating_mul(86_400),
+                reason.clone(),
+            )
+            .await;
+        for (user, result) in results {
+            let Some((key, ends)) = pending.remove(&user) else {
+                continue;
+            };
+            let made = result.map(|done| done.case.number);
+            outcomes.insert(user.get(), settle(ctx, &key, ends, made).await?);
+        }
+    }
+    Ok(outcomes)
 }
 
 /// Takes up the operations a stop left running: one still running gets its next batch (a job already
@@ -936,6 +1039,15 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
         .set_sample(&queue(id), BATCH)
         .await
         .map_err(|e| stored(&e))?;
+    // Bans of a batch go out in bulk requests, unless the operation was stopped before the batch.
+    let running = load(ctx, id)
+        .await?
+        .is_some_and(|current| current.state == State::Running);
+    let mut outcomes = if operation.what == What::Ban && batch.len() > 1 && running {
+        ban_batch(ctx, &punisher, &actor, &operation, id, &batch).await?
+    } else {
+        HashMap::new()
+    };
     let mut pause = PAUSE;
     for member in batch {
         // A cancel is heard between two members, not only between two batches.
@@ -945,8 +1057,10 @@ pub(crate) async fn step(cx: JobCx) -> Result<(), ModuleError> {
         {
             break;
         }
-        let user = UserId::new(member);
-        let result = act_on(ctx, &punisher, &actor, &operation, id, user).await?;
+        let result = match outcomes.remove(&member) {
+            Some(result) => result,
+            None => act_on(ctx, &punisher, &actor, &operation, id, UserId::new(member)).await?,
+        };
         match result {
             Ok(()) => {}
             Err(error) => {

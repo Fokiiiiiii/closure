@@ -72,6 +72,11 @@ struct SavedRole {
     id: u64,
     name: String,
     color: u32,
+    /// The extra colours of a gradient or holographic role; a backup from before has none.
+    #[serde(default)]
+    secondary_color: Option<u32>,
+    #[serde(default)]
+    tertiary_color: Option<u32>,
     permissions: u64,
     hoist: bool,
     mentionable: bool,
@@ -156,6 +161,8 @@ fn saved_role(role: &Role) -> SavedRole {
         id: role.id.get(),
         name: role.name.clone(),
         color: role.colors.primary_color,
+        secondary_color: role.colors.secondary_color,
+        tertiary_color: role.colors.tertiary_color,
         permissions: role.permissions.bits(),
         hoist: role.hoist,
         mentionable: role.mentionable,
@@ -344,6 +351,8 @@ async fn restore_roles(
                 spec: NewRole {
                     name: saved.name,
                     color: saved.color,
+                    secondary_color: saved.secondary_color,
+                    tertiary_color: saved.tertiary_color,
                     permissions: Permissions::from_bits_truncate(saved.permissions),
                     hoist: saved.hoist,
                     mentionable: saved.mentionable,

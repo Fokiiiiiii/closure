@@ -232,6 +232,10 @@ fn embed_with_file(embed: &Embed, file: &FileUpload) -> Embed {
             proxy_url: None,
             url: format!("attachment://{}", file.filename),
             width: None,
+            content_type: None,
+            placeholder: None,
+            placeholder_version: None,
+            flags: None,
         });
     }
     embed

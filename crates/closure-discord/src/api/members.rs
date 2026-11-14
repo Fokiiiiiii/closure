@@ -51,6 +51,26 @@ impl TwilightApi {
         .await
     }
 
+    pub(super) async fn bulk_ban(
+        &self,
+        guild: GuildId,
+        users: &[UserId],
+        delete_message_seconds: u32,
+        reason: &Reason,
+    ) -> Result<Outcome, DiscordError> {
+        read(
+            self.http
+                .bulk_guild_ban(guild, users)
+                .delete_message_seconds(delete_message_seconds)
+                .reason(reason.as_str()),
+        )
+        .await
+        .map(|body| Outcome::BulkBan {
+            banned: body.banned_users,
+            failed: body.failed_users,
+        })
+    }
+
     pub(super) async fn unban(
         &self,
         guild: GuildId,

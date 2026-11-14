@@ -8,7 +8,7 @@ use closure_core::module::ModuleId;
 use closure_core::permission::{GuildPermissions, Level};
 use closure_core::settings::{GuildPolicy, ModuleSettings};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::Issue;
 
@@ -250,6 +250,33 @@ impl LevelSetting {
     }
 }
 
+/// The parser refuses `null` where a struct or map is expected; here it means the default, as in
+/// the published schema.
+pub(crate) fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+/// As [`null_as_default`], and also for each entry: `warn: null` is the default entry.
+pub(crate) fn null_entries_as_default<'de, D, T>(
+    deserializer: D,
+) -> Result<BTreeMap<String, T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<BTreeMap<String, Option<T>>>::deserialize(deserializer).map(|entries| {
+        entries
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, entry)| (key, entry.unwrap_or_default()))
+            .collect()
+    })
+}
+
 /// Roles and members, by id.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -286,13 +313,25 @@ pub struct PermissionsOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub administrator_level: Option<LevelSetting>,
     /// Role id to level.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "null_as_default"
+    )]
     pub roles: BTreeMap<String, LevelSetting>,
     /// User id to level.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "null_as_default"
+    )]
     pub users: BTreeMap<String, LevelSetting>,
     /// Permission key (`moderation.ban`) to what is decided about it.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "null_entries_as_default"
+    )]
     pub keys: BTreeMap<String, KeyOverride>,
 }
 
@@ -343,7 +382,11 @@ pub struct GuildOverrides {
     pub limits: Option<LimitsOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionsOverride>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "null_entries_as_default"
+    )]
     pub modules: BTreeMap<String, ModuleOverride>,
 }
 

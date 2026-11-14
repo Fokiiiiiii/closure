@@ -1197,6 +1197,8 @@ async fn create(ctx: &EventContext, which: RestrictionRole) -> Result<RoleId, Di
                 name,
                 // Red, as the errors are: a restriction shows at a glance.
                 color: Color::Error.value(),
+                secondary_color: None,
+                tertiary_color: None,
                 permissions: Permissions::empty(),
                 hoist: false,
                 mentionable: false,

@@ -74,7 +74,10 @@ impl TwilightApi {
             .await
             .map_err(|_| DiscordError::Fatal("could not read webhook response".into()))?;
         same_guild(hook.guild_id, guild)?;
-        let channel = hook.channel_id;
+        // A webhook can be left without a channel; there is nothing to post to then.
+        let channel = hook
+            .channel_id
+            .ok_or_else(|| DiscordError::Fatal("the webhook has no channel".into()))?;
         self.webhook_gone
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

@@ -5132,14 +5132,16 @@ fn bulk_start(action: &str, users: &str) -> Invocation {
         .owner()
 }
 
+/// The members banned, one by one or in bulk requests, in the order they were sent.
 fn bans_of(harness: &Harness) -> Vec<u64> {
     harness
         .api()
         .actions()
         .iter()
-        .filter_map(|a| match a {
-            Action::Ban { user_id, .. } => Some(user_id.get()),
-            _ => None,
+        .flat_map(|a| match a {
+            Action::Ban { user_id, .. } => vec![user_id.get()],
+            Action::BulkBan { user_ids, .. } => user_ids.iter().map(|user| user.get()).collect(),
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -6024,4 +6026,49 @@ async fn a_hidden_newest_warning_does_not_hide_an_older_one_from_mywarnings() {
         .await
         .unwrap();
     assert!(text(&own).contains("first words"), "{own:?}");
+}
+
+/// How many members each bulk ban request named, in the order they were sent.
+fn bulk_batches(harness: &Harness) -> Vec<usize> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|a| match a {
+            Action::BulkBan { user_ids, .. } => Some(user_ids.len()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_bulk_ban_of_five_members_is_one_request_not_five() {
+    let harness = harness();
+    harness.api().add_channel(Id::new(5), Some(Id::new(GUILD)));
+    let members: Vec<u64> = (2600..2605).collect();
+    for member in &members {
+        harness
+            .api()
+            .set_not_a_member(Id::new(GUILD), Id::new(*member));
+    }
+    let list = members
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    harness.invoke(bulk_start("ban", &list)).await.unwrap();
+    let press = Click::new("moderation:bulk:*:run:1")
+        .user(MODERATOR)
+        .roles([ADMIN_ROLE]);
+    harness.click(press).await.unwrap();
+    harness.run_due_jobs().await;
+    assert_eq!(bulk_batches(&harness), [5]);
+    assert!(
+        harness
+            .api()
+            .actions()
+            .iter()
+            .all(|action| !matches!(action, Action::Ban { .. })),
+        "no member is banned alone"
+    );
 }

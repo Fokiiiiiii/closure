@@ -263,6 +263,31 @@ async fn ban_raw(cx: CommandCx, args: RawBan) -> Result<(), UserError> {
     answer(&cx, &punisher, done).await
 }
 
+/// Members named in one command, as user ids separated by spaces.
+#[derive(CommandArgs)]
+struct BanMany {
+    /// Members
+    users: String,
+    /// How long
+    duration: Option<Duration>,
+}
+
+async fn ban_many(cx: CommandCx, args: BanMany) -> Result<(), UserError> {
+    let punisher = setup(&cx, Moderator::of(cx.user()))?;
+    let targets: Vec<UserId> = args
+        .users
+        .split_whitespace()
+        .map(|id| UserId::new(id.parse().unwrap()))
+        .collect();
+    for (_, outcome) in punisher
+        .ban_many(&targets, args.duration, 0, Some("raid".to_owned()))
+        .await
+    {
+        outcome?;
+    }
+    Ok(())
+}
+
 fn module() -> ModuleBuilder {
     let builder = ModuleBuilder::new("punisher", "Punisher", "0.1.0")
         .unwrap()
@@ -290,7 +315,8 @@ fn module() -> ModuleBuilder {
         .command(Command::<Undo>::new("undo_untimeout").handler(undo_untimeout))
         .command(Command::<Undo>::new("undo_unban").handler(undo_unban))
         .command(Command::<Undo>::new("undo_vcunmute").handler(undo_voice_unmute))
-        .command(Command::<RawBan>::new("ban_raw").handler(ban_raw));
+        .command(Command::<RawBan>::new("ban_raw").handler(ban_raw))
+        .command(Command::<BanMany>::new("ban_many").handler(ban_many));
     punish::jobs(builder)
 }
 
@@ -2423,5 +2449,107 @@ async fn a_timed_ban_lift_finds_an_older_ban_behind_a_hundred_other_cases() {
         !sequence(&harness).contains(&"unban"),
         "the older ban still stands: {:?}",
         sequence(&harness)
+    );
+}
+
+fn many_of(users: &[u64], duration: Option<&str>) -> Invocation {
+    let list = users
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let invocation = Invocation::new("ban_many").option("users", CommandOptionValue::String(list));
+    match duration {
+        Some(duration) => with_duration(invocation, duration),
+        None => invocation,
+    }
+}
+
+/// The member lists of the bulk bans, in the order they were sent.
+fn bulk_bans(harness: &Harness) -> Vec<Vec<u64>> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::BulkBan { user_ids, .. } => {
+                Some(user_ids.iter().map(|user| user.get()).collect())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The members banned one by one.
+fn single_bans(harness: &Harness) -> Vec<u64> {
+    harness
+        .api()
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::Ban { user_id, .. } => Some(user_id.get()),
+            _ => None,
+        })
+        .collect()
+}
+
+const FIVE: [u64; 5] = [1001, 1002, 1003, 1004, 1005];
+
+#[tokio::test]
+async fn ban_many_bans_five_members_in_one_request_and_records_each_case() {
+    let harness = harness();
+    harness.invoke(many_of(&FIVE, None)).await.unwrap();
+    assert_eq!(bulk_bans(&harness), [FIVE.to_vec()]);
+    assert!(single_bans(&harness).is_empty(), "{:?}", sequence(&harness));
+    for user in FIVE {
+        assert_eq!(cases_of(&harness, user).await.len(), 1, "case of {user}");
+        let intent: Option<serde_json::Value> = harness
+            .store()
+            .get(&format!("ban-intent:{user}"))
+            .await
+            .unwrap();
+        assert!(intent.is_none(), "the intent of {user} is removed");
+    }
+}
+
+#[tokio::test]
+async fn a_member_discord_does_not_reach_in_bulk_is_banned_alone() {
+    let harness = harness();
+    harness.api().refuse_in_bulk_ban(UserId::new(1003));
+    harness.invoke(many_of(&FIVE, None)).await.unwrap();
+    assert_eq!(bulk_bans(&harness), [FIVE.to_vec()]);
+    assert_eq!(single_bans(&harness), [1003]);
+    for user in FIVE {
+        assert_eq!(cases_of(&harness, user).await.len(), 1, "case of {user}");
+    }
+}
+
+#[tokio::test]
+async fn more_than_two_hundred_members_are_banned_in_two_requests() {
+    let harness = harness();
+    let users: Vec<u64> = (5000..5201).collect();
+    harness.invoke(many_of(&users, None)).await.unwrap();
+    let sizes: Vec<usize> = bulk_bans(&harness).iter().map(Vec::len).collect();
+    assert_eq!(sizes, [200]);
+    assert_eq!(single_bans(&harness), [5200]);
+}
+
+#[tokio::test]
+async fn a_timed_bulk_ban_gets_an_unban_timer_for_each_member() {
+    let harness = harness();
+    harness.invoke(many_of(&FIVE, Some("1d"))).await.unwrap();
+    assert_eq!(bulk_bans(&harness), [FIVE.to_vec()]);
+    assert_eq!(harness.jobs(), 5);
+
+    harness.advance(Duration::from_secs(DAY));
+    let ended = harness.run_due_jobs().await;
+    assert_eq!(ended.len(), 5, "{ended:?}");
+    assert!(ended.iter().all(Result::is_ok), "{ended:?}");
+    assert_eq!(
+        sequence(&harness)
+            .iter()
+            .filter(|step| **step == "unban")
+            .count(),
+        5
     );
 }

@@ -176,6 +176,52 @@ async fn ban_carries_the_reason_and_the_message_window() {
 }
 
 #[tokio::test]
+async fn a_bulk_ban_sends_all_the_users_in_one_request_and_reads_who_was_banned() {
+    let discord = FakeDiscord::start(vec![(
+        200,
+        r#"{"banned_users":["20","21"],"failed_users":["22"]}"#,
+    )])
+    .await;
+    let outcome = discord
+        .api()
+        .execute(Action::BulkBan {
+            guild_id: Id::new(10),
+            user_ids: vec![Id::new(20), Id::new(21), Id::new(22)],
+            delete_message_seconds: 3600,
+            reason: reason("raid"),
+        })
+        .await;
+
+    assert_eq!(
+        outcome,
+        Ok(Outcome::BulkBan {
+            banned: vec![Id::new(20), Id::new(21)],
+            failed: vec![Id::new(22)],
+        })
+    );
+    let requests = discord.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method, "POST");
+    assert!(
+        request.path.ends_with("/guilds/10/bulk-ban"),
+        "{}",
+        request.path
+    );
+    assert_eq!(request.headers["x-audit-log-reason"], "raid");
+    assert!(
+        request.body.contains("\"delete_message_seconds\":3600"),
+        "{}",
+        request.body
+    );
+    assert!(
+        request.body.contains("\"user_ids\":[\"20\",\"21\",\"22\"]"),
+        "{}",
+        request.body
+    );
+}
+
+#[tokio::test]
 async fn non_ascii_reasons_are_sent_percent_encoded() {
     let discord = FakeDiscord::start(vec![(204, "")]).await;
     discord
@@ -611,7 +657,14 @@ async fn lookups_of_one_channel_at_the_same_time_make_one_request() {
     }
 
     assert_eq!(discord.requests().len(), 1);
-    // Nothing is left behind once the lookups are over.
+    // Nothing is left behind once the lookups are over; the one that asked is the last to let go,
+    // a moment after the others have their answer.
+    for _ in 0..100 {
+        if api.lookups_in_flight() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert_eq!(api.lookups_in_flight(), 0);
 }
 

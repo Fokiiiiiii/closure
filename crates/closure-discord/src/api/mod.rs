@@ -773,6 +773,15 @@ impl TwilightApi {
                 self.ban(*guild_id, *user_id, *delete_message_seconds, reason)
                     .await
             }
+            Action::BulkBan {
+                guild_id,
+                user_ids,
+                delete_message_seconds,
+                reason,
+            } => {
+                self.bulk_ban(*guild_id, user_ids, *delete_message_seconds, reason)
+                    .await
+            }
             Action::Unban {
                 guild_id,
                 user_id,

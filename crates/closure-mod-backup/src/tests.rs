@@ -474,3 +474,30 @@ async fn a_channel_whose_overwrite_is_for_a_role_not_yet_made_waits_for_that_rol
         "the overwrite is for the role made now: {rules:?}"
     );
 }
+
+#[tokio::test]
+async fn a_gradient_role_comes_back_with_its_extra_colours() {
+    let harness = harness();
+    let mut gradient = role(STAFF, false);
+    gradient.colors.secondary_color = Some(0x00_FF_00);
+    gradient.colors.tertiary_color = Some(0xFF_00_FF);
+    harness.api().set_roles(
+        Id::new(GUILD),
+        vec![role(GUILD, false), gradient, role(900, true)],
+    );
+    harness.invoke(admin_runs("create")).await.unwrap();
+    gone(&harness);
+    harness.invoke(admin_runs("restore")).await.unwrap();
+    let made = harness
+        .actions()
+        .iter()
+        .find_map(|action| match action {
+            Action::CreateRole { spec, .. } => Some(spec.clone()),
+            _ => None,
+        })
+        .expect("the role is made again");
+    assert_eq!(
+        (made.color, made.secondary_color, made.tertiary_color),
+        (255, Some(0x00_FF_00), Some(0xFF_00_FF))
+    );
+}

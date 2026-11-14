@@ -40,6 +40,8 @@ pub const MAX_MESSAGE_CHARS: usize = 2000;
 pub const MAX_EMBEDS: usize = 10;
 pub const MAX_BULK_DELETE: usize = 100;
 pub const MAX_BAN_DELETE_SECONDS: u32 = 604_800;
+/// How many users one bulk ban may name; Discord refuses more.
+pub const MAX_BULK_BAN_USERS: usize = 200;
 pub const MAX_TIMEOUT_SECONDS: u32 = 2_419_200;
 pub const MAX_SLOWMODE_SECONDS: u16 = 21_600;
 pub const MAX_NICKNAME_CHARS: usize = 32;
@@ -208,6 +210,12 @@ mod optional_channel_parent {
 pub struct NewRole {
     pub name: String,
     pub color: u32,
+    /// The second colour of a gradient role, and the third of a holographic one; only servers
+    /// with enhanced role colours take them.
+    #[serde(default)]
+    pub secondary_color: Option<u32>,
+    #[serde(default)]
+    pub tertiary_color: Option<u32>,
     pub permissions: Permissions,
     pub hoist: bool,
     pub mentionable: bool,
@@ -989,6 +997,14 @@ pub enum Action {
         delete_message_seconds: u32,
         reason: Reason,
     },
+    /// Bans up to [`MAX_BULK_BAN_USERS`] users in one request; the outcome says which were banned and
+    /// which were not. Discord asks for the permissions to ban members and to manage the server.
+    BulkBan {
+        guild_id: GuildId,
+        user_ids: Vec<UserId>,
+        delete_message_seconds: u32,
+        reason: Reason,
+    },
     Unban {
         guild_id: GuildId,
         user_id: UserId,
@@ -1164,6 +1180,11 @@ pub enum Outcome {
     Role(Box<Role>),
     Roles(Vec<Role>),
     Bans(Vec<Ban>),
+    /// The result of [`Action::BulkBan`].
+    BulkBan {
+        banned: Vec<UserId>,
+        failed: Vec<UserId>,
+    },
     AutoModRule(Box<AutoModerationRule>),
     AutoModRules(Vec<AutoModerationRule>),
     AuditLog(Box<AuditLog>),
@@ -1910,7 +1931,7 @@ impl Action {
             Self::Kick { .. } | Self::PruneCount { .. } | Self::Prune { .. } => {
                 Capability::KickMembers
             }
-            Self::Ban { .. } | Self::Unban { .. } => Capability::BanMembers,
+            Self::Ban { .. } | Self::BulkBan { .. } | Self::Unban { .. } => Capability::BanMembers,
             Self::Timeout { .. } => Capability::TimeoutMembers,
             Self::SetVoiceMute { .. } => Capability::MuteMembers,
             Self::SetNickname { .. } => Capability::ManageNicknames,
@@ -1944,6 +1965,7 @@ impl Action {
             | Self::GetMember { guild_id, .. }
             | Self::Kick { guild_id, .. }
             | Self::Ban { guild_id, .. }
+            | Self::BulkBan { guild_id, .. }
             | Self::Unban { guild_id, .. }
             | Self::Timeout { guild_id, .. }
             | Self::SetVoiceMute { guild_id, .. }
@@ -2096,6 +2118,7 @@ impl Action {
             | Self::GetMember { .. }
             | Self::Kick { .. }
             | Self::Ban { .. }
+            | Self::BulkBan { .. }
             | Self::Unban { .. }
             | Self::Timeout { .. }
             | Self::SetVoiceMute { .. }
@@ -2157,6 +2180,7 @@ impl Action {
             | Self::GetMember { .. }
             | Self::Kick { .. }
             | Self::Ban { .. }
+            | Self::BulkBan { .. }
             | Self::Unban { .. }
             | Self::Timeout { .. }
             | Self::SetVoiceMute { .. }
@@ -2285,6 +2309,7 @@ impl Action {
             Self::GetMember { .. } => "get_member",
             Self::Kick { .. } => "kick",
             Self::Ban { .. } => "ban",
+            Self::BulkBan { .. } => "bulk_ban",
             Self::Unban { .. } => "unban",
             Self::Timeout { .. } => "timeout",
             Self::SetVoiceMute { .. } => "set_voice_mute",
@@ -2446,6 +2471,20 @@ impl Action {
             } => ensure(*delete_message_seconds <= MAX_BAN_DELETE_SECONDS, || {
                 format!("ban message deletion is at most {MAX_BAN_DELETE_SECONDS} seconds (7 days)")
             }),
+            Self::BulkBan {
+                user_ids,
+                delete_message_seconds,
+                ..
+            } => {
+                ensure((1..=MAX_BULK_BAN_USERS).contains(&user_ids.len()), || {
+                    format!("a bulk ban names 1-{MAX_BULK_BAN_USERS} users")
+                })?;
+                ensure(*delete_message_seconds <= MAX_BAN_DELETE_SECONDS, || {
+                    format!(
+                        "ban message deletion is at most {MAX_BAN_DELETE_SECONDS} seconds (7 days)"
+                    )
+                })
+            }
             Self::Timeout {
                 duration_seconds, ..
             } => duration_seconds.map_or(Ok(()), check_timeout_seconds),

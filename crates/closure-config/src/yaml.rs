@@ -35,14 +35,17 @@ pub fn parse_overrides(yaml: &str) -> Result<GuildOverrides, ConfigError> {
     if yaml.trim().is_empty() {
         return Ok(GuildOverrides::default());
     }
-    serde_saphyr::from_str_with_options(yaml, options()).map_err(|error| {
-        let location = error.location();
-        ConfigError::Syntax {
-            message: error.to_string(),
-            line: location.map(|location| location.line()),
-            column: location.map(|location| location.column()),
-        }
-    })
+    // A `null` document means the defaults, as the published schema allows.
+    let overrides: Option<GuildOverrides> = serde_saphyr::from_str_with_options(yaml, options())
+        .map_err(|error| {
+            let location = error.location();
+            ConfigError::Syntax {
+                message: error.to_string(),
+                line: location.map(|location| location.line()),
+                column: location.map(|location| location.column()),
+            }
+        })?;
+    Ok(overrides.unwrap_or_default())
 }
 
 /// Parses a YAML document as plain data, for a patch that is merged into a stored document. The

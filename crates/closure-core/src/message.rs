@@ -302,6 +302,10 @@ impl EmbedSpec {
             height: None,
             width: None,
             proxy_url: None,
+            content_type: None,
+            placeholder: None,
+            placeholder_version: None,
+            flags: None,
         });
         if title.is_none()
             && description.is_none()
@@ -331,6 +335,7 @@ impl EmbedSpec {
             color: self.color.as_ref().map(ColorSpec::number).transpose()?,
             description,
             fields,
+            flags: None,
             footer,
             image,
             kind: "rich".to_owned(),

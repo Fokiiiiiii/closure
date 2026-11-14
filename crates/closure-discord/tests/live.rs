@@ -301,6 +301,8 @@ async fn in_guild_roles_can_be_created_edited_and_deleted() {
             spec: NewRole {
                 name: "closure-live-test".into(),
                 color: 0x00_80_FF,
+                secondary_color: None,
+                tertiary_color: None,
                 permissions: Permissions::empty(),
                 hoist: false,
                 mentionable: false,

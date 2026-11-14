@@ -78,6 +78,13 @@ fn unexpected(action: &'static str) -> DiscordError {
     DiscordError::Fatal(format!("unexpected outcome for `{action}`"))
 }
 
+/// What a bulk ban did: who is banned now, and who the ban did not reach (Discord names no reason).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkBanned {
+    pub banned: Vec<UserId>,
+    pub failed: Vec<UserId>,
+}
+
 impl ApiClient {
     /// Resolve a named webhook only within this client's guild.
     pub async fn webhook_channel(&self, name: &str) -> Result<ChannelId, DiscordError> {
@@ -512,6 +519,29 @@ impl ApiClient {
         })
         .await
         .map(drop)
+    }
+
+    /// Bans up to [`MAX_BULK_BAN_USERS`](crate::action::MAX_BULK_BAN_USERS) users in one request;
+    /// the answer names the users that were banned and those that were not.
+    pub async fn bulk_ban(
+        &self,
+        guild_id: GuildId,
+        user_ids: Vec<UserId>,
+        delete_message_seconds: u32,
+        reason: Reason,
+    ) -> Result<BulkBanned, DiscordError> {
+        match self
+            .execute(Action::BulkBan {
+                guild_id,
+                user_ids,
+                delete_message_seconds,
+                reason,
+            })
+            .await?
+        {
+            Outcome::BulkBan { banned, failed } => Ok(BulkBanned { banned, failed }),
+            _ => Err(unexpected("bulk_ban")),
+        }
     }
 
     pub async fn unban(

@@ -23,8 +23,7 @@ use tokio_util::task::TaskTracker;
 use twilight_cache_inmemory::{InMemoryCache, ResourceType};
 use twilight_gateway::error::{ReceiveMessageError, ReceiveMessageErrorType};
 use twilight_gateway::{
-    CloseFrame, Config, Event, EventTypeFlags, Intents, Message, Shard, ShardId,
-    create_recommended, parse,
+    CloseFrame, Config, Event, EventTypeFlags, Intents, Message, Shard, ShardId, parse,
 };
 use twilight_http::Client;
 use twilight_model::application::interaction::InteractionType;
@@ -766,9 +765,18 @@ pub async fn start_gateway(
     shutdown: CancellationToken,
 ) -> Result<GatewayHandle, GatewayError> {
     let gateway = Config::new(config.token, config.intents | Intents::GUILDS);
-    let shards: Vec<Shard> = create_recommended(http, gateway, |_, builder| builder.build())
+    // The shard count Discord recommends; all the shards run in this process.
+    let recommended = http
+        .gateway()
+        .authed()
         .await
         .map_err(|error| GatewayError::Start(error.to_string()))?
+        .model()
+        .await
+        .map_err(|error| GatewayError::Start(error.to_string()))?
+        .shards;
+    let shards: Vec<Shard> = twilight_gateway::bucket(0, 1, recommended)
+        .map(|shard| Shard::with_config(shard, gateway.clone()))
         .collect();
     tracing::info!(shards = shards.len(), "starting gateway");
 

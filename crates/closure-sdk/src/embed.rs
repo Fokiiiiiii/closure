@@ -200,6 +200,7 @@ impl EmbedBuilder {
                     value,
                 })
                 .collect(),
+            flags: None,
             footer: self.footer.map(|text| EmbedFooter {
                 icon_url: None,
                 proxy_icon_url: None,

@@ -741,7 +741,7 @@ pub(crate) fn event(gateway: &Gateway) -> Option<Event> {
             guild_id: removed.guild_id,
             user: user(&removed.user),
         },
-        Gateway::MessageCreate(created) => Event::MessageCreated(message(&created.0)?),
+        Gateway::MessageCreate(created) => Event::MessageCreated(message(&created.message)?),
         Gateway::MessageUpdate(updated) => Event::MessageUpdated(message(&updated.0)?),
         Gateway::MessageDelete(deleted) => Event::MessageDeleted {
             guild_id: deleted.guild_id?,
@@ -1218,7 +1218,10 @@ mod tests {
 
     fn gateway_message(guild: Option<&str>) -> Gateway {
         let message: Message = serde_json::from_value(message_json(guild)).unwrap();
-        Gateway::MessageCreate(Box::new(MessageCreate(message)))
+        Gateway::MessageCreate(Box::new(MessageCreate {
+            channel_type: None,
+            message,
+        }))
     }
 
     #[test]
@@ -1596,7 +1599,8 @@ mod tests {
 
     fn command_json(options: &Value) -> Value {
         json!({
-            "app_permissions": "0", "application_id": "60", "channel": { "id": "3", "type": 0 },
+            "app_permissions": "0", "application_id": "60", "attachment_size_limit": 10_485_760,
+            "channel": { "id": "3", "type": 0 },
             "data": { "id": "70", "name": "warn", "type": 1, "options": options },
             "guild_id": "1", "id": "50", "locale": "ja-JP", "guild_locale": "en-US",
             "member": { "permissions": "8", "roles": [], "joined_at": "2026-10-24T00:00:00.000000+00:00",
@@ -1788,7 +1792,8 @@ mod tests {
 
     fn user_interaction(kind: u8, data: &Value, extra: &Value) -> Gateway {
         let mut json = json!({
-            "app_permissions": "0", "application_id": "60", "channel": { "id": "3", "type": 0 },
+            "app_permissions": "0", "application_id": "60", "attachment_size_limit": 10_485_760,
+            "channel": { "id": "3", "type": 0 },
             "data": data,
             "guild_id": "1", "id": "51", "locale": "en-US", "guild_locale": "en-US",
             "member": { "permissions": "0", "roles": ["10", "11"], "joined_at": "2026-10-24T00:00:00.000000+00:00",

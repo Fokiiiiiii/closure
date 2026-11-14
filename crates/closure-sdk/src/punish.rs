@@ -3,10 +3,14 @@
 //! The caller checks its own users' rights and passes its settings in; this module reads no configuration.
 //! Needs the capabilities of what it does (`Cases`, `SendMessages`, `SendDirectMessages`, `KickMembers`, `BanMembers`, `TimeoutMembers`, `ManageRoles`, `MuteMembers`, `ReadGuild`, `Schedule`).
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
-use closure_core::action::{Action, Outcome};
+use closure_core::action::{Action, MAX_BULK_BAN_USERS, Outcome};
 use closure_core::cases::MAX_PAGE;
+use closure_core::client::BulkBanned;
 use serde::{Deserialize, Serialize};
 use twilight_model::channel::message::Embed;
 
@@ -293,6 +297,15 @@ impl Note {
 pub struct Done {
     pub case: Case,
     pub notes: Vec<Note>,
+}
+
+/// A ban that is ready for Discord: its intent is kept under `key` when `kept`, and `note` tells
+/// of a notice that did not arrive.
+struct BanReady {
+    key: String,
+    kept: bool,
+    note: Option<Note>,
+    expires_at: Option<i64>,
 }
 
 /// Punishes members as `moderator`, under the server's `settings`. Direct messages and the log
@@ -589,6 +602,140 @@ impl<'a> Punisher<'a> {
         reason: Option<String>,
     ) -> Result<Done, UserError> {
         let _turn = member_turn(self.ctx, target).await;
+        let ready = self
+            .prepare_ban(target, duration, delete_message_seconds, reason.as_deref())
+            .await?;
+        self.ctx
+            .api
+            .ban(
+                self.ctx.guild_id,
+                target,
+                delete_message_seconds,
+                self.audit(reason.as_deref()),
+            )
+            .await?;
+        self.finish_ban(target, reason, ready).await
+    }
+
+    /// Bans many members, in bulk requests of at most [`MAX_BULK_BAN_USERS`] members each. A member
+    /// that Discord does not reach in a bulk ban is banned alone, and that ban's error is the
+    /// member's outcome. The outcomes come in ascending order of user id, each member once.
+    pub async fn ban_many(
+        &self,
+        targets: &[UserId],
+        duration: Option<Duration>,
+        delete_message_seconds: u32,
+        reason: Option<String>,
+    ) -> Vec<(UserId, Result<Done, UserError>)> {
+        let unique: Vec<UserId> = targets
+            .iter()
+            .copied()
+            .collect::<BTreeSet<UserId>>()
+            .into_iter()
+            .collect();
+        let mut outcomes = Vec::with_capacity(unique.len());
+        for chunk in unique.chunks(MAX_BULK_BAN_USERS) {
+            match chunk {
+                // One member is one request either way, and the single ban takes no bulk.
+                [only] => {
+                    let outcome = self
+                        .ban(*only, duration, delete_message_seconds, reason.clone())
+                        .await;
+                    outcomes.push((*only, outcome));
+                }
+                _ => outcomes.extend(
+                    self.ban_chunk(chunk, duration, delete_message_seconds, reason.as_deref())
+                        .await,
+                ),
+            }
+        }
+        outcomes
+    }
+
+    /// Bans a chunk of at least two members with one request. The turns of all of them are held
+    /// until the chunk ends, taken in ascending order so that two chunks cannot wait on each other.
+    async fn ban_chunk(
+        &self,
+        chunk: &[UserId],
+        duration: Option<Duration>,
+        delete_message_seconds: u32,
+        reason: Option<&str>,
+    ) -> Vec<(UserId, Result<Done, UserError>)> {
+        let mut turns = Vec::with_capacity(chunk.len());
+        for &user in chunk {
+            turns.push(member_turn(self.ctx, user).await);
+        }
+        let mut outcomes = Vec::with_capacity(chunk.len());
+        let mut ready = Vec::with_capacity(chunk.len());
+        for &user in chunk {
+            match self
+                .prepare_ban(user, duration, delete_message_seconds, reason)
+                .await
+            {
+                Ok(prepared) => ready.push((user, prepared)),
+                Err(error) => outcomes.push((user, Err(error))),
+            }
+        }
+        let users: Vec<UserId> = ready.iter().map(|(user, _)| *user).collect();
+        match self
+            .ctx
+            .api
+            .bulk_ban(
+                self.ctx.guild_id,
+                users,
+                delete_message_seconds,
+                self.audit(reason),
+            )
+            .await
+        {
+            Err(error) => {
+                // The intents stay, so that the reconcile finds out what Discord did.
+                for (user, _) in ready {
+                    outcomes.push((user, Err(error.clone().into())));
+                }
+            }
+            Ok(BulkBanned { banned, .. }) => {
+                for (user, prepared) in ready {
+                    let outcome = if banned.contains(&user) {
+                        self.finish_ban(user, reason.map(str::to_owned), prepared)
+                            .await
+                    } else {
+                        // Discord named no reason, so the member gets the ban of its own.
+                        match self
+                            .ctx
+                            .api
+                            .ban(
+                                self.ctx.guild_id,
+                                user,
+                                delete_message_seconds,
+                                self.audit(reason),
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                self.finish_ban(user, reason.map(str::to_owned), prepared)
+                                    .await
+                            }
+                            Err(error) => Err(error.into()),
+                        }
+                    };
+                    outcomes.push((user, outcome));
+                }
+            }
+        }
+        drop(turns);
+        outcomes
+    }
+
+    /// What a ban does before Discord hears of it: the range check, the reconcile of an earlier
+    /// intent, the notice, and the intent of this ban.
+    async fn prepare_ban(
+        &self,
+        target: UserId,
+        duration: Option<Duration>,
+        delete_message_seconds: u32,
+        reason: Option<&str>,
+    ) -> Result<BanReady, UserError> {
         if delete_message_seconds > MAX_BAN_DELETE_SECONDS {
             return Err(UserError::sdk("punish-ban-delete-days-range"));
         }
@@ -619,7 +766,7 @@ impl<'a> Punisher<'a> {
                             "expires",
                             ends_at(self.ctx.now(), duration, TimeStyle::LongDateTime),
                         )
-                        .with("reason", dm_reason(self.ctx, reason.as_deref())),
+                        .with("reason", dm_reason(self.ctx, reason)),
                 )
                 .await
             }
@@ -628,7 +775,7 @@ impl<'a> Punisher<'a> {
                     target,
                     "ban",
                     "punish-dm-banned",
-                    &Args::new().with("reason", dm_reason(self.ctx, reason.as_deref())),
+                    &Args::new().with("reason", dm_reason(self.ctx, reason)),
                 )
                 .await
             }
@@ -638,34 +785,42 @@ impl<'a> Punisher<'a> {
         // The intent comes before the ban, for good or not: a stop between the ban and its case
         // is finished from it.
         if kept {
-            self.remember_ban(target, reason.as_deref(), started_at, expires_at)
+            self.remember_ban(target, reason, started_at, expires_at)
                 .await?;
         }
-        self.ctx
-            .api
-            .ban(
-                self.ctx.guild_id,
-                target,
-                delete_message_seconds,
-                self.audit(reason.as_deref()),
-            )
-            .await?;
+        Ok(BanReady {
+            key,
+            kept,
+            note,
+            expires_at,
+        })
+    }
+
+    /// The part of a ban after Discord applied it: its case, its unban timer, and the removal of
+    /// its intent once both are done.
+    async fn finish_ban(
+        &self,
+        target: UserId,
+        reason: Option<String>,
+        ready: BanReady,
+    ) -> Result<Done, UserError> {
+        let BanReady {
+            key,
+            kept,
+            note,
+            expires_at,
+        } = ready;
         let recorded = self.record_ban(target, reason, expires_at).await;
         // A new ban replaces the timer of an earlier one, which would lift this ban too early.
         let _ = self.ctx.scheduler().cancel(&unban_key(target)).await;
         // The ban holds even when its case is not recorded, so its timer is set all the same.
-        let timer = match duration {
-            Some(_duration) => {
+        let timer = match expires_at {
+            Some(expires_at) => {
                 let case = recorded
                     .as_ref()
                     .map_or(UNRECORDED_CASE, |case| case.number);
                 let remaining = Duration::from_secs(
-                    u64::try_from(
-                        expires_at
-                            .unwrap_or(started_at)
-                            .saturating_sub(self.ctx.now()),
-                    )
-                    .unwrap_or_default(),
+                    u64::try_from(expires_at.saturating_sub(self.ctx.now())).unwrap_or_default(),
                 );
                 match schedule_unban(self.ctx, target, case, remaining).await {
                     Ok(()) => None,
