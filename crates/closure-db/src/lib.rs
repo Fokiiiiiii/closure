@@ -285,10 +285,18 @@ mod tests {
             .await
             .unwrap();
         }
-        sqlx::raw_sql(include_str!("../migrations/0019_backfill_long_ids.sql"))
-            .execute(&pool)
+        // The migration's helper lives in the temporary schema of the connection that ran it, and
+        // the pool may hand that very connection out again: clear it on the one used here.
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::raw_sql("DROP FUNCTION IF EXISTS pg_temp.fitting_id(text)")
+            .execute(&mut *connection)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0019_backfill_long_ids.sql"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
 
         let xp: Vec<(i64, i64)> = sqlx::query_as(
             "SELECT subject, value FROM module_scores WHERE name = 'xp' ORDER BY subject",
