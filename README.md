@@ -6,8 +6,8 @@ closure is a moderation bot built around a small, strict core. Everything a feat
 events, Discord actions, per-server configuration, translations — is provided by that core, so
 new features are modules that cannot weaken it.
 
-**Status:** the foundation is in place (core, configuration, Discord layer, HTTP API, Lua and
-WebAssembly script host), and twenty-two modules are built on it: moderation, automod, logs,
+**Status:** the foundation is in place (core, configuration, Discord layer, HTTP API, Lua script
+host, and a WebAssembly one that is built in with `--features script-wasm`), and twenty-two modules are built on it: moderation, automod, logs,
 diagnostics, welcome, roles, verify, guard, sticky, backup, follow, dehoist, honeypot, tags, remind, channels, companion, persist, phishing, post,
 utility and dashboard. The dashboard itself is a separate project,
 [closure-dashboard](https://github.com/Fokiiiiiii/closure-dashboard).

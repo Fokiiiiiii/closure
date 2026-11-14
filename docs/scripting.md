@@ -123,12 +123,13 @@ For example, this WAT module returns an empty action list:
 Each invocation uses fuel, epoch interruption and `StoreLimits`. Epoch checks
 exclude time spent in host operations from the CPU budget while still enforcing
 the wall deadline. Memory growth failure traps. The `script-wasm` feature is
-enabled by default for `closure`; `--no-default-features` omits it. Wasmtime
-increases build time and binary size.
+not enabled by default for `closure`: build with `--features script-wasm` to run
+WebAssembly scripts (a build without it has no `wasm` runtime and only runs Lua). Wasmtime
+increases build time and binary size by about 5 MB.
 
 ## Runtimes
 
-1. **WebAssembly (`wasmtime`)**, available. No WASI, no imports except the host calls above,
+1. **WebAssembly (`wasmtime`)**, available with `--features script-wasm`. No WASI, no imports except the host calls above,
    fuel and epoch interruption on, memory and table limits set. Any language that compiles to it
    (Rust, AssemblyScript, JavaScript via a toolchain) can write a module.
 2. **Lua (`mlua`, vendored Lua 5.4)**, available for small scripts. The

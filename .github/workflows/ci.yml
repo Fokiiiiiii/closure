@@ -49,6 +49,8 @@ jobs:
           shared-key: ci-linux
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Wasmtime is not in the default build; it must keep compiling cleanly.
+      - run: cargo clippy -p closure -p closure-script --all-targets --locked --features closure/script-wasm -- -D warnings
 
   test:
     if: github.event_name != 'schedule'
@@ -81,6 +83,8 @@ jobs:
       - run: cargo test --workspace --locked
       # The build with the plugins built in: their modules must register cleanly.
       - run: cargo test -p closure --locked --features plugins
+      # The WebAssembly runtime is opt-in, so the default run above does not exercise it.
+      - run: cargo test -p closure -p closure-script --locked --features closure/script-wasm
       # The generated references must match the modules; the check builds the app crate too.
       - run: cargo run --locked -p closure-xtask -- docs --check
 

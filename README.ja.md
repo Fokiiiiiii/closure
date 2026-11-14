@@ -6,7 +6,7 @@ closure は、小さく厳格な「核」を中心に作られたモデレーシ
 （イベント、Discord 操作、サーバーごとの設定、翻訳）はすべて核が提供するので、新しい機能は
 核を弱めることなくモジュールとして追加できます。
 
-**現状:** 基盤（コア、設定、Discord 層、HTTP API、Lua と WebAssembly のスクリプト実行）の上に、
+**現状:** 基盤（コア、設定、Discord 層、HTTP API、Lua のスクリプト実行と、`--features script-wasm` で組み込む WebAssembly のスクリプト実行）の上に、
 22 のモジュール（moderation、automod、logs、diagnostics、welcome、roles、verify、guard、sticky、backup、follow、dehoist、honeypot、tags、remind、channels、
 companion、persist、phishing、post、utility、dashboard）が実装されています。ダッシュボード本体は別プロジェクトの
 [closure-dashboard](https://github.com/Fokiiiiiii/closure-dashboard) です。

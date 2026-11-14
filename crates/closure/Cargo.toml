@@ -9,7 +9,8 @@ publish.workspace = true
 repository.workspace = true
 
 [features]
-default = ["script-wasm", "script-lua"]
+default = ["script-lua"]
+# Wasmtime adds about 5 MB to the binary and nobody has to run it: build with it when asked for.
 script-wasm = ["closure-script/wasm"]
 script-lua = ["closure-script/lua"]
 # The modules of closure-plugins (link expansion, starboard), built in when asked for.
