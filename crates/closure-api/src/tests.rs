@@ -602,6 +602,53 @@ async fn dashboard_privileged_changes_require_owner_level(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../closure-db/migrations")]
+async fn delegated_editors_cannot_repoint_integration_credentials(pool: PgPool) {
+    let app = app(pool).await;
+    let permissions = "permissions: { roles: { '5': admin, '6': owner, '7': trusted }, keys: { dashboard.edit: { allow: { roles: [8] } } } }\n";
+    let document = |url: &str, send_form_data: bool| {
+        format!(
+            "{permissions}modules:\n  tickets:\n    config:\n      integrations:\n        - id: crm\n          url: {url}\n          auth: bearer\n          headers: [{{ name: Authorization, value_template: \"Bearer %api%\" }}]\n          secrets: [api]\n          send_form_data: {send_form_data}\n"
+        )
+    };
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "0", &document("https://crm.example.com/a", false))
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let moved = send(
+        &app.router,
+        put(42, "1", &document("https://attacker.example.com/a", false))
+            .header("x-closure-actor", "2"),
+    )
+    .await;
+    assert_eq!(moved.status, StatusCode::FORBIDDEN, "{}", moved.text);
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "1", &document("https://crm.example.com/a", true))
+                .header("x-closure-actor", "2")
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(
+            &app.router,
+            put(42, "2", &document("https://crm.example.com/b", true))
+                .header("x-closure-actor", "1")
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test(migrations = "../closure-db/migrations")]
 async fn dashboard_uses_the_saved_permissions_when_the_runtime_store_is_stale(pool: PgPool) {
     let app = app(pool).await;
     let elevated = "permissions: { users: { '2': owner } }";

@@ -2,14 +2,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use closure_core::action::InteractionReply;
-use closure_sdk::testing::{Click, Harness, Invocation, ReplyKind};
+use closure_sdk::testing::{Click, Harness, Invocation, Reply, ReplyKind};
 use closure_sdk::ui::{button, row};
 use closure_sdk::{Command, CustomId, DiscordError, ModuleBuilder, UserError};
+use serde_json::json;
 use twilight_model::channel::message::component::ButtonStyle;
 
 const EN: &str = "
 secret = Only for you.
 ";
+
+/// A text that must reach only the user who asked.
+const SECRET: &str = "internal-note-7";
 
 fn module() -> ModuleBuilder {
     ModuleBuilder::new("replies", "Replies", "0.1.0")
@@ -119,6 +123,28 @@ fn module() -> ModuleBuilder {
                         .await?;
                 }
                 Ok(())
+            }),
+        )
+        .command(
+            Command::<()>::new("secret-fresh")
+                .handler(|cx, ()| async move { cx.reply_secret(SECRET).await }),
+        )
+        .command(
+            Command::<()>::new("secret-after-defer").handler(|cx, ()| async move {
+                cx.defer(false).await?;
+                cx.reply_secret(SECRET).await
+            }),
+        )
+        .command(
+            Command::<()>::new("secret-after-private-defer").handler(|cx, ()| async move {
+                cx.defer(true).await?;
+                cx.reply_secret(SECRET).await
+            }),
+        )
+        .command(
+            Command::<()>::new("secret-followup").handler(|cx, ()| async move {
+                cx.reply("public first").await?;
+                cx.reply_secret(SECRET).await
             }),
         )
         .catalog(closure_sdk::Locale::En, EN)
@@ -238,4 +264,69 @@ async fn a_failed_attempt_to_close_the_public_message_does_not_let_the_retry_lea
     assert!(!replies[1].ephemeral);
     assert_eq!(replies[2].content, "Only for you.");
     assert!(replies[2].ephemeral, "the secret goes to the user alone");
+}
+
+/// The secret reaches the user alone, and no message everyone sees carries it.
+fn assert_secret_only_privately(replies: &[Reply]) {
+    assert!(
+        replies
+            .iter()
+            .any(|reply| reply.ephemeral && reply.content.contains(SECRET)),
+        "the secret was not sent privately: {replies:?}"
+    );
+    assert!(
+        replies
+            .iter()
+            .all(|reply| reply.ephemeral || !reply.content.contains(SECRET)),
+        "the secret went into a public message: {replies:?}"
+    );
+}
+
+fn public_harness() -> Harness {
+    let harness = Harness::new(module()).unwrap();
+    harness.set_config(json!({ "replies": "public" }));
+    harness
+}
+
+#[tokio::test]
+async fn a_secret_answer_stays_private_when_the_replies_setting_is_public() {
+    let replies = public_harness()
+        .invoke(Invocation::new("secret-fresh"))
+        .await
+        .unwrap();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_secret_only_privately(&replies);
+}
+
+#[tokio::test]
+async fn a_secret_answer_after_a_public_deferral_stays_private_when_replies_are_public() {
+    let replies = public_harness()
+        .invoke(Invocation::new("secret-after-defer"))
+        .await
+        .unwrap();
+    assert_secret_only_privately(&replies);
+}
+
+#[tokio::test]
+async fn a_secret_answer_after_a_private_deferral_stays_private_when_replies_are_public() {
+    let replies = public_harness()
+        .invoke(Invocation::new("secret-after-private-defer"))
+        .await
+        .unwrap();
+    assert_secret_only_privately(&replies);
+}
+
+#[tokio::test]
+async fn a_secret_follow_up_stays_private_when_replies_are_public() {
+    let replies = public_harness()
+        .invoke(Invocation::new("secret-followup"))
+        .await
+        .unwrap();
+    let kinds: Vec<ReplyKind> = replies.iter().map(|reply| reply.kind).collect();
+    assert_eq!(
+        kinds,
+        [ReplyKind::Response, ReplyKind::Followup],
+        "{replies:?}"
+    );
+    assert_secret_only_privately(&replies);
 }

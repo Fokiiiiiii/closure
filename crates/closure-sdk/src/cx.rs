@@ -439,6 +439,12 @@ impl<I: InteractionRef + 'static> Cx<I> {
         self.say_private(Tone::Info, content).await
     }
 
+    /// [`Self::reply_private`] that the `replies` setting cannot make public; for what must not
+    /// reach the channel, such as the notes on a user.
+    pub async fn reply_secret(&self, content: impl Into<String>) -> Result<(), UserError> {
+        self.say_locked(Tone::Info, content.into()).await
+    }
+
     /// [`Self::reply`] with a message of the module's catalog.
     pub async fn reply_t(&self, key: &str, args: &Args) -> Result<(), UserError> {
         self.say_t(Tone::Info, key, args).await

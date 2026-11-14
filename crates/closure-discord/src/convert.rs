@@ -440,11 +440,11 @@ fn modal_component(
             modal_component(&children[0], ModalPlacement::LegacyRowChild, answers)
         }
         18 if placement == ModalPlacement::TopLevel => {
-            let label = component
-                .get("label")
-                .and_then(Value::as_str)
-                .ok_or("a modal Label has no label")?;
-            check_modal_string(label, 1, 45)?;
+            // Discord does not send a Label's text back, so it is checked only when present.
+            if let Some(label) = component.get("label") {
+                let label = label.as_str().ok_or("a modal Label label is not text")?;
+                check_modal_string(label, 1, 45)?;
+            }
             if let Some(description) = component.get("description") {
                 check_modal_string(
                     description
@@ -1889,6 +1889,35 @@ mod tests {
         assert_eq!(form.field("note"), Some("twice"));
         assert_eq!(form.field("other"), None);
         assert_eq!(form.channel_id.get(), 3);
+    }
+
+    #[test]
+    fn a_label_answer_without_its_text_is_read_for_every_input_kind() {
+        // Discord answers a Label with its id and component only; the text is not sent back.
+        let raw_components = json!([
+            { "type": 18, "id": 3, "component": {
+                "type": 4, "id": 4, "custom_id": "note", "value": "twice" } },
+            { "type": 18, "id": 5, "component": {
+                "type": 3, "id": 6, "custom_id": "pick", "values": ["a"] } },
+            { "type": 18, "id": 7, "component": {
+                "type": 5, "id": 8, "custom_id": "who", "values": ["9"] } }
+        ]);
+        let gateway = user_interaction(
+            5,
+            &json!({"custom_id": "warn:reason", "components": raw_components.clone()}),
+            &json!({}),
+        );
+        let events =
+            events_with_modal_components(&gateway, &Before::default(), Some(&raw_components));
+        let [Event::Modal(form)] = events.as_slice() else {
+            panic!("expected a modal");
+        };
+        assert_eq!(form.field("note"), Some("twice"));
+        assert!(matches!(
+            form.value("pick"),
+            Some(ModalValue::StringSelect(values)) if values == &["a".to_owned()]
+        ));
+        assert!(matches!(form.value("who"), Some(ModalValue::UserSelect(_))));
     }
 
     #[test]

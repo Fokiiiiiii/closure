@@ -150,6 +150,8 @@ struct HistoryStaffAccess {
 #[derive(Default, Deserialize)]
 struct HistoryStaffTeam {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     roles: Vec<u64>,
     #[serde(default)]
     users: Vec<u64>,
@@ -224,6 +226,15 @@ pub(super) struct Viewer {
     pub(super) actor: Actor,
     pub(super) can_manage: bool,
     default_staff_roles: Vec<u64>,
+    staff_teams: Vec<CurrentStaffTeam>,
+}
+
+/// A staff team as configured now; a snapshot team only stays reachable while this still lists the viewer.
+#[derive(Clone)]
+struct CurrentStaffTeam {
+    id: String,
+    roles: Vec<u64>,
+    users: Vec<u64>,
 }
 
 pub(crate) async fn list(
@@ -543,12 +554,21 @@ pub(super) async fn viewer(
         .flatten()
         .filter_map(staff_role_id)
         .collect();
+    let staff_teams = settings
+        .module(&ticket_module)
+        .and_then(|module| module.config.get("staff_teams"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(current_staff_team)
+        .collect();
     Ok((
         guild,
         Viewer {
             actor,
             can_manage,
             default_staff_roles,
+            staff_teams,
         },
     ))
 }
@@ -584,19 +604,26 @@ fn can_view(viewer: &Viewer, staff_roles: &[u64]) -> bool {
             .any(|role| staff_roles.contains(&role.get()))
 }
 
+fn team_grants(viewer: &Viewer, users: &[u64], roles: &[u64]) -> bool {
+    users.contains(&viewer.actor.user.get())
+        || viewer
+            .actor
+            .roles
+            .iter()
+            .any(|role| roles.contains(&role.get()))
+}
+
 fn can_view_history(viewer: &Viewer, history: &TicketHistory) -> bool {
     if viewer.can_manage {
         return true;
     }
     if let Some(snapshot) = &history.staff_access {
-        let user = viewer.actor.user.get();
+        // A deleted team grants nothing, and a removed member loses the old tickets too.
         return snapshot.teams.iter().any(|team| {
-            team.users.contains(&user)
-                || viewer
-                    .actor
-                    .roles
-                    .iter()
-                    .any(|role| team.roles.contains(&role.get()))
+            team_grants(viewer, &team.users, &team.roles)
+                && viewer.staff_teams.iter().any(|current| {
+                    current.id == team.id && team_grants(viewer, &current.users, &current.roles)
+                })
         });
     }
     can_view(viewer, &history.staff_roles)
@@ -625,6 +652,23 @@ fn open_staff_roles(ticket: &OpenTicket, defaults: &[u64]) -> Vec<u64> {
                 .collect()
         },
     )
+}
+
+fn current_staff_team(value: &Value) -> Option<CurrentStaffTeam> {
+    Some(CurrentStaffTeam {
+        id: value.get("id")?.as_str()?.to_owned(),
+        roles: id_list(value.get("roles")),
+        users: id_list(value.get("users")),
+    })
+}
+
+fn id_list(value: Option<&Value>) -> Vec<u64> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(staff_role_id)
+        .collect()
 }
 
 fn staff_role_id(value: &Value) -> Option<u64> {
@@ -1150,4 +1194,59 @@ fn storage_error(error: StorageError) -> ApiError {
 
 fn no_ticket() -> ApiError {
     ApiError::NotFound("no such ticket".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use twilight_model::id::Id;
+
+    use super::*;
+
+    fn history(snapshot_users: &[u64]) -> TicketHistory {
+        serde_json::from_value(json!({
+            "channel_id": 1,
+            "number": 1,
+            "opener": 99,
+            "created": 0,
+            "status": "closed",
+            "staff_access": { "teams": [{ "id": "ops", "users": snapshot_users }] }
+        }))
+        .unwrap()
+    }
+
+    fn viewer(user: u64, staff_teams: Vec<CurrentStaffTeam>) -> Viewer {
+        Viewer {
+            actor: Actor {
+                user: Id::new(user),
+                roles: vec![],
+                administrator: false,
+                owner: false,
+            },
+            can_manage: false,
+            default_staff_roles: vec![],
+            staff_teams,
+        }
+    }
+
+    fn ops_team(users: Vec<u64>) -> CurrentStaffTeam {
+        CurrentStaffTeam {
+            id: "ops".into(),
+            roles: vec![],
+            users,
+        }
+    }
+
+    #[test]
+    fn removing_a_user_from_a_staff_team_revokes_their_old_ticket_access() {
+        let history = history(&[10, 11]);
+        let current = vec![ops_team(vec![11])];
+        assert!(!can_view_history(&viewer(10, current.clone()), &history));
+        assert!(can_view_history(&viewer(11, current), &history));
+    }
+
+    #[test]
+    fn deleting_a_staff_team_revokes_its_members_old_ticket_access() {
+        let history = history(&[11]);
+        assert!(!can_view_history(&viewer(11, vec![]), &history));
+    }
 }

@@ -239,12 +239,19 @@ pub(crate) async fn put_config(
     }
     let (overrides, active_generations, retirements) =
         normalize_integration_generations(guild, compiler, &current, &overrides)?;
-    let can_retire_secrets = if retirements.is_empty() || actor.is_none() {
+    let rerouted = credential_routes_changed(&current, &overrides)?;
+    let can_retire_secrets = if (retirements.is_empty() && !rerouted) || actor.is_none() {
         false
     } else {
         let (_, viewer) = crate::tickets::viewer(&state, guild.get(), &headers).await?;
         viewer.actor.owner || viewer.actor.administrator
     };
+    if rerouted && actor.is_some() && !can_retire_secrets {
+        return Err(ApiError::Forbidden(
+            "changing where an integration's credentials are sent requires owner or administrator"
+                .into(),
+        ));
+    }
     save(
         &state,
         guild,
@@ -256,6 +263,80 @@ pub(crate) async fn put_config(
         can_retire_secrets,
     )
     .await
+}
+
+/// The integration settings a stored secret travels through: the URL, the authentication kind and
+/// the headers that carry a secret. Integrations that carry no secret have no route.
+fn credential_routes(
+    document: &GuildOverrides,
+) -> Result<BTreeMap<String, serde_json::Value>, ApiError> {
+    let value =
+        serde_json::to_value(document).map_err(|error| ApiError::Internal(error.to_string()))?;
+    let integrations = value
+        .pointer("/modules/tickets/config/integrations")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut routes = BTreeMap::new();
+    for integration in integrations {
+        let Some(id) = integration.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let auth = integration
+            .get("auth")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("none");
+        let secrets: Vec<&str> = integration
+            .get("secrets")
+            .and_then(serde_json::Value::as_array)
+            .map(|names| names.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_default();
+        let secret_headers: Vec<&serde_json::Value> = integration
+            .get("headers")
+            .and_then(serde_json::Value::as_array)
+            .map(|headers| {
+                headers
+                    .iter()
+                    .filter(|header| {
+                        header
+                            .get("value_template")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|template| {
+                                template.contains("%token%")
+                                    || secrets
+                                        .iter()
+                                        .any(|name| template.contains(&format!("%{name}%")))
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if auth == "none" && secret_headers.is_empty() {
+            continue;
+        }
+        routes.insert(
+            id.to_owned(),
+            json!({
+                "url": integration.get("url"),
+                "auth": auth,
+                "secret_headers": secret_headers,
+            }),
+        );
+    }
+    Ok(routes)
+}
+
+/// True when an edit changes where a stored secret would be sent, which needs owner or administrator.
+fn credential_routes_changed(
+    current: &GuildOverrides,
+    next: &GuildOverrides,
+) -> Result<bool, ApiError> {
+    let before = credential_routes(current)?;
+    let after = credential_routes(next)?;
+    Ok(before
+        .keys()
+        .chain(after.keys())
+        .any(|id| before.get(id) != after.get(id)))
 }
 
 /// Adds host-generated immutable generations to ticket integrations and returns active/retired scopes.
