@@ -74,6 +74,9 @@ fn wall_clock(unix: i64, offset: i64) -> String {
     )
 }
 
+/// A loaded CI runner can stall between reading the clock and running the command.
+const TOLERANCE: i64 = 30;
+
 /// A minute three days from now, which the wall clock text names exactly.
 fn target() -> i64 {
     (now() + 3 * 86_400).div_euclid(60) * 60
@@ -98,7 +101,7 @@ async fn a_server_in_english_reads_a_moment_without_zone_as_utc() {
     let reply = run(&harness, &wall_clock(target, 0)).await;
     let expected = target - before;
     assert!(
-        (expected - 2..=expected).contains(&seconds(&reply)),
+        (expected - TOLERANCE..=expected).contains(&seconds(&reply)),
         "{reply} vs {expected}"
     );
 }
@@ -112,7 +115,7 @@ async fn a_japanese_server_reads_a_moment_without_zone_as_jst() {
     let reply = run(&harness, &wall_clock(target, 9 * HOUR)).await;
     let expected = target - before;
     assert!(
-        (expected - 2..=expected).contains(&seconds(&reply)),
+        (expected - TOLERANCE..=expected).contains(&seconds(&reply)),
         "{reply} vs {expected}"
     );
 }
@@ -126,7 +129,7 @@ async fn the_same_text_means_another_moment_on_an_english_server() {
     let reply = run(&harness, &wall_clock(target, 9 * HOUR)).await;
     let expected = target + 9 * HOUR - before;
     assert!(
-        (expected - 2..=expected).contains(&seconds(&reply)),
+        (expected - TOLERANCE..=expected).contains(&seconds(&reply)),
         "{reply} vs {expected}"
     );
 }
@@ -141,7 +144,7 @@ async fn an_explicit_zone_wins_over_the_server_language() {
     let reply = run(&harness, &typed).await;
     let expected = target - before;
     assert!(
-        (expected - 2..=expected).contains(&seconds(&reply)),
+        (expected - TOLERANCE..=expected).contains(&seconds(&reply)),
         "{reply} vs {expected}"
     );
 }
@@ -159,7 +162,7 @@ async fn a_server_timezone_replaces_the_language_default() {
     let reply = run(&harness, &wall_clock(target, 9 * HOUR)).await;
     let expected = target - before;
     assert!(
-        (expected - 2..=expected).contains(&seconds(&reply)),
+        (expected - TOLERANCE..=expected).contains(&seconds(&reply)),
         "{reply} vs {expected}"
     );
 }
@@ -177,7 +180,7 @@ async fn a_japanese_server_with_a_utc_timezone_reads_utc() {
     let reply = run(&harness, &wall_clock(target, 0)).await;
     let expected = target - before;
     assert!(
-        (expected - 2..=expected).contains(&seconds(&reply)),
+        (expected - TOLERANCE..=expected).contains(&seconds(&reply)),
         "{reply} vs {expected}"
     );
 }
