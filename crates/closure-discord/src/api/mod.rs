@@ -680,9 +680,17 @@ impl TwilightApi {
                 embeds,
                 reply_to,
                 mentions,
+                silent,
             } => {
-                self.send_message(*channel_id, content.as_deref(), embeds, *reply_to, mentions)
-                    .await
+                self.send_message(
+                    *channel_id,
+                    content.as_deref(),
+                    embeds,
+                    *reply_to,
+                    mentions,
+                    *silent,
+                )
+                .await
             }
             Action::GetInvite { code } => self.get_invite(code).await,
             Action::PostMessage {
@@ -693,6 +701,7 @@ impl TwilightApi {
                 embeds,
                 components,
                 files,
+                silent,
             } => {
                 self.post_message(
                     *channel_id,
@@ -702,6 +711,7 @@ impl TwilightApi {
                     embeds,
                     components,
                     files,
+                    *silent,
                 )
                 .await
             }

@@ -660,8 +660,9 @@ impl fmt::Debug for FileUpload {
     }
 }
 
-/// Discord takes at most this many bytes in one message, files included.
-pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+/// Discord takes at most this many bytes in one message, files included. The request limit
+/// is about 25 MiB, so the files stay below it with the JSON body.
+pub const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 /// The longest name a file may have, in characters.
 pub const MAX_FILENAME_CHARS: usize = 255;
 /// The most files Discord takes in one message.
@@ -693,6 +694,9 @@ pub enum Action {
         reply_to: Option<MessageId>,
         #[serde(default)]
         mentions: MentionPolicy,
+        /// Sent without notifications, as a `@silent` message; the default notifies.
+        #[serde(default)]
+        silent: bool,
     },
     /// A message with buttons or menus under it; with `message_id` it replaces that message of the
     /// bot (text, embeds and components alike) instead of sending a new one. Nobody is mentioned.
@@ -709,6 +713,9 @@ pub enum Action {
         /// Files sent with a new message (a replaced message keeps the files it has).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<FileUpload>,
+        /// Sent without notifications, as a `@silent` message; an edit has no flags to set and ignores it.
+        #[serde(default)]
+        silent: bool,
     },
     /// Hides the link previews of a message, as the person who posted it could. Needs the
     /// permission to manage messages when the message is somebody else's.
@@ -2623,6 +2630,7 @@ mod tests {
                 components: vec![button],
             })],
             files: Vec::new(),
+            silent: false,
         };
         assert_eq!(action.custom_ids(), ["other:delete:1"]);
     }
@@ -2883,9 +2891,54 @@ mod tests {
             embeds: vec![],
             reply_to: None,
             mentions: MentionPolicy::default(),
+            silent: false,
         };
         assert!(action.validate().is_err());
         assert_eq!(MentionPolicy::default(), MentionPolicy::None);
+    }
+
+    #[test]
+    fn a_send_message_is_loud_unless_it_says_silent() {
+        let loud: Action = serde_json::from_str(
+            r#"{"type":"send_message","channel_id":"1","content":"hi","embeds":[],"reply_to":null}"#,
+        )
+        .unwrap();
+        let quiet: Action = serde_json::from_str(
+            r#"{"type":"send_message","channel_id":"1","content":"hi","embeds":[],"reply_to":null,"silent":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(loud, Action::SendMessage { silent: false, .. }));
+        assert!(matches!(quiet, Action::SendMessage { silent: true, .. }));
+    }
+
+    #[test]
+    fn a_post_is_loud_unless_it_says_silent_and_fits_the_larger_upload_limit() {
+        let loud: Action = serde_json::from_str(
+            r#"{"type":"post_message","channel_id":"1","message_id":null,"content":"hi","embeds":[],"components":[]}"#,
+        )
+        .unwrap();
+        let quiet: Action = serde_json::from_str(
+            r#"{"type":"post_message","channel_id":"1","message_id":null,"content":"hi","embeds":[],"components":[],"silent":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(loud, Action::PostMessage { silent: false, .. }));
+        assert!(matches!(quiet, Action::PostMessage { silent: true, .. }));
+
+        let file = FileUpload {
+            filename: "export.zip".into(),
+            data: vec![0; 15 * 1024 * 1024],
+        };
+        let post = Action::PostMessage {
+            channel_id: id::<1, _>(),
+            message_id: None,
+            reply_to: None,
+            content: Some("x".into()),
+            embeds: vec![],
+            components: vec![],
+            files: vec![file],
+            silent: false,
+        };
+        assert!(post.validate().is_ok(), "15 MiB fits the 20 MiB limit");
     }
 
     #[test]
@@ -2898,6 +2951,7 @@ mod tests {
             embeds: vec![],
             components: vec![],
             files,
+            silent: false,
         };
         let file = |bytes: usize| FileUpload {
             filename: "a.jpg".into(),
@@ -2913,6 +2967,7 @@ mod tests {
             embeds: vec![],
             components: vec![],
             files,
+            silent: false,
         };
         assert!(
             bare(vec![file(10)]).validate().is_ok(),
@@ -2961,6 +3016,7 @@ mod tests {
             embeds: vec![],
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         };
         assert!(make("あ".repeat(MAX_MESSAGE_CHARS)).validate().is_ok());
         assert!(make("あ".repeat(MAX_MESSAGE_CHARS + 1)).validate().is_err());

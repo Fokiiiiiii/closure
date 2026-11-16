@@ -419,6 +419,7 @@ async fn the_entries_go_to_the_configured_channel_and_not_the_log_channel() {
             .any(|action| matches!(action, Action::SendMessage {
         channel_id, content: None, embeds, reply_to: None,
         mentions: closure_core::action::MentionPolicy::None,
+        silent: false,
     } if channel_id.get() == OTHER_LOG && embeds.len() == 1))
     );
 }

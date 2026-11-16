@@ -16,6 +16,7 @@ pub mod files;
 pub mod message;
 pub mod modlog;
 mod module;
+pub mod notify;
 pub mod punish;
 pub mod recent;
 mod span;

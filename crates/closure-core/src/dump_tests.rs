@@ -19,6 +19,7 @@ fn sample(text: &str) -> Action {
         embeds: vec![],
         reply_to: None,
         mentions: MentionPolicy::None,
+        silent: false,
     }
 }
 

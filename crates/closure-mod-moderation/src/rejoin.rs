@@ -94,6 +94,7 @@ async fn alert_staff(
             embeds: Vec::new(),
             reply_to: None,
             mentions: closure_core::action::MentionPolicy::None,
+            silent: false,
         })
         .await?;
     Ok(())

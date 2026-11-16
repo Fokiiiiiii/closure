@@ -140,6 +140,7 @@ pub(crate) async fn file(cx: CommandCx, args: Appeal) -> Result<(), UserError> {
             embeds: Vec::new(),
             components,
             files: Vec::new(),
+            silent: false,
         })
         .await;
     if post.is_err() {

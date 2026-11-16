@@ -893,6 +893,7 @@ mod tests {
             embeds: vec![],
             reply_to: None,
             mentions: crate::action::MentionPolicy::default(),
+            silent: false,
         };
         let (a, b) = tokio::join!(api.execute(send()), api.execute(send()));
         let (Outcome::Message(a), Outcome::Message(b)) = (a.unwrap(), b.unwrap()) else {

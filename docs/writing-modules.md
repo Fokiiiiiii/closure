@@ -284,6 +284,13 @@ deferral ephemeral (only the user sees it), `"public"` makes them public, and wh
 each reply keeps its own visibility. The SDK adds the key to every module's schema, so a module must
 not declare it itself. `cx.config()` leaves the key out before it reads the module's own type.
 
+A message a module posts from an event, such as the preview it adds under a user's link, is sent
+with `closure_sdk::notify::send_silent(ctx, channel, text)` for text alone, or with
+`notify::send_silent_with(ctx, channel, SilentPost { content, embeds, components, files, reply_to })`
+when it needs embeds, buttons, files or a reply. Both send without notifications, so the user's own
+message does not ping twice; the second returns the new message's id. An edit (`message_id`) keeps the
+notification state it has.
+
 The sections below describe what is under the SDK, and what a module that is not only commands
 (reacting to messages, members, bans) needs to know.
 

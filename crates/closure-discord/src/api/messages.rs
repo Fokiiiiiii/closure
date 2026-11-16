@@ -71,6 +71,7 @@ impl TwilightApi {
         embeds: &[Embed],
         reply_to: Option<MessageId>,
         mentions: &MentionPolicy,
+        silent: bool,
     ) -> Result<Outcome, DiscordError> {
         let allowed = allowed_mentions(mentions);
         let mut request = self
@@ -82,6 +83,10 @@ impl TwilightApi {
         }
         if !embeds.is_empty() {
             request = request.embeds(embeds);
+        }
+        if silent {
+            request = request
+                .flags(twilight_model::channel::message::MessageFlags::SUPPRESS_NOTIFICATIONS);
         }
         if let Some(message) = reply_to {
             // A reply to a message deleted since should still be sent as a plain message, not fail.
@@ -107,6 +112,7 @@ impl TwilightApi {
         embeds: &[Embed],
         components: &[Component],
         files: &[closure_core::action::FileUpload],
+        silent: bool,
     ) -> Result<Outcome, DiscordError> {
         let allowed = AllowedMentions::default();
         let message = if let Some(message) = edit {
@@ -143,6 +149,10 @@ impl TwilightApi {
             }
             if let Some(reply) = reply_to {
                 request = request.reply(reply).fail_if_not_exists(false);
+            }
+            if silent {
+                request = request
+                    .flags(twilight_model::channel::message::MessageFlags::SUPPRESS_NOTIFICATIONS);
             }
             read(request).await?
         };

@@ -324,11 +324,60 @@ async fn outgoing_messages_never_ping_anyone_by_default() {
             embeds: vec![],
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         })
         .await;
     let body: serde_json::Value = serde_json::from_str(&discord.requests()[0].body).unwrap();
     assert_eq!(body["content"], "hello @everyone");
     assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn silent_messages_suppress_notifications_and_others_do_not() {
+    let discord = FakeDiscord::start(vec![(200, "{}"), (200, "{}")]).await;
+    let api = discord.api();
+    for silent in [true, false] {
+        let _ = api
+            .execute(Action::SendMessage {
+                channel_id: Id::new(30),
+                content: Some("https://x.com/a/status/1".into()),
+                embeds: vec![],
+                reply_to: None,
+                mentions: MentionPolicy::None,
+                silent,
+            })
+            .await;
+    }
+    let requests = discord.requests();
+    let quiet: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    let loud: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(quiet["flags"], 4096, "{}", requests[0].body);
+    assert!(loud.get("flags").is_none(), "{}", requests[1].body);
+}
+
+#[tokio::test]
+async fn silent_posts_suppress_notifications_and_others_do_not() {
+    let discord = FakeDiscord::start(vec![(200, "{}"), (200, "{}")]).await;
+    let api = discord.api();
+    for silent in [true, false] {
+        let _ = api
+            .execute(Action::PostMessage {
+                channel_id: Id::new(30),
+                message_id: None,
+                reply_to: None,
+                content: Some("https://x.com/a/status/1".into()),
+                embeds: vec![],
+                components: vec![],
+                files: vec![],
+                silent,
+            })
+            .await;
+    }
+    let requests = discord.requests();
+    let quiet: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    let loud: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(quiet["flags"], 4096, "{}", requests[0].body);
+    assert!(loud.get("flags").is_none(), "{}", requests[1].body);
 }
 
 #[tokio::test]

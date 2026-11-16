@@ -249,6 +249,7 @@ async fn send_welcome(
             embeds,
             reply_to: None,
             mentions: MentionPolicy::Users(vec![member.user.id]),
+            silent: false,
         })
         .await
     {

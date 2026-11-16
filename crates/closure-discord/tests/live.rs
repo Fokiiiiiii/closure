@@ -232,6 +232,7 @@ async fn in_guild_messages_can_be_sent_edited_reacted_to_and_deleted() {
                 embeds: vec![],
                 reply_to: None,
                 mentions: closure_core::action::MentionPolicy::None,
+                silent: false,
             })
             .await?
         else {

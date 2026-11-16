@@ -282,6 +282,7 @@ async fn deliver_item(
         embeds: Vec::new(),
         reply_to: None,
         mentions: closure_core::action::MentionPolicy::Users(vec![item.user]),
+        silent: false,
     };
     if let Err(error) = cx.api().execute(action).await {
         tracing::warn!(?error, "reminder delivery failed");

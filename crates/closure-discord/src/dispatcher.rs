@@ -2002,6 +2002,7 @@ fn notice_in_channel(shared: &Shared, token: &InteractionToken, message: String,
         embeds: vec![notice::embed(&message, color)],
         reply_to: Some(invoker),
         mentions: MentionPolicy::default(),
+        silent: false,
     };
     let api = Arc::clone(&shared.api);
     let cancel = shared.cancel.clone();

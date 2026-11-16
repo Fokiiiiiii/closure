@@ -130,6 +130,7 @@ impl closure_api::MessageSink for DiscordSink {
                 message_id: edit,
                 reply_to: None,
                 files: Vec::new(),
+                silent: false,
                 content: post.content,
                 embeds: post.embeds,
                 components: post.components,

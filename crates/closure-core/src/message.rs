@@ -585,6 +585,7 @@ mod tests {
                 embeds,
                 components,
                 files: Vec::new(),
+                silent: false,
             };
             assert_eq!(action.validate(), Ok(()));
         }

@@ -56,6 +56,7 @@ pub async fn send(
             embeds: embeds.clone(),
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         },
     };
     match destination {

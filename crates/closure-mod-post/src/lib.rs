@@ -59,6 +59,7 @@ async fn send(cx: JobCx) -> Result<(), ModuleError> {
             message_id: edit,
             reply_to: None,
             files: Vec::new(),
+            silent: false,
             content,
             embeds,
             components,

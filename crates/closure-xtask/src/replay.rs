@@ -366,6 +366,7 @@ fn message(channel: ChannelId, content: Option<String>, embeds: Vec<Embed>, kind
             embeds,
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         }),
         key,
     }
@@ -433,6 +434,7 @@ mod tests {
             embeds: vec![],
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         }
     }
 
@@ -578,6 +580,7 @@ mod tests {
             embeds: vec![embed(title)],
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         };
 
         let plan = plan_of(&[card("a"), card("b")]);
@@ -593,6 +596,7 @@ mod tests {
             embeds: vec![],
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         };
 
         let plan = plan_of(&[empty]);

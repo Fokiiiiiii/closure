@@ -369,6 +369,7 @@ impl ApiClient {
             embeds: Vec::new(),
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         };
         match self.execute(action).await? {
             Outcome::Message(message) => Ok(*message),
@@ -389,6 +390,7 @@ impl ApiClient {
             embeds,
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         };
         match self.execute(action).await? {
             Outcome::Message(message) => Ok(*message),
@@ -1490,6 +1492,7 @@ mod tests {
             embeds: Vec::new(),
             components,
             files: Vec::new(),
+            silent: false,
         };
         let api = Arc::new(MockApi::default());
         let module = |name: &str| {
@@ -1578,6 +1581,7 @@ mod tests {
                 embeds: Vec::new(),
                 reply_to: None,
                 mentions: MentionPolicy::None,
+                silent: false,
             },
             Action::EditMessage {
                 channel_id,
@@ -2116,6 +2120,7 @@ mod tests {
                 embeds: vec![embed],
                 reply_to: None,
                 mentions: MentionPolicy::None,
+                silent: false,
             }]
         );
     }

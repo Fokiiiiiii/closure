@@ -1129,6 +1129,7 @@ async fn announce(ctx: &EventContext, id: i64, operation: &Operation) -> Result<
             embeds: Vec::new(),
             reply_to: None,
             mentions: MentionPolicy::None,
+            silent: false,
         })
         .await;
     if let Err(error) = sent {
@@ -1225,6 +1226,7 @@ async fn post_request(
         embeds: Vec::new(),
         components,
         files: Vec::new(),
+        silent: false,
     })
     .await
     .map(drop)
