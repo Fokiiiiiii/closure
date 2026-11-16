@@ -966,16 +966,19 @@ dependencies = [
 [[package]]
 name = "closure-plugins"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb97f5fa43565cd6d46f3d7879b3474f476e58c9"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#c42919f954fba0bbe7a126590d78312ae5bbb5f9"
 dependencies = [
  "anyhow",
  "closure-core",
+ "plugin-feeds",
  "plugin-giveaway",
+ "plugin-kit",
  "plugin-leveling",
  "plugin-linkexpand",
  "plugin-starboard",
  "plugin-tickets",
  "plugin-translate",
+ "tracing",
 ]
 
 [[package]]
@@ -2863,9 +2866,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "plugin-feeds"
+version = "0.1.0"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#c42919f954fba0bbe7a126590d78312ae5bbb5f9"
+dependencies = [
+ "anyhow",
+ "closure-core",
+ "closure-sdk",
+ "fastrand",
+ "plugin-kit",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "tracing",
+ "twilight-model",
+ "twilight-util",
+]
+
+[[package]]
 name = "plugin-giveaway"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb97f5fa43565cd6d46f3d7879b3474f476e58c9"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#c42919f954fba0bbe7a126590d78312ae5bbb5f9"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2878,18 +2899,22 @@ dependencies = [
 [[package]]
 name = "plugin-kit"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb97f5fa43565cd6d46f3d7879b3474f476e58c9"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#c42919f954fba0bbe7a126590d78312ae5bbb5f9"
 dependencies = [
  "anyhow",
  "async-trait",
+ "closure-core",
  "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
  "rustls",
+ "secrecy",
+ "serde",
  "serde_json",
  "tokio",
  "tower-service",
+ "tracing",
  "twilight-model",
  "twilight-util",
 ]
@@ -2897,7 +2922,7 @@ dependencies = [
 [[package]]
 name = "plugin-leveling"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb97f5fa43565cd6d46f3d7879b3474f476e58c9"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#c42919f954fba0bbe7a126590d78312ae5bbb5f9"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2910,7 +2935,7 @@ dependencies = [
 [[package]]
 name = "plugin-linkexpand"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb97f5fa43565cd6d46f3d7879b3474f476e58c9"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#c42919f954fba0bbe7a126590d78312ae5bbb5f9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2929,7 +2954,7 @@ dependencies = [
 [[package]]
 name = "plugin-starboard"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb97f5fa43565cd6d46f3d7879b3474f476e58c9"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#c42919f954fba0bbe7a126590d78312ae5bbb5f9"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2945,7 +2970,7 @@ dependencies = [
 [[package]]
 name = "plugin-tickets"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb97f5fa43565cd6d46f3d7879b3474f476e58c9"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#c42919f954fba0bbe7a126590d78312ae5bbb5f9"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -2964,7 +2989,7 @@ dependencies = [
 [[package]]
 name = "plugin-translate"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#eb97f5fa43565cd6d46f3d7879b3474f476e58c9"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#c42919f954fba0bbe7a126590d78312ae5bbb5f9"
 dependencies = [
  "anyhow",
  "closure-core",
@@ -3311,6 +3336,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "roxmltree"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3562,7 +3596,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
 dependencies = [
  "annotate-snippets",
- "base64 0.22.1",
+ "base64 0.23.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
