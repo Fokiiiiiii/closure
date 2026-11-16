@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use closure_core::module::Module;
+use closure_core::operator_settings::OperatorSettings;
 
 pub mod message_history;
 
@@ -11,8 +12,13 @@ pub mod message_history;
 #[path = "message_files_tests.rs"]
 mod message_files_tests;
 
-/// Every module this build ships. Adding a module means adding it here.
-pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
+/// Every module this build ships, with the operator's settings for the plugins.
+/// Adding a module means adding it here.
+#[cfg_attr(
+    not(feature = "plugins"),
+    allow(unused_variables, reason = "only the plugins read the settings")
+)]
+pub fn modules_with(settings: &OperatorSettings) -> Result<Vec<Arc<dyn Module>>> {
     #[allow(unused_mut, reason = "the plugins feature adds to it")]
     let mut modules: Vec<Arc<dyn Module>> = vec![
         Arc::new(closure_mod_dashboard::module()?),
@@ -41,6 +47,11 @@ pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
         Arc::new(closure_mod_persist::module()?),
     ];
     #[cfg(feature = "plugins")]
-    modules.extend(closure_plugins::modules()?);
+    modules.extend(closure_plugins::modules_with(settings)?);
     Ok(modules)
+}
+
+/// Every module this build ships, with no operator settings.
+pub fn modules() -> Result<Vec<Arc<dyn Module>>> {
+    modules_with(&OperatorSettings::default())
 }

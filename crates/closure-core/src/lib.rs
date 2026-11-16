@@ -27,6 +27,7 @@ pub mod links;
 pub mod locale;
 pub mod message;
 pub mod module;
+pub mod operator_settings;
 pub mod permission;
 pub mod registry;
 pub mod schedule;

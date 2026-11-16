@@ -592,6 +592,7 @@ dependencies = [
  "ring",
  "secrecy",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "thiserror",
  "tokio",

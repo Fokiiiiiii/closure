@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use closure::message_history::{retention_cutoff, unix_now};
-use closure::modules;
+use closure::modules_with;
 use closure_api::{ApiState, GatewayStatus, Readiness, ServerLimits, router};
 use closure_config::{ConfigCompiler, SettingsStore, parse_overrides};
 use closure_core::action::{Action, Outcome};
@@ -21,6 +21,7 @@ use closure_core::integration_secrets::{
 use closure_core::latency::GatewayLatency;
 use closure_core::locale::Translator;
 use closure_core::module::{DynamicCommandChangeError, DynamicCommandChangeSink};
+use closure_core::operator_settings::OperatorSettings;
 use closure_core::permission::Actor;
 use closure_core::registry::ModuleRegistry;
 use closure_core::schedule::SchedulerBackend;
@@ -548,8 +549,12 @@ struct Core {
     store: Arc<SettingsStore>,
 }
 
-fn build_core(bot_config: Option<&Path>, scripts_dir: &Path) -> Result<Core> {
-    let mut all = modules()?;
+fn build_core(
+    bot_config: Option<&Path>,
+    scripts_dir: &Path,
+    settings: &OperatorSettings,
+) -> Result<Core> {
+    let mut all = modules_with(settings)?;
     let mut unavailable = std::collections::HashSet::new();
     let grants = closure_script::load_grants(scripts_dir).unwrap_or_else(|error| {
         tracing::error!(%error, "could not load script grants");
@@ -1073,7 +1078,7 @@ async fn serve(
     let latency = Arc::new(GatewayLatency::default());
     let api = Arc::new(
         TwilightApi::new(Arc::clone(&http), application_id)
-            .with_webhooks(crate::webhooks::load(&args.webhook_file)?)
+            .with_webhooks(crate::webhooks::from_env()?)
             .with_cache(Arc::new(InMemoryCacheView(Arc::clone(&cache)))),
     );
     let integration_secrets = integration_secret_service(db)?;
@@ -1297,7 +1302,9 @@ pub async fn run(args: Args) -> Result<()> {
         "starting closure"
     );
 
-    let core = build_core(args.bot_config.as_deref(), &args.scripts_dir)?;
+    let settings =
+        OperatorSettings::load(&args.settings).context("could not read the settings file")?;
+    let core = build_core(args.bot_config.as_deref(), &args.scripts_dir, &settings)?;
     let db = Db::connect(&args.database_url, &DbOptions::default())
         .await
         .context("could not connect to the database")?;
@@ -1395,6 +1402,8 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use closure::modules;
+
     use super::*;
     use closure_api::MemberAccess;
 
@@ -1494,7 +1503,7 @@ mod tests {
         let missing =
             std::env::temp_dir().join(format!("closure-no-scripts-{}", std::process::id()));
         assert!(!missing.exists());
-        let core = build_core(None, &missing).unwrap();
+        let core = build_core(None, &missing, &OperatorSettings::default()).unwrap();
         let native = ModuleRegistry::new(modules().unwrap()).unwrap();
         let ids = |registry: &ModuleRegistry| {
             registry
@@ -1557,7 +1566,7 @@ mod tests {
             std::fs::write(dir.join("module.yaml"), serde_json::to_vec(&spec).unwrap()).unwrap();
             std::fs::write(dir.join("main.lua"), source).unwrap();
         }
-        let core = build_core(None, &root).unwrap();
+        let core = build_core(None, &root, &OperatorSettings::default()).unwrap();
         let module = |id| core.registry.get(&ModuleId::new(id).unwrap());
         assert!(module("a-dependent").is_some());
         assert!(module("z-base").is_some());
@@ -1607,7 +1616,7 @@ mod tests {
             "modules: { broken: { enabled: true }, bad-command: { enabled: true }, automod: { enabled: true } }",
         )
         .unwrap();
-        let core = build_core(Some(&config), &root).unwrap();
+        let core = build_core(Some(&config), &root, &OperatorSettings::default()).unwrap();
         let settings = core.store.settings(Id::new(1));
         assert!(
             settings
@@ -1658,7 +1667,12 @@ mod tests {
             path
         };
         let good = write("good.yaml", "language: ja\nlimits: { concurrency: 12 }\n");
-        let core = build_core(Some(&good), Path::new("/nonexistent-closure-scripts-test")).unwrap();
+        let core = build_core(
+            Some(&good),
+            Path::new("/nonexistent-closure-scripts-test"),
+            &OperatorSettings::default(),
+        )
+        .unwrap();
         let defaults = core.store.settings(Id::new(1));
         assert_eq!(defaults.effective.limits.concurrency, 12);
         assert!(defaults.effective.language.0.is_some());
@@ -1668,9 +1682,13 @@ mod tests {
         let broken = write("broken.yaml", "limits: [");
         let invalid = write("invalid.yaml", "limits: { concurrency: 0 }\n");
         for path in [&missing, &broken, &invalid] {
-            let error = build_core(Some(path), Path::new("/nonexistent-closure-scripts-test"))
-                .err()
-                .expect("start-up is refused");
+            let error = build_core(
+                Some(path),
+                Path::new("/nonexistent-closure-scripts-test"),
+                &OperatorSettings::default(),
+            )
+            .err()
+            .expect("start-up is refused");
             assert!(
                 format!("{error:#}").contains(&*path.to_string_lossy()),
                 "{error:#}"

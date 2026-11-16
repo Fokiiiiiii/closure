@@ -60,9 +60,10 @@ pub struct Args {
     #[arg(long, env = "BOT_CONFIG")]
     pub bot_config: Option<PathBuf>,
 
-    /// File containing named webhook credentials.
-    #[arg(long, env = "WEBHOOK_FILE", default_value = "webhooks.env")]
-    pub webhook_file: PathBuf,
+    /// The operator's settings file (YAML): the sections of the plugins and the secrets they use.
+    /// A missing file means no settings.
+    #[arg(long, env = "BOT_SETTINGS", default_value = "closure.yaml")]
+    pub settings: PathBuf,
 
     /// Directory containing installed script modules.
     #[arg(long, env = "SCRIPTS_DIR", default_value = "scripts")]
@@ -196,7 +197,7 @@ mod tests {
         assert_eq!(args.api_bind, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(args.log_format, LogFormat::Pretty);
         assert_eq!(args.application_id.get(), 42);
-        assert_eq!(args.webhook_file, PathBuf::from("webhooks.env"));
+        assert_eq!(args.settings, PathBuf::from("closure.yaml"));
         assert_eq!(args.scripts_dir, PathBuf::from("scripts"));
         assert!(args.api_admin_token.is_none());
         assert!(!args.skip_command_registration);
@@ -216,8 +217,8 @@ mod tests {
             "json",
             "--bot-config",
             "/etc/closure/bot.yaml",
-            "--webhook-file",
-            "/etc/closure/hooks",
+            "--settings",
+            "/etc/closure/settings.yaml",
             "--scripts-dir",
             "/etc/closure/scripts",
         ])
@@ -227,7 +228,7 @@ mod tests {
             Some(PathBuf::from("/etc/closure/bot.yaml"))
         );
         assert_eq!(args.api_bind.port(), 9000);
-        assert_eq!(args.webhook_file, PathBuf::from("/etc/closure/hooks"));
+        assert_eq!(args.settings, PathBuf::from("/etc/closure/settings.yaml"));
         assert_eq!(args.scripts_dir, PathBuf::from("/etc/closure/scripts"));
         assert_eq!(args.command_guild.map(NonZeroU64::get), Some(7));
         assert!(args.skip_command_registration);

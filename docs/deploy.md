@@ -88,9 +88,16 @@ Only publish the admin API port to a trusted network or put it behind a reverse 
 
 ## Named webhooks
 
-Set `WEBHOOK_FILE` or `--webhook-file` to the path of a file containing one
-`NAME=URL` per line. The default is `webhooks.env`; a missing file is allowed.
-See `webhooks.env.example` for the format. Restrict the file to its owner, for
-example with `chmod 600 webhooks.env`. Webhook tokens stay in this file and are
-not stored in server configuration or the database. Set `log_webhook` or the logs module's
-`webhook` to a registered name to use it for log delivery.
+Each named webhook is a variable `WEBHOOK_<NAME>` holding its Discord URL, for example
+`WEBHOOK_LOGS=https://discord.com/api/webhooks/<id>/<token>`, in the environment or in `.env`.
+Keep `.env` private, for example with `chmod 600 .env`. A value that is not a Discord webhook URL
+stops the start-up; the error names the variable and never the URL. Webhook tokens are not stored
+in server configuration or the database. Set `log_webhook` or the logs module's `webhook` to a
+registered name to use it for log delivery.
+
+## Operator settings
+
+`closure.yaml` (or `--settings` / `BOT_SETTINGS`) holds the operator's plugin sections under
+`plugins:` and names the secrets they use under `secrets:`, for example
+`secrets: { gemini: GEMINI_API_KEY }`: the value itself stays in the environment. A missing file
+means no settings. An unknown top-level key stops the start-up.
