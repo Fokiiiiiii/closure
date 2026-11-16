@@ -101,3 +101,9 @@ registered name to use it for log delivery.
 `plugins:` and names the secrets they use under `secrets:`, for example
 `secrets: { gemini: GEMINI_API_KEY }`: the value itself stays in the environment. A missing file
 means no settings. An unknown top-level key stops the start-up.
+
+To expand adult (R-18) Pixiv artworks, set `PIXIV_SESSION` to the value of the `PHPSESSID` cookie of
+a dedicated Pixiv account that is set to show such works, and name it with
+`secrets: { pixiv_session: PIXIV_SESSION }`. The value is a secret: it is sent only to Pixiv's JSON
+addresses, never logged, and a value of any other form is ignored with a warning. Without it, such
+artworks are not expanded; when the session expires, they stop being expanded again.
