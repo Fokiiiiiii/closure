@@ -108,6 +108,15 @@ a dedicated Pixiv account that is set to show such works, and name it with
 addresses, never logged, and a value of any other form is ignored with a warning. Without it, such
 artworks are not expanded; when the session expires, they stop being expanded again.
 
+## Feeds
+
+`/feed add` watches a YouTube channel or a subreddit with no setup. X and Pixiv are read through an
+`RSSHub` that you run or trust: set `plugins.feeds.rsshub_base_url` in `closure.yaml` to its
+`https://` address (no user info, query or fragment). The bot reads it like any other site, so it
+must be reachable on the public internet; without it, `/feed add` refuses those two kinds. The X
+routes of an `RSSHub` need their own credentials on the `RSSHub` side. `plugins.feeds.interval_secs`
+sets the seconds between two looks (300 by default, at least 60).
+
 Reddit and Instagram links are expanded through an embed fixer, a third-party service named per
 site under `plugins.linkexpand.proxies`. Reddit uses `rxddit.com` when no host is given; Instagram
 is off until one is named:
