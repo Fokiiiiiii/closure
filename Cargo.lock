@@ -966,7 +966,7 @@ dependencies = [
 [[package]]
 name = "closure-plugins"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#52488bf72b58d8b41f46d7ced989e47b804f7436"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#f20fd0ac206f2ff627be5fb112cbf0ae0fdeb41c"
 dependencies = [
  "anyhow",
  "closure-core",
@@ -2868,7 +2868,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 [[package]]
 name = "plugin-feeds"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#52488bf72b58d8b41f46d7ced989e47b804f7436"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#f20fd0ac206f2ff627be5fb112cbf0ae0fdeb41c"
 dependencies = [
  "anyhow",
  "closure-core",
@@ -2886,7 +2886,7 @@ dependencies = [
 [[package]]
 name = "plugin-giveaway"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#52488bf72b58d8b41f46d7ced989e47b804f7436"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#f20fd0ac206f2ff627be5fb112cbf0ae0fdeb41c"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2899,7 +2899,7 @@ dependencies = [
 [[package]]
 name = "plugin-kit"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#52488bf72b58d8b41f46d7ced989e47b804f7436"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#f20fd0ac206f2ff627be5fb112cbf0ae0fdeb41c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2922,7 +2922,7 @@ dependencies = [
 [[package]]
 name = "plugin-leveling"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#52488bf72b58d8b41f46d7ced989e47b804f7436"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#f20fd0ac206f2ff627be5fb112cbf0ae0fdeb41c"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2935,7 +2935,7 @@ dependencies = [
 [[package]]
 name = "plugin-linkexpand"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#52488bf72b58d8b41f46d7ced989e47b804f7436"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#f20fd0ac206f2ff627be5fb112cbf0ae0fdeb41c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2954,7 +2954,7 @@ dependencies = [
 [[package]]
 name = "plugin-starboard"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#52488bf72b58d8b41f46d7ced989e47b804f7436"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#f20fd0ac206f2ff627be5fb112cbf0ae0fdeb41c"
 dependencies = [
  "closure-core",
  "closure-sdk",
@@ -2970,7 +2970,7 @@ dependencies = [
 [[package]]
 name = "plugin-tickets"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#52488bf72b58d8b41f46d7ced989e47b804f7436"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#f20fd0ac206f2ff627be5fb112cbf0ae0fdeb41c"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -2989,7 +2989,7 @@ dependencies = [
 [[package]]
 name = "plugin-translate"
 version = "0.1.0"
-source = "git+https://github.com/Fokiiiiiii/closure-plugins#52488bf72b58d8b41f46d7ced989e47b804f7436"
+source = "git+https://github.com/Fokiiiiiii/closure-plugins#f20fd0ac206f2ff627be5fb112cbf0ae0fdeb41c"
 dependencies = [
  "anyhow",
  "closure-core",
@@ -3596,7 +3596,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
