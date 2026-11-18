@@ -107,3 +107,20 @@ a dedicated Pixiv account that is set to show such works, and name it with
 `secrets: { pixiv_session: PIXIV_SESSION }`. The value is a secret: it is sent only to Pixiv's JSON
 addresses, never logged, and a value of any other form is ignored with a warning. Without it, such
 artworks are not expanded; when the session expires, they stop being expanded again.
+
+Reddit and Instagram links are expanded through an embed fixer, a third-party service named per
+site under `plugins.linkexpand.proxies`. Reddit uses `rxddit.com` when no host is given; Instagram
+is off until one is named:
+
+```yaml
+plugins:
+  linkexpand:
+    proxies:
+      reddit: rxddit.com
+      instagram: embed-fixer.example.org  # example only: name a fixer you trust
+```
+
+The link's host is replaced with the fixer's, so the fixer sees the post's address. Posts from
+these sites are marked for adults, so they are expanded only in a channel for adults. When the
+fixer stops working, they are no longer expanded. A host that is not a plain host name is logged
+without its value, and that site is not expanded.
