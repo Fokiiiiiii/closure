@@ -117,6 +117,12 @@ must be reachable on the public internet; without it, `/feed add` refuses those 
 routes of an `RSSHub` need their own credentials on the `RSSHub` side. `plugins.feeds.interval_secs`
 sets the seconds between two looks (300 by default, at least 60).
 
+Twitch posts when a channel goes live. Register an application in the Twitch developer console, put
+its client id and secret in the environment as `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`, and
+name them with `secrets: { twitch_client_id: TWITCH_CLIENT_ID, twitch_client_secret:
+TWITCH_CLIENT_SECRET }`. Both are needed; with one of them, or none, `/feed add` refuses Twitch.
+Neither value is logged or shown in an error.
+
 Reddit and Instagram links are expanded through an embed fixer, a third-party service named per
 site under `plugins.linkexpand.proxies`. Reddit uses `rxddit.com` when no host is given; Instagram
 is off until one is named:
