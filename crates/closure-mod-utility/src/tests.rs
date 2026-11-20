@@ -576,6 +576,39 @@ async fn a_message_is_described_only_in_this_server_and_only_when_its_channel_is
 }
 
 #[tokio::test]
+async fn the_rich_embeds_of_a_message_are_shown_with_its_card() {
+    let open = harness();
+    open.api().set_channels(Id::new(1), vec![text_channel(30)]);
+    open.api()
+        .set_roles(Id::new(1), vec![everyone_with("66560")]);
+    let message: twilight_model::channel::Message = serde_json::from_value(serde_json::json!({
+        "id": "900", "channel_id": "30", "content": "",
+        "author": { "id": "7", "username": "panel", "discriminator": "0", "avatar": null, "bot": true },
+        "attachments": [], "mention_everyone": false, "mention_roles": [], "mentions": [],
+        "pinned": false, "timestamp": "2026-10-24T00:00:00.000000+00:00",
+        "edited_timestamp": null, "tts": false, "type": 0,
+        "embeds": [
+            { "type": "rich", "title": "Rules", "description": "Be kind",
+              "fields": [{ "name": "One", "value": "No spam", "inline": false }] },
+            { "type": "article", "url": "https://example.com", "title": "A link preview" }
+        ]
+    }))
+    .unwrap();
+    open.api().set_message(message);
+    let shown = open
+        .invoke(info_of("message", "https://discord.com/channels/1/30/900"))
+        .await
+        .unwrap();
+    assert_eq!(
+        shown[0].embeds.len(),
+        2,
+        "the card, and the rich embed: {shown:?}"
+    );
+    assert_eq!(shown[0].embeds[1].title.as_deref(), Some("Rules"));
+    assert_eq!(shown[0].embeds[1].fields[0].value, "No spam");
+}
+
+#[tokio::test]
 async fn an_emoji_is_described_from_how_it_is_written_and_only_one_thing_at_a_time() {
     let harness = harness();
     for (given, title, animated) in [

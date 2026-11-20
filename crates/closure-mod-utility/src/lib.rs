@@ -18,6 +18,7 @@ use closure_sdk::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use twilight_model::channel::Channel;
+use twilight_model::channel::message::Embed;
 use twilight_model::guild::{Member, Permissions};
 use twilight_util::permission_calculator::PermissionCalculator;
 
@@ -447,7 +448,43 @@ async fn messageinfo(cx: CommandCx, text: &str) -> Result<(), UserError> {
     // the command was used in.
     let mut reply = reply_of(card)?;
     reply.ephemeral = true;
+    // The embeds of the message are shown as they are, so that what a panel says can be read. Link
+    // previews are left out (Discord makes them again), and so is what does not fit: an answer
+    // holds at most ten embeds and six thousand characters of them.
+    let mut room = EMBED_ROOM;
+    for embed in message
+        .embeds
+        .iter()
+        .filter(|embed| embed.kind == "rich")
+        .take(MAX_SHOWN_EMBEDS)
+    {
+        let size = embed_size(embed);
+        if size > room {
+            break;
+        }
+        room -= size;
+        reply.embeds.push(embed.clone());
+    }
     cx.reply_with(reply).await
+}
+
+/// The embeds of another message that are shown next to the card of `/info message`.
+const MAX_SHOWN_EMBEDS: usize = 9;
+/// What is left of the six thousand characters an answer may hold, after the card.
+const EMBED_ROOM: usize = 4500;
+
+/// The characters of an embed that Discord counts towards the limit.
+fn embed_size(embed: &Embed) -> usize {
+    let chars = |text: Option<&str>| text.map_or(0, |text| text.chars().count());
+    chars(embed.title.as_deref())
+        + chars(embed.description.as_deref())
+        + chars(embed.author.as_ref().map(|author| author.name.as_str()))
+        + chars(embed.footer.as_ref().map(|footer| footer.text.as_str()))
+        + embed
+            .fields
+            .iter()
+            .map(|field| field.name.chars().count() + field.value.chars().count())
+            .sum::<usize>()
 }
 
 /// The id of an emoji written as `<:name:id>`, `<a:name:id>`, `name:id` or the id alone, with its
