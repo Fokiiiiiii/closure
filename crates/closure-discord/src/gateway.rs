@@ -167,6 +167,8 @@ impl GuildLeaver for HttpLeaver {
 #[derive(Clone)]
 pub struct AllowedGuilds {
     guilds: Arc<HashSet<GuildId>>,
+    /// Guilds the bot stays in without serving them.
+    quiet: Arc<HashSet<GuildId>>,
     leaver: Arc<dyn GuildLeaver>,
 }
 
@@ -183,8 +185,22 @@ impl AllowedGuilds {
     pub fn new(guilds: HashSet<GuildId>, leaver: Arc<dyn GuildLeaver>) -> Self {
         Self {
             guilds: Arc::new(guilds),
+            quiet: Arc::new(HashSet::new()),
             leaver,
         }
+    }
+
+    /// Stays in `quiet` without serving them: nothing from them is handled, and they are not left.
+    #[must_use]
+    pub fn keeping(mut self, quiet: HashSet<GuildId>) -> Self {
+        self.quiet = Arc::new(quiet);
+        self
+    }
+
+    /// Whether the bot stays in the guild without serving it.
+    #[must_use]
+    pub fn keeps(&self, guild: GuildId) -> bool {
+        self.quiet.contains(&guild)
     }
 
     /// Leaves through `http`.
@@ -1079,7 +1095,9 @@ fn handle_event_with_modal_components(
             GuildCreate::Unavailable(guild) => guild.id,
         };
         if !allowed.permits(guild) {
-            allowed.leaver.leave(guild);
+            if !allowed.keeps(guild) {
+                allowed.leaver.leave(guild);
+            }
             return;
         }
     }
@@ -1499,6 +1517,58 @@ mod tests {
         assert_eq!(*leaves.0.lock().unwrap(), [2]);
         let arrivals = queues.lifecycle.take().jobs.len();
         assert_eq!(arrivals, 1, "the allowed guild is served");
+    }
+
+    #[tokio::test]
+    async fn a_quiet_guild_is_neither_left_nor_served() {
+        use closure_core::testing::{MockApi, StaticSettings};
+
+        let dispatcher = Dispatcher::start(
+            Arc::new(ModuleRegistry::new(vec![]).unwrap()),
+            Arc::new(StaticSettings::new([])),
+            Arc::new(MockApi::default()),
+            Arc::new(closure_i18n::TranslatorBuilder::new().unwrap().build()),
+            crate::DispatcherConfig::default(),
+        )
+        .await
+        .unwrap();
+        let leaves = Arc::new(Leaves::default());
+        let queues = Arc::new(HookQueues::new(None));
+        let context = ShardContext {
+            cache: new_cache(),
+            dispatcher,
+            hooks: Arc::clone(&queues),
+            guild_hooks: Arc::new(NoHooks),
+            health: Arc::new(GatewayHealth::new(1)),
+            latency: Arc::default(),
+            members_intent: false,
+            member_request_limit: 0,
+            allowed: Some(
+                AllowedGuilds::new(
+                    HashSet::from([Id::new(1)]),
+                    Arc::clone(&leaves) as Arc<dyn GuildLeaver>,
+                )
+                .keeping(HashSet::from([Id::new(2)])),
+            ),
+            shutdown: CancellationToken::new(),
+        };
+        let unavailable = |id: &str| {
+            let created: GuildCreate =
+                serde_json::from_value(json!({ "id": id, "unavailable": true })).unwrap();
+            Event::GuildCreate(Box::new(created))
+        };
+        let shard = ShardId::new(0, 1);
+        handle_event(&context, shard, None, &unavailable("2"));
+        handle_event(&context, shard, None, &unavailable("3"));
+        handle_event(&context, shard, None, &unavailable("1"));
+        handle_event(&context, shard, None, &guild_with(1));
+        assert_eq!(
+            *leaves.0.lock().unwrap(),
+            [3],
+            "only the guild nobody named is left"
+        );
+        let arrivals = queues.lifecycle.take().jobs.len();
+        assert_eq!(arrivals, 1, "the quiet guild is not served");
     }
 
     #[tokio::test]

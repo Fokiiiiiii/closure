@@ -84,6 +84,11 @@ pub struct Args {
     #[arg(long, env = "ALLOWED_GUILDS_CONFIRM")]
     pub confirm_leave_all: bool,
 
+    /// Servers the bot stays in without serving them: it handles nothing from them, and never
+    /// leaves them. It needs `ALLOWED_GUILDS`, which names the servers it serves.
+    #[arg(long, env = "QUIET_GUILDS", value_delimiter = ',')]
+    pub quiet_guilds: Vec<NonZeroU64>,
+
     /// Do not publish slash commands at start-up.
     #[arg(long)]
     pub skip_command_registration: bool,

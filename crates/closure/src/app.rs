@@ -648,6 +648,14 @@ fn allowed_guild_ids(args: &Args) -> Option<HashSet<GuildId>> {
     )
 }
 
+/// The servers the bot stays in without serving them.
+fn quiet_guild_ids(args: &Args) -> HashSet<GuildId> {
+    args.quiet_guilds
+        .iter()
+        .map(|guild| Id::new(guild.get()))
+        .collect()
+}
+
 /// What the allowed list would make the bot leave of the servers it is in at start-up.
 #[derive(Debug, PartialEq, Eq)]
 enum LeaveRisk {
@@ -708,8 +716,18 @@ async fn reconcile_joined_guilds(
             return Ok(());
         }
     };
+    if allowed.is_none() && !args.quiet_guilds.is_empty() {
+        bail!(
+            "QUIET_GUILDS only means something with ALLOWED_GUILDS, which names the servers served"
+        );
+    }
     if let Some(allowed) = allowed {
-        check_leave_risk(args, allowed, &guilds)?;
+        let stay: HashSet<GuildId> = allowed
+            .iter()
+            .copied()
+            .chain(quiet_guild_ids(args))
+            .collect();
+        check_leave_risk(args, &stay, &guilds)?;
     }
     match reconcile_guilds(db, &guilds).await {
         Ok(left) => tracing::info!(guilds = guilds.len(), left, "reconciled the guild list"),
@@ -1193,6 +1211,7 @@ async fn serve(
                 member_spool: Some(args.hook_spool_dir.clone()),
                 allowed_guilds: allowed.map(|guilds| {
                     closure_discord::AllowedGuilds::leaving_with(guilds, Arc::clone(&http))
+                        .keeping(quiet_guild_ids(args))
                 }),
             },
             Arc::clone(&cache),
