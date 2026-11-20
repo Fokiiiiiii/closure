@@ -1042,6 +1042,16 @@ async fn deleted(
         .get(channel, message)
         .await
         .map_err(|error| ModuleError::other(error.to_string()))?;
+    deleted_entry(ctx, channel, message, saved).await
+}
+
+/// The entry of a deleted message, given what the history kept of it.
+async fn deleted_entry(
+    ctx: &EventContext,
+    channel: ChannelId,
+    message: MessageId,
+    saved: Option<SavedMessage>,
+) -> Result<LogEntry, ModuleError> {
     let kept = files::kept_files(ctx, message).await?;
     let card = match &saved {
         Some(saved) => saved_card(ctx, "logs-deleted", Color::Error, saved, &kept),
@@ -1073,7 +1083,7 @@ async fn bulk_deleted(
         match saved {
             // A message a bot wrote is not logged.
             Some(saved) if saved.author_bot || ignored_users.contains(&saved.author.get()) => {}
-            Some(_) => entries.push(deleted(ctx, channel, *message).await?),
+            saved @ Some(_) => entries.push(deleted_entry(ctx, channel, *message, saved).await?),
             None => unkept += 1,
         }
     }
