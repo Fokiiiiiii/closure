@@ -1,0 +1,24 @@
+id: guild-profile-lua
+name: Temporary guild profile
+version: '1'
+description: Renames the server on a day of the year, between two times, and gives the name back
+runtime: lua
+entry: main.lua
+intents: 0
+events: []
+capabilities: [read_guild, manage_guild, storage, schedule]
+dependencies: []
+commands: []
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    name: { type: [string, 'null'], description: The name of the server during the window; left out, nothing happens }
+    month: { type: [integer, 'null'], minimum: 1, maximum: 12, description: Month of the day }
+    day: { type: [integer, 'null'], minimum: 1, maximum: 31, description: Day of the month }
+    from: { type: [string, 'null'], description: 'Start time, HH:MM' }
+    to: { type: [string, 'null'], description: 'End time, HH:MM, after the start' }
+    utc_offset_minutes: { type: [integer, 'null'], minimum: -720, maximum: 840, description: 'The zone of the times, in minutes from UTC (Japan: 540)' }
+default_config: {}
+default_enabled: false
+catalogs: []

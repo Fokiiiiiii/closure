@@ -50,6 +50,8 @@ Everything that crosses is JSON of types that already exist and are already `Ser
 | host → script | `call(event)` | returns a list of actions, including for commands and jobs |
 | script → host | `execute(action)` | returns the `Outcome` or an error |
 | script → host | `store_get/set/delete/list` | the module's own KV store, same quotas as native |
+| script → host | `now`, `config` | the time in unix seconds, and the module's own configuration of the guild |
+| script → host | `schedule`, `cancel` | a job of the module's own at a time, and its cancellation; needs the `schedule` capability |
 
 The current bridge calls the runtime once with the serialized `Event`, using its `type` and `data`
 fields, and expects an array of serialized `Action` values. Commands arrive as `command`,
@@ -58,11 +60,12 @@ The dispatcher routes commands and autocomplete to their command owner and sched
 owning module, regardless of event subscriptions. Component, modal and context-command events
 likewise arrive in their existing `Event` form. An action rejected by the host is logged and later
 actions still run, including after transient API errors; failed actions are not retried, so
-at-least-once delivery is not guaranteed. Scripts have no job registration API; scheduled events
-only arrive for existing jobs. Host KV list returns objects with `key`, `value`, and `revision`.
+at-least-once delivery is not guaranteed. A script with the `schedule` capability
+schedules its own jobs, `{name, at, key?, payload?}` with `at` in whole unix seconds (a job with
+the same `key` is replaced), and `cancel` takes one back by key; the due job arrives as `scheduled`. Host KV list returns objects with `key`, `value`, and `revision`.
 
-A script gets no clock, no randomness, no network, no files and no environment beyond what the
-event carries. Every `execute` goes through the same `ApiClient` as native
+A script gets no randomness, no network, no files and no environment beyond what the
+event carries, the time (`now`) and its own configuration (`config`). Every `execute` goes through the same `ApiClient` as native
 modules: capability check, guild binding, validation. A script cannot do more than a native module
 holding the same capabilities.
 
@@ -105,6 +108,8 @@ returning the same packed pointer and length. Requests are:
 - `{"op":"set","key":"...","value":...}`
 - `{"op":"delete","key":"..."}`
 - `{"op":"list","prefix":"...","limit":10}`
+- `{"op":"now"}`, `{"op":"config"}`
+- `{"op":"schedule","name":"...","at":1790000000,"key":"...","payload":...}`, `{"op":"cancel","key":"..."}`
 
 Responses are `{"ok": value}` or `{"err":"message"}`. Calls use a new store
 and instance each time; use KV for persistent data. WASI is unavailable.
@@ -143,7 +148,8 @@ The chunk defines `on_event(event)`, which returns an array of actions; `nil` an
 actions. JSON arrays carry an array metatable and JSON null is `closure.null`; use
 `closure.array({})` for a newly constructed empty array. `closure.execute(action)`,
 `closure.store_get(key)`, `closure.store_set(key, value)`, `closure.store_delete(key)` and
-`closure.store_list(prefix, limit)` raise Lua errors on host errors. An upper-limit failure still
+`closure.store_list(prefix, limit)`, `closure.now()`, `closure.config()`, `closure.schedule{name=, at=, key=, payload=}`
+and `closure.cancel(key)` raise Lua errors on host errors. Use `//` for a time, since `at` must be a whole number. An upper-limit failure still
 fails the invocation even if caught with `pcall`.
 Metatables containing `__gc` are rejected to prevent finalizers from bypassing the instruction hook.
 

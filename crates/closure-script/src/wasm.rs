@@ -100,6 +100,13 @@ fn request(host: &dyn HostApi, value: &Value) -> Result<Value, String> {
             Ok(Value::Null)
         }
         "delete" => host.delete(string("key")?).map(Value::Bool),
+        "now" => host.now().map(Value::from),
+        "config" => host.config(),
+        "schedule" => {
+            host.schedule(value.clone())?;
+            Ok(Value::Null)
+        }
+        "cancel" => host.cancel(string("key")?).map(Value::Bool),
         "list" => host.list(
             string("prefix")?,
             usize::try_from(field("limit")?.as_u64().ok_or("invalid limit")?)

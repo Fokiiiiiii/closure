@@ -90,6 +90,25 @@ impl LuaRuntime {
                     })?)
                 }
             );
+            host_call!("now", _lua, waited, (), (), {
+                timed(&waited, || host.now().map_err(mlua::Error::runtime))
+            });
+            host_call!("config", lua, waited, (), (), {
+                lua.to_value(&timed(&waited, || {
+                    host.config().map_err(mlua::Error::runtime)
+                })?)
+            });
+            let schedule_limit = Rc::clone(&conversion_limit);
+            host_call!("schedule", lua, waited, request, LuaValue, {
+                let request =
+                    bounded_host_json(lua, request, budget.output_bytes, &schedule_limit)?;
+                timed(&waited, || {
+                    host.schedule(request).map_err(mlua::Error::runtime)
+                })
+            });
+            host_call!("cancel", _lua, waited, key, String, {
+                timed(&waited, || host.cancel(&key).map_err(mlua::Error::runtime))
+            });
             api.set("null", lua.null())?;
             api.set(
                 "array",

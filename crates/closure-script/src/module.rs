@@ -220,6 +220,15 @@ impl Host {
         }
     }
 
+    fn schedule_allowed(&self) -> Result<(), String> {
+        self.check()?;
+        if self.capabilities.contains(Capability::Schedule) {
+            Ok(())
+        } else {
+            Err("capability `schedule` is not granted to this script".into())
+        }
+    }
+
     fn run<T>(&self, future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
         self.check()?;
         let mut cancelled = self.cancelled.clone();
@@ -293,6 +302,54 @@ impl HostApi for Host {
                 .map_err(|error| error.to_string())
         })?;
         self.output(Value::Array(entries.into_iter().map(|(key, entry)| serde_json::json!({"key": key, "value": entry.value, "revision": entry.revision})).collect()))
+    }
+
+    fn now(&self) -> Result<i64, String> {
+        self.check()?;
+        Ok(self.ctx.now())
+    }
+
+    fn config(&self) -> Result<Value, String> {
+        self.check()?;
+        self.output(self.ctx.config().clone())
+    }
+
+    fn schedule(&self, request: Value) -> Result<(), String> {
+        self.schedule_allowed()?;
+        let name = request
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("missing name")?;
+        let at = request
+            .get("at")
+            .and_then(Value::as_i64)
+            .ok_or("`at` must be a whole number of seconds")?;
+        let key = request.get("key").and_then(Value::as_str);
+        let payload = request.get("payload").cloned().unwrap_or(Value::Null);
+        self.run(async {
+            let mut job = self
+                .ctx
+                .scheduler()
+                .job(name, &payload)
+                .map_err(|error| error.to_string())?;
+            if let Some(key) = key {
+                job = job.key(key);
+            }
+            job.at(at).await.map_err(|error| error.to_string())
+        })
+    }
+
+    fn cancel(&self, key: &str) -> Result<bool, String> {
+        self.schedule_allowed()?;
+        let cancelled = self.run(async {
+            self.ctx
+                .scheduler()
+                .cancel(key)
+                .await
+                .map_err(|error| error.to_string())
+        })?;
+        self.output(Value::Bool(cancelled))?;
+        Ok(cancelled)
     }
     fn limit_failure(&self) -> Option<String> {
         self.state

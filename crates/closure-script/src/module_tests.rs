@@ -9,6 +9,7 @@ use closure_core::error::DiscordError;
 use closure_core::event::{ChannelId, Event, GuildId};
 use closure_core::locale::{KeyTranslator, Locale};
 use closure_core::module::{EventContext, Module, ModuleId, ModuleManifest};
+use closure_core::schedule::{MemoryScheduler, Scheduler};
 use closure_core::settings::GuildPolicy;
 use closure_core::storage::{MemoryStorage, Store};
 use closure_core::testing::MockApi;
@@ -370,6 +371,47 @@ async fn host_kv_and_execute_use_grants_and_scoped_services() {
     module.on_event(&ctx, &event()).await.unwrap();
     assert_eq!(api.actions().len(), 1);
     assert_eq!(ctx.store().get::<Value>("key").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn host_clock_config_and_jobs_follow_the_schedule_capability() {
+    let backend = Arc::new(MemoryScheduler::default());
+    let runtime = Arc::new(FakeRuntime::new(|_, host, _| {
+        assert!(host.now()? > 1_700_000_000);
+        assert_eq!(host.config()?, json!({}));
+        let job = json!({"name":"tick","at":2_000_000_000_i64,"key":"k","payload":{"n":1}});
+        host.schedule(job.clone())?;
+        assert!(host.cancel("k")?);
+        assert!(!host.cancel("k")?);
+        host.schedule(job)?;
+        assert!(
+            host.schedule(json!({"name":"tick","at":"soon"}))
+                .unwrap_err()
+                .contains("whole number")
+        );
+        Ok(json!([]))
+    }));
+    let (module, ctx, _) = setup(runtime, vec![Capability::Schedule], Limits::default());
+    let ctx = ctx.with_scheduler(Scheduler::new(
+        backend.clone(),
+        &CapabilitySet::all(),
+        ModuleId::new("script").unwrap(),
+        GuildId::new(1),
+    ));
+    module.on_event(&ctx, &event()).await.unwrap();
+    assert_eq!(backend.len(), 1);
+
+    let runtime = Arc::new(FakeRuntime::new(|_, host, _| {
+        assert!(
+            host.schedule(json!({"name":"tick","at":2_000_000_000_i64}))
+                .unwrap_err()
+                .contains("capability")
+        );
+        assert!(host.cancel("k").unwrap_err().contains("capability"));
+        Ok(json!([]))
+    }));
+    let (module, ctx, _) = setup(runtime, vec![], Limits::default());
+    module.on_event(&ctx, &event()).await.unwrap();
 }
 
 #[tokio::test]

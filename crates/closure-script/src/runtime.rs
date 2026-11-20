@@ -49,6 +49,23 @@ pub trait HostApi: Send + Sync {
     fn set(&self, key: &str, value: Value) -> Result<(), String>;
     fn delete(&self, key: &str) -> Result<bool, String>;
     fn list(&self, prefix: &str, limit: usize) -> Result<Value, String>;
+    /// The time in seconds since 1970, as the host sees it.
+    fn now(&self) -> Result<i64, String> {
+        Err("the clock is not available".into())
+    }
+    /// The module's own configuration for this guild.
+    fn config(&self) -> Result<Value, String> {
+        Ok(Value::Null)
+    }
+    /// Has a job of the module's own run at `at` (unix seconds): `name`, `at`, optional `key` (a job
+    /// with the same key is replaced) and `payload`.
+    fn schedule(&self, _request: Value) -> Result<(), String> {
+        Err("scheduling is not available".into())
+    }
+    /// Cancels the job with this key; whether there was one.
+    fn cancel(&self, _key: &str) -> Result<bool, String> {
+        Err("scheduling is not available".into())
+    }
     fn limit_failure(&self) -> Option<String> {
         None
     }
