@@ -37,6 +37,10 @@ impl ScriptRuntime for LuaRuntime {
 }
 
 impl LuaRuntime {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the host calls and the call of the script, one after the other"
+    )]
     fn invoke(&self, input: &Value, host: &dyn HostApi, budget: Budget) -> mlua::Result<Value> {
         let (lua, waited, interrupted, started) = sandbox(budget)?;
         let globals = lua.globals();
