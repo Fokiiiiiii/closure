@@ -441,7 +441,14 @@ pub async fn register_commands(
         CommandScope::Global => interaction.set_global_commands(commands).await,
         CommandScope::Guild(guild) => interaction.set_guild_commands(guild, commands).await,
     }
-    .map_err(|error| map_http_error(&error))?;
+    .map_err(|error| {
+        // Discord names the command and the field it refused in the body; the error code alone does not.
+        if let twilight_http::error::ErrorType::Response { body, .. } = error.kind() {
+            let body = String::from_utf8_lossy(body);
+            tracing::error!(body = %body.chars().take(2000).collect::<String>(), "Discord refused the slash commands");
+        }
+        map_http_error(&error)
+    })?;
     let published = response.models().await.map_err(|error| {
         DiscordError::Fatal(format!("could not read Discord's response: {error}"))
     })?;
