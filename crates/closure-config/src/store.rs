@@ -313,6 +313,7 @@ mod tests {
         assert_eq!(
             *store.policy(guild),
             GuildPolicy {
+                prefix_delete_command_after: Some(std::time::Duration::from_secs(30)),
                 prefix_delete_reply_after: Some(std::time::Duration::from_secs(30)),
                 ..GuildPolicy::default()
             }

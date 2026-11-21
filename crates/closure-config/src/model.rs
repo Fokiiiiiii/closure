@@ -68,6 +68,8 @@ pub(crate) const MAX_DELETE_AFTER_SECONDS: u32 = 86_400;
 /// How long a text command's reply stays when the guild sets no delay for it: about the time a moderator
 /// needs to read it.
 pub(crate) const DEFAULT_REPLY_DELETE_AFTER_SECONDS: u32 = 30;
+/// How long a text command's own message stays when the guild sets no delay.
+pub(crate) const DEFAULT_COMMAND_DELETE_AFTER_SECONDS: u32 = 30;
 
 fn optional_delete_after_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({

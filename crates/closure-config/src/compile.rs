@@ -13,9 +13,9 @@ use twilight_model::id::Id;
 
 use crate::error::{ConfigError, Issue};
 use crate::model::{
-    CURRENT_VERSION, DEFAULT_REPLY_DELETE_AFTER_SECONDS, EffectiveConfig, GuildOverrides,
-    GuildSettings, KeyOverride, LevelSetting, MAX_DELETE_AFTER_SECONDS, ModuleEffective,
-    ModuleOverride, Principals,
+    CURRENT_VERSION, DEFAULT_COMMAND_DELETE_AFTER_SECONDS, DEFAULT_REPLY_DELETE_AFTER_SECONDS,
+    EffectiveConfig, GuildOverrides, GuildSettings, KeyOverride, LevelSetting,
+    MAX_DELETE_AFTER_SECONDS, ModuleEffective, ModuleOverride, Principals,
 };
 
 const MAX_MODERATOR_ROLES: usize = 100;
@@ -342,10 +342,13 @@ fn compile_policy_text(overrides: &GuildOverrides, issues: &mut Vec<Issue>) -> P
     PolicyText {
         timezone,
         prefix: compile_prefix(overrides.prefix.as_deref(), issues),
-        prefix_delete_command_after: compile_delete_after(
-            "prefix_delete_command_after",
-            overrides.prefix_delete_command_after,
-            issues,
+        prefix_delete_command_after: Some(
+            compile_delete_after(
+                "prefix_delete_command_after",
+                overrides.prefix_delete_command_after,
+                issues,
+            )
+            .unwrap_or(DEFAULT_COMMAND_DELETE_AFTER_SECONDS),
         ),
         prefix_delete_reply_after: Some(
             compile_delete_after(

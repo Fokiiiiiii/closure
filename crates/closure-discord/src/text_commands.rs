@@ -607,7 +607,7 @@ impl TextCommandApi {
                 embeds: vec![notice::embed(text, color)],
                 reply_to: Some(invoker),
                 mentions: MentionPolicy::default(),
-                silent: false,
+                silent: true,
             })
             .await?;
         if let Outcome::Message(sent) = &outcome {

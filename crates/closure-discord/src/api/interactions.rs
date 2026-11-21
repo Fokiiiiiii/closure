@@ -290,7 +290,9 @@ impl TwilightApi {
         reply: &InteractionReply,
     ) -> Result<Outcome, DiscordError> {
         match self.text.fresh(token) {
-            Some((Some(message), false)) if !reply.ephemeral => {
+            // A reply that is already in the channel is edited, a private one too: it is no longer sent
+            // anywhere else, and a command that shows its progress must not leave a message for each step.
+            Some((Some(message), _)) => {
                 let allowed = AllowedMentions::default();
                 let mut request = self
                     .http
@@ -305,7 +307,7 @@ impl TwilightApi {
             None => Err(DiscordError::Invalid(
                 "text command reply is no longer editable".into(),
             )),
-            // A deferral or a private reply, which is sent again rather than edited.
+            // A deferral: nothing is in the channel yet, so the first reply is sent.
             Some((_, private)) => {
                 // What was deferred as private stays private, whatever the reply itself says.
                 let ephemeral = private || reply.ephemeral;
@@ -340,9 +342,11 @@ impl TwilightApi {
         reply: &InteractionReply,
     ) -> Result<Message, DiscordError> {
         let allowed = AllowedMentions::default();
+        // Without a notification, as `@silent`: the answer to a text command is not worth a ping.
         let mut request = self
             .http
             .create_message(channel)
+            .flags(MessageFlags::SUPPRESS_NOTIFICATIONS)
             .allowed_mentions(Some(&allowed));
         if let Some(invoker) = invoker {
             // The invoking message may be gone by now; the reply is then sent as a plain message.

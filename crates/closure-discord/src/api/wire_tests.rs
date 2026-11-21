@@ -1453,6 +1453,35 @@ async fn a_private_deferral_posts_the_later_replies_in_the_channel() {
 }
 
 #[tokio::test]
+async fn a_private_text_reply_is_edited_in_the_channel_and_not_sent_again() {
+    let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (200, MESSAGE_JSON)]).await;
+    let api = discord.api();
+    api.execute(Action::Respond {
+        interaction_id: Id::new(44),
+        token: text_token(),
+        response: ephemeral_reply("measuring 1/5"),
+    })
+    .await
+    .unwrap();
+    api.execute(Action::EditResponse {
+        token: text_token(),
+        reply: closure_core::action::InteractionReply {
+            ephemeral: true,
+            ..text_reply("Pong!")
+        },
+    })
+    .await
+    .unwrap();
+    let paths = method_paths(&discord);
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert_eq!(paths[0], "POST /channels/1/messages");
+    assert!(
+        paths[1].starts_with("PATCH /channels/1/messages/"),
+        "{paths:?}"
+    );
+}
+
+#[tokio::test]
 async fn messages_are_read_one_by_one_and_as_history_from_a_cursor() {
     let discord = FakeDiscord::start(vec![(200, MESSAGE_JSON), (200, "[]")]).await;
     let api = discord.api();
