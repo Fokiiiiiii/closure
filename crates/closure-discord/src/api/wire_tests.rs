@@ -1412,7 +1412,7 @@ async fn deferred_ephemeral_text_edit_and_followup_are_said_in_the_channel() {
         ["POST /channels/1/messages", "POST /channels/1/messages"],
         "nothing is sent as a direct message"
     );
-    for request in discord.requests().iter() {
+    for request in &discord.requests() {
         let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
         assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
         assert!(body.get("components").is_none());
