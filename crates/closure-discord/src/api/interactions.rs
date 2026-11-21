@@ -8,7 +8,6 @@ use closure_core::event::{ChannelId, InteractionId, InteractionToken};
 use closure_core::module::{ChoiceValue, OptionChoice};
 use serde_json::{Value, json};
 use twilight_http::request::Request;
-use twilight_http::request::channel::reaction::RequestReactionType;
 use twilight_http::routing::Route;
 use twilight_model::application::command::{CommandOptionChoice, CommandOptionChoiceValue};
 use twilight_model::channel::Message;
@@ -328,30 +327,9 @@ impl TwilightApi {
         invoker: Id<MessageMarker>,
         reply: &InteractionReply,
     ) -> Result<Message, DiscordError> {
-        if reply.ephemeral {
-            return self.send_private_text_reply(channel, invoker, reply).await;
-        }
+        // Never a direct message: a private reply of a text command is said in the channel, as a reply to
+        // the command, and the delay of the guild (30 seconds without one) takes it back.
         self.post_text_reply(channel, Some(invoker), reply).await
-    }
-
-    /// A private reply goes to the DMs of whoever wrote the command, since the channel is readable by everyone in it. When their DMs are closed, the command is marked with a reaction and nothing else is said.
-    async fn send_private_text_reply(
-        &self,
-        channel: ChannelId,
-        invoker: Id<MessageMarker>,
-        reply: &InteractionReply,
-    ) -> Result<Message, DiscordError> {
-        let author = read(self.http.message(channel, invoker)).await?.author.id;
-        let sent = async {
-            let dm = read(self.http.create_private_channel(author)).await?;
-            self.post_text_reply(dm.id, None, reply).await
-        }
-        .await;
-        if sent.is_err() {
-            let refused = RequestReactionType::Unicode { name: "❌" };
-            let _ = self.http.create_reaction(channel, invoker, &refused).await;
-        }
-        sent
     }
 
     /// Sends `reply` to `channel`, as a reply to `invoker` when there is one; no one is pinged.
