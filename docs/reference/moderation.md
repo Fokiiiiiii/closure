@@ -55,7 +55,7 @@ Warn members, note about them, and look at and revoke the cases of a server.
 
 ### `/warn`
 
-Warn a member; the warning expires after a set number of days
+Warn a member; it expires after a set time
 
 - Japanese name: `警告`
 - Japanese description: メンバーに警告します。警告は設定した日数で失効します
@@ -67,7 +67,7 @@ Warn a member; the warning expires after a set number of days
 
 ### `/note`
 
-Add a note about a member that is not a warning
+Add a note about a member
 
 - Japanese name: `メモ`
 - Japanese description: 警告ではないメモを相手に残します
@@ -99,10 +99,10 @@ This command takes no options.
 
 ### `/clear`
 
-Delete the newest messages of the channel, all of them or only those that fit
+Delete the newest messages of the channel
 
 - Japanese name: `一括削除`
-- Japanese description: チャンネルの新しいメッセージを消します（条件で絞り込めます）
+- Japanese description: チャンネルの新しいメッセージを消す
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
@@ -110,30 +110,30 @@ Delete the newest messages of the channel, all of them or only those that fit
 | `user` | user | user | no | - | Only the messages of this member |
 | `bots` | bots | boolean | no | - | Yes: only the messages of bots |
 | `contains` | contains | string | no | max_length 100 | Only the messages that contain this text |
-| `links` | links | boolean | no | - | Yes: only the messages with a link or an invite |
+| `links` | links | boolean | no | - | Yes: only messages with links or invites |
 | `files` | files | boolean | no | - | Yes: only the messages with a file |
 | `pinned` | pinned | boolean | no | - | Yes: pinned messages are deleted too |
 
 ### `/bulk`
 
-Punish many members at once, after a preview
+Punish many members after a preview
 
 - Japanese name: `一括処罰`
 - Japanese description: 確認してから、多数のメンバーをまとめて処罰します
 
 #### `/bulk start`
 
-Show what a ban, kick, timeout or unban of many members would do, and wait for Run
+Preview a bulk ban, kick, timeout or unban
 
 - Japanese name: `開始`
-- Japanese description: 多数のメンバーの BAN・キック・タイムアウト・BAN 解除の内容を見せ、実行ボタンを待ちます
+- Japanese description: 一括処罰の内容を確認してから実行する
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `action` | 処理 | string | yes | max_length 16 | ban, kick, timeout or unban |
-| `users` | ユーザー | string | yes | - | User IDs or mentions separated by spaces or commas |
+| `users` | ユーザー | string | yes | - | User IDs or mentions, separated by spaces |
 | `reason` | 理由 | string | yes | max_length 512 | Why |
-| `duration` | 期間 | string | no | max_length 32 | How long a timeout lasts, such as 1h or 3d; a ban lasts for good when it is left out |
+| `duration` | 期間 | string | no | max_length 32 | Timeout length, e.g. 1h or 3d; bans are permanent |
 | `delete_days` | 削除日数 | integer | no | min 0; max 7 | Days of messages a ban deletes, 0 to 7 |
 
 #### `/bulk status`
@@ -149,7 +149,7 @@ Where a bulk operation stands
 
 #### `/bulk cancel`
 
-Stop a bulk operation between two batches
+Stop a bulk operation between batches
 
 - Japanese name: `中止`
 - Japanese description: 一括処罰をバッチの間で止めます
@@ -178,7 +178,7 @@ Look at, list and revoke cases
 
 #### `/case view`
 
-Show a case, or list the cases of a member
+Show a case or a member's cases
 
 - Japanese name: `表示`
 - Japanese description: ケースを表示、またはメンバーのケースを一覧します
@@ -187,7 +187,7 @@ Show a case, or list the cases of a member
 |---|---|---|---|---|---|
 | `number` | 番号 | integer | no | - | Number of the case, to see one |
 | `user` | ユーザー | user | no | - | Member, to list their cases |
-| `before` | 前の番号 | integer | no | - | With a member: show only the cases numbered below this |
+| `before` | 前の番号 | integer | no | - | With a member: only cases below this number |
 
 #### `/case revoke`
 
@@ -203,20 +203,20 @@ Revoke a case
 
 #### `/case add`
 
-Record a case by hand, such as a note or something done elsewhere
+Record a case by hand
 
 - Japanese name: `追加`
-- Japanese description: ノートや、ほかの場所で行ったことをケースとして手で記録します
+- Japanese description: ケースを手で記録する
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member |
-| `kind` | 種類 | string | yes | - | note, warn, kick, ban, timeout, softban, vcmute, unban, untimeout or vcunmute |
+| `kind` | 種類 | string | yes | - | note, warn, kick, ban, timeout, softban, ... |
 | `reason` | 理由 | string | no | max_length 512 | Why |
 
 #### `/case update`
 
-Change the reason of a case, or who it names as its moderator
+Change a case's reason or moderator
 
 - Japanese name: `更新`
 - Japanese description: ケースの理由や、実行者として示す人を変えます
@@ -229,7 +229,7 @@ Change the reason of a case, or who it names as its moderator
 
 #### `/case hide`
 
-Hide a case from the lists, or show it again
+Hide a case, or show it again
 
 - Japanese name: `非表示`
 - Japanese description: ケースを一覧から隠す、または再表示します
@@ -237,7 +237,7 @@ Hide a case from the lists, or show it again
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `number` | 番号 | integer | yes | - | Number of the case |
-| `show` | 再表示 | boolean | no | - | Yes: show the case again instead of hiding it |
+| `show` | 再表示 | boolean | no | - | Yes: show the case again |
 
 #### `/case delete`
 
@@ -253,30 +253,30 @@ Delete a case for good
 
 #### `/case search`
 
-Find cases by member, moderator, kind, source, state, time or a word of the reason
+Find cases by member, kind, state, time or reason
 
 - Japanese name: `検索`
-- Japanese description: メンバー・実行者・種類・発生元・状態・期間・理由の語でケースを探します
+- Japanese description: メンバー・種類・状態・期間・理由でケースを探す
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | no | - | Cases against this member |
 | `moderator` | 実行者 | user | no | - | Cases made by this moderator |
-| `kind` | 種類 | string | no | max_length 32 | The kind: warn, note, ban, kick, timeout, softban, ... |
-| `source` | 発生元 | string | no | max_length 16 | Where it came from: command, button, automod, manual, dashboard, script, appeal |
-| `state` | 状態 | string | no | max_length 16 | Where it stands: active, expired or revoked |
+| `kind` | 種類 | string | no | max_length 32 | Kind: warn, note, ban, kick, timeout, ... |
+| `source` | 発生元 | string | no | max_length 16 | Source: command, button, automod, manual, ... |
+| `state` | 状態 | string | no | max_length 16 | State: active, expired or revoked |
 | `within` | 期間 | string | no | max_length 32 | Made within this long, such as 7d |
 | `text` | 語 | string | no | max_length 100 | A word of the reason |
-| `hidden` | 非表示も含める | boolean | no | - | Include hidden cases (needs the permission to hide cases) |
+| `hidden` | 非表示も含める | boolean | no | - | Include hidden cases (needs permission) |
 | `before` | 前の番号 | integer | no | - | Show only the cases numbered below this |
-| `export` | 出力 | boolean | no | - | Yes: send the result as a CSV file to the export channel |
+| `export` | 出力 | boolean | no | - | Yes: send a CSV to the export channel |
 
 ### `/slowmode`
 
-Set channel slowmode. Over 6 hours, the bot enforces it by deleting early posts
+Set slowmode; over 6 hours the bot enforces it
 
 - Japanese name: `slowmode`
-- Japanese description: チャンネルの低速モードを設定。6 時間超は、早すぎる投稿を Bot が削除して実現
+- Japanese description: 低速モードを設定（6 時間超は Bot が削除で実現）
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
@@ -294,7 +294,7 @@ Lock a channel
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `channel` | channel | channel | no | - | Channel to lock |
-| `duration` | duration | string | no | - | Time before restoring the previous permissions |
+| `duration` | duration | string | no | - | Time before permissions are restored |
 | `reason` | reason | string | no | max_length 512 | Why |
 
 ### `/unlock`
@@ -310,7 +310,7 @@ Restore a locked channel
 
 ### `/userinfo`
 
-Show a user's membership and case history
+Show a user's membership and cases
 
 - Japanese name: `userinfo`
 - Japanese description: ユーザーの参加情報とケース履歴を表示
@@ -321,15 +321,15 @@ Show a user's membership and case history
 
 ### `/timeout`
 
-Time a member out for a while; Discord allows 28 days at most
+Time out a member, up to 28 days
 
 - Japanese name: `タイムアウト`
-- Japanese description: メンバーを一定時間タイムアウトします。Discord の上限は 28 日です
+- Japanese description: メンバーをタイムアウト（最長 28 日）
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member to time out |
-| `duration` | 期間 | string | no | - | How long (1h, 7d) or until (2026-11-01 18:00); a template may give it |
+| `duration` | 期間 | string | no | - | How long (1h, 7d) or until (2026-11-01 18:00) |
 | `reason` | 理由 | string | no | max_length 512 | Why |
 
 ### `/untimeout`
@@ -361,15 +361,15 @@ Kick a member from the server
 Ban a member, for good or for a while
 
 - Japanese name: `バン`
-- Japanese description: メンバーを BAN します。期間を付ければ一時的な BAN になります
+- Japanese description: メンバーを BAN（期間で一時 BAN）
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member to ban |
 | `reason` | 理由 | string | no | max_length 512 | Why |
-| `duration` | 期間 | string | no | - | How long (7d) or until (2026-11-01 18:00); forever if left out |
-| `delete_days` | 削除日数 | integer | no | min 0; max 7 | Days of the member's messages to delete, 0 to 7 |
-| `soft` | ソフト | boolean | no | - | Yes: a softban, the ban is lifted at once and only the messages are gone |
+| `duration` | 期間 | string | no | - | How long (7d) or until a date; forever if left out |
+| `delete_days` | 削除日数 | integer | no | min 0; max 7 | Days of messages to delete, 0 to 7 |
+| `soft` | ソフト | boolean | no | - | Yes: softban; the ban is lifted at once |
 
 ### `/appeal`
 
@@ -381,7 +381,7 @@ Ask for a punishment to be lifted
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `text` | 理由 | string | yes | max_length 400 | Why the punishment should be lifted |
-| `user` | ユーザー | user | no | - | The member, for an appeal that came another way (moderators) |
+| `user` | ユーザー | user | no | - | The member, for appeals that came another way |
 
 ### `/unban`
 
@@ -397,15 +397,15 @@ Lift the ban of a member
 
 ### `/vcmute`
 
-Mute a member in voice channels, for a while or until it is lifted
+Mute a member in voice
 
 - Japanese name: `vcミュート`
-- Japanese description: メンバーをボイスチャンネルでミュートします。期間を付けなければ解除するまで続きます
+- Japanese description: メンバーをボイスでミュート
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | Member to mute in voice channels |
-| `duration` | 期間 | string | no | - | How long (1h, 7d) or until (2026-11-01 18:00); until lifted if left out |
+| `duration` | 期間 | string | no | - | How long (1h, 7d) or until a date; until lifted |
 | `reason` | 理由 | string | no | max_length 512 | Why |
 
 ### `/vcunmute`

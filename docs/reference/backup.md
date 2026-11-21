@@ -22,10 +22,10 @@
 
 ### `/backup`
 
-Keep the roles and channels of the server, and bring back what is gone
+Back up and restore roles and channels
 
 - Japanese name: `バックアップ`
-- Japanese description: サーバーのロールとチャンネルを保存し、消えたものを戻します
+- Japanese description: ロールとチャンネルを保存し、消えたものを戻す
 
 #### `/backup create`
 
@@ -36,17 +36,17 @@ Keep the roles and channels now
 
 #### `/backup info`
 
-When the backup was taken and what it holds
+When it was taken and what it holds
 
 - Japanese name: `情報`
 - Japanese description: バックアップの時刻と内容を表示します
 
 #### `/backup restore`
 
-Create again the roles and channels that the backup holds and the server lacks
+Recreate roles and channels the server lacks
 
 - Japanese name: `復元`
-- Japanese description: バックアップにあってサーバーに無いロールとチャンネルを作り直します
+- Japanese description: 足りないロールとチャンネルを作り直す
 
 ## Configuration
 

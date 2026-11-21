@@ -1,13 +1,13 @@
 config-backup-daily = ロールとチャンネルを 1 日 1 回バックアップします。直前のバックアップの半分未満になってしまう状態のバックアップは取らないので、荒らしでも正常なバックアップは上書きされません。
 permission-backup-manage = サーバーのバックアップの作成・確認・復元
 command-backup = バックアップ
-    .description = サーバーのロールとチャンネルを保存し、消えたものを戻します
+    .description = ロールとチャンネルを保存し、消えたものを戻す
 subcommand-backup-create = 作成
     .description = いまのロールとチャンネルを保存します
 subcommand-backup-info = 情報
     .description = バックアップの時刻と内容を表示します
 subcommand-backup-restore = 復元
-    .description = バックアップにあってサーバーに無いロールとチャンネルを作り直します
+    .description = 足りないロールとチャンネルを作り直す
 backup-created = ロール { $roles } 件、チャンネル { $channels } 件をバックアップしました。
 backup-none = まだバックアップがありません。/バックアップ 作成 を使ってください。
 backup-info = バックアップは { $when } に取りました。ロール { $roles } 件、チャンネル { $channels } 件を保持しています。

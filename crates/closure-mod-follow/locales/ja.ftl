@@ -1,6 +1,6 @@
 permission-follow-use = メンバーのボイス参加を追跡する
 command-follow = フォロー
-    .description = メンバーがボイスチャンネルに参加したら DM で知らせます
+    .description = メンバーがボイスに入ったら DM で通知
 subcommand-follow-add = 追加
     .description = メンバーをフォローします
 option-follow-add-user = ユーザー

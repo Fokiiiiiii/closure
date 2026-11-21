@@ -39,14 +39,14 @@ Automatic moderation: rules that check every message, and act on the first one t
 
 ### `/automod`
 
-Automatic moderation: its rules and state
+Automod rules and state
 
 - Japanese name: `自動モデレーション`
 - Japanese description: 自動モデレーションのルールと状態
 
 #### `/automod status`
 
-Show whether dry run is on and which rules run
+Show dry run and active rules
 
 - Japanese name: `状態`
 - Japanese description: ドライランの設定と、動いているルールを表示します
@@ -67,14 +67,14 @@ Show whether dry run is on and which rules run
 
 #### `/automod antiraid`
 
-Raise or lower the antiraid level, and release the quarantined members
+Set the antiraid level, release members
 
 - Japanese name: `アンチレイド`
-- Japanese description: アンチレイドのレベルを上げ下げし、隔離中のメンバーを解除する
+- Japanese description: アンチレイドのレベル変更と隔離の解除
 
 ##### `/automod antiraid view`
 
-Show the antiraid level and the quarantine
+Show the antiraid level and quarantine
 
 - Japanese name: `view`
 - Japanese description: アンチレイドのレベルと隔離を表示する
@@ -88,19 +88,19 @@ Raise or lower the antiraid level
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `level` | level | string | yes | - | The level to raise or lower the server to |
-| `duration` | duration | string | no | - | How long the level lasts, such as 30m or 2h; the calm level comes back after it |
+| `level` | level | string | yes | - | The level to set |
+| `duration` | duration | string | no | - | How long, e.g. 30m or 2h; then back to calm |
 
 ##### `/automod antiraid clear`
 
-Put the antiraid level back to the calm one
+Return the antiraid level to calm
 
 - Japanese name: `clear`
 - Japanese description: アンチレイドのレベルを通常に戻す
 
 ##### `/automod antiraid release`
 
-Take a member, or every member, out of the quarantine
+Release one member or all from quarantine
 
 - Japanese name: `release`
 - Japanese description: メンバー、または全員を隔離から解除します
@@ -108,7 +108,7 @@ Take a member, or every member, out of the quarantine
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | user | user | no | - | The member to take out of the quarantine |
-| `all` | all | boolean | no | - | Yes: take every member out of the quarantine |
+| `all` | all | boolean | no | - | Yes: release every member |
 
 ## Configuration
 

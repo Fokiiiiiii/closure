@@ -20,10 +20,10 @@
 
 ### `/follow`
 
-Get a direct message when a member joins a voice channel
+Get a DM when a member joins voice
 
 - Japanese name: `フォロー`
-- Japanese description: メンバーがボイスチャンネルに参加したら DM で知らせます
+- Japanese description: メンバーがボイスに入ったら DM で通知
 
 #### `/follow add`
 

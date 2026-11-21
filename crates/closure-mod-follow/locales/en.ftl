@@ -1,6 +1,6 @@
 permission-follow-use = Follow members into voice channels
 command-follow = follow
-    .description = Get a direct message when a member joins a voice channel
+    .description = Get a DM when a member joins voice
 subcommand-follow-add = add
     .description = Follow a member
 option-follow-add-user = user

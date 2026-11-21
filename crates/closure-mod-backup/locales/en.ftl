@@ -1,13 +1,13 @@
 config-backup-daily = Back up the roles and channels once a day. A backup that would hold less than half of what the last one holds is not taken, so a nuke cannot replace the good backup.
 permission-backup-manage = Create, see and restore the backup of the server
 command-backup = backup
-    .description = Keep the roles and channels of the server, and bring back what is gone
+    .description = Back up and restore roles and channels
 subcommand-backup-create = create
     .description = Keep the roles and channels now
 subcommand-backup-info = info
-    .description = When the backup was taken and what it holds
+    .description = When it was taken and what it holds
 subcommand-backup-restore = restore
-    .description = Create again the roles and channels that the backup holds and the server lacks
+    .description = Recreate roles and channels the server lacks
 backup-created = Backed up { $roles } role(s) and { $channels } channel(s).
 backup-none = There is no backup yet. Use /backup create.
 backup-info = The backup was taken { $when }. It holds { $roles } role(s) and { $channels } channel(s).

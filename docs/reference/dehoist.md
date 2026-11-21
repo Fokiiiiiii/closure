@@ -20,10 +20,10 @@
 
 ### `/dehoist`
 
-Take leading symbols off the names that sort to the top of the member list
+Strip leading symbols from names that sort first
 
 - Japanese name: `ホイスト解除`
-- Japanese description: メンバー一覧の上位に居座る、記号で始まる名前から先頭の記号を外します
+- Japanese description: 名前の先頭の記号を外す
 
 This command takes no options.
 

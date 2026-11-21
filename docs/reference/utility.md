@@ -29,18 +29,18 @@ Commands that tell about the server, a role, a channel or a member, the names a 
 
 ### `/info`
 
-Show facts about a role, a channel, an invite, a message, an emoji, or this server
+Show a role, channel, invite, message, emoji or server
 
 - Japanese name: `info`
-- Japanese description: ロール、チャンネル、招待、メッセージ、絵文字、またはこのサーバーの情報を表示します
+- Japanese description: ロール・チャンネル・招待・メッセージなどの情報
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `role` | role | role | no | - | A role to tell about |
 | `channel` | channel | channel | no | - | A channel to tell about |
-| `invite` | invite | string | no | max_length 120 | An invite (its link or its code) to look at before anybody follows it |
-| `message` | message | string | no | max_length 140 | A message of this server (its link) to tell about |
-| `emoji` | emoji | string | no | max_length 80 | An emoji (written out, or its id) to tell about |
+| `invite` | invite | string | no | max_length 120 | An invite link or code to inspect |
+| `message` | message | string | no | max_length 140 | A message link of this server |
+| `emoji` | emoji | string | no | max_length 80 | An emoji, or its id |
 
 ### `/avatar`
 
@@ -55,19 +55,19 @@ Show the avatar of a member
 
 ### `/names`
 
-Show the names a member went by, or find the members who went by a name
+Show a member's past names, or search by name
 
 - Japanese name: `names`
-- Japanese description: メンバーの過去の名前を表示、またはある名前で過ごしたメンバーを探します
+- Japanese description: 過去の名前を表示、または名前で探す
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | user | user | no | - | The member; yourself when left out |
-| `name` | name | string | no | max_length 64 | Instead: find the members who went by this name (case does not matter) |
+| `name` | name | string | no | max_length 64 | Instead: find members who used this name |
 
 ### `/nickname`
 
-Change the nickname of a member, or take it off
+Change or remove a member's nickname
 
 - Japanese name: `ニックネーム`
 - Japanese description: メンバーのニックネームを変更、または削除します
@@ -75,7 +75,7 @@ Change the nickname of a member, or take it off
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | ユーザー | user | yes | - | The member |
-| `nickname` | ニックネーム | string | no | max_length 32 | The new nickname; left out, the nickname is taken off |
+| `nickname` | ニックネーム | string | no | max_length 32 | New nickname; removed if left out |
 
 ### `/snowflake`
 
@@ -86,18 +86,18 @@ Tell when a Discord id was made
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `id` | id | string | yes | max_length 20 | The id of a user, channel, role, message or the like |
+| `id` | id | string | yes | max_length 20 | An ID of a user, channel, role or message |
 
 ### `/inviteprune`
 
-Delete the invites that were used few times
+Delete rarely used invites
 
 - Japanese name: `招待整理`
 - Japanese description: 使用回数の少ない招待を削除します
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `max_uses` | 使用回数 | integer | no | - | Invites used this many times or fewer are deleted; 1 when left out |
+| `max_uses` | 使用回数 | integer | no | - | Delete invites used this often or less; default 1 |
 
 ### `/locate`
 
@@ -112,16 +112,16 @@ Find the voice channel a member is in
 
 ### `/vcmove`
 
-Move a member or a whole voice channel; omit the channel only to disconnect one member
+Move a member or a voice channel
 
 - Japanese name: `vcmove`
-- Japanese description: メンバー、またはチャンネルの全員を移動します。移動先を省略できるのは1人を指定した時だけで、その場合は切断
+- Japanese description: メンバーやチャンネルを移動する
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
 | `user` | user | user | no | - | The member, who has to be in voice |
-| `channel` | channel | channel | no | - | The voice channel to move them to; omit it only for one member, who is then disconnected |
-| `from` | from | channel | no | - | Instead of one member: the voice channel to empty |
+| `channel` | channel | channel | no | - | Destination; omit to disconnect one member |
+| `from` | from | channel | no | - | Instead: the voice channel to empty |
 
 ## Configuration
 

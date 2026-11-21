@@ -28,7 +28,7 @@
 
 ### `/honeypot`
 
-Channels where whoever posts is punished at once
+Channels that punish whoever posts
 
 - Japanese name: `ハニーポット`
 - Japanese description: 投稿した人をその場で処罰するチャンネル
@@ -64,14 +64,14 @@ The honeypot channels
 
 #### `/honeypot create`
 
-Make a channel with a warning in it and set it as a honeypot
+Make a honeypot channel with a warning
 
 - Japanese name: `作成`
 - Japanese description: 警告文付きのチャンネルを作り、ハニーポットにします
 
 | Option | Japanese name | Type | Required | Limits | Description |
 |---|---|---|---|---|---|
-| `name` | 名前 | string | no | max_length 100 | The name of the new channel; left out, a name of the language of the server |
+| `name` | 名前 | string | no | max_length 100 | Channel name; a default if left out |
 
 ## Configuration
 
