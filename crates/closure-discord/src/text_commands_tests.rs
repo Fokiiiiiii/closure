@@ -238,6 +238,57 @@ async fn configured_reply_delay_applies_to_ephemeral_text_replies() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_command_that_defers_and_edits_loses_its_message_once() {
+    use closure_core::action::InteractionReply;
+    use closure_core::settings::GuildPolicy;
+    use closure_core::testing::{MockApi, StaticSettings};
+    let inner = Arc::new(MockApi::default());
+    let interactions = Arc::new(InteractionGuilds::default());
+    let token = InteractionToken::for_text_command(Id::new(3), Id::new(44));
+    assert!(interactions.register(&token, Id::new(1)).is_recorded());
+    let mut settings = StaticSettings::new([]);
+    settings.policy = Arc::new(GuildPolicy {
+        prefix_delete_command_after: Some(Duration::from_secs(7)),
+        prefix_delete_reply_after: Some(Duration::from_secs(7)),
+        ..GuildPolicy::default()
+    });
+    let api = TextCommandApi::new(
+        Arc::clone(&inner) as Arc<dyn DiscordApi>,
+        interactions,
+        Arc::new(settings),
+        Arc::new(TranslatorBuilder::new().unwrap().build()),
+    );
+    api.execute(Action::Respond {
+        interaction_id: Id::new(44),
+        token: token.clone(),
+        response: InteractionResponse::Defer { ephemeral: false },
+    })
+    .await
+    .unwrap();
+    for text in ["measuring", "Pong!"] {
+        api.execute(Action::EditResponse {
+            token: token.clone(),
+            reply: InteractionReply {
+                content: Some(text.into()),
+                ..InteractionReply::default()
+            },
+        })
+        .await
+        .unwrap();
+    }
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(8)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let command_deletions = inner
+        .actions()
+        .iter()
+        .filter(|a| matches!(a, Action::DeleteMessage { message_id, .. } if message_id.get() == 44))
+        .count();
+    assert_eq!(command_deletions, 1, "the command message goes, once");
+}
+
 #[tokio::test]
 async fn ephemeral_text_reply_is_refused_when_deletion_queue_is_full() {
     use closure_core::action::InteractionReply;

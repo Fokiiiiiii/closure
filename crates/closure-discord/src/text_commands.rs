@@ -2,7 +2,8 @@
 //! name, through the same handler and the same checks. The words after the command word fill the
 //! options by their type.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -503,6 +504,9 @@ pub(crate) struct TextCommandApi {
     translator: Arc<dyn Translator>,
     /// The places for the deletions still waiting.
     pending: Arc<Semaphore>,
+    /// The command messages whose deletion is already set, so that a command that answers in several
+    /// steps (a deferral, then edits) has its message taken back once.
+    cleaned: Mutex<VecDeque<MessageId>>,
 }
 
 impl TextCommandApi {
@@ -518,19 +522,32 @@ impl TextCommandApi {
             settings,
             translator,
             pending: Arc::new(Semaphore::new(MAX_PENDING_DELETIONS)),
+            cleaned: Mutex::new(VecDeque::new()),
         }
     }
 
+    /// Whether this is the first time the command message is asked about; the oldest are forgotten past a limit.
+    fn first_cleanup(&self, command: MessageId) -> bool {
+        let mut cleaned = self.cleaned.lock().unwrap_or_else(PoisonError::into_inner);
+        if cleaned.contains(&command) {
+            return false;
+        }
+        if cleaned.len() >= MAX_PENDING_DELETIONS * 2 {
+            cleaned.pop_front();
+        }
+        cleaned.push_back(command);
+        true
+    }
+
     fn deletions(&self, action: &Action) -> Option<(Deletions, bool)> {
-        let (token, reply, command) = match action {
+        let (token, reply) = match action {
             Action::Respond {
                 token,
                 response: InteractionResponse::Message { reply },
                 ..
-            } => (token, reply, true),
-            Action::EditResponse { token, reply } | Action::Followup { token, reply } => {
-                (token, reply, false)
             }
+            | Action::EditResponse { token, reply }
+            | Action::Followup { token, reply } => (token, reply),
             _ => return None,
         };
         let (channel, command_id) = token.text_command_message()?;
@@ -540,16 +557,11 @@ impl TextCommandApi {
             .map(|guild| self.settings.policy(guild));
         let command_after = policy
             .as_ref()
-            .and_then(|policy| policy.prefix_delete_command_after)
-            .filter(|_| command);
-        let reply_after = if command || reply.ephemeral {
-            policy
-                .as_ref()
-                .and_then(|policy| policy.prefix_delete_reply_after)
-                .or_else(|| reply.ephemeral.then_some(PRIVATE_REPLY_LIFETIME))
-        } else {
-            None
-        };
+            .and_then(|policy| policy.prefix_delete_command_after);
+        let reply_after = policy
+            .as_ref()
+            .and_then(|policy| policy.prefix_delete_reply_after)
+            .or_else(|| reply.ephemeral.then_some(PRIVATE_REPLY_LIFETIME));
         if command_after.is_none() && reply_after.is_none() {
             return None;
         }
@@ -571,7 +583,9 @@ impl TextCommandApi {
         outcome: &Outcome,
         permit: Option<OwnedSemaphorePermit>,
     ) {
-        if let Some(after) = deletions.command_after {
+        if let Some(after) = deletions.command_after
+            && self.first_cleanup(deletions.command)
+        {
             self.delete_after(deletions.channel, deletions.command, after, reason.clone());
         }
         if let (Some(after), Outcome::Message(reply)) = (deletions.reply_after, outcome) {
