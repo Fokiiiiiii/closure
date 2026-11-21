@@ -504,15 +504,15 @@ fn group_of(event: &Event) -> Option<Group> {
         Event::MessageUpdated(_)
         | Event::MessageDeleted { .. }
         | Event::MessagesBulkDeleted { .. } => Group::Messages,
-        Event::MemberJoined(_)
-        | Event::MemberLeft { .. }
-        | Event::NicknameChanged { .. }
-        | Event::RolesChanged(_) => Group::Members,
+        Event::MemberJoined(_) | Event::MemberLeft { .. } | Event::NicknameChanged { .. } => {
+            Group::Members
+        }
         Event::BanAdded { .. } | Event::BanRemoved { .. } | Event::TimeoutChanged { .. } => {
             Group::Moderation
         }
         Event::VoiceStateChanged { .. } => Group::Voice,
-        Event::ChannelCreated(_)
+        Event::RolesChanged(_)
+        | Event::ChannelCreated(_)
         | Event::ChannelChanged { .. }
         | Event::ChannelDeleted(_)
         | Event::ThreadCreated(_)

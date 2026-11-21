@@ -2191,6 +2191,30 @@ async fn a_kind_of_entry_goes_to_its_own_channel_and_the_others_to_the_usual_one
 }
 
 #[tokio::test]
+async fn a_role_change_of_a_member_goes_to_the_server_route() {
+    let harness = harness();
+    harness.set_log_channel(OTHER_LOG);
+    harness.set_log_channel(LOG);
+    let mut settings = config(None, true);
+    settings["routes"] = json!({ "members": LOG.to_string(), "server": OTHER_LOG.to_string() });
+    harness.set_config(settings);
+
+    harness
+        .emit(Event::RolesChanged(RolesChange {
+            guild_id: Id::new(GUILD),
+            user: member(7),
+            added: vec![Id::new(1_000_000_000_000_000_000)],
+            removed: Vec::new(),
+        }))
+        .await
+        .unwrap();
+
+    let posted = sent(&harness);
+    assert_eq!(posted.len(), 1, "{posted:?}", posted = posted.len());
+    assert_eq!(posted[0].channel, OTHER_LOG);
+}
+
+#[tokio::test]
 async fn a_route_works_without_any_other_channel() {
     let harness = Harness::new(builder().unwrap()).unwrap();
     harness
