@@ -540,15 +540,15 @@ impl TextCommandApi {
     }
 
     fn deletions(&self, action: &Action) -> Option<(Deletions, bool)> {
-        let (token, reply) = match action {
-            Action::Respond {
-                token,
-                response: InteractionResponse::Message { reply },
-                ..
-            }
-            | Action::EditResponse { token, reply }
-            | Action::Followup { token, reply } => (token, reply),
-            _ => return None,
+        let (Action::Respond {
+            token,
+            response: InteractionResponse::Message { reply },
+            ..
+        }
+        | Action::EditResponse { token, reply }
+        | Action::Followup { token, reply }) = action
+        else {
+            return None;
         };
         let (channel, command_id) = token.text_command_message()?;
         let policy = self
